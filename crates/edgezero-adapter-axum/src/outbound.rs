@@ -18,7 +18,7 @@ use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
 use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode};
 #[cfg(feature = "test-utils")]
 use edgezero_core::outbound::test_support::{
-    NativeBodyRecorder, native_body_recorder, observe_sdk_read, own_sdk_source,
+    NativeBodyRecorder, native_body_recorder, observe_sdk_read, own_sdk_operation, own_sdk_source,
 };
 use edgezero_core::outbound::{
     OutboundBatch, OutboundBatchDriverEvent, OutboundDispatchRequest, OutboundExchangeOwner,
@@ -89,8 +89,13 @@ impl AxumOutboundClient {
             .body(request_body);
         let mut previous = time.clock().now();
         let mut timer = time.wait_until(budget.deadline);
+        let native_send = request_builder.send();
+        #[cfg(feature = "test-utils")]
+        let send = own_sdk_operation(Box::pin(native_send), native_body_recorder(&context));
+        #[cfg(not(feature = "test-utils"))]
+        let send = native_send;
         let response = race_with_timer(
-            request_builder.send(),
+            send,
             budget,
             &time,
             &mut timer,
@@ -875,6 +880,110 @@ mod clock_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[cfg(feature = "test-utils")]
+    async fn native_pending_heads_release_before_retained_handles_are_collected() {
+        use edgezero_core::outbound::test_support::NativeBodyWitness;
+        use tokio::io::AsyncReadExt as _;
+
+        LocalSet::new()
+            .run_until(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+                let address = listener.local_addr().expect("address");
+                let (ready, received) = oneshot::channel();
+                let (finish, finished) = oneshot::channel::<()>();
+                let origin = tokio::spawn(async move {
+                    let mut connections = Vec::new();
+                    for _ in 0..4_usize {
+                        let (mut socket, _) = listener.accept().await.expect("connection");
+                        let mut head = [0_u8; 4096];
+                        assert!(socket.read(&mut head).await.expect("request head") > 0);
+                        connections.push(socket);
+                    }
+                    ready.send(()).expect("requests received");
+                    finished.await.expect("release origin");
+                    drop(connections);
+                });
+                let witnesses = repeat_with(NativeBodyWitness::new)
+                    .take(4)
+                    .collect::<Vec<_>>();
+                let request = |index: usize| {
+                    let mut request =
+                        OutboundRequest::get(format!("http://{address}/{index}")).expect("request");
+                    witnesses[index]
+                        .attach(&mut request)
+                        .expect("attach witness");
+                    request
+                };
+                let callback = OutboundScopeOwner::callback();
+                let client =
+                    HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+                let (pending, batch) = callback
+                    .run(async {
+                        let pending = client.begin(request(0)).await.expect("begin");
+                        let batch = client.start_batch_until(
+                            (1..4).map(request).collect(),
+                            Deadline::after(Duration::from_secs(10)),
+                        );
+                        timeout(Duration::from_secs(5), received)
+                            .await
+                            .expect("requests arrive")
+                            .expect("origin live");
+                        (pending, batch)
+                    })
+                    .await;
+                for witness in &witnesses {
+                    let snapshot = witness.snapshot();
+                    assert!(!snapshot.invalid);
+                    assert_eq!(snapshot.operation_acquisitions, 1);
+                    assert!(snapshot.operation_polls > 0);
+                    assert!(
+                        snapshot
+                            .first_operation_poll
+                            .expect("native send poll")
+                            .pending
+                    );
+                    assert_eq!(snapshot.operation_releases, 0);
+                    assert_eq!(snapshot.heads, 0);
+                    assert_eq!(snapshot.source_acquisitions, 0);
+                }
+                drop(callback);
+                let stopped = witnesses
+                    .iter()
+                    .map(NativeBodyWitness::snapshot)
+                    .collect::<Vec<_>>();
+                for snapshot in &stopped {
+                    assert_eq!(snapshot.operation_releases, 1);
+                    assert!(snapshot.first_operation_release.is_some());
+                }
+                pending
+                    .collect()
+                    .now_or_never()
+                    .expect("closed begin settles without polling SDK")
+                    .expect_err("scope revoked begin");
+                batch
+                    .collect()
+                    .now_or_never()
+                    .expect("closed batch settles without polling SDK")
+                    .expect_err("scope revoked batch");
+                yield_now().await;
+                for (witness, before) in witnesses.iter().zip(stopped) {
+                    let after = witness.snapshot();
+                    assert!(!after.invalid);
+                    assert_eq!(after.operation_polls, before.operation_polls);
+                    assert_eq!(after.operation_releases, before.operation_releases);
+                    assert_eq!(after.heads, 0);
+                    assert_eq!(after.source_releases, 0);
+                }
+                finish.send(()).expect("finish origin");
+                timeout(Duration::from_secs(5), origin)
+                    .await
+                    .expect("origin stops")
+                    .expect("origin");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn closed_scope_rejects_scheduling_before_work_is_polled() {
         LocalSet::new()
             .run_until(async {
@@ -1095,11 +1204,33 @@ mod clock_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn image_optimizer_batch_rejection_keeps_live_plain_sibling() {
         LocalSet::new().run_until(async {
-        use edgezero_core::OutboundImageOptimizerOptions;
+        use edgezero_core::{OutboundImageOptimizerOptions, http::request_builder};
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let target = format!("http://{}/plain", listener.local_addr().unwrap());
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&polls);
+        let incoming = request_builder()
+            .method(Method::GET)
+            .uri("http://fixture.invalid/inbound")
+            .body(Body::from_stream(stream::poll_fn(move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Poll::Pending
+            })))
+            .unwrap();
+        let client = HttpClient::with_client(AxumOutboundClient::try_new().unwrap());
+        for request in [OutboundRequest::get(&target).unwrap(),
+            OutboundRequest::from_request(incoming, target.parse().unwrap()).unwrap()] {
+            let error = client.send(request
+                .image_optimizer(OutboundImageOptimizerOptions::new())
+                .timeout(Duration::from_secs(1))).await.expect_err("unsupported before dispatch");
+            assert!(matches!(error, EdgeError::BadRequest { .. }));
+            assert!(error.message().contains("image_optimizer") && error.message().contains("axum"));
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), 0, "inbound GET remains unread");
+        assert!(timeout(Duration::from_millis(25), listener.accept()).await.is_err(),
+            "live unsupported requests cannot contact the reachable origin");
         let server = tokio::spawn(async move {
             let (mut socket, _) = timeout(Duration::from_secs(2), listener.accept())
                 .await
@@ -1112,11 +1243,10 @@ mod clock_tests {
             }
             assert!(head.starts_with(b"GET /plain HTTP/1.1\r\n"));
             socket
-                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await
                 .unwrap();
         });
-        let client = HttpClient::with_client(AxumOutboundClient::try_new().unwrap());
         let image = OutboundRequest::get(&target)
             .unwrap()
             .image_optimizer(OutboundImageOptimizerOptions::new())
@@ -1142,7 +1272,7 @@ mod clock_tests {
         assert!(
             matches!(results.slots().get(1), Some(OutboundCollectedSlot::Resolved(edgezero_core::OutboundSlotResult {
             outcome: Ok(response), ..
-        })) if response.status() == StatusCode::NO_CONTENT)
+        })) if response.status() == StatusCode::OK)
         );
         server.await.unwrap();
 

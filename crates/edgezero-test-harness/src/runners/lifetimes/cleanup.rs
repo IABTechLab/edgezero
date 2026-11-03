@@ -4,6 +4,22 @@ use super::protocol::{self, LogCursor};
 use super::*;
 
 const PREFIX: &[u8] = b"edgezero-lifetime-cleanup ";
+const SDK_ROLES: [&str; 6] = ["origin", "a", "b", "c", "callback", "post"];
+const SDK_COLUMNS: [&str; 13] = [
+    "attachments",
+    "preparations",
+    "operation_acquisitions",
+    "operation_polls",
+    "operation_releases",
+    "ready_operation_polls",
+    "heads",
+    "source_acquisitions",
+    "source_releases",
+    "reads",
+    "ready_reads",
+    "pending_kind",
+    "invalid",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Mode {
@@ -61,7 +77,7 @@ fn body(mode: Mode, token: &str) -> Value {
         "batch_pending":true,"callback_pending":true,"qualification":false})
 }
 
-fn record(mode: Mode, token: &str, stage: &str) -> Value {
+fn baseline_record(mode: Mode, token: &str, stage: &str) -> Value {
     let mut evidence = match stage {
         "cleaned" => json!({"outcome":"Completed","terminal_reports":1,"body_scope_closed":true,
             "origin_error":"Internal","batch_error":"Internal","slots":["Unresolved","Unresolved","Unresolved"],
@@ -88,13 +104,228 @@ fn record(mode: Mode, token: &str, stage: &str) -> Value {
         "stage":stage,"evidence":evidence,"qualification":false})
 }
 
-#[cfg(test)]
-fn parse_records(mode: Mode, bytes: &[u8], token: &str) -> Result<Vec<Value>> {
-    protocol::parse(PREFIX, bytes, &expected_records(mode, token))
+fn validate_sdk_rows(rows: &Value, count: usize, completed: bool) -> Result<()> {
+    let rows = rows
+        .as_array()
+        .filter(|rows| rows.len() == count)
+        .ok_or("missing SDK role rows")?;
+    for (index, row) in rows.iter().enumerate() {
+        let fields = row
+            .as_array()
+            .filter(|row| row.len() == SDK_COLUMNS.len())
+            .ok_or("invalid SDK observation row")?;
+        let counts = fields[..11]
+            .iter()
+            .map(|value| value.as_u64().ok_or("noninteger SDK count"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        require(
+            counts[..3] == [1, 1, 1]
+                && counts[3] >= counts[5]
+                && counts[9] >= counts[10]
+                && (matches!(fields[11].as_str(), Some("SdkPoll") if counts[3] > 0)
+                    || fields[11] == "HeadReadinessTimeout"
+                    || (completed && index == 5 && fields[11].is_null()))
+                && fields[12] == false,
+            "unobserved, reused or invalid SDK operation",
+        )?;
+        if completed && index >= 4 {
+            require(
+                counts[4..9] == [1, 1, 1, 1, 1] && counts[9] > 0 && counts[10] > 0,
+                "callback or post SDK operation/body was not completed and released once",
+            )?;
+        } else {
+            require(
+                counts[5..11] == [0, 0, 0, 0, 0, 0]
+                    && (fields[11] == "SdkPoll"
+                        || (fields[11] == "HeadReadinessTimeout" && counts[3] == 0)),
+                "SDK operation was not genuinely pending at the head",
+            )?;
+        }
+    }
+    Ok(())
 }
 
-fn expected_records(mode: Mode, token: &str) -> [Value; 3] {
-    ["cleaned", "continued", "returned"].map(|stage| record(mode, token, stage))
+fn rows<'a>(native: &'a Value, phase: &str) -> Result<&'a Vec<Value>> {
+    native[phase]
+        .as_array()
+        .ok_or_else(|| "missing SDK lifetime phase".into())
+}
+
+fn validate_record(
+    mode: Mode,
+    token: &str,
+    backend: &str,
+    index: usize,
+    value: &Value,
+    previous: &[Value],
+) -> Result<()> {
+    let stage = *["cleaned", "continued", "returned"]
+        .get(index)
+        .ok_or("extra cleanup record")?;
+    let native = &value["evidence"]["native_sdk"];
+    let mut expected = baseline_record(mode, token, stage);
+    expected["evidence"]["native_sdk"] = native.clone();
+    require(
+        value == &expected,
+        "invalid or reordered canonical cleanup record",
+    )?;
+    let count = if index == 0 { 5 } else { 6 };
+    let phases: &[&str] = match index {
+        0 => &["pending", "closed", "collected"],
+        1 => &["completed"],
+        _ => &["returned"],
+    };
+    let mut shape = json!({"base_uri":backend,"roles":&SDK_ROLES[..count],"columns":SDK_COLUMNS});
+    for phase in phases {
+        shape[*phase] = native[*phase].clone();
+        validate_sdk_rows(&native[*phase], count, index > 0)?;
+    }
+    require(
+        native == &shape,
+        "foreign target, reordered roles or invalid SDK fields",
+    )?;
+    if index == 0 {
+        let pending = rows(native, "pending")?;
+        let closed = rows(native, "closed")?;
+        let collected = rows(native, "collected")?;
+        for slot in 0..5 {
+            require(
+                pending[slot][4] == 0
+                    && closed[slot][4] == u64::from(slot < 4)
+                    && collected[slot][4] == u64::from(slot < 4)
+                    && number_at(&closed[slot], 3)? >= number_at(&pending[slot], 3)?,
+                "body cleanup failed to release SDK ownership or cancelled callback work",
+            )?;
+            if slot < 4 {
+                require(
+                    closed[slot] == collected[slot],
+                    "SDK cleanup was deferred until retained handle collection or polling continued",
+                )?;
+            } else {
+                require(
+                    number_at(&collected[slot], 3)? >= number_at(&closed[slot], 3)?,
+                    "callback SDK counter moved backwards",
+                )?;
+            }
+        }
+    } else if index == 1 {
+        let completed = rows(native, "completed")?;
+        let cleaned = previous
+            .first()
+            .ok_or("continuation preceded SDK cleanup")?;
+        let collected = rows(&cleaned["evidence"]["native_sdk"], "collected")?;
+        require(
+            completed[..4] == collected[..4],
+            "released body SDK work was polled during callback/post continuation",
+        )?;
+        require(
+            number_at(&completed[4], 3)? >= number_at(&collected[4], 3)?
+                && completed[4][11] == collected[4][11],
+            "callback SDK identity changed or observation stopped",
+        )?;
+    } else {
+        let continued = previous
+            .get(1)
+            .ok_or("callback return preceded SDK continuation")?;
+        require(
+            native["returned"] == continued["evidence"]["native_sdk"]["completed"],
+            "SDK resources were released twice or polled after continuation/callback return",
+        )?;
+    }
+    Ok(())
+}
+
+fn number_at(row: &Value, index: usize) -> Result<u64> {
+    row[index]
+        .as_u64()
+        .ok_or_else(|| "invalid SDK counter".into())
+}
+
+fn read_validated(
+    mode: Mode,
+    log: &Path,
+    token: &str,
+    backend: &str,
+    count: usize,
+    cursor: &LogCursor,
+) -> Result<(Vec<Value>, u64)> {
+    let seen = std::cell::RefCell::new(Vec::<Value>::new());
+    protocol::wait_validated(
+        log,
+        cursor,
+        PREFIX,
+        3,
+        count,
+        Instant::now() + Duration::from_secs(2),
+        &|index, value| {
+            if index == 0 {
+                seen.borrow_mut().clear();
+            }
+            validate_record(mode, token, backend, index, value, &seen.borrow())?;
+            seen.borrow_mut().push(value.clone());
+            Ok(())
+        },
+    )
+}
+
+#[cfg(test)]
+fn sample_sdk(token: &str, stage: &str) -> Value {
+    let row = |closed: bool, done: bool| {
+        json!([
+            1,
+            1,
+            1,
+            if done { 7 } else { 3 },
+            u64::from(closed),
+            u64::from(done),
+            u64::from(done),
+            u64::from(done),
+            u64::from(done),
+            if done { 2 } else { 0 },
+            if done { 2 } else { 0 },
+            "SdkPoll",
+            false
+        ])
+    };
+    let count = if stage == "cleaned" { 5 } else { 6 };
+    let mut value = json!({"base_uri":format!("http://127.0.0.1:1234/lifetimes/{token}/response-cleanup"),
+        "roles":&SDK_ROLES[..count],"columns":SDK_COLUMNS});
+    if stage == "cleaned" {
+        value["pending"] = json!((0..5).map(|_| row(false, false)).collect::<Vec<_>>());
+        let closed = json!(
+            (0..5)
+                .map(|index| row(index < 4, false))
+                .collect::<Vec<_>>()
+        );
+        value["closed"] = closed.clone();
+        value["collected"] = closed;
+    } else {
+        value[if stage == "continued" {
+            "completed"
+        } else {
+            "returned"
+        }] = json!(
+            (0..6)
+                .map(|index| row(true, index >= 4))
+                .collect::<Vec<_>>()
+        );
+    }
+    value
+}
+
+#[cfg(test)]
+fn record(mode: Mode, token: &str, stage: &str) -> Value {
+    let mut value = baseline_record(mode, token, stage);
+    value["evidence"]["native_sdk"] = sample_sdk(token, stage);
+    value
+}
+
+#[cfg(test)]
+fn parse_records(mode: Mode, bytes: &[u8], token: &str) -> Result<Vec<Value>> {
+    let directory = tempfile::tempdir()?;
+    let log = directory.path().join("cleanup.log");
+    fs::write(&log, bytes)?;
+    read_records(mode, &log, token, &LogCursor::default()).map(|(records, _)| records)
 }
 
 fn expected_bytes(mode: Mode, token: &str) -> Result<Vec<u8>> {
@@ -268,17 +499,25 @@ fn read_records(
     token: &str,
     cursor: &LogCursor,
 ) -> Result<(Vec<Value>, u64)> {
-    protocol::read(log, cursor, PREFIX, &expected_records(mode, token))
+    read_validated(
+        mode,
+        log,
+        token,
+        &format!("http://127.0.0.1:1234/lifetimes/{token}/response-cleanup"),
+        0,
+        cursor,
+    )
 }
 
 fn wait_records(
     mode: Mode,
     log: &Path,
     token: &str,
+    backend: &str,
     count: usize,
     cursor: &LogCursor,
 ) -> Result<(Vec<Value>, u64)> {
-    protocol::wait(log, cursor, PREFIX, &expected_records(mode, token), count)
+    read_validated(mode, log, token, backend, count, cursor)
 }
 
 pub(super) fn check(
@@ -319,7 +558,8 @@ pub(super) fn check(
             ("x-fixture-backend", &backend),
             ("x-fixture-cleanup-mode", mode.header()),
         ],
-        Some(net::PrefixObserver {
+        Some(net::ResponseCapturePolicy {
+            exchange_deadline: None,
             bytes: expected_bytes(mode, &token)?.len(),
             notify: &notify,
         }),
@@ -340,14 +580,20 @@ pub(super) fn check(
                 "cleanup wire ended before its write deadline",
             )?;
         }
-        evidence = wait_records(mode, log, &token, 1, cursor)?.0;
+        evidence = wait_records(mode, log, &token, &backend, 1, cursor)?.0;
         cleaned = Some(Instant::now());
         origins.release_lifetime(&token, returned)?;
-        let (all, end) = wait_records(mode, log, &token, 3, cursor)?;
+        let (all, end) = wait_records(mode, log, &token, &backend, 3, cursor)?;
         evidence = all;
         cursor.offset = end;
         Ok(())
     })();
+    let outcome = if cleaned.is_none() {
+        let released = origins.release_lifetime(&token, returned);
+        outcome.and(released)
+    } else {
+        outcome
+    };
     let source = origins.take_lifetime_events(&token);
     let source_error = source.as_ref().err().map(ToString::to_string);
     let mut origin = source.unwrap_or(Value::Null);
@@ -378,6 +624,194 @@ pub(super) fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_releases_origin_before_collection_on_wire_validation_error() {
+        super::super::callback::assert_failure_releases_origin(
+            "cleanup wire termination does not match its mode",
+            |_| b"invalid\n".to_vec(),
+            |port, origins, log, cursor, records| {
+                check(Mode::Complete, port, origins, log, cursor, records)
+            },
+        );
+    }
+
+    #[test]
+    fn failure_releases_origin_before_collection_on_protocol_timeout() {
+        super::super::callback::assert_failure_releases_origin(
+            "cleanup terminal evidence timed out",
+            |token| expected_bytes(Mode::Complete, token).unwrap(),
+            |port, origins, log, cursor, records| {
+                check(Mode::Complete, port, origins, log, cursor, records)
+            },
+        );
+    }
+
+    #[test]
+    fn sdk_cleanup_accepts_typed_head_timeouts_with_zero_polls() {
+        let mut valid = sdk_records(Mode::Complete, "cleanup");
+        for record in &mut valid {
+            record["evidence"]["native_sdk"]["columns"][11] = json!("pending_kind");
+            for phase in ["pending", "closed", "collected", "completed", "returned"] {
+                if let Some(rows) = record["evidence"]["native_sdk"]
+                    .get_mut(phase)
+                    .and_then(Value::as_array_mut)
+                {
+                    for row in rows.iter_mut().take(4) {
+                        row[3] = json!(0);
+                        row[11] = json!("HeadReadinessTimeout");
+                    }
+                }
+            }
+        }
+        parse_records(Mode::Complete, &encode_records(&valid), "cleanup")
+            .expect("typed native head timeouts");
+    }
+
+    #[test]
+    fn scope_only_cleanup_records_cannot_qualify_sdk_lifetimes() {
+        for mode in CASES {
+            let mut scope_only = record(mode, "cleanup", "cleaned");
+            scope_only["evidence"]
+                .as_object_mut()
+                .unwrap()
+                .remove("native_sdk");
+            let mut bytes = PREFIX.to_vec();
+            bytes.extend(serde_json::to_vec(&scope_only).unwrap());
+            bytes.push(b'\n');
+            assert!(parse_records(mode, &bytes, "cleanup").is_err());
+        }
+    }
+
+    fn encode_records(records: &[Value]) -> Vec<u8> {
+        records
+            .iter()
+            .flat_map(|record| {
+                let mut bytes = PREFIX.to_vec();
+                bytes.extend(serde_json::to_vec(record).unwrap());
+                bytes.push(b'\n');
+                bytes
+            })
+            .collect()
+    }
+
+    fn sdk_records(mode: Mode, token: &str) -> Vec<Value> {
+        ["cleaned", "continued", "returned"]
+            .map(|stage| record(mode, token, stage))
+            .to_vec()
+    }
+
+    #[test]
+    fn sdk_cleanup_requires_pending_before_closed_and_release_before_collect() {
+        for mode in CASES {
+            let valid = sdk_records(mode, "cleanup");
+            assert_eq!(
+                parse_records(mode, &encode_records(&valid), "cleanup").unwrap(),
+                valid
+            );
+            for (phase, role, column, value) in [
+                ("pending", 0, 0, json!(0)),
+                ("pending", 0, 2, json!(0)),
+                ("pending", 0, 3, json!(0)),
+                ("pending", 0, 6, json!(1)),
+                ("pending", 0, 11, json!(false)),
+                ("pending", 0, 12, json!(true)),
+                ("closed", 0, 4, json!(0)),
+                ("closed", 0, 4, json!(2)),
+                ("closed", 4, 4, json!(1)),
+                ("collected", 0, 4, json!(2)),
+                ("collected", 0, 3, json!(4)),
+                ("collected", 4, 3, json!(2)),
+            ] {
+                let mut bad = valid.clone();
+                bad[0]["evidence"]["native_sdk"][phase][role][column] = value;
+                assert!(
+                    parse_records(mode, &encode_records(&bad), "cleanup").is_err(),
+                    "{mode:?} {phase} {role} {column}"
+                );
+            }
+            for field in ["pending", "closed", "collected"] {
+                let mut bad = valid.clone();
+                bad[0]["evidence"]["native_sdk"][field]
+                    .as_array_mut()
+                    .unwrap()
+                    .pop();
+                assert!(parse_records(mode, &encode_records(&bad), "cleanup").is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn sdk_cleanup_stops_polling_through_callback_post_and_return_and_requires_sdk_body_release() {
+        for mode in CASES {
+            let valid = sdk_records(mode, "cleanup");
+            for (stage, phase, role, column, value) in [
+                (1, "completed", 0, 3, json!(4)),
+                (2, "returned", 0, 3, json!(4)),
+                (1, "completed", 4, 4, json!(0)),
+                (1, "completed", 4, 5, json!(0)),
+                (1, "completed", 4, 11, json!(false)),
+                (1, "completed", 5, 7, json!(0)),
+                (1, "completed", 5, 8, json!(0)),
+                (1, "completed", 5, 10, json!(0)),
+                (2, "returned", 4, 3, json!(8)),
+                (2, "returned", 5, 8, json!(2)),
+            ] {
+                let mut bad = valid.clone();
+                bad[stage]["evidence"]["native_sdk"][phase][role][column] = value;
+                assert!(
+                    parse_records(mode, &encode_records(&bad), "cleanup").is_err(),
+                    "{mode:?} {phase} {role} {column}"
+                );
+            }
+            let mut foreign = valid.clone();
+            foreign[0]["evidence"]["native_sdk"]["base_uri"] =
+                json!("http://127.0.0.1:9999/lifetimes/cleanup/response-cleanup");
+            assert!(parse_records(mode, &encode_records(&foreign), "cleanup").is_err());
+            let mut swapped = valid.clone();
+            swapped[0]["evidence"]["native_sdk"]["roles"]
+                .as_array_mut()
+                .unwrap()
+                .swap(0, 4);
+            assert!(parse_records(mode, &encode_records(&swapped), "cleanup").is_err());
+        }
+    }
+
+    #[test]
+    fn dynamic_sdk_counts_preserve_canonical_reader_and_original_record_limits() {
+        let token = "x".repeat(64);
+        for mode in CASES {
+            let mut records = sdk_records(mode, &token);
+            for record in &mut records {
+                let sdk = &mut record["evidence"]["native_sdk"];
+                for phase in ["pending", "closed", "collected", "completed", "returned"] {
+                    if let Some(rows) = sdk.get_mut(phase).and_then(Value::as_array_mut) {
+                        for row in rows {
+                            row[3] = json!(u64::MAX);
+                        }
+                    }
+                }
+                assert!(serde_json::to_vec(record).unwrap().len() <= 2048);
+            }
+            let bytes = encode_records(&records);
+            assert_eq!(parse_records(mode, &bytes, &token).unwrap(), records);
+            let directory = tempfile::tempdir().unwrap();
+            let log = directory.path().join("canonical.log");
+            fs::write(&log, &bytes).unwrap();
+            assert_eq!(
+                protocol::read(&log, &LogCursor::default(), PREFIX, &records)
+                    .unwrap()
+                    .0,
+                records
+            );
+            let mut noninteger = records.clone();
+            noninteger[0]["evidence"]["native_sdk"]["pending"][0][3] = json!(1.5);
+            assert!(parse_records(mode, &encode_records(&noninteger), &token).is_err());
+            let mut oversized = records;
+            oversized[0]["evidence"]["padding"] = json!("x".repeat(2048));
+            assert!(parse_records(mode, &encode_records(&oversized), &token).is_err());
+        }
+    }
 
     fn failure_wire(mode: Mode, cause: net::ResponseInterruption) -> Result<Value> {
         let payload = body(mode, "cleanup");

@@ -18,6 +18,9 @@ The [typed-focus invariant amendment](#scoped-typed-focus-invariant-amendment) r
 requester's later approval of the two EZ-8 wording corrections and their affected inventory
 digests. It changes neither the portable API nor any other requirement or qualification gate.
 
+The [TLS baseline clarification](#scoped-tls-baseline-clarification) records AG's 2026-11-02
+approval to clarify EZ-2's blocking baseline while keeping configurable TLS verification deferred.
+
 The inspected checkout is PR 275 at `7cccaf10734914161803317aec6c55c22c2bccc9` plus the uncommitted
 G1-G3 work and Spin response-egress repair. Its local characterization does not qualify that commit.
 The [implementation index](https://github.com/IABTechLab/edgezero/blob/7cccaf10734914161803317aec6c55c22c2bccc9/docs/superpowers/plans/2026-10-18-trusted-server-outbound-implementation.md)
@@ -30,6 +33,7 @@ There is no compatibility branch, alternate transport or lazy default proposed h
 | G4-SCOPE-CAPTURE     | Authorized scoped architectural redesign | Requester; explicit conversation reply     | 2026-10-27    | Structured ownership design below; not the earlier closure proposal |
 | G4-FASTLY-SLACK      | Approved, scoped retirement              | Requester; explicit conversation reply     | 2026-10-27    | Remove slack rejection; retain original deadlines, B31 and limits   |
 | G4-FOCUS-INVARIANT   | Approved, scoped wording only            | Requester; explicit conversation reply     | 2026-10-31    | EZ-8.3 and acceptance 01; no API or qualification approval          |
+| G4-TLS-BASELINE      | Approved, baseline clarification only    | AG; explicit conversation reply            | 2026-11-02    | EZ-2.1 and acceptance 03 below; configurable TLS remains deferred   |
 | G4-FASTLY-POLICY     | Pending; local primitive failed          | Unset                                      | Unset         | Unset                                                               |
 | G4-FASTLY-B31        | Approved, scoped implementation only     | Requester; scoped conversation reply       | 2026-10-25    | Proposal referenced below; not new whole-contract digest approval   |
 | G4-OPTIMIZER-HORIZON | Pending; finite rule unproved            | Unset                                      | Unset         | Unset                                                               |
@@ -267,6 +271,41 @@ The criterion stays planned until its numeric and compiler proofs have complete 
 approval or a local Rustdoc pass cannot silently substitute for that acceptance binding.
 The original exact-digest API approval, current Interfaces and hosted/provider qualification
 remain separate and unchanged.
+
+### Scoped TLS Baseline Clarification
+
+**Approved, baseline clarification only: AG, 2026-11-02.** The requester explicitly replied
+`Clarify baseline; keep configurable TLS deferred`.
+
+This authorizes only the EZ-2.1 TLS wording and acceptance 03 clarification. One inbound request
+uses a baseline configuration and four independent scheme, port, Host-authority and configured
+connect-timeout variants. Native registration counters must reach five configurations and five
+registrations. The existing native SDK transport readback confirms SSL is enabled for HTTPS and
+disabled for HTTP; full certificate verification and URI-derived certificate/SNI policy remain
+the fixed baseline. This does not claim certificate-handshake success or connect-phase enforcement.
+
+| Verification identity                  | SHA-256                                                            |
+| -------------------------------------- | ------------------------------------------------------------------ |
+| Requirements before this clarification | `d434beb87106405004315a016b5d5787ec07c3adc25080504f2cb4264a4a11c2` |
+| Requirements after this clarification  | `431eed70e0f4ea0fcab5ddc186a185147a27bf9f5eb0515a95523c572ba3a1b2` |
+| Updated EZ-2 acceptance 03             | `421f6a4d614cf501246d8896855b8afa77553a244d7630d584193870e0b506d1` |
+
+The sole planned required-local binding, `EZ-2/acceptance/03@viceroy`, becomes ready against the
+existing `fastly-budget-inventory` controller. Its mandatory companion is the already-ready
+`EZ-2/acceptance/22@unit/fastly` runtime-unit owner, extended only with the existing
+`outbound::fastly_impl::tests::b31_registered_transport_preserves_origin_and_wire_authority`
+readback sentinel. Readiness means executable binding coverage, not a passing runtime result.
+The harness and fixture now implement this clarification: the obsolete independent TLS-unverified
+disposition is removed, all five variants are mandatory, and legacy waiver fields are rejected.
+Controller and fixture tests pass; passing the native SDK companion and full runtime execution
+remain separate from executable binding readiness and do not grant hosted qualification.
+
+All 255 criteria, 511 environment/split identities, requirement IDs, applicability and existing
+adoption decisions are preserved. Only the document digest and acceptance 03's expected
+text/digest change; the native readback companion's source assertion/digest is unchanged.
+EZ-12's configurable full/chain-only verification remains unpromoted follow-up. No portable TLS
+API, relaxed certificate policy, runtime/dependency pin, hosted pooling claim or qualification
+approval is supplied. Historical exact-digest approvals above remain historical.
 
 ### Scoped Region Enum Amendment
 

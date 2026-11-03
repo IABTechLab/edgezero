@@ -63,6 +63,14 @@ pub fn build_id() -> Result<String> {
     build_identity::current()
 }
 
+pub fn owned_process_group(port: u16) -> Result<u32> {
+    let registered = find(port).ok_or("no owned runtime for this port")?;
+    let mut launch = registered.lock().unwrap();
+    launch.check()?;
+    require(launch.verified, "runtime identity is not verified")?;
+    Ok(launch.child.id())
+}
+
 pub fn command(command: &mut Command, mode: &str, build: &str) -> String {
     let nonce = crate::token();
     command

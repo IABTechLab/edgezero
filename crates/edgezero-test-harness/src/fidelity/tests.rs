@@ -2,7 +2,8 @@ use super::{
     Case, HEADER_LIMIT, TimedSocket, cases, cloudflare_routing_probes, read_response,
     request_packet, verify_observation,
 };
-use crate::Process;
+use crate::{Process, SignalOutcome, SignalTarget};
+use nix::sys::signal::Signal;
 use serde_json::json;
 use std::io::{self, BufRead as _, BufReader, Cursor, Write as _};
 use std::net::{TcpListener, TcpStream};
@@ -253,45 +254,124 @@ fn pending_command_cancellation_reaps_before_blocked_output_is_drained() {
     let pid = std::fs::read_to_string(directory.path().join("pid")).unwrap_or_default();
     // Give the old live-forwarding poll a chance to block on the already-full socket.
     thread::sleep(Duration::from_millis(200));
-    crate::signal_group_command(
-        Command::new("kill").args(["-TERM", "--", &child.id().to_string()]),
+    let cancellation = crate::signal_target(
+        SignalTarget::Pid(child.id()),
+        Some(Signal::SIGTERM),
         Instant::now() + Duration::from_secs(2),
-    )
-    .unwrap();
-    let reaped = || {
-        !pid.trim().is_empty()
-            && !Command::new("kill")
-                .args(["-0", "--", pid.trim()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .unwrap()
-                .success()
-    };
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while !reaped() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    let cleaned_before_drain = reaped();
-    drop(reader);
-    if !pid.trim().is_empty() {
-        let _ = crate::signal_group(
-            pid.trim().parse().unwrap(),
-            "-KILL",
+    );
+    let reaped = || -> crate::evidence::Result<bool> {
+        if pid.trim().is_empty() {
+            return Ok(false);
+        }
+        Ok(crate::signal_target(
+            SignalTarget::Pid(pid.trim().parse()?),
+            None,
             Instant::now() + Duration::from_secs(2),
-        );
-    }
-    let status = crate::wait_for_exit(&mut child, Instant::now() + Duration::from_secs(3)).unwrap();
-    if status.is_none() {
-        let _ = crate::signal_group(child.id(), "-KILL", Instant::now() + Duration::from_secs(2));
-        crate::wait_for_exit(&mut child, Instant::now() + Duration::from_secs(2)).unwrap();
-    }
+        )? == SignalOutcome::Absent)
+    };
+    let (cleaned_before_drain, status) =
+        observe_reaping_and_cleanup(&mut child, pid.trim().parse().ok(), reader, reaped).unwrap();
+    cancellation.unwrap();
     assert!(ready, "pending command did not start");
     assert!(
         cleaned_before_drain,
         "blocked diagnostic output prevented cancellation and child reaping"
     );
     assert!(status.is_some_and(|status| status.success()));
+}
+
+fn observe_reaping_and_cleanup(
+    child: &mut std::process::Child,
+    command_group: Option<u32>,
+    reader: std::os::unix::net::UnixStream,
+    mut reaped: impl FnMut() -> crate::evidence::Result<bool>,
+) -> crate::evidence::Result<(bool, Option<std::process::ExitStatus>)> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let observation = (|| -> crate::evidence::Result<bool> {
+        loop {
+            let observed = reaped()?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if observed || remaining.is_zero() {
+                return Ok(observed);
+            }
+            thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+    })();
+    drop(reader);
+    let command_cleanup = if let Some(group) = command_group {
+        crate::signal_target(
+            SignalTarget::Group(group),
+            Some(Signal::SIGKILL),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .map(|_| ())
+    } else {
+        Ok(())
+    };
+    let status = crate::wait_for_exit(child, Instant::now() + Duration::from_secs(3));
+    let forced_cleanup = (|| -> crate::evidence::Result<()> {
+        if status.as_ref().is_ok_and(|status| status.is_some()) {
+            return Ok(());
+        }
+        let killed = crate::signal_target(
+            SignalTarget::Group(child.id()),
+            Some(Signal::SIGKILL),
+            Instant::now() + Duration::from_secs(2),
+        );
+        let reaped = crate::wait_for_exit(child, Instant::now() + Duration::from_secs(2));
+        killed?;
+        crate::evidence::require(reaped?.is_some(), "raw command child survived cleanup")
+    })();
+    let cleaned_before_drain = observation?;
+    command_cleanup?;
+    forced_cleanup?;
+    Ok((cleaned_before_drain, status?))
+}
+
+#[test]
+fn pending_command_probe_error_is_deferred_until_child_cleanup() {
+    use std::os::unix::{net::UnixStream, process::CommandExt as _};
+    let mut child = Command::new("/bin/sleep")
+        .arg("30")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let (reader, _writer) = UnixStream::pair().unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        observe_reaping_and_cleanup(&mut child, None, reader, || {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected reap probe failure",
+            )
+            .into())
+        })
+    }));
+    let reaped_before_return = child.try_wait().unwrap().is_some();
+    if !reaped_before_return {
+        crate::signal_target(
+            SignalTarget::Group(child.id()),
+            Some(Signal::SIGKILL),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        crate::wait_for_exit(&mut child, Instant::now() + Duration::from_secs(2))
+            .unwrap()
+            .expect("rescue must reap the owned regression child");
+    }
+    assert!(
+        reaped_before_return,
+        "probe failure skipped owned-child cleanup"
+    );
+    let error = result
+        .expect("probe failure must not panic before cleanup")
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(error.to_string().contains("injected reap probe failure"));
 }
 
 #[test]
@@ -632,14 +712,15 @@ fn cancellation_stops_and_reaps_the_owned_process_group() {
         start.elapsed() < Duration::from_secs(6),
         "should bound cleanup even when interrupted"
     );
-    let status = Command::new("/bin/kill")
-        .args(["-0", "--", &format!("-{group}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("should inspect owned group");
-    assert!(
-        !status.success(),
+    let state = crate::signal_target(
+        SignalTarget::Group(group),
+        None,
+        Instant::now() + Duration::from_secs(2),
+    )
+    .expect("should inspect owned group");
+    assert_eq!(
+        state,
+        SignalOutcome::Absent,
         "should leave no live owned process group"
     );
 }

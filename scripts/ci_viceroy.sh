@@ -75,8 +75,8 @@ case "${1:-}" in
     export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
     cargo fetch --locked --manifest-path "$source/Cargo.toml"
     # Never cache a passing result: discovery and execution run even on exact hits.
-    bash scripts/run_test_nonzero.sh readiness_preserves_bytes_without_polling_the_source_again cargo test --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy-lib --lib body::tests::readiness_
-    bash scripts/run_test_nonzero.sh readiness_preserves_between_bytes_timeout_without_repolling_source cargo test --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy-lib --lib body::tests::
+    regressions=$'body::tests::readiness_preserves_bytes_without_polling_the_source_again\nbody::tests::readiness_preserves_between_bytes_timeout_without_repolling_source\nconfig::backends::timeout_tests::configured_timeout_readback_preserves_values_and_rejects_absence_or_overflow'
+    bash scripts/run_test_nonzero.sh "$regressions" cargo test --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy-lib --lib
     cargo build --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy
     executable="$CARGO_TARGET_DIR/debug/viceroy"
     test -x "$executable"

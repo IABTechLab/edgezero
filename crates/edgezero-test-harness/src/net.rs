@@ -1,4 +1,5 @@
 use crate::evidence::{Result, require};
+pub mod connect_fault;
 pub mod overflow;
 mod readiness;
 pub use readiness::ReadinessOrigin;
@@ -738,15 +739,17 @@ pub fn binary_request(port: u16, path: &str, token: &str, backend: Option<&str>)
 type PrefixNotification<'a> = dyn Fn(u16, &[Value], &[u8]) -> Result<()> + 'a;
 
 #[derive(Clone, Copy)]
-pub struct PrefixObserver<'a> {
+pub struct ResponseCapturePolicy<'a> {
     pub bytes: usize,
+    /// Bounds the whole exchange, including after the prefix notification is consumed.
+    pub exchange_deadline: Option<Instant>,
     pub notify: &'a PrefixNotification<'a>,
 }
 
 #[derive(Clone, Copy)]
 enum BodyObserver<'a> {
     Signal(&'a Signal),
-    Prefix(PrefixObserver<'a>),
+    Prefix(ResponseCapturePolicy<'a>),
 }
 
 struct BodyObservation<'a>(Option<BodyObserver<'a>>);
@@ -810,7 +813,7 @@ pub fn header_request(
     path: &str,
     token: &str,
     headers: &[(&str, &str)],
-    prefix: Option<PrefixObserver<'_>>,
+    prefix: Option<ResponseCapturePolicy<'_>>,
 ) -> Result<Value> {
     require(
         prefix.is_none_or(|observer| (1..=512).contains(&observer.bytes)),
@@ -936,7 +939,16 @@ fn exchange(
 ) -> Result<Value> {
     let start = Instant::now();
     let budget = crate::startup::remaining(port, Duration::from_secs(12))?;
-    let deadline = start + budget;
+    let deadline = match observer {
+        Some(BodyObserver::Prefix(policy)) => policy
+            .exchange_deadline
+            .map_or(start + budget, |deadline| deadline.min(start + budget)),
+        _ => start + budget,
+    };
+    let budget = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or("fixture response deadline expired before connect")?;
     let stream =
         TcpStream::connect_timeout(&std::net::SocketAddr::from(([127, 0, 0, 1], port)), budget)?;
     let mut stream = BoundedStream {
@@ -1362,7 +1374,8 @@ mod tests {
                     "/p5",
                     "prefix",
                     &[],
-                    Some(PrefixObserver {
+                    Some(ResponseCapturePolicy {
+                        exchange_deadline: None,
                         bytes: prelude.len(),
                         notify: &notify,
                     }),
@@ -1430,7 +1443,8 @@ mod tests {
                         "/p5",
                         "gated-prefix",
                         &[],
-                        Some(PrefixObserver {
+                        Some(ResponseCapturePolicy {
+                            exchange_deadline: None,
                             bytes: prelude.len(),
                             notify: &notify,
                         }),
@@ -1461,7 +1475,8 @@ mod tests {
                     "/p5",
                     "bound",
                     &[],
-                    Some(PrefixObserver {
+                    Some(ResponseCapturePolicy {
+                        exchange_deadline: None,
                         bytes,
                         notify: &notify
                     })
@@ -1485,7 +1500,8 @@ mod tests {
                     "/p5",
                     "short",
                     &[],
-                    Some(PrefixObserver {
+                    Some(ResponseCapturePolicy {
+                        exchange_deadline: None,
                         bytes: 2,
                         notify: &notify,
                     }),
@@ -1507,7 +1523,8 @@ mod tests {
                     "/p5",
                     "exact",
                     &[],
-                    Some(PrefixObserver {
+                    Some(ResponseCapturePolicy {
+                        exchange_deadline: None,
                         bytes: 512,
                         notify: &notify,
                     }),
@@ -1536,7 +1553,8 @@ mod tests {
                     "/p5",
                     "reject",
                     &[],
-                    Some(PrefixObserver {
+                    Some(ResponseCapturePolicy {
+                        exchange_deadline: None,
                         bytes: 3,
                         notify: &notify,
                     }),
@@ -1575,7 +1593,8 @@ mod tests {
                     "/p5",
                     "ambiguous",
                     &[],
-                    Some(PrefixObserver {
+                    Some(ResponseCapturePolicy {
+                        exchange_deadline: None,
                         bytes: 1,
                         notify: &notify
                     }),
@@ -1585,6 +1604,103 @@ mod tests {
             );
         }
         assert_eq!(notified.get(), 0);
+    }
+
+    #[test]
+    fn capture_deadline_survives_prefix_consumption_and_trickling_input() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut remaining = MAX_HEAD;
+            loop {
+                let mut line = String::new();
+                if bounded_line(&mut reader, &mut line, &mut remaining).unwrap() == 0
+                    || line == "\r\n"
+                {
+                    break;
+                }
+            }
+            let socket = reader.get_mut();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nA\r\n")
+                .unwrap();
+            socket.flush().unwrap();
+            for _ in 0..16 {
+                thread::sleep(Duration::from_millis(20));
+                if socket
+                    .write_all(b"1\r\nb\r\n")
+                    .and_then(|()| socket.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = socket.write_all(b"0\r\n\r\n");
+        });
+        let notified = std::cell::Cell::new(0);
+        let notify = |status, _: &[Value], bytes: &[u8]| {
+            assert_eq!(status, 200);
+            assert_eq!(bytes, b"A");
+            notified.set(notified.get() + 1);
+            Ok(())
+        };
+        let deadline = Instant::now() + Duration::from_millis(150);
+        let result = header_request(
+            port,
+            "/trickle",
+            "bounded",
+            &[],
+            Some(ResponseCapturePolicy {
+                bytes: 1,
+                exchange_deadline: Some(deadline),
+                notify: &notify,
+            }),
+        );
+        let observed = Instant::now();
+        server.join().unwrap();
+        let error = result.unwrap_err();
+        let partial = error.downcast_ref::<InterruptedResponse>().unwrap();
+        assert_eq!(notified.get(), 1);
+        assert!(partial.body.starts_with(b"A"));
+        assert_eq!(
+            partial.cause,
+            ResponseInterruption::ReadIo(std::io::ErrorKind::TimedOut)
+        );
+        assert!(observed >= deadline);
+    }
+
+    #[test]
+    fn expired_capture_deadline_precedes_connection_and_prefix_notification() {
+        let notifications = std::cell::Cell::new(0);
+        let notify = |_, _: &[Value], _: &[u8]| {
+            notifications.set(notifications.get() + 1);
+            Ok(())
+        };
+        let error = header_request(
+            0,
+            "/expired",
+            "expired",
+            &[],
+            Some(ResponseCapturePolicy {
+                bytes: 1,
+                exchange_deadline: Some(Instant::now() - Duration::from_millis(1)),
+                notify: &notify,
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "fixture response deadline expired before connect"
+        );
+        assert_eq!(notifications.get(), 0);
     }
 
     #[test]

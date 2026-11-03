@@ -13,7 +13,9 @@ use std::{
 };
 
 mod accept;
+mod budgets;
 mod lifetimes;
+mod transport;
 
 const GZIP_TEN: &[u8] = &[
     31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 75, 76, 132, 1, 0, 240, 205, 17, 76, 10, 0, 0, 0,
@@ -404,6 +406,34 @@ fn serve(mut socket: TcpStream, port: u16, second: u16, shared: &Shared) -> Resu
         "invalid wire request line",
     )?;
     let (method, target) = (parts[0], parts[1]);
+    if target.starts_with("/budget/") {
+        return budgets::serve(
+            &mut socket,
+            &mut reader,
+            budgets::Request {
+                method,
+                target,
+                fields: &head.fields,
+                port,
+            },
+            shared,
+        );
+    }
+    if target.starts_with("/transport/") {
+        return transport::serve(
+            &mut socket,
+            &mut reader,
+            transport::Request {
+                method,
+                target,
+                fields: &head.fields,
+                port,
+                second,
+                head_received,
+            },
+            shared,
+        );
+    }
     if let Some(path) = target.strip_prefix("/coding/") {
         let (coding, status) = path.split_once('/').ok_or("invalid coding target")?;
         require(
@@ -815,11 +845,7 @@ fn p5(socket: &mut TcpStream, target: &str, second: u16, shared: &Shared) -> Res
             coding @ ("identity" | "gzip" | "passthrough"),
             size @ ("10" | "11"),
         ] => {
-            let bytes = if *coding == "gzip" {
-                if *size == "10" { GZIP_TEN } else { GZIP_ELEVEN }
-            } else {
-                &[b'a'; 11][..if *size == "10" { 10 } else { 11 }]
-            };
+            let bytes = transport::policy_payload(coding, size, false)?;
             fields.push((
                 "Content-Encoding",
                 if *coding == "passthrough" {
@@ -845,7 +871,7 @@ fn p5(socket: &mut TcpStream, target: &str, second: u16, shared: &Shared) -> Res
                 .to_string(),
             ));
             fields.push(("Content-Length", "11".to_owned()));
-            body = vec![b'a'; 11];
+            body = transport::policy_payload(coding, "11", true)?.to_vec();
         }
         ["cross"] | ["limit", _, _] | ["to-body", _, _] => {
             status = 302;
@@ -934,6 +960,22 @@ mod tests {
         let mut response = Vec::new();
         socket.read_to_end(&mut response).unwrap();
         response
+    }
+
+    #[test]
+    fn transport_origin_records_raw_target_and_application_fields() {
+        let origins = WireOrigins::start().unwrap();
+        let reply = exchange(&origins, 0,
+            b"GET /transport/raw%2Ftarget/probe?a=%2F&b=two%20words&a=1 HTTP/1.1\r\nx-request-token: probe\r\nx-transport-step: target\r\nx-transport-proof: application-value\r\nx-signature-test: user-built-signature\r\nContent-Length: 0\r\n\r\n");
+        assert!(reply.starts_with(b"HTTP/1.1 200"));
+        let receipt = origins.take_wire().unwrap();
+        assert_eq!(
+            receipt["target"],
+            "/transport/raw%2Ftarget/probe?a=%2F&b=two%20words&a=1"
+        );
+        assert_eq!(receipt["proof"], json!(["application-value"]));
+        assert_eq!(receipt["signature"], json!(["user-built-signature"]));
+        assert_eq!(origins.finish_counted().unwrap(), 1);
     }
 
     #[test]

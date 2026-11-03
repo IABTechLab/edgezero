@@ -994,6 +994,8 @@ fn warn_missing_kv_binding_once(kv_binding: &str, error: &impl Display) {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    #[cfg(feature = "test-utils")]
+    use std::array::from_fn;
     use std::cell::RefCell;
     use std::rc::{Rc, Weak};
     use std::sync::Arc;
@@ -1033,11 +1035,22 @@ mod tests {
     thread_local! {
         static RETAINED_SEND: RefCell<Option<OutboundFuture<OutboundResponse>>> = const { RefCell::new(None) };
         static RETAINED_UPLOAD: RefCell<Weak<()>> = const { RefCell::new(Weak::new()) };
-        static RETAINED_PROGRESS: RefCell<Option<(OutboundPending, OutboundBatch)>> = const { RefCell::new(None) };
+        static RETAINED_PROGRESS: RefCell<Option<RetainedProgress>> = const { RefCell::new(None) };
+    }
+
+    #[cfg(feature = "test-utils")]
+    use edgezero_core::outbound::test_support::NativeBodyWitness;
+
+    struct RetainedProgress {
+        batch: OutboundBatch,
+        #[cfg(feature = "test-utils")]
+        native: [NativeBodyWitness; 3],
+        origin: OutboundPending,
     }
 
     struct FailingScopeAssembly;
 
+    // Controlled fetch promises exercise the SDK boundary, not a live host network.
     struct ScopeFetchProbe {
         probe: JsValue,
         restore: Function,
@@ -1138,17 +1151,39 @@ mod tests {
     }
 
     async fn retain_progress(client: &HttpClient) -> Result<(), EdgeError> {
+        let untagged = [
+            OutboundRequest::get("https://fixture.invalid/begin")?,
+            OutboundRequest::get("https://fixture.invalid/first")?,
+            OutboundRequest::get("https://fixture.invalid/second")?,
+        ];
+        #[cfg(feature = "test-utils")]
+        let native = from_fn(|_| NativeBodyWitness::new());
+        #[cfg(feature = "test-utils")]
+        let prepared = {
+            let mut observed = untagged;
+            for (witness, request) in native.iter().zip(&mut observed) {
+                witness.attach(request)?;
+            }
+            observed
+        };
+        #[cfg(not(feature = "test-utils"))]
+        let prepared = untagged;
+        let mut dispatches = prepared.into_iter();
         let pending = client
-            .begin(OutboundRequest::get("https://fixture.invalid/begin")?)
+            .begin(dispatches.next().expect("origin request"))
             .await?;
         let batch = client.start_batch_until(
-            vec![
-                OutboundRequest::get("https://fixture.invalid/first")?,
-                OutboundRequest::get("https://fixture.invalid/second")?,
-            ],
+            dispatches.collect(),
             Deadline::after(Duration::from_secs(10)),
         );
-        RETAINED_PROGRESS.with(|retained| *retained.borrow_mut() = Some((pending, batch)));
+        RETAINED_PROGRESS.with(|retained| {
+            *retained.borrow_mut() = Some(RetainedProgress {
+                origin: pending,
+                batch,
+                #[cfg(feature = "test-utils")]
+                native,
+            });
+        });
         Ok(())
     }
 
@@ -1158,17 +1193,36 @@ mod tests {
             Some(3.0_f64),
             "all fetch aborts precede consuming retained handles"
         );
-        let (origin, batch) = RETAINED_PROGRESS
+        let retained = RETAINED_PROGRESS
             .with(|slot| slot.borrow_mut().take())
             .expect("retained original handles");
+        #[cfg(feature = "test-utils")]
+        let before = retained.native.each_ref().map(NativeBodyWitness::snapshot);
+        #[cfg(feature = "test-utils")]
+        for snapshot in &before {
+            assert!(!snapshot.invalid);
+            assert_eq!(snapshot.operation_acquisitions, 1);
+            assert_eq!(snapshot.operation_releases, 1);
+            assert!(snapshot.operation_polls > 0);
+            assert!(
+                snapshot
+                    .first_operation_poll
+                    .expect("original SDK fetch poll")
+                    .pending
+            );
+            assert_eq!(snapshot.heads, 0);
+            assert_eq!(snapshot.source_acquisitions, 0);
+        }
         assert!(matches!(
-            origin
+            retained
+                .origin
                 .collect()
                 .now_or_never()
                 .expect("closed begun receiver ready"),
             Err(EdgeError::Internal { .. })
         ));
-        let failure = batch
+        let failure = retained
+            .batch
             .collect()
             .now_or_never()
             .expect("closed original batch ready")
@@ -1186,6 +1240,14 @@ mod tests {
             Some(3.0_f64),
             "later handle consumption cannot duplicate aborts"
         );
+        #[cfg(feature = "test-utils")]
+        for (witness, stopped) in retained.native.iter().zip(before) {
+            let after = witness.snapshot();
+            assert!(!after.invalid);
+            assert_eq!(after.operation_acquisitions, stopped.operation_acquisitions);
+            assert_eq!(after.operation_polls, stopped.operation_polls);
+            assert_eq!(after.operation_releases, stopped.operation_releases);
+        }
     }
 
     async fn retain_progress_handler(ctx: RequestContext) -> Result<Response, EdgeError> {
@@ -1623,10 +1685,10 @@ mod tests {
             assert_eq!(probe.count("aborts"), Some(0.0_f64));
             RETAINED_PROGRESS.with(|storage| {
                 let mut state = storage.borrow_mut();
-                let (origin, batch) = state.as_mut().expect("original handles");
-                assert!(!origin.is_ready());
+                let retained = state.as_mut().expect("original handles");
+                assert!(!retained.origin.is_ready());
                 assert!(matches!(
-                    batch.check().expect("batch pending"),
+                    retained.batch.check().expect("batch pending"),
                     edgezero_core::OutboundBatchCheck::Pending
                 ));
             });

@@ -3,8 +3,9 @@
 mod native_body;
 pub use native_body::{
     NativeBodyOwner, NativeBodyPreparation, NativeBodyRead, NativeBodyRecorder, NativeBodySnapshot,
-    NativeBodyWait, NativeBodyWaitOutcome, NativeBodyWitness, native_body_recorder,
-    observe_sdk_read, observe_sdk_stream, observe_sdk_wait, own_sdk_resource, own_sdk_source,
+    NativeBodyWait, NativeBodyWaitOutcome, NativeBodyWitness, NativeOperationPending,
+    NativeOperationPoll, NativeSdkWaitKind, native_body_recorder, observe_sdk_read,
+    observe_sdk_stream, observe_sdk_wait, own_sdk_operation, own_sdk_resource, own_sdk_source,
 };
 
 use super::*;

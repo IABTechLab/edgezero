@@ -1,3 +1,5 @@
+//! Injected lifecycle models, not native SDK resource evidence. The runtime companion owns that proof.
+
 use std::iter::repeat_with;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -144,14 +146,24 @@ impl Handoff {
             "retained handle cannot retain its request body"
         );
         assert!(matches!(
-            block_on(self.retained),
+            self.retained
+                .now_or_never()
+                .expect("closed Send settles without producer polls"),
             Err(EdgeError::Internal { .. })
         ));
         assert!(matches!(
-            block_on(self.origin.collect()),
+            self.origin
+                .collect()
+                .now_or_never()
+                .expect("closed Begin settles without producer polls"),
             Err(EdgeError::Internal { .. })
         ));
-        let failure = block_on(self.batch.collect()).expect_err("closed original batch");
+        let failure = self
+            .batch
+            .collect()
+            .now_or_never()
+            .expect("closed batch settles without producer polls")
+            .expect_err("closed original batch");
         assert!(matches!(failure.error(), EdgeError::Internal { .. }));
         assert_eq!(failure.slots().len(), 3);
         assert!(
@@ -413,6 +425,14 @@ fn attached_owner_closes_on_source_deadline_write_and_finish_failures() {
             Body::from("payload"),
             MockState {
                 next_body: Some(IoFailureKind::Deadline),
+                ..MockState::default()
+            },
+            ResponseEgressOutcome::DeadlineExceeded,
+        ),
+        (
+            Body::from("payload"),
+            MockState {
+                writes: VecDeque::from([MockWrite::Fail(IoFailureKind::Deadline, 0)]),
                 ..MockState::default()
             },
             ResponseEgressOutcome::DeadlineExceeded,

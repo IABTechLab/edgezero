@@ -4,6 +4,8 @@
     reason = "table-driven tests intentionally reuse conventional request, response, and budget names"
 )]
 
+mod buffered_parity;
+
 use std::cell::Cell;
 use std::future::Future as _;
 use std::io::{Error as IoError, ErrorKind, Write as _};

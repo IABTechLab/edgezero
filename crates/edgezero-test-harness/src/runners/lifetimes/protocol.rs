@@ -106,41 +106,27 @@ pub(super) fn read(
     Ok((records, cursor.offset + complete as u64))
 }
 
-pub(super) fn wait(
-    log: &Path,
-    cursor: &LogCursor,
-    prefix: &[u8],
-    expected: &[Value],
-    count: usize,
-) -> Result<(Vec<Value>, u64)> {
-    wait_validated(
-        log,
-        cursor,
-        prefix,
-        expected.len(),
-        count,
-        &|index, record| {
-            require(
-                record == &expected[index],
-                "invalid or reordered canonical cleanup record",
-            )
-        },
-    )
-}
-
 pub(super) fn wait_validated(
     log: &Path,
     cursor: &LogCursor,
     prefix: &[u8],
     maximum: usize,
     count: usize,
+    deadline: Instant,
     validate: &dyn Fn(usize, &Value) -> Result<()>,
 ) -> Result<(Vec<Value>, u64)> {
     require(count <= maximum, "invalid cleanup protocol count")?;
-    let started = Instant::now();
     loop {
+        require(
+            Instant::now() < deadline,
+            "cleanup terminal evidence timed out",
+        )?;
         let bytes = read_bytes(log, cursor)?;
         let records = parse_validated(prefix, &bytes, maximum, validate)?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or("cleanup terminal evidence timed out")?;
         if records.len() >= count {
             let complete = bytes
                 .iter()
@@ -148,11 +134,7 @@ pub(super) fn wait_validated(
                 .map_or(0, |index| index + 1);
             return Ok((records, cursor.offset + complete as u64));
         }
-        require(
-            started.elapsed() < Duration::from_secs(2),
-            "cleanup terminal evidence timed out",
-        )?;
-        thread::sleep(Duration::from_millis(5));
+        thread::sleep(remaining.min(Duration::from_millis(5)));
     }
 }
 

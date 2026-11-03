@@ -282,3 +282,228 @@ index 5f86628..465abab 100644
      /// Proptest strategy: get a set of Bytes.
      fn some_bytes() -> impl Strategy<Value = Bytes> {
          proptest::collection::vec(any::<u8>(), 0..16).prop_map(|v| v.into())
+diff --git a/src/component/backend.rs b/src/component/backend.rs
+index 1dcf45f..125bd9c 100644
+--- a/src/component/backend.rs
++++ b/src/component/backend.rs
+@@ -130,6 +130,9 @@ pub(crate) async fn register_dynamic_backend(
+ 
+     let grpc = options.grpc;
+ 
++    let connect_timeout = (options.connect_timeout != 0)
++        .then(|| Duration::from_millis(u64::from(options.connect_timeout)));
++
+     let first_byte_timeout = if options.first_byte_timeout != 0 {
+         Some(Duration::from_millis(options.first_byte_timeout as u64))
+     } else {
+@@ -155,6 +158,7 @@ pub(crate) async fn register_dynamic_backend(
+         cert_host,
+         use_sni,
+         grpc,
++        connect_timeout,
+         first_byte_timeout,
+         between_bytes_timeout,
+         client_cert,
+@@ -251,36 +255,24 @@ pub(crate) fn get_connect_timeout_ms(
+     sandbox: &mut Sandbox,
+     backend: &str,
+ ) -> Result<u32, types::Error> {
+-    // just doing this to get a different error if the backend doesn't exist
+-    let _ = sandbox.backend(backend).ok_or(Error::InvalidArgument)?;
+-    Err(Error::Unsupported {
+-        msg: "connection timing is not actually supported in Viceroy",
+-    }
+-    .into())
++    let backend = sandbox.backend(backend).ok_or(Error::InvalidArgument)?;
++    crate::config::configured_timeout_ms(backend.connect_timeout).map_err(Into::into)
+ }
+ 
+ pub(crate) fn get_first_byte_timeout_ms(
+     sandbox: &mut Sandbox,
+     backend: &str,
+ ) -> Result<u32, types::Error> {
+-    // just doing this to get a different error if the backend doesn't exist
+-    let _ = sandbox.backend(backend).ok_or(Error::InvalidArgument)?;
+-    Err(Error::Unsupported {
+-        msg: "connection timing is not actually supported in Viceroy",
+-    }
+-    .into())
++    let backend = sandbox.backend(backend).ok_or(Error::InvalidArgument)?;
++    crate::config::configured_timeout_ms(backend.first_byte_timeout).map_err(Into::into)
+ }
+ 
+ pub(crate) fn get_between_bytes_timeout_ms(
+     sandbox: &mut Sandbox,
+     backend: &str,
+ ) -> Result<u32, types::Error> {
+-    // just doing this to get a different error if the backend doesn't exist
+-    let _ = sandbox.backend(backend).ok_or(Error::InvalidArgument)?;
+-    Err(Error::Unsupported {
+-        msg: "connection timing is not actually supported in Viceroy",
+-    }
+-    .into())
++    let backend = sandbox.backend(backend).ok_or(Error::InvalidArgument)?;
++    crate::config::configured_timeout_ms(backend.between_bytes_timeout).map_err(Into::into)
+ }
+ 
+ pub(crate) fn is_tls(sandbox: &mut Sandbox, backend: &str) -> Result<bool, types::Error> {
+diff --git a/src/component/shielding.rs b/src/component/shielding.rs
+index 24d4fe1..d2fedb4 100644
+--- a/src/component/shielding.rs
++++ b/src/component/shielding.rs
+@@ -37,6 +37,7 @@ pub(crate) fn backend_for_shield(
+         cert_host: None,
+         use_sni: false,
+         grpc: false,
++        connect_timeout: None,
+         first_byte_timeout,
+         between_bytes_timeout,
+         client_cert: None,
+diff --git a/src/config.rs b/src/config.rs
+index d9ae66b..42876ac 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -39,6 +39,7 @@ pub use crate::acl::Acls;
+ /// Types and deserializers for backend configuration settings.
+ mod backends;
+ 
++pub(crate) use self::backends::configured_timeout_ms;
+ pub use self::backends::{Backend, BackendHealth, ClientCertError, ClientCertInfo};
+ 
+ pub type Backends = HashMap<String, Arc<Backend>>;
+diff --git a/src/config/backends.rs b/src/config/backends.rs
+index e7b1b66..a69a4c3 100644
+--- a/src/config/backends.rs
++++ b/src/config/backends.rs
+@@ -28,6 +28,7 @@ pub struct Backend {
+     pub cert_host: Option<String>,
+     pub use_sni: bool,
+     pub grpc: bool,
++    pub connect_timeout: Option<Duration>,
+     pub first_byte_timeout: Option<Duration>,
+     pub between_bytes_timeout: Option<Duration>,
+     pub client_cert: Option<ClientCertInfo>,
+@@ -39,6 +40,35 @@ pub struct Backend {
+ #[derive(Clone, Debug, Default)]
+ pub struct BackendsConfig(pub HashMap<String, Arc<Backend>>);
+ 
++pub(crate) fn configured_timeout_ms(timeout: Option<Duration>) -> Result<u32, crate::error::Error> {
++    let timeout = timeout.ok_or(crate::error::Error::NotAvailable("Connection timing"))?;
++    u32::try_from(timeout.as_millis()).map_err(|_| crate::error::Error::InvalidArgument)
++}
++
++#[cfg(test)]
++mod timeout_tests {
++    use super::*;
++    use crate::error::Error;
++
++    #[test]
++    fn configured_timeout_readback_preserves_values_and_rejects_absence_or_overflow() {
++        for value in [0, 711, 812, 913, u32::MAX] {
++            assert_eq!(
++                configured_timeout_ms(Some(Duration::from_millis(u64::from(value)))).unwrap(),
++                value
++            );
++        }
++        assert!(matches!(
++            configured_timeout_ms(None),
++            Err(Error::NotAvailable(_))
++        ));
++        assert!(matches!(
++            configured_timeout_ms(Some(Duration::from_millis(u64::from(u32::MAX) + 1))),
++            Err(Error::InvalidArgument)
++        ));
++    }
++}
++
+ /// This module contains [`TryFrom`] implementations used when deserializing a `fastly.toml`.
+ ///
+ /// These implementations are called indirectly by [`FastlyConfig::from_file`][super::FastlyConfig],
+@@ -218,6 +248,7 @@ mod deserialization {
+                 use_sni,
+                 client_cert,
+                 grpc,
++                connect_timeout: None,
+                 first_byte_timeout,
+                 between_bytes_timeout,
+                 ca_certs,
+diff --git a/src/wiggle_abi/backend_impl.rs b/src/wiggle_abi/backend_impl.rs
+index dc791ec..824df87 100644
+--- a/src/wiggle_abi/backend_impl.rs
++++ b/src/wiggle_abi/backend_impl.rs
+@@ -130,10 +130,8 @@ impl FastlyBackend for Sandbox {
+         memory: &mut wiggle::GuestMemory<'_>,
+         backend: wiggle::GuestPtr<str>,
+     ) -> Result<super::types::TimeoutMs, Error> {
+-        // just doing this to get a different error if the backend doesn't exist
+-        let _ = lookup_backend_definition(self, memory, backend)?;
+-        // health checks are not enabled in Viceroy :(
+-        Err(Error::NotAvailable("Connection timing"))
++        let backend = lookup_backend_definition(self, memory, backend)?;
++        crate::config::configured_timeout_ms(backend.connect_timeout)
+     }
+ 
+     fn get_first_byte_timeout_ms(
+@@ -141,10 +139,8 @@ impl FastlyBackend for Sandbox {
+         memory: &mut wiggle::GuestMemory<'_>,
+         backend: wiggle::GuestPtr<str>,
+     ) -> Result<super::types::TimeoutMs, Error> {
+-        // just doing this to get a different error if the backend doesn't exist
+-        let _ = lookup_backend_definition(self, memory, backend)?;
+-        // health checks are not enabled in Viceroy :(
+-        Err(Error::NotAvailable("Connection timing"))
++        let backend = lookup_backend_definition(self, memory, backend)?;
++        crate::config::configured_timeout_ms(backend.first_byte_timeout)
+     }
+ 
+     fn get_between_bytes_timeout_ms(
+@@ -152,10 +148,8 @@ impl FastlyBackend for Sandbox {
+         memory: &mut wiggle::GuestMemory<'_>,
+         backend: wiggle::GuestPtr<str>,
+     ) -> Result<super::types::TimeoutMs, Error> {
+-        // just doing this to get a different error if the backend doesn't exist
+-        let _ = lookup_backend_definition(self, memory, backend)?;
+-        // health checks are not enabled in Viceroy :(
+-        Err(Error::NotAvailable("Connection timing"))
++        let backend = lookup_backend_definition(self, memory, backend)?;
++        crate::config::configured_timeout_ms(backend.between_bytes_timeout)
+     }
+ 
+     fn get_ssl_min_version(
+diff --git a/src/wiggle_abi/req_impl.rs b/src/wiggle_abi/req_impl.rs
+index 3b1635a..8b73d4f 100644
+--- a/src/wiggle_abi/req_impl.rs
++++ b/src/wiggle_abi/req_impl.rs
+@@ -614,6 +614,12 @@ impl FastlyHttpReq for Sandbox {
+ 
+         let grpc = backend_info_mask.contains(BackendConfigOptions::GRPC);
+ 
++        let connect_timeout = if backend_info_mask.contains(BackendConfigOptions::CONNECT_TIMEOUT) {
++            Some(Duration::from_millis(u64::from(config.connect_timeout_ms)))
++        } else {
++            None
++        };
++
+         let first_byte_timeout =
+             if backend_info_mask.contains(BackendConfigOptions::FIRST_BYTE_TIMEOUT) {
+                 Some(Duration::from_millis(config.first_byte_timeout_ms as u64))
+@@ -640,6 +646,7 @@ impl FastlyHttpReq for Sandbox {
+             cert_host,
+             use_sni,
+             grpc,
++            connect_timeout,
+             first_byte_timeout,
+             between_bytes_timeout,
+             client_cert,
+diff --git a/src/wiggle_abi/shielding.rs b/src/wiggle_abi/shielding.rs
+index 6924661..6839182 100644
+--- a/src/wiggle_abi/shielding.rs
++++ b/src/wiggle_abi/shielding.rs
+@@ -111,6 +111,7 @@ impl fastly_shielding::FastlyShielding for Sandbox {
+             cert_host: None,
+             use_sni: false,
+             grpc: false,
++            connect_timeout: None,
+             first_byte_timeout,
+             between_bytes_timeout,
+             client_cert: None,

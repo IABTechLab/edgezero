@@ -413,6 +413,8 @@ mod tests {
     };
     use edgezero_core::key_value_store::KvStore;
     use edgezero_core::middleware::{Middleware, Next};
+    #[cfg(feature = "test-utils")]
+    use edgezero_core::outbound::test_support::NativeBodyWitness;
     use edgezero_core::outbound::{
         HttpClient, OutboundBatch, OutboundCollectedSlot, OutboundFuture, OutboundPending,
         OutboundRequest, OutboundResponse,
@@ -428,6 +430,8 @@ mod tests {
     use futures_util::future::pending;
     use futures_util::stream::poll_fn;
     use http_body::Body as _;
+    #[cfg(feature = "test-utils")]
+    use std::array::from_fn;
     use std::cell::RefCell;
     use std::future::poll_fn as poll_future;
     use std::io;
@@ -444,7 +448,14 @@ mod tests {
 
     thread_local! {
         static RETAINED_SEND: RefCell<Option<OutboundFuture<OutboundResponse>>> = const { RefCell::new(None) };
-        static RETAINED_PROGRESS: RefCell<Option<(OutboundPending, OutboundBatch)>> = const { RefCell::new(None) };
+        static RETAINED_PROGRESS: RefCell<Option<RetainedProgress>> = const { RefCell::new(None) };
+    }
+
+    struct RetainedProgress {
+        batch: OutboundBatch,
+        #[cfg(feature = "test-utils")]
+        native: [NativeBodyWitness; 3],
+        origin: OutboundPending,
     }
 
     async fn waiting_outbound_origin() -> (String, Arc<AtomicUsize>, JoinHandle<()>) {
@@ -478,12 +489,39 @@ mod tests {
     }
 
     async fn start_retained_progress(client: &HttpClient, target: &str) -> Result<(), EdgeError> {
-        let pending = client.begin(OutboundRequest::get(target)?).await?;
+        let untagged = [
+            OutboundRequest::get(target)?,
+            OutboundRequest::get(target)?,
+            OutboundRequest::get(target)?,
+        ];
+        #[cfg(feature = "test-utils")]
+        let native = from_fn(|_| NativeBodyWitness::new());
+        #[cfg(feature = "test-utils")]
+        let prepared = {
+            let mut observed = untagged;
+            for (witness, request) in native.iter().zip(&mut observed) {
+                witness.attach(request)?;
+            }
+            observed
+        };
+        #[cfg(not(feature = "test-utils"))]
+        let prepared = untagged;
+        let mut dispatches = prepared.into_iter();
+        let pending = client
+            .begin(dispatches.next().expect("origin request"))
+            .await?;
         let batch = client.start_batch_until(
-            vec![OutboundRequest::get(target)?, OutboundRequest::get(target)?],
+            dispatches.collect(),
             Deadline::after(Duration::from_secs(10)),
         );
-        RETAINED_PROGRESS.with(|retained| *retained.borrow_mut() = Some((pending, batch)));
+        RETAINED_PROGRESS.with(|retained| {
+            *retained.borrow_mut() = Some(RetainedProgress {
+                origin: pending,
+                batch,
+                #[cfg(feature = "test-utils")]
+                native,
+            });
+        });
         Ok(())
     }
 
@@ -506,17 +544,36 @@ mod tests {
         result
             .expect("scope exit closes every native exchange")
             .expect("origin task");
-        let (origin, batch) = RETAINED_PROGRESS
+        let retained = RETAINED_PROGRESS
             .with(|retained| retained.borrow_mut().take())
             .expect("caller retains both progress handles");
+        #[cfg(feature = "test-utils")]
+        let before = retained.native.each_ref().map(NativeBodyWitness::snapshot);
+        #[cfg(feature = "test-utils")]
+        for snapshot in &before {
+            assert!(!snapshot.invalid);
+            assert_eq!(snapshot.operation_acquisitions, 1);
+            assert_eq!(snapshot.operation_releases, 1);
+            assert!(snapshot.operation_polls > 0);
+            assert!(
+                snapshot
+                    .first_operation_poll
+                    .expect("original SDK send poll")
+                    .pending
+            );
+            assert_eq!(snapshot.heads, 0);
+            assert_eq!(snapshot.source_acquisitions, 0);
+        }
         assert!(matches!(
-            origin
+            retained
+                .origin
                 .collect()
                 .now_or_never()
                 .expect("closed begun receiver ready"),
             Err(EdgeError::Internal { .. })
         ));
-        let failure = batch
+        let failure = retained
+            .batch
             .collect()
             .now_or_never()
             .expect("closed batch ready")
@@ -529,6 +586,14 @@ mod tests {
                 .iter()
                 .all(|slot| matches!(slot, OutboundCollectedSlot::Unresolved))
         );
+        #[cfg(feature = "test-utils")]
+        for (witness, stopped) in retained.native.iter().zip(before) {
+            let after = witness.snapshot();
+            assert!(!after.invalid);
+            assert_eq!(after.operation_acquisitions, stopped.operation_acquisitions);
+            assert_eq!(after.operation_polls, stopped.operation_polls);
+            assert_eq!(after.operation_releases, stopped.operation_releases);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -578,9 +643,9 @@ mod tests {
                 assert!(!server.is_finished(),"original SDK I/O remains pending");
                 RETAINED_PROGRESS.with(|storage| {
                     let mut state=storage.borrow_mut();
-                    let (origin,batch)=state.as_mut().expect("original handles");
-                    assert!(!origin.is_ready());
-                    assert!(matches!(batch.check().expect("batch check"),edgezero_core::OutboundBatchCheck::Pending));
+                    let retained=state.as_mut().expect("original handles");
+                    assert!(!retained.origin.is_ready());
+                    assert!(matches!(retained.batch.check().expect("batch check"),edgezero_core::OutboundBatchCheck::Pending));
                 });
                 assert_eq!(released.load(Ordering::SeqCst),0);
                 assert!(reports.lock().expect("reports").is_empty());
@@ -723,14 +788,23 @@ mod tests {
             .run_until(async {
                 for clean_eof in [false, true] {
                     let (target, received, server) = waiting_outbound_origin().await;
+                    let source_drops = Arc::new(AtomicUsize::new(0));
+                    let source_polls = Arc::new(AtomicUsize::new(0));
+                    let observed_drops = Arc::clone(&source_drops);
+                    let observed_polls = Arc::clone(&source_polls);
                     let router = RouterService::builder()
                         .get("/", move |ctx: RequestContext| {
                             let destination = target.clone();
+                            let source_guard = DropSignal(Arc::clone(&observed_drops));
+                            let polls = Arc::clone(&observed_polls);
                             async move {
                                 let client = ctx.http_client().expect("HTTP client");
                                 let source = stream! {
+                                    let _guard = source_guard;
+                                    polls.fetch_add(1, Ordering::SeqCst);
                                     start_retained_progress(&client, &destination).await.expect("body progress");
                                     yield Ok(Bytes::from_static(b"live"));
+                                    polls.fetch_add(1, Ordering::SeqCst);
                                     if !clean_eof {
                                         pending::<()>().await;
                                     }
@@ -739,7 +813,10 @@ mod tests {
                             }
                         })
                         .build();
-                    let response = AxumServiceState::new(router)
+                    let reports = Arc::new(Mutex::new(Vec::new()));
+                    let mut app = App::new(router);
+                    app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&reports)));
+                    let response = AxumServiceState::from_app(app)
                         .oneshot(Request::new(AxumBody::empty()))
                         .await
                         .expect("native streaming handoff");
@@ -751,9 +828,23 @@ mod tests {
                     assert!(!server.is_finished(), "body work survives callback handoff");
                     if clean_eof {
                         assert!(poll_future(|cx| Pin::new(&mut body).poll_frame(cx)).await.is_none());
+                    } else {
+                        assert!(poll_future(|cx| Pin::new(&mut body).poll_frame(cx)).now_or_never().is_none());
+                        assert!(reports.lock().expect("reports").is_empty());
                     }
+                    let polls_at_terminal = source_polls.load(Ordering::SeqCst);
                     drop(body);
+                    assert_eq!(source_drops.load(Ordering::SeqCst), 1);
                     assert_retained_progress_cancelled(server).await;
+                    assert_eq!(source_polls.load(Ordering::SeqCst), polls_at_terminal);
+                    let recorded = reports.lock().expect("reports");
+                    assert_eq!(recorded.len(), 1);
+                    assert_eq!(recorded[0].bytes_written, 4);
+                    assert_eq!(recorded[0].outcome, if clean_eof {
+                        ResponseEgressOutcome::HostHandoff
+                    } else {
+                        ResponseEgressOutcome::TransportError
+                    });
                 }
             })
             .await;

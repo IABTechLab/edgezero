@@ -10,6 +10,20 @@
 
 ---
 
+## Current Status Authority (2026-11-02)
+
+Use the master plan's [required-local closeout](2026-10-18-trusted-server-outbound-implementation.md#required-local-acceptance-closeout-2026-11-02)
+and `node scripts/check_outbound_cutover_evidence.mjs --coverage` for current implementation
+coverage and remaining scope. The head-first API and four adapter integrations are implemented;
+older references to a proposed or unchanged trait describe their dated checkpoints, not a second
+current transport or compatibility path. Earlier counts, failures and implementation stops remain
+historical records. Only explicitly recorded later approvals supersede those decisions.
+
+Open task checkboxes retain their complete acceptance and qualification exits; they do not mean
+that every implementation step is still missing. Ready bindings are not passing execution,
+candidate freeze, hosted qualification or approval. No pending TLS, conditional or follow-up
+scope is promoted by this status note.
+
 **Current encoding checkpoint (2026-10-30):** the existing wire phases bind EZ-5 criteria 04/05
 on all four adapters, 06 on Viceroy and 07 on workerd, using the shared coding/relay handler and
 actual native clients. No driver, cap, pin, capability or pending metadata-adoption policy changes.

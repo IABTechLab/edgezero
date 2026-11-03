@@ -54,6 +54,21 @@ mod sdk {
     impl Guest for BodylessWire {
         async fn handle(request: Request) -> Result<Response, ErrorCode> {
             let path = request.get_path_with_query().unwrap_or_default();
+            if path.starts_with("/progress/transport/") {
+                let incoming = SpinRequest::from_request(request)?;
+                let app = App::with_name_and_platform(
+                    RouterService::builder()
+                        .get("/progress/transport/{case}", transport_response)
+                        .build(),
+                    "native-transport",
+                    edgezero_adapter_spin::SPIN_PLATFORM,
+                );
+                return edgezero_adapter_spin::dispatch_app::<HandoffHooks>(&app, incoming)
+                    .await
+                    .map_err(|_| {
+                        ErrorCode::InternalError(Some("transport fixture failed".to_owned()))
+                    });
+            }
             if path.starts_with("/progress/coding-")
                 || path.starts_with("/progress/relay-")
                 || path.starts_with("/progress/batch-gzip-")
@@ -266,6 +281,16 @@ mod sdk {
         let (response, result) = Response::new(headers, None, trailers);
         drop(result);
         Ok(response)
+    }
+
+    #[action]
+    async fn transport_response(ctx: RequestContext) -> Result<CoreResponse, EdgeError> {
+        fixture_core::qualification::transport::probe(
+            ctx,
+            "spin",
+            Arc::new(SpinOutboundClient::new()),
+        )
+        .await
     }
 
     fn fixture_error(message: &'static str) -> EdgeError {

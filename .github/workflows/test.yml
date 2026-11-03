@@ -109,6 +109,7 @@ jobs:
         run: |
           node --test scripts/check_outbound_cutover_evidence.test.mjs
           node scripts/check_outbound_cutover_evidence.mjs --manifest
+          node scripts/check_outbound_cutover_evidence.mjs --coverage
 
       - name: Build strict public API documentation
         if: matrix.suite == 'workspace'
@@ -250,7 +251,7 @@ jobs:
     env:
       VICEROY_REVISION: a69d982d1d95e13c0fc9f92683b9118639bb4b04
       VICEROY_LOCK_SHA256: d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a
-      VICEROY_PATCH_SHA256: 8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759
+      VICEROY_PATCH_SHA256: 42ff805147e003e0bec6ec190a5e72cab2ef445582940818c056f2718162663d
     strategy:
       fail-fast: false
       matrix:

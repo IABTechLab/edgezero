@@ -22,7 +22,7 @@ uploads artifacts, while Rust owns the test phases and persisted-evidence checks
 | Adapter    | Phases                                                                                                                                                           |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Axum       | Guarded native contracts/TCP tests, fixture compilation, redirect wire acceptance                                                                                |
-| Fastly     | Native preflight, SDK contracts, runtime unit tests, feature matrix, ingress, fixture compilation, lifecycle smoke, client progress, redirect wire acceptance    |
+| Fastly     | Native preflight, SDK contracts, runtime unit tests, feature matrix, ingress, guarded fixture tests, lifecycle smoke, client progress, redirect wire acceptance  |
 | Cloudflare | Native preflight, guest-shim tests, SDK contracts, browser ingress, runtime unit tests, feature matrix, real-runtime ingress, fixture compilation                |
 | Spin       | Pinned tools, feature matrix, native contracts, SDK/private-boundary tests, shared guest scenarios, async CLI component, actual HTTP wire/policy matrix, ingress |
 
@@ -56,7 +56,37 @@ batch-only selector is removed. Cloudflare uses the selected Wrangler package's 
 with the inspector disabled: its network preview otherwise decodes malformed compressed bodies
 before application policy. The small Node bootstrap only starts/disposes that SDK; Rust still
 owns supervision and every assertion. This does not activate Cloudflare wire execution in CI
-or qualify hosted behavior. There are 85 ready and 426 planned acceptance legs.
+or qualify hosted behavior. Obtain current coverage from the checked inventory rather than
+copying readiness totals into this guide:
+
+```sh
+node scripts/check_outbound_cutover_evidence.mjs --coverage
+```
+
+The report accounts for every reviewed leg exactly once. It separates required-local bindings
+from external evidence, unconfirmed conditional scope, unpromoted follow-ups and explicitly
+approved deferrals. It exits nonzero while required-local bindings remain planned. A zero exit
+means binding completeness, not passing execution, consumer approval or qualification.
+
+Callback cleanup combines two distinct local proofs: Fastly's fixture counter tests and the
+same-candidate adapter ownership/isolation tests. The fixture tests validate bounded evidence
+snapshots; they do not execute either lifecycle wrapper or establish SDK cancellation. The
+independent eight-case Viceroy run covers both wrappers and actual pending SDK ownership.
+Spin's native response-coordinator models execute in its existing native phase, not as
+provider-runtime or client-delivery evidence.
+
+The Spin silent-connect qualification additionally requires Linux `/proc` ownership evidence.
+It holds a finite, unaccepted loopback backlog with silent-overflow policy, correlates the
+runtime's exact socket with causal start/recovery requests, and rejects immediate refusal,
+foreign sockets and stale observations. Other operating systems report that case unverified;
+they cannot substitute a connect-refusal result. This is an explicit local qualification
+prerequisite, not a new production platform requirement.
+The observer resolves one exact listener owner inside the verified launcher's process group,
+not necessarily the launcher itself. It checks leader and worker start times/group membership
+before and after observation and never reselects a PID. Inspection is bounded to 4,096 numeric
+process entries, 512 descriptors per inspected group member, 16 KiB per stat record and 64 KiB
+per TCP table. Missing, ambiguous, recycled or out-of-bound ownership fails explicitly; process
+supervision and teardown retain the original launcher/group identity.
 
 Client-selection acceptance uses the existing adapter-owned phases: Axum's native handler
 and transport-factory tests, Fastly/Cloudflare's runtime library tests, and Spin's executable
@@ -161,3 +191,9 @@ The existing ephemeral-port handoff is not atomic reservation. Identity checks m
 wrong-listener success without port reselection, respawn or retry-until-green. Modes
 without an identity-bearing response, including canonical Fastly assembly failures,
 remain explicitly unverified rather than gaining a test-only production lifecycle API.
+
+Owned Unix processes are signalled directly through safe Nix PID/process-group APIs, not helper
+subprocesses. Targets must be positive IDs greater than one; only `ESRCH` establishes absence.
+Permission and other errors remain failures. Existing TERM/KILL/reaping deadlines are unchanged,
+and probe errors are propagated only after owned-child cleanup has run. Earlier helper-timeout
+observations remain retained; their exact startup-delay cause was not established.

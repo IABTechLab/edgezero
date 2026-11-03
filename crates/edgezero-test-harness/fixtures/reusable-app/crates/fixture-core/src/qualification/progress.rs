@@ -79,6 +79,16 @@ struct State {
     dispatch_returned: Option<Arc<DispatchReturn>>,
 }
 
+pub(super) fn outbound_client(
+    ctx: &RequestContext,
+) -> Result<Arc<dyn OutboundHttpClient>, EdgeError> {
+    ctx.extensions()
+        .get::<Arc<State>>()
+        .ok_or_else(probe_failure)?
+        .runtime
+        .outbound_client()
+}
+
 pub(super) fn pause(
     ctx: &RequestContext,
     duration: Duration,
@@ -173,6 +183,7 @@ pub fn router(
             super::response_headers::probe,
         )
         .get("/progress/redirect", super::redirect::probe)
+        .get("/progress/transport/{case}", transport_probe)
         .get("/progress/batch-recovery/{case}", batch_recovery)
         .get("/progress/lifetimes/{case}", super::lifetimes::probe)
         .get("/progress/{case}", progress)
@@ -192,9 +203,14 @@ pub fn application(
         "outbound-progress-probe",
         platform,
     );
-    app.set_response_egress_observer(FramingObserver);
-    super::response_headers::configure(&mut app)?;
+    configure(&mut app)?;
     Ok(app)
+}
+
+pub fn configure(app: &mut App) -> Result<(), EdgeError> {
+    app.set_response_egress_observer(FramingObserver);
+    super::lifetimes::configure_admission(app);
+    super::response_headers::configure(app)
 }
 
 #[action]
@@ -207,6 +223,21 @@ async fn framing_trailers() -> Result<Response, EdgeError> {
 
 pub fn probe_failure() -> EdgeError {
     EdgeError::internal(std::io::Error::other("outbound progress SDK probe failed"))
+}
+
+#[action]
+async fn transport_probe(ctx: RequestContext) -> Result<Response, EdgeError> {
+    let state = ctx
+        .extensions()
+        .get::<Arc<State>>()
+        .cloned()
+        .ok_or_else(probe_failure)?;
+    super::transport::probe(
+        ctx,
+        state.runtime.adapter(),
+        state.runtime.outbound_client()?,
+    )
+    .await
 }
 
 fn observed(mut job: Job, closed: Arc<AtomicBool>, polls: Arc<AtomicUsize>) -> Job {

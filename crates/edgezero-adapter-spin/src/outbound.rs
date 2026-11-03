@@ -586,7 +586,8 @@ mod spin_impl {
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
     #[cfg(feature = "test-utils")]
     use edgezero_core::outbound::test_support::{
-        NativeBodyRecorder, native_body_recorder, observe_sdk_read, own_sdk_source,
+        NativeBodyRecorder, native_body_recorder, observe_sdk_read, own_sdk_operation,
+        own_sdk_source,
     };
     use edgezero_core::outbound::{
         IndependentOutboundProgress, OutboundBatch, OutboundBatchDriverEvent,
@@ -749,6 +750,8 @@ mod spin_impl {
             let (request, request_done) = Request::new(fields, contents, trailers, Some(options));
             set_request_target(&request, &method, &uri)?;
             let exchange_time = time.clone();
+            #[cfg(feature = "test-utils")]
+            let recorder = native_body_recorder(&context);
             let exchange = async move {
                 let upload = async {
                     match writer {
@@ -765,7 +768,11 @@ mod spin_impl {
                         None => Ok(UploadCompletion::Complete),
                     }
                 };
-                let send = client::send(request);
+                let native_send = client::send(request);
+                #[cfg(feature = "test-utils")]
+                let send = own_sdk_operation(Box::pin(native_send), recorder);
+                #[cfg(not(feature = "test-utils"))]
+                let send = native_send;
                 run_exchange(send, upload, request_done, |error, phase| {
                     map_spin_dispatch_error(
                         error,

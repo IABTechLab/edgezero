@@ -1,6 +1,7 @@
 use super::*;
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use std::{collections::HashSet, net::Shutdown};
+mod response_cleanup;
 
 const EVENT_LIMIT: usize = 32;
 const CAPS_BUFFER_BYTES: usize = 64 * 1024;
@@ -26,6 +27,11 @@ enum Case {
     Handoff,
     Cleanup,
     Callback,
+    WriteDeadline,
+    Cancel,
+    BodyCheck,
+    Connect,
+    ResponseCleanup(&'static str),
 }
 
 impl Case {
@@ -46,7 +52,15 @@ impl Case {
             "response-handoff" => Ok(Self::Handoff),
             "response-cleanup" => Ok(Self::Cleanup),
             "callback-exit" => Ok(Self::Callback),
-            _ => Err("unknown lifetime case".into()),
+            "batch-write-deadline" => Ok(Self::WriteDeadline),
+            "batch-cancel" => Ok(Self::Cancel),
+            "body-check" => Ok(Self::BodyCheck),
+            "connect-timeout" => Ok(Self::Connect),
+            _ => response_cleanup::CASES
+                .into_iter()
+                .find(|known| *known == case)
+                .map(Self::ResponseCleanup)
+                .ok_or_else(|| "unknown lifetime case".into()),
         }
     }
 
@@ -67,6 +81,11 @@ impl Case {
             Self::Handoff => "response-handoff",
             Self::Cleanup => "response-cleanup",
             Self::Callback => "callback-exit",
+            Self::WriteDeadline => "batch-write-deadline",
+            Self::Cancel => "batch-cancel",
+            Self::BodyCheck => "body-check",
+            Self::Connect => "connect-timeout",
+            Self::ResponseCleanup(name) => name,
         }
     }
 
@@ -91,13 +110,25 @@ impl Case {
                 role,
                 "origin" | "a" | "b" | "c" | "ready" | "post" | "post-ready"
             ),
+            Self::WriteDeadline | Self::BodyCheck => matches!(role, "a" | "b" | "c" | "ready"),
+            Self::Cancel => matches!(role, "a" | "b" | "ready"),
+            Self::Connect => matches!(role, "start" | "done"),
+            Self::ResponseCleanup(_) => response_cleanup::permits(role),
         }
     }
 
     fn held(self) -> bool {
         matches!(
             self,
-            Self::PendingHead | Self::PendingBody | Self::Handoff | Self::Cleanup | Self::Callback
+            Self::PendingHead
+                | Self::PendingBody
+                | Self::Handoff
+                | Self::Cleanup
+                | Self::Callback
+                | Self::WriteDeadline
+                | Self::Cancel
+                | Self::BodyCheck
+                | Self::ResponseCleanup(_)
         )
     }
 }
@@ -128,7 +159,9 @@ pub(super) fn acknowledge(shared: &Shared, token: &str, observed: Instant) -> Re
         .get_mut(token)
         .ok_or("unknown lifetime token")?;
     require(
-        matches!(lifetime.case, Case::Cleanup) && !lifetime.released && !lifetime.acknowledged,
+        matches!(lifetime.case, Case::Cleanup | Case::ResponseCleanup(_))
+            && !lifetime.released
+            && !lifetime.acknowledged,
         "invalid cleanup acknowledgment state",
     )?;
     let anchor = lifetime.anchor.ok_or("lifetime not started")?;
@@ -793,6 +826,91 @@ fn respond_caps(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>
 }
 
 fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> Result<bool> {
+    if matches!(exchange.case, Case::Connect) {
+        record(
+            shared,
+            exchange,
+            exchange.event("write-started", Instant::now(), None),
+        )?;
+        socket.write_all(if exchange.role == "start" {
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        } else {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n"
+        })?;
+        socket.flush()?;
+        record(
+            shared,
+            exchange,
+            exchange.event("head", Instant::now(), None),
+        )?;
+        if exchange.role == "done" {
+            socket.write_all(b"ok")?;
+            socket.flush()?;
+            let mut event = exchange.event("chunk", Instant::now(), None);
+            event["bytes"] = json!(b"ok");
+            record(shared, exchange, event)?;
+        }
+        return Ok(true);
+    }
+    if matches!(exchange.case, Case::ResponseCleanup(_)) {
+        return response_cleanup::respond(socket, shared, exchange);
+    }
+    if matches!(exchange.case, Case::Cancel | Case::BodyCheck) && exchange.role == "a" {
+        // The ready request is sent only after C's initial preflight observation.
+        shared.wait(GATE_BUDGET, |state| {
+            state.stop || state.lifetimes[exchange.token].roles.contains("ready")
+        })?;
+        require(!shared.lock().stop, "completed-slot barrier stopped")?;
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n")?;
+        socket.flush()?;
+        record(
+            shared,
+            exchange,
+            exchange.event("head", Instant::now(), None),
+        )?;
+        socket.write_all(b"A")?;
+        socket.flush()?;
+        let mut chunk = exchange.event("chunk", Instant::now(), None);
+        chunk["bytes"] = json!(b"A");
+        record(shared, exchange, chunk)?;
+        return Ok(true);
+    }
+    if matches!(
+        exchange.case,
+        Case::WriteDeadline | Case::Cancel | Case::BodyCheck
+    ) && exchange.role == "ready"
+    {
+        let roles: &[&str] = match exchange.case {
+            Case::Cancel => &["b"],
+            Case::BodyCheck => &["b", "c"],
+            _ => &["a", "b", "c"],
+        };
+        shared.wait(GATE_BUDGET, |state| {
+            state.stop
+                || (roles.iter().all(|role| {
+                    state.lifetimes[exchange.token]
+                        .events
+                        .iter()
+                        .any(|event| event["op"] == "waiting" && event["role"] == *role)
+                }) && (matches!(exchange.case, Case::WriteDeadline)
+                    || state.lifetimes[exchange.token].events.iter().any(|event| {
+                        event["role"] == "a"
+                            && event["op"] == "closed"
+                            && event["reason"] == "complete"
+                    })))
+        })?;
+        require(!shared.lock().stop, "batch runtime barrier stopped")?;
+        socket.write_all(
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )?;
+        socket.flush()?;
+        record(
+            shared,
+            exchange,
+            exchange.event("head", Instant::now(), None),
+        )?;
+        return Ok(true);
+    }
     if matches!(exchange.case, Case::Callback) && matches!(exchange.role, "ready" | "post-ready") {
         let needed = if exchange.role == "ready" { 4 } else { 5 };
         shared.wait(GATE_BUDGET, |state| {
@@ -963,6 +1081,13 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
                 | Case::Callback => {
                     unreachable!()
                 }
+                Case::WriteDeadline
+                | Case::Cancel
+                | Case::BodyCheck
+                | Case::Connect
+                | Case::ResponseCleanup(_) => {
+                    unreachable!()
+                }
             };
             (at, vec![(at, [b"A".as_slice(), b"B", b"C"][index])])
         }
@@ -1047,6 +1172,122 @@ fn respond(socket: &mut TcpStream, shared: &Shared, exchange: &Exchange<'_>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_controls_record_causal_boundaries_on_the_existing_origin() {
+        let origins = WireOrigins::start().unwrap();
+        let token = "connect_source_controls";
+        origins.register_lifetime(token, "connect-timeout").unwrap();
+        origins.mark_lifetime_start(token).unwrap();
+        for (role, status, payload) in [
+            ("start", "204 No Content", b"".as_slice()),
+            ("done", "200 OK", b"ok".as_slice()),
+        ] {
+            let mut socket = TcpStream::connect(("127.0.0.1", origins.port(0))).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            write!(socket,"GET /lifetimes/{token}/connect-timeout/{role} HTTP/1.1\r\nHost: localhost\r\nx-fixture-at-us: 0\r\nConnection: close\r\n\r\n").unwrap();
+            let mut bytes = Vec::new();
+            socket.read_to_end(&mut bytes).unwrap();
+            assert!(bytes.starts_with(format!("HTTP/1.1 {status}\r\n").as_bytes()));
+            assert!(bytes.ends_with(payload));
+        }
+        let source = origins.take_lifetime_events(token).unwrap();
+        let events = source.as_array().unwrap();
+        assert_eq!(events.len(), 9);
+        for role in ["start", "done"] {
+            let at = |op| {
+                events
+                    .iter()
+                    .find(|v| v["role"] == role && v["op"] == op)
+                    .unwrap()["at_us"]
+                    .as_u64()
+                    .unwrap()
+            };
+            assert!(
+                at("request") <= at("write-started")
+                    && at("write-started") <= at("head")
+                    && at("head") <= at("closed")
+            );
+        }
+        assert!(Case::Connect.permits("start") && Case::Connect.permits("done"));
+        assert!(!Case::Connect.permits("origin"));
+        origins.finish().unwrap();
+    }
+
+    #[test]
+    fn runtime_batch_cases_only_permit_their_bounded_roles() {
+        for name in ["batch-write-deadline", "body-check", "batch-cancel"] {
+            let case = Case::parse(name).expect("supported runtime case");
+            assert_eq!(case.name(), name);
+            assert!(case.held());
+            for role in ["b", "ready"] {
+                assert!(case.permits(role));
+            }
+            assert!(case.permits("a"));
+            assert_eq!(case.permits("c"), name != "batch-cancel");
+            for role in ["origin", "post", "ack", "other"] {
+                assert!(!case.permits(role));
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_batch_barrier_waits_for_every_live_slot_and_never_releases_heads() {
+        for case in ["batch-write-deadline", "body-check", "batch-cancel"] {
+            let origins = WireOrigins::start().unwrap();
+            origins.register_lifetime("batch", case).unwrap();
+            origins.mark_lifetime_start("batch").unwrap();
+            let roles: &[&str] = match case {
+                "batch-cancel" => &["b"],
+                "body-check" => &["b", "c"],
+                _ => &["a", "b", "c"],
+            };
+            let ready = connect(&origins, "batch", case, "ready", "0");
+            ready
+                .set_read_timeout(Some(Duration::from_millis(10)))
+                .unwrap();
+            assert!(matches!(ready.peek(&mut [0]), Err(error)
+                if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)));
+            let sockets: Vec<_> = roles
+                .iter()
+                .map(|role| connect(&origins, "batch", case, role, "0"))
+                .collect();
+            if case != "batch-write-deadline" {
+                let completed = read(connect(&origins, "batch", case, "a", "34000"));
+                assert!(completed.starts_with(b"HTTP/1.1 200"));
+                assert!(completed.ends_with(b"\r\n\r\nA"));
+            }
+            assert!(read(ready).starts_with(b"HTTP/1.1 204"));
+            for socket in &sockets {
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(10)))
+                    .unwrap();
+                assert!(matches!(socket.peek(&mut [0]), Err(error)
+                    if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)));
+            }
+            origins.release_lifetime("batch", Instant::now()).unwrap();
+            assert!(origins.release_lifetime("batch", Instant::now()).is_err());
+            for socket in sockets {
+                assert!(read(socket).is_empty());
+            }
+            let events = origins.take_lifetime_events("batch").unwrap();
+            let entries = events.as_array().unwrap();
+            let ready_at = event(&events, "ready", "head")["at_us"].as_i64().unwrap();
+            for role in roles {
+                assert!(event(&events, role, "waiting")["at_us"].as_i64().unwrap() <= ready_at);
+                assert_eq!(event(&events, role, "closed")["reason"], "fixture_released");
+                assert!(
+                    !entries
+                        .iter()
+                        .any(|entry| entry["role"] == *role && entry["op"] == "head")
+                );
+            }
+            assert!(entries.len() < EVENT_LIMIT);
+            origins.finish().unwrap();
+        }
+    }
 
     #[test]
     fn callback_exit_source_holds_original_and_post_delivery_work_until_wrapper_evidence() {

@@ -254,7 +254,7 @@ mod fastly_impl {
     use core::future::Future;
     use core::task::{Context, Poll};
     #[cfg(test)]
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::io::{Read as _, Result as IoResult, Write};
     use std::net::IpAddr;
@@ -276,7 +276,8 @@ mod fastly_impl {
     use edgezero_core::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
     #[cfg(feature = "test-utils")]
     use edgezero_core::outbound::test_support::{
-        NativeBodyOwner, NativeBodyRecorder, native_body_recorder, own_sdk_resource,
+        NativeBodyOwner, NativeBodyRecorder, native_body_recorder, own_sdk_operation,
+        own_sdk_resource,
     };
     #[cfg(test)]
     use edgezero_core::outbound::{
@@ -432,11 +433,21 @@ mod fastly_impl {
             clock: &MonotonicClock,
         ) -> Result<Bytes, EdgeError> {
             #[cfg(feature = "test-utils")]
+            let recorder = body.recorder().cloned();
+            #[cfg(feature = "test-utils")]
             let handle = body.get_mut();
             #[cfg(not(feature = "test-utils"))]
             let handle = body;
             let mut bytes = vec![0; maximum];
-            let count = handle.read(&mut bytes).map_err(|error| {
+            let mut read = || handle.read(&mut bytes);
+            #[cfg(feature = "test-utils")]
+            let result = match recorder {
+                Some(observation) => observation.observe_sync_read(read),
+                None => read(),
+            };
+            #[cfg(not(feature = "test-utils"))]
+            let result = read();
+            let count = result.map_err(|error| {
                 let classified = if budget.deadline.is_expired_at(clock.now()) {
                     timeout_error(budget.cause)
                 } else {
@@ -500,9 +511,22 @@ mod fastly_impl {
     static BACKENDS: OnceLock<Mutex<HashMap<String, (BackendIdentity, Backend)>>> = OnceLock::new();
 
     #[cfg(test)]
+    type NativeSdkObserver = Box<dyn FnMut(&'static str, &str)>;
+
+    #[cfg(test)]
     std::thread_local! {
         static NATIVE_HEAD_POLLS: Cell<usize> = const { Cell::new(0) };
         static NATIVE_SELECTIONS: Cell<usize> = const { Cell::new(0) };
+        static NATIVE_SDK_OBSERVER: RefCell<Option<NativeSdkObserver>> = const { RefCell::new(None) };
+    }
+
+    #[cfg(test)]
+    fn observe_native_sdk(operation: &'static str, name: &str) {
+        NATIVE_SDK_OBSERVER.with(|observer| {
+            if let Some(observe) = observer.borrow_mut().as_mut() {
+                observe(operation, name);
+            }
+        });
     }
 
     #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -520,6 +544,57 @@ mod fastly_impl {
         backend: Backend,
         context: OutboundResponseContext,
         parts: OutboundRequestParts,
+    }
+
+    struct RequestPlan {
+        identity: Result<BackendIdentity, EdgeError>,
+        context: OutboundResponseContext,
+        parts: OutboundRequestParts,
+    }
+
+    impl RequestPlan {
+        fn new(request: OutboundDispatchRequest) -> Self {
+            let budget = request.budget();
+            let mut identity =
+                backend_identity_view(request.request(), budget).map(|(settings, ())| settings);
+            let (parts, context) = request.into_parts();
+            if let Ok(settings) = &mut identity {
+                settings.phase_ms = backend_timer_ms(parts.timeout.unwrap_or(budget.duration));
+            }
+            Self {
+                identity,
+                context,
+                parts,
+            }
+        }
+
+        fn is_registered(&self, cache: &HashMap<String, (BackendIdentity, Backend)>) -> bool {
+            self.identity.as_ref().is_ok_and(|identity| {
+                cache
+                    .get(&backend_name(identity))
+                    .is_some_and(|(registered, _)| registered == identity)
+            })
+        }
+    }
+
+    fn known_first(requests: Vec<(usize, OutboundDispatchRequest)>) -> Vec<(usize, RequestPlan)> {
+        let plans: Vec<_> = requests
+            .into_iter()
+            .map(|(index, request)| (index, RequestPlan::new(request)))
+            .collect();
+        let Some(registry) = BACKENDS.get() else {
+            return plans;
+        };
+        let Ok(cache) = registry.lock() else {
+            // Dispatch keeps the existing per-slot poisoned-cache error authoritative.
+            return plans;
+        };
+        let (mut warm, cold): (Vec<_>, Vec<_>) = plans
+            .into_iter()
+            .partition(|(_, plan)| plan.is_registered(&cache));
+        drop(cache);
+        warm.extend(cold);
+        warm
     }
 
     /// Native outbound HTTP implementation for Fastly Compute.
@@ -579,7 +654,14 @@ mod fastly_impl {
                         }
                     }
                     register_backend_while_live(batch_started_at, budget, self.time.clock(), || {
-                        registration.run(|| builder.finish())
+                        registration.run(|| {
+                            let result = builder.finish();
+                            #[cfg(test)]
+                            if result.is_ok() {
+                                observe_native_sdk("register", name);
+                            }
+                            result
+                        })
                     })
                 },
             )?;
@@ -590,12 +672,19 @@ mod fastly_impl {
             &self,
             request: OutboundDispatchRequest,
         ) -> Result<PreparedRequest, EdgeError> {
-            request.scope().check()?;
-            let observation = observation::for_scope(request.scope());
-            let budget = request.budget();
-            let (mut identity, ()) = backend_identity_view(request.request(), budget)?;
-            let (mut parts, context) = request.into_parts();
-            identity.phase_ms = backend_timer_ms(parts.timeout.unwrap_or(budget.duration));
+            self.configure_plan(RequestPlan::new(request))
+        }
+
+        fn configure_plan(&self, plan: RequestPlan) -> Result<PreparedRequest, EdgeError> {
+            let RequestPlan {
+                identity: planned_identity,
+                context,
+                mut parts,
+            } = plan;
+            context.scope().check()?;
+            let observation = observation::for_scope(context.scope());
+            let budget = context.budget();
+            let identity = planned_identity?;
             if !parts.headers.contains_key(ACCEPT_ENCODING) {
                 parts
                     .headers
@@ -627,29 +716,27 @@ mod fastly_impl {
             let budget = context.budget();
             let started_at = context.entered_at();
             let time = context.time().clone();
-            let OutboundRequestParts {
-                body,
-                cache_policy,
-                headers,
-                image_optimizer,
-                max_request_body_bytes,
-                method,
-                uri,
-                ..
-            } = parts;
             let configured =
                 super::effective_connect_ms(parts.connect_timeout, budget.duration).is_some();
-            let fastly_request = build_fastly_request(&method, &uri, &headers, cache_policy);
-            let (payload, _scope) = body.into_parts();
+            let fastly_request = build_fastly_request(
+                &parts.method,
+                &parts.uri,
+                &parts.headers,
+                parts.cache_policy,
+            );
+            let max_request_body_bytes = parts.max_request_body_bytes;
+            let (payload, _scope) = parts.body.into_parts();
             let response = match payload {
                 BodyPayload::Once(bytes) => {
                     validate_request_body_length(&bytes, max_request_body_bytes)?;
                     let mut request = fastly_request;
-                    if let Some(options) = image_optimizer {
-                        request
-                            .set_image_optimizer(super::image_optimizer::native_options(&options)?);
+                    if let Some(options) = parts.image_optimizer {
+                        let native_options = super::image_optimizer::native_options(&options)?;
+                        request.set_image_optimizer(native_options);
                         ensure_dispatch_budget(started_at, budget, time.clock())?;
                         super::synchronous_send_until(budget, time.clock(), || {
+                            #[cfg(test)]
+                            observe_native_sdk("optimizer-send", backend.name());
                             request.send(backend).map_err(|error| {
                                 map_configured_send_cause(
                                     error.root_cause(),
@@ -662,40 +749,7 @@ mod fastly_impl {
                     } else {
                         request.set_body(bytes.to_vec());
                         ensure_dispatch_budget(started_at, budget, time.clock())?;
-                        let pending = if context.mode() == OutboundSendMode::Batch {
-                            let (handle, optional_body) = request.into_handles();
-                            let native_body = optional_body.ok_or_else(|| {
-                                EdgeError::internal(anyhow::anyhow!(
-                                    "Fastly buffered request did not produce a body handle"
-                                ))
-                            })?;
-                            PendingHead::Direct(
-                                handle
-                                    .send_async_to_backend(native_body, &backend)
-                                    .map_err(|cause| {
-                                        map_configured_send_cause(
-                                            &cause,
-                                            budget,
-                                            time.clock(),
-                                            configured,
-                                        )
-                                    })?,
-                                configured,
-                            )
-                        } else {
-                            PendingHead::Sdk(
-                                Box::new(request.send_async(backend).map_err(|error| {
-                                    map_configured_send_cause(
-                                        error.root_cause(),
-                                        budget,
-                                        time.clock(),
-                                        configured,
-                                    )
-                                })?),
-                                configured,
-                            )
-                        };
-                        progress.head(pending, budget).receive().await?
+                        send_buffered(request, backend, &context, progress, configured).await?
                     }
                 }
                 BodyPayload::Stream(source) => {
@@ -709,6 +763,8 @@ mod fastly_impl {
                         time.clock().clone(),
                         progress,
                         configured,
+                        #[cfg(feature = "test-utils")]
+                        native_body_recorder(&context),
                     )
                     .await?
                 }
@@ -717,16 +773,16 @@ mod fastly_impl {
         }
 
         fn pipeline(
-            request: OutboundDispatchRequest,
+            plan: RequestPlan,
             progress: NativeProgress,
         ) -> OutboundFuture<OutboundResponse> {
-            let client = Self::with_time(request.time().clone());
+            let client = Self::with_time(plan.context.time().clone());
             Box::pin(async move {
-                let budget = request.budget();
-                let time = request.time().clone();
+                let budget = plan.context.budget();
+                let time = plan.context.time().clone();
                 race_deadline(
                     async {
-                        let prepared = client.configure(request)?;
+                        let prepared = client.configure_plan(plan)?;
                         client
                             .execute_head(prepared, &progress)
                             .boxed_local()
@@ -803,7 +859,7 @@ mod fastly_impl {
             let progress = super::scope::native_progress(&scope, &time, entered)?;
             super::scope::begin(
                 &scope,
-                Self::pipeline(request, progress.clone()),
+                Self::pipeline(RequestPlan::new(request), progress.clone()),
                 &progress,
                 &time,
                 entered,
@@ -857,11 +913,11 @@ mod fastly_impl {
                 }
             };
             let time = context.time().clone();
-            let exchanges = requests
+            let exchanges = known_first(requests)
                 .into_iter()
-                .map(|(index, request)| {
-                    let budget = request.budget();
-                    let future = Self::pipeline(request, progress.clone());
+                .map(|(index, plan)| {
+                    let budget = plan.context.budget();
+                    let future = Self::pipeline(plan, progress.clone());
                     let clock = time.clock().clone();
                     async move {
                         let outcome = future.await;
@@ -1436,6 +1492,49 @@ mod fastly_impl {
         wait()
     }
 
+    async fn send_buffered(
+        request: FastlyRequest,
+        backend: Backend,
+        context: &OutboundResponseContext,
+        progress: &NativeProgress,
+        configured: bool,
+    ) -> Result<FastlyResponse, EdgeError> {
+        let budget = context.budget();
+        let clock = context.clock();
+        #[cfg(test)]
+        let dispatched_backend = backend.name().to_owned();
+        let pending = if context.mode() == OutboundSendMode::Batch {
+            let (handle, optional_body) = request.into_handles();
+            let native_body = optional_body.ok_or_else(|| {
+                EdgeError::internal(anyhow::anyhow!(
+                    "Fastly buffered request did not produce a body handle"
+                ))
+            })?;
+            PendingHead::Direct(
+                handle
+                    .send_async_to_backend(native_body, &backend)
+                    .map_err(|cause| {
+                        map_configured_send_cause(&cause, budget, clock, configured)
+                    })?,
+                configured,
+            )
+        } else {
+            PendingHead::Sdk(
+                Box::new(request.send_async(backend).map_err(|error| {
+                    map_configured_send_cause(error.root_cause(), budget, clock, configured)
+                })?),
+                configured,
+            )
+        };
+        #[cfg(test)]
+        observe_native_sdk("send", &dispatched_backend);
+        #[cfg(feature = "test-utils")]
+        let lease = progress.head_observed(pending, budget, native_body_recorder(context));
+        #[cfg(not(feature = "test-utils"))]
+        let lease = progress.head(pending, budget);
+        lease.receive().await
+    }
+
     #[expect(
         clippy::too_many_arguments,
         reason = "upload ownership and original dispatch budget stay explicit at the provider boundary"
@@ -1450,18 +1549,27 @@ mod fastly_impl {
         clock: MonotonicClock,
         progress: &NativeProgress,
         configured: bool,
+        #[cfg(feature = "test-utils")] recorder: Option<NativeBodyRecorder>,
     ) -> Result<FastlyResponse, EdgeError> {
         ensure_dispatch_budget(started_at, budget, &clock)?;
         let (writer, pending) = request.send_async_streaming(backend).map_err(|error| {
             map_configured_send_cause(error.root_cause(), budget, &clock, configured)
         })?;
+        #[cfg(feature = "test-utils")]
+        let queued = own_sdk_operation(
+            Some(PendingHead::Sdk(Box::new(pending), configured)),
+            recorder,
+        );
+        #[cfg(not(feature = "test-utils"))]
+        let queued = pending;
         let uploaded =
-            complete_streamed_exchange(writer, source, maximum, budget, &clock, || Ok(pending))
+            complete_streamed_exchange(writer, source, maximum, budget, &clock, || Ok(queued))
                 .await?;
-        progress
-            .head(PendingHead::Sdk(Box::new(uploaded), configured), budget)
-            .receive()
-            .await
+        #[cfg(feature = "test-utils")]
+        let lease = progress.head_owned(uploaded, budget);
+        #[cfg(not(feature = "test-utils"))]
+        let lease = progress.head(PendingHead::Sdk(Box::new(uploaded), configured), budget);
+        lease.receive().await
     }
 
     fn resolve_stream_io_result(
@@ -1630,12 +1738,14 @@ mod fastly_impl {
 
     #[cfg(test)]
     mod tests {
+        use std::array::from_fn;
         use std::cell::Cell;
         use std::collections::{BTreeSet, VecDeque};
         use std::io::{Error, ErrorKind};
         use std::mem::discriminant;
         use std::num::NonZeroU64;
         use std::sync::{Arc, Mutex};
+        use std::task::Waker;
         use std::thread;
 
         use super::super::testing;
@@ -1648,6 +1758,7 @@ mod fastly_impl {
         use edgezero_core::{ContentEncoding, PassthroughReason, classify_content_encoding};
         use flate2::{Compression, write::GzEncoder};
         use futures::executor::block_on;
+        use futures_util::future::pending;
         use futures_util::stream;
 
         use super::*;
@@ -1819,6 +1930,20 @@ mod fastly_impl {
             }
         }
 
+        fn assert_original_per_call_slot(
+            slot: &edgezero_core::OutboundSlotResult,
+            elapsed: Duration,
+        ) {
+            assert_eq!(slot.elapsed, elapsed);
+            assert!(matches!(
+                slot.outcome,
+                Err(EdgeError::GatewayTimeout {
+                    cause: BudgetSource::PerCallTimeout,
+                    ..
+                })
+            ));
+        }
+
         fn scripted_clock(script: Vec<MonotonicInstant>) -> MonotonicClock {
             let last = *script.last().expect("clock script");
             let observations = Arc::new(Mutex::new(VecDeque::from(script)));
@@ -1833,6 +1958,61 @@ mod fastly_impl {
 
         fn constant_clock(now: MonotonicInstant) -> MonotonicClock {
             MonotonicClock::new(move || now)
+        }
+
+        struct NativeSdkTrace {
+            entered: MonotonicInstant,
+            events: Rc<RefCell<Vec<(&'static str, String)>>>,
+            now: Arc<Mutex<MonotonicInstant>>,
+        }
+
+        impl NativeSdkTrace {
+            fn new(registration_delay: Duration) -> Self {
+                let entered = MonotonicInstant::now();
+                let now = Arc::new(Mutex::new(entered));
+                let observed = Arc::clone(&now);
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let recorded = Rc::clone(&events);
+                NATIVE_SDK_OBSERVER.with(|observer| {
+                    assert!(observer.borrow().is_none(), "isolated native SDK script");
+                    observer.replace(Some(Box::new(move |operation, name| {
+                        if operation == "register" {
+                            let mut sampled = observed.lock().expect("clock");
+                            *sampled = sampled
+                                .checked_add(registration_delay)
+                                .expect("registration time");
+                        }
+                        recorded.borrow_mut().push((operation, name.to_owned()));
+                    })));
+                });
+                Self {
+                    entered,
+                    events,
+                    now,
+                }
+            }
+
+            fn advance(&self, elapsed: Duration) {
+                *self.now.lock().expect("clock") =
+                    self.entered.checked_add(elapsed).expect("scripted time");
+            }
+
+            fn time(&self) -> OutboundTime {
+                let observed = Arc::clone(&self.now);
+                OutboundTime::new(
+                    MonotonicClock::new(move || *observed.lock().expect("clock")),
+                    |_, _| Box::pin(pending()),
+                )
+            }
+        }
+
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for NativeSdkTrace {
+            fn drop(&mut self) {
+                NATIVE_SDK_OBSERVER.with(|observer| {
+                    observer.take();
+                });
+            }
         }
 
         fn clock_budget(start: MonotonicInstant, duration: Duration) -> DispatchBudget {
@@ -3251,6 +3431,122 @@ mod fastly_impl {
 
         #[cfg(target_env = "p1")]
         #[test]
+        fn ez_4_acceptance_11_independent_connect_preserves_full_head_budget() {
+            let start = MonotonicInstant::now();
+            let time = native_time(constant_clock(start));
+            let client = FastlyOutboundClient::with_time(time.clone());
+            let request = OutboundRequest::get("http://127.0.0.1:9/connect-eligibility")
+                .expect("request")
+                .timeout(Duration::from_secs(15))
+                .connect_timeout(Duration::from_secs(1));
+            let dispatch = testing::dispatch(request, time);
+            let original = dispatch.budget();
+            let (identity, ()) = backend_identity_view(dispatch.request(), original)
+                .expect("eligible transport settings");
+            assert_eq!(identity.connect_ms, Some(1000));
+            assert_eq!(identity.phase_ms, 0x4000);
+            let prepared = client
+                .configure(dispatch)
+                .expect("15-second request is eligible");
+            assert_eq!(prepared.context.budget().duration, Duration::from_secs(15));
+            assert_eq!(
+                prepared.context.budget().deadline.instant(),
+                original.deadline.instant()
+            );
+            assert_eq!(prepared.parts.timeout, Some(Duration::from_secs(15)));
+            assert_eq!(prepared.parts.connect_timeout, Some(Duration::from_secs(1)));
+            assert_eq!(prepared.backend.name(), backend_name(&identity));
+            for cause in [
+                BudgetSource::Default,
+                BudgetSource::PerCallTimeout,
+                BudgetSource::RequestDeadline,
+                BudgetSource::BatchCutoff,
+            ] {
+                let budget = DispatchBudget { cause, ..original };
+                for observed in [
+                    start + Duration::from_secs(1),
+                    original
+                        .deadline
+                        .instant()
+                        .checked_sub(Duration::from_nanos(1))
+                        .expect("before deadline"),
+                    original.deadline.instant(),
+                    original.deadline.instant() + Duration::from_nanos(1),
+                ] {
+                    let expected = if observed < original.deadline.instant() {
+                        BudgetSource::ConnectTimeout
+                    } else {
+                        cause
+                    };
+                    assert!(matches!(
+                        super::super::classify_send_failure(super::super::SendFailure::ConnectTimeout, budget, observed),
+                        EdgeError::GatewayTimeout { cause: selected, .. } if selected == expected
+                    ));
+                }
+            }
+        }
+
+        #[cfg(target_env = "p1")]
+        #[test]
+        fn configured_connect_timeout_reads_registered_sdk_timeout_settings() {
+            // Distinct native settings control getter wiring, not timeout enforcement.
+            let control = Backend::builder("ez-sdk-timeout-field-control", "127.0.0.1:9")
+                .connect_timeout(Duration::from_millis(711))
+                .first_byte_timeout(Duration::from_millis(812))
+                .between_bytes_timeout(Duration::from_millis(913))
+                .finish()
+                .expect("native SDK registration control");
+            assert_eq!(control.get_connect_timeout(), Duration::from_millis(711));
+            assert_eq!(control.get_first_byte_timeout(), Duration::from_millis(812));
+            assert_eq!(
+                control.get_between_bytes_timeout(),
+                Duration::from_millis(913)
+            );
+            let start = MonotonicInstant::now();
+            let client = FastlyOutboundClient::with_time(native_time(constant_clock(start)));
+            let mut names = BTreeSet::new();
+            for seconds in [1, 2] {
+                let configured = Duration::from_secs(seconds);
+                let prepared = client
+                    .configure(testing::dispatch(
+                        OutboundRequest::get("http://127.0.0.1:9/connect-readback")
+                            .expect("request")
+                            .timeout(Duration::from_secs(15))
+                            .connect_timeout(configured),
+                        client.time(),
+                    ))
+                    .expect("production backend registration");
+                assert_eq!(prepared.backend.get_connect_timeout(), configured);
+                assert_eq!(
+                    prepared.backend.get_first_byte_timeout(),
+                    Duration::from_millis(0x4000)
+                );
+                assert_eq!(
+                    prepared.backend.get_between_bytes_timeout(),
+                    Duration::from_millis(0x4000)
+                );
+                assert_eq!(prepared.context.budget().duration, Duration::from_secs(15));
+                assert_eq!(
+                    prepared.context.budget().cause,
+                    BudgetSource::PerCallTimeout
+                );
+                assert_eq!(
+                    prepared.context.budget().deadline.instant(),
+                    start
+                        .checked_add(Duration::from_secs(15))
+                        .expect("original deadline")
+                );
+                names.insert(prepared.backend.name().to_owned());
+            }
+            assert_eq!(
+                names.len(),
+                2,
+                "connect settings distinguish backend configurations"
+            );
+        }
+
+        #[cfg(target_env = "p1")]
+        #[test]
         fn b31_registered_transport_preserves_origin_and_wire_authority() {
             let start = MonotonicInstant::now();
             let client = FastlyOutboundClient::with_time(native_time(constant_clock(start)));
@@ -3334,6 +3630,116 @@ mod fastly_impl {
             })
             .expect_err("identity collision");
             assert!(matches!(error, EdgeError::Internal { .. }));
+        }
+
+        #[test]
+        fn request_plan_keeps_streamed_body_and_original_context_without_sdk_io() {
+            let trace = NativeSdkTrace::new(Duration::from_millis(5));
+            let owner = Rc::new(());
+            let retained = Rc::clone(&owner);
+            let polls = Rc::new(Cell::new(0_usize));
+            let counted = Rc::clone(&polls);
+            let original = Bytes::from_static(b"original upload");
+            let mut payload = Some(original.clone());
+            let source = stream::poll_fn(move |_| {
+                assert_eq!(Rc::strong_count(&retained), 2);
+                counted.set(counted.get().checked_add(1).expect("source polls"));
+                Poll::Ready(payload.take().map(Ok))
+            });
+            let dispatch = testing::dispatch(
+                OutboundRequest::post("http://127.0.0.1:62410/unread-plan")
+                    .expect("request")
+                    .body(Body::from_stream(source))
+                    .timeout(Duration::from_secs(1))
+                    .deadline(Deadline::at_instant(
+                        trace.entered + Duration::from_micros(100),
+                    )),
+                trace.time(),
+            );
+            let budget = dispatch.budget();
+            let plan = RequestPlan::new(dispatch);
+            assert_eq!(plan.context.entered_at(), trace.entered);
+            assert_eq!(plan.context.clock().now(), trace.entered);
+            assert_eq!(plan.context.mode(), OutboundSendMode::Send);
+            assert_eq!(plan.context.budget().duration, budget.duration);
+            assert_eq!(
+                plan.context.budget().deadline.instant(),
+                budget.deadline.instant()
+            );
+            assert_eq!(plan.context.budget().cause, budget.cause);
+            assert_eq!(plan.parts.timeout, Some(Duration::from_secs(1)));
+            assert_eq!(plan.identity.as_ref().expect("identity").phase_ms, 1024);
+            assert_eq!(polls.get(), 0);
+            assert_eq!(Rc::strong_count(&owner), 2);
+            assert!(trace.events.borrow().is_empty());
+            let mut body = plan.parts.body.into_stream().expect("original stream");
+            assert_eq!(
+                block_on(body.next()).expect("chunk").expect("bytes"),
+                original
+            );
+            assert!(block_on(body.next()).is_none());
+            assert_eq!(polls.get(), 2);
+            drop(body);
+            assert_eq!(Rc::strong_count(&owner), 1);
+            assert!(trace.events.borrow().is_empty());
+        }
+
+        #[test]
+        fn request_plan_registration_lookup_rejects_every_identity_collision() {
+            let start = MonotonicInstant::now();
+            let client = FastlyOutboundClient::with_time(native_time(constant_clock(start)));
+            let request = || {
+                OutboundRequest::get("http://127.0.0.1:62411/verified-plan")
+                    .expect("request")
+                    .timeout(Duration::from_secs(1))
+            };
+            let prepared = client
+                .configure(testing::dispatch(request(), client.time()))
+                .expect("real SDK registration");
+            let plan = RequestPlan::new(testing::dispatch(request(), client.time()));
+            let identity = plan.identity.as_ref().expect("identity");
+            let name = backend_name(identity);
+            assert_eq!(prepared.backend.name(), name);
+            let mut cache = HashMap::from([(name.clone(), (identity.clone(), prepared.backend))]);
+            assert!(plan.is_registered(&cache));
+            for collision in [
+                BackendIdentity {
+                    host: "foreign.example".to_owned(),
+                    ..identity.clone()
+                },
+                BackendIdentity {
+                    phase_ms: 2048,
+                    ..identity.clone()
+                },
+                BackendIdentity {
+                    connect_ms: Some(1),
+                    ..identity.clone()
+                },
+                BackendIdentity {
+                    port: 62412,
+                    ..identity.clone()
+                },
+                BackendIdentity {
+                    scheme: "https".to_owned(),
+                    ..identity.clone()
+                },
+                BackendIdentity {
+                    tls: true,
+                    ..identity.clone()
+                },
+                BackendIdentity {
+                    wire_authority: "foreign.example".to_owned(),
+                    ..identity.clone()
+                },
+            ] {
+                cache.get_mut(&name).expect("cache entry").0 = collision;
+                assert!(
+                    !plan.is_registered(&cache),
+                    "a name alone is not a verified backend"
+                );
+            }
+            cache.clear();
+            assert!(!plan.is_registered(&cache));
         }
 
         #[test]
@@ -5089,6 +5495,640 @@ mod fastly_impl {
         }
 
         #[test]
+        fn ez_3_acceptance_02_twenty_cold_slots_reach_sdk_dispatch() {
+            use edgezero_core::{
+                OutboundBatchCheck, OutboundBatchTermination, OutboundCollectedSlot,
+                OutboundScopeOwner,
+            };
+
+            let trace = NativeSdkTrace::new(Duration::from_millis(5));
+            let time = trace.time();
+            let callback = OutboundScopeOwner::callback();
+            let progress = super::super::scope::native_progress(
+                &callback.with(super::super::scope::capture),
+                &time,
+                trace.entered,
+            )
+            .expect("native progress");
+            let client = HttpClient::with_client(FastlyOutboundClient::with_time(time.clone()));
+            let requests = (0_u16..20)
+                .map(|index| {
+                    OutboundRequest::get(format!("http://127.0.0.1:{}/twenty-cold", 62000 + index))
+                        .expect("request")
+                        .timeout(Duration::from_secs(1))
+                })
+                .collect();
+            let mut batch = callback.with(|| {
+                client.start_batch_until(
+                    requests,
+                    Deadline::at_instant(trace.entered + Duration::from_secs(1)),
+                )
+            });
+            let events = trace.events.borrow();
+            assert_eq!(
+                events.iter().filter(|event| event.0 == "register").count(),
+                20
+            );
+            assert_eq!(events.iter().filter(|event| event.0 == "send").count(), 20);
+            assert_eq!(
+                time.clock().now(),
+                trace.entered + Duration::from_millis(100)
+            );
+            let (pairs, remainder) = events.as_chunks::<2>();
+            assert!(remainder.is_empty());
+            for [registration, send] in pairs {
+                assert_eq!(registration.0, "register");
+                assert_eq!(*send, ("send", registration.1.clone()));
+            }
+            assert_eq!(events.len(), 40);
+            drop(events);
+            assert!(matches!(
+                batch.check().expect("no setup failure"),
+                OutboundBatchCheck::Pending
+            ));
+            trace.advance(Duration::from_secs(1));
+            let result = block_on(callback.run(progress.drive(batch.collect())))
+                .expect("callback")
+                .expect("batch collection");
+            assert_eq!(result.termination(), OutboundBatchTermination::Cutoff);
+            assert_eq!(result.slots().len(), 20);
+            assert!(
+                result
+                    .slots()
+                    .iter()
+                    .all(|slot| matches!(slot, OutboundCollectedSlot::Unresolved))
+            );
+            callback.close();
+        }
+
+        #[test]
+        fn ez_3_acceptance_03_expired_later_slot_skips_sdk_registration_and_send() {
+            use edgezero_core::{
+                OutboundBatchCheck, OutboundBatchTermination, OutboundCollectedSlot,
+                OutboundScopeOwner,
+            };
+
+            let trace = NativeSdkTrace::new(Duration::from_millis(20));
+            let time = trace.time();
+            let callback = OutboundScopeOwner::callback();
+            let progress = super::super::scope::native_progress(
+                &callback.with(super::super::scope::capture),
+                &time,
+                trace.entered,
+            )
+            .expect("native progress");
+            let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
+            let request = |index, millis| {
+                OutboundRequest::get(format!(
+                    "http://127.0.0.1:{}/expiry-during-registration",
+                    62100 + index
+                ))
+                .expect("request")
+                .timeout(Duration::from_millis(millis))
+            };
+            let expected = [0, 2].map(|index| {
+                let (identity, _) = backend_identity(
+                    request(index, 1000),
+                    clock_budget(trace.entered, Duration::from_secs(1)),
+                )
+                .expect("live slot identity");
+                backend_name(&identity)
+            });
+            let requests = [1000, 10, 1000]
+                .into_iter()
+                .enumerate()
+                .map(|(index, millis)| request(index, millis))
+                .collect();
+            let mut batch = callback.with(|| {
+                client.start_batch_until(
+                    requests,
+                    Deadline::at_instant(trace.entered + Duration::from_secs(1)),
+                )
+            });
+            let OutboundBatchCheck::Item(item) = batch.check().expect("expired slot") else {
+                panic!("the expired slot must be recorded during batch setup");
+            };
+            let (expired_index, slot) = item.into_parts();
+            assert_eq!(expired_index, 1);
+            assert_eq!(slot.elapsed, Duration::from_millis(10));
+            assert!(matches!(
+                slot.outcome,
+                Err(EdgeError::GatewayTimeout {
+                    cause: BudgetSource::PerCallTimeout,
+                    ..
+                })
+            ));
+            let mut collection = Box::pin(batch.collect());
+            let continued = callback.with(|| {
+                collection
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+            });
+            let events = trace.events.borrow();
+            assert_eq!(
+                *events,
+                [
+                    ("register", expected[0].clone()),
+                    ("send", expected[0].clone()),
+                    ("register", expected[1].clone()),
+                    ("send", expected[1].clone()),
+                ]
+            );
+            drop(events);
+            trace.advance(Duration::from_secs(1));
+            let result = match continued {
+                Poll::Ready(result) => result.expect("continued batch"),
+                Poll::Pending => block_on(callback.run(progress.drive(collection)))
+                    .expect("callback")
+                    .expect("continued batch"),
+            };
+            assert!(matches!(
+                result.termination(),
+                OutboundBatchTermination::Completed | OutboundBatchTermination::Cutoff
+            ));
+            assert!(matches!(
+                result.slots()[1],
+                OutboundCollectedSlot::AlreadyDelivered
+            ));
+            for index in [0, 2] {
+                assert!(matches!(
+                    &result.slots()[index],
+                    OutboundCollectedSlot::Unresolved
+                        | OutboundCollectedSlot::Resolved(edgezero_core::OutboundSlotResult {
+                            outcome: Ok(_) | Err(EdgeError::BadGateway { .. }),
+                            ..
+                        })
+                ));
+            }
+            callback.close();
+        }
+
+        #[test]
+        fn ez_3_acceptance_04_known_first_sdk_dispatch_preserves_completion_and_input_order() {
+            use edgezero_core::{
+                OutboundBatchNext, OutboundBatchTermination, OutboundCollectedSlot,
+                OutboundScopeOwner,
+            };
+
+            let trace = NativeSdkTrace::new(Duration::from_millis(5));
+            let time = trace.time();
+            let native_client = FastlyOutboundClient::with_time(time.clone());
+            let durations = [120, 110, 140, 130].map(Duration::from_millis);
+            let request = |index| {
+                OutboundRequest::get(format!("http://127.0.0.1:{}/mixed-backends", 62200 + index))
+                    .expect("request")
+                    .timeout(durations[index])
+            };
+            let expected: [String; 4] = from_fn(|index| {
+                let (identity, _) = backend_identity(
+                    request(index),
+                    clock_budget(trace.entered, durations[index]),
+                )
+                .expect("backend identity");
+                backend_name(&identity)
+            });
+            for index in [1, 3] {
+                native_client
+                    .configure(testing::dispatch(request(index), time.clone()))
+                    .expect("warm SDK registration");
+            }
+            trace.events.borrow_mut().clear();
+            trace.advance(Duration::ZERO);
+            let callback = OutboundScopeOwner::callback();
+            let progress = super::super::scope::native_progress(
+                &callback.with(super::super::scope::capture),
+                &time,
+                trace.entered,
+            )
+            .expect("native progress");
+            let client = HttpClient::with_client(native_client);
+            let mut batch = callback.with(|| {
+                client.start_batch_until(
+                    (0..4).map(request).collect(),
+                    Deadline::at_instant(trace.entered + Duration::from_secs(1)),
+                )
+            });
+            let events = trace.events.borrow();
+            assert_eq!(
+                *events,
+                [
+                    ("send", expected[1].clone()),
+                    ("send", expected[3].clone()),
+                    ("register", expected[0].clone()),
+                    ("send", expected[0].clone()),
+                    ("register", expected[2].clone()),
+                    ("send", expected[2].clone()),
+                ]
+            );
+            drop(events);
+            for index in [1, 0] {
+                trace.advance(durations[index]);
+                let OutboundBatchNext::Item(item) =
+                    block_on(callback.run(progress.drive(batch.next())))
+                        .expect("callback")
+                        .expect("native pending completion")
+                else {
+                    panic!("expected original indexed slot");
+                };
+                assert_eq!(item.index(), index);
+                assert_original_per_call_slot(item.result(), durations[index]);
+            }
+            trace.advance(Duration::from_millis(150));
+            let result = block_on(callback.run(progress.drive(batch.collect())))
+                .expect("callback")
+                .expect("collected batch");
+            assert_eq!(result.termination(), OutboundBatchTermination::Completed);
+            assert_eq!(result.slots().len(), durations.len());
+            for slot in &result.slots()[..2] {
+                assert!(matches!(slot, OutboundCollectedSlot::AlreadyDelivered));
+            }
+            for index in [2, 3] {
+                assert_original_per_call_slot(resolved(&result.slots()[index]), durations[index]);
+            }
+            let fresh = callback.with(|| {
+                client.start_batch_until(
+                    (0..2).map(request).collect(),
+                    Deadline::at_instant(trace.entered + Duration::from_secs(1)),
+                )
+            });
+            trace.advance(Duration::from_millis(300));
+            let collected = block_on(callback.run(progress.drive(fresh.collect())))
+                .expect("callback")
+                .expect("fresh native pending collection");
+            assert_eq!(collected.termination(), OutboundBatchTermination::Completed);
+            assert_eq!(collected.slots().len(), 2);
+            for (index, slot) in collected.slots().iter().enumerate() {
+                assert_original_per_call_slot(resolved(slot), durations[index]);
+            }
+            callback.close();
+        }
+
+        #[test]
+        fn ez_3_acceptance_04_warm_priority_uses_the_per_call_backend_anchor() {
+            use edgezero_core::{OutboundBatchNext, OutboundScopeOwner};
+
+            let trace = NativeSdkTrace::new(Duration::from_millis(5));
+            let time = trace.time();
+            let native_client = FastlyOutboundClient::with_time(time.clone());
+            let request = |index| {
+                OutboundRequest::get(format!("http://127.0.0.1:{}/warm-key", 62400 + index))
+                    .expect("request")
+                    .timeout(Duration::from_secs(1))
+            };
+            let known = native_client
+                .configure(testing::dispatch(request(1_u16), time.clone()))
+                .expect("warm SDK registration")
+                .backend
+                .name()
+                .to_owned();
+            let (cold_identity, _) = backend_identity(
+                request(0),
+                clock_budget(trace.entered, Duration::from_secs(1)),
+            )
+            .expect("cold identity");
+            trace.events.borrow_mut().clear();
+            trace.advance(Duration::ZERO);
+            let callback = OutboundScopeOwner::callback();
+            let progress = super::super::scope::native_progress(
+                &callback.with(super::super::scope::capture),
+                &time,
+                trace.entered,
+            )
+            .expect("native progress");
+            let client = HttpClient::with_client(native_client);
+            let mut batch = callback.with(|| {
+                client.start_batch_until(
+                    vec![
+                        request(0),
+                        request(1).deadline(Deadline::at_instant(
+                            trace.entered + Duration::from_micros(100),
+                        )),
+                    ],
+                    Deadline::at_instant(trace.entered + Duration::from_secs(1)),
+                )
+            });
+            assert_eq!(
+                *trace.events.borrow(),
+                [
+                    ("send", known),
+                    ("register", backend_name(&cold_identity)),
+                    ("send", backend_name(&cold_identity)),
+                ]
+            );
+            let OutboundBatchNext::Item(item) =
+                block_on(callback.run(progress.drive(batch.next())))
+                    .expect("callback")
+                    .expect("expired warm slot")
+            else {
+                panic!("original short deadline must expire after SDK dispatch");
+            };
+            assert_eq!(item.index(), 1);
+            assert_eq!(item.result().elapsed, Duration::from_micros(100));
+            assert!(matches!(
+                item.result().outcome,
+                Err(EdgeError::GatewayTimeout {
+                    cause: BudgetSource::RequestDeadline,
+                    ..
+                })
+            ));
+            callback.close();
+        }
+
+        #[test]
+        fn ez_8_acceptance_02_deadline_only_backend_policy_covers_every_boundary() {
+            let start = MonotonicInstant::now();
+            let ceilings = (0_u32..30)
+                .map(|shift| Duration::from_millis(1_u64 << shift))
+                .chain([DEADLINE_FAR_FUTURE])
+                .collect::<Vec<_>>();
+            let mut samples = BTreeSet::from([Duration::from_nanos(1), DEADLINE_FAR_FUTURE]);
+            for ceiling in &ceilings {
+                for sample in [
+                    ceiling.checked_sub(Duration::from_nanos(1)),
+                    Some(*ceiling),
+                    ceiling.checked_add(Duration::from_nanos(1)),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if !sample.is_zero() && sample <= DEADLINE_FAR_FUTURE {
+                        samples.insert(sample);
+                    }
+                }
+            }
+            for duration in samples {
+                let budget = DispatchBudget {
+                    cause: BudgetSource::RequestDeadline,
+                    ..clock_budget(start, duration)
+                };
+                let mut identities = Vec::new();
+                for optimized in [false, true] {
+                    let mut request =
+                        OutboundRequest::get("https://optimizer-policy.example/image")
+                            .expect("request")
+                            .deadline(budget.deadline);
+                    if optimized {
+                        request = request.image_optimizer(
+                            edgezero_core::OutboundImageOptimizerOptions::new()
+                                .region(edgezero_core::OutboundImageOptimizerRegion::UsEast),
+                        );
+                    }
+                    let (identity, parts) =
+                        backend_identity(request, budget).expect("production policy");
+                    assert_eq!(parts.timeout, None, "deadline-only request");
+                    assert_eq!(
+                        parts.deadline.expect("deadline").instant(),
+                        budget.deadline.instant()
+                    );
+                    let expected = *ceilings
+                        .iter()
+                        .find(|ceiling| **ceiling >= duration)
+                        .expect("policy ceiling");
+                    assert_eq!(Duration::from_millis(identity.phase_ms), expected);
+                    let timers = backend_timers(identity.phase_ms);
+                    assert_eq!(timers.connect, expected);
+                    assert_eq!(timers.first_byte, expected);
+                    assert_eq!(timers.between_bytes, expected);
+                    identities.push(identity);
+                }
+                assert_eq!(identities[0], identities[1]);
+                assert_eq!(backend_name(&identities[0]), backend_name(&identities[1]));
+                assert_eq!(budget.deadline.instant(), start + duration);
+            }
+            for duration in [
+                DEADLINE_FAR_FUTURE,
+                DEADLINE_FAR_FUTURE + Duration::from_nanos(1),
+                Duration::MAX,
+            ] {
+                assert_eq!(
+                    Duration::from_millis(backend_timer_ms(duration)),
+                    DEADLINE_FAR_FUTURE
+                );
+            }
+        }
+
+        #[cfg(target_env = "p1")]
+        #[test]
+        fn ez_8_acceptance_02_effective_deadlines_keep_the_registered_backend() {
+            let start = MonotonicInstant::now();
+            let client = FastlyOutboundClient::with_time(native_time(constant_clock(start)));
+            let mut names = BTreeSet::new();
+            for duration in [
+                Duration::from_nanos(1),
+                Duration::from_micros(100),
+                Duration::from_nanos(999_999),
+                Duration::from_millis(1),
+                Duration::from_nanos(1_000_001),
+                Duration::from_millis(511),
+                Duration::from_millis(513),
+                Duration::from_millis(640),
+                Duration::from_millis(655),
+            ] {
+                for optimized in [false, true] {
+                    let deadline = start + duration;
+                    let mut request =
+                        OutboundRequest::get("http://127.0.0.1:9/optimizer-effective-deadline")
+                            .expect("request")
+                            .timeout(Duration::from_secs(1))
+                            .deadline(Deadline::at_instant(deadline));
+                    if optimized {
+                        request = request.image_optimizer(
+                            edgezero_core::OutboundImageOptimizerOptions::new()
+                                .region(edgezero_core::OutboundImageOptimizerRegion::UsEast),
+                        );
+                    }
+                    let prepared = client
+                        .configure(testing::dispatch(request, client.time()))
+                        .expect("live configured request");
+                    assert_eq!(prepared.context.entered_at(), start);
+                    assert_eq!(prepared.context.budget().duration, duration);
+                    assert_eq!(prepared.context.budget().deadline.instant(), deadline);
+                    assert_eq!(
+                        prepared.context.budget().cause,
+                        BudgetSource::RequestDeadline
+                    );
+                    assert_eq!(prepared.parts.timeout, Some(Duration::from_secs(1)));
+                    assert_eq!(prepared.parts.image_optimizer.is_some(), optimized);
+                    for configured in [
+                        prepared.backend.get_connect_timeout(),
+                        prepared.backend.get_first_byte_timeout(),
+                        prepared.backend.get_between_bytes_timeout(),
+                    ] {
+                        assert_eq!(configured, Duration::from_millis(1024));
+                    }
+                    names.insert(prepared.backend.name().to_owned());
+                }
+            }
+            assert_eq!(
+                names.len(),
+                1,
+                "effective deadlines and optimizer options are not backend discriminators"
+            );
+        }
+
+        #[test]
+        fn ez_8_acceptance_02_late_registration_skips_optimizer_and_retains_backend() {
+            use edgezero_core::OutboundScopeOwner;
+
+            let trace = NativeSdkTrace::new(Duration::from_millis(5));
+            let time = trace.time();
+            let callback = OutboundScopeOwner::callback();
+            let progress = super::super::scope::native_progress(
+                &callback.with(super::super::scope::capture),
+                &time,
+                trace.entered,
+            )
+            .expect("native progress");
+            let client = HttpClient::with_client(FastlyOutboundClient::with_time(time.clone()));
+            let request = |deadline| {
+                OutboundRequest::get("http://127.0.0.1:62300/late-optimizer-registration")
+                    .expect("request")
+                    .timeout(Duration::from_secs(1))
+                    .deadline(Deadline::at_instant(deadline))
+                    .image_optimizer(
+                        edgezero_core::OutboundImageOptimizerOptions::new()
+                            .region(edgezero_core::OutboundImageOptimizerRegion::UsEast),
+                    )
+            };
+            let deadline = trace.entered + Duration::from_micros(100);
+            let result = block_on(
+                callback.run(progress.drive(callback.with(|| client.send(request(deadline))))),
+            )
+            .expect("callback");
+            assert!(matches!(
+                result,
+                Err(EdgeError::GatewayTimeout {
+                    cause: BudgetSource::RequestDeadline,
+                    ..
+                })
+            ));
+            assert_eq!(
+                trace
+                    .events
+                    .borrow()
+                    .iter()
+                    .map(|event| event.0)
+                    .collect::<Vec<_>>(),
+                ["register"]
+            );
+            assert_eq!(time.clock().now(), trace.entered + Duration::from_millis(5));
+            let retry_deadline = time.clock().now() + Duration::from_micros(100);
+            let retry_result = block_on(
+                callback
+                    .run(progress.drive(callback.with(|| client.send(request(retry_deadline))))),
+            )
+            .expect("callback");
+            assert!(matches!(
+                retry_result,
+                Err(EdgeError::BadGateway {
+                    reason: BadGatewayReason::ImageOptimizerUnavailable,
+                    ..
+                })
+            ));
+            let events = trace.events.borrow();
+            assert_eq!(
+                events.iter().map(|event| event.0).collect::<Vec<_>>(),
+                ["register", "optimizer-send"]
+            );
+            assert_eq!(events[0].1, events[1].1, "late registration remains usable");
+            drop(events);
+            callback.close();
+        }
+
+        #[test]
+        fn ez_8_acceptance_02_timely_scripted_head_keeps_pending_body_deadline() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
+            for selected in [
+                BudgetSource::Default,
+                BudgetSource::PerCallTimeout,
+                BudgetSource::RequestDeadline,
+            ] {
+                let entered = MonotonicInstant::now();
+                let now = Arc::new(Mutex::new(entered));
+                let observed = Arc::clone(&now);
+                let clock = MonotonicClock::new(move || *observed.lock().expect("clock"));
+                let time = OutboundTime::new(clock.clone(), |_, _| Box::pin(pending()));
+                let mut request =
+                    OutboundRequest::get("http://127.0.0.1:9/scripted-optimizer-body")
+                        .expect("request")
+                        .stream_response()
+                        .image_optimizer(
+                            edgezero_core::OutboundImageOptimizerOptions::new()
+                                .region(edgezero_core::OutboundImageOptimizerRegion::UsEast),
+                        );
+                request = match selected {
+                    BudgetSource::PerCallTimeout => request.timeout(Duration::from_millis(1)),
+                    BudgetSource::RequestDeadline => request
+                        .timeout(Duration::from_secs(1))
+                        .deadline(Deadline::at_instant(entered + Duration::from_millis(1))),
+                    BudgetSource::Default => request,
+                    BudgetSource::BatchCutoff
+                    | BudgetSource::ConnectTimeout
+                    | BudgetSource::IdleTimeout
+                    | BudgetSource::Unspecified => {
+                        panic!("scripted Send uses request budgets")
+                    }
+                    _ => panic!("unexpected future budget source"),
+                };
+                let dispatch = testing::dispatch(request, time);
+                let budget = dispatch.budget();
+                assert_eq!(budget.cause, selected);
+                let (_, context) = dispatch.into_parts();
+                let polls = Arc::new(AtomicUsize::new(0));
+                let counted = Arc::clone(&polls);
+                let source = stream::poll_fn(move |_| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Poll::Pending
+                })
+                .boxed_local();
+                let head = super::super::synchronous_send_until(budget, &clock, || {
+                    *now.lock().expect("clock") = entered + Duration::from_nanos(1);
+                    OutboundHead::new(
+                        StatusCode::OK,
+                        OutboundHeaderInput::new(
+                            "fastly",
+                            HeaderMap::new(),
+                            OutboundHeaderFidelity::AdapterVisibleFields,
+                        ),
+                        source,
+                        context,
+                        OutboundExchangeOwner::new(|| {}),
+                    )
+                })
+                .expect("timely scripted native head");
+                let response = block_on(head.finish()).expect("streamed head");
+                assert_eq!(polls.load(Ordering::SeqCst), 0, "stream remains lazy");
+                let mut body = response
+                    .into_body()
+                    .into_stream()
+                    .expect("streamed response");
+                let mut read = Box::pin(body.next());
+                assert!(
+                    read.as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+                let before_expiry = polls.load(Ordering::SeqCst);
+                assert!(before_expiry > 0);
+                *now.lock().expect("clock") = budget.deadline.instant();
+                let Poll::Ready(Some(Err(error))) =
+                    read.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+                else {
+                    panic!("pending body must fail at the original deadline");
+                };
+                assert!(
+                    matches!(error, EdgeError::GatewayTimeout { cause, .. } if cause == selected)
+                );
+                assert_eq!(
+                    polls.load(Ordering::SeqCst),
+                    before_expiry,
+                    "no source read after expiry"
+                );
+            }
+        }
+
+        #[test]
         fn cold_backend_registration_uses_the_original_deadline() {
             use edgezero_core::time::Deadline;
 
@@ -5337,6 +6377,180 @@ mod send_failure_policy_tests {
 
     use super::testing;
     use super::*;
+
+    fn scripted_optimizer_return(
+        duration: Duration,
+        cause: BudgetSource,
+        preparation: Duration,
+        host_return: Duration,
+        provider_failure: bool,
+    ) {
+        use edgezero_core::{
+            FastlyFailureCause, MonotonicClock, ProviderFailureDetail, ProviderFailurePhase,
+        };
+        use std::cell::Cell;
+        use std::sync::{Arc, Mutex};
+
+        struct Reply(Arc<AtomicU64>);
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for Reply {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let entered = MonotonicInstant::now();
+        let deadline = entered.checked_add(duration).expect("deadline");
+        let prepared_at = entered.checked_add(preparation).expect("prepared time");
+        let returned_at = entered.checked_add(host_return).expect("host return time");
+        let now = Arc::new(Mutex::new(prepared_at));
+        let observed = Arc::clone(&now);
+        let clock = MonotonicClock::new(move || *observed.lock().expect("clock"));
+        let budget = DispatchBudget {
+            cause,
+            duration,
+            deadline: Deadline::at_instant(deadline),
+        };
+        let calls = Cell::new(0_usize);
+        let released = Arc::new(AtomicU64::new(0));
+        let detail = ProviderFailureDetail::Fastly {
+            phase: ProviderFailurePhase::Send,
+            cause: FastlyFailureCause::ImageOptimizerUnsupported,
+        };
+        let result = synchronous_send_until(budget, &clock, || {
+            calls.set(calls.get().checked_add(1).expect("host call count"));
+            assert_eq!(clock.now(), prepared_at);
+            *now.lock().expect("clock") = returned_at;
+            if provider_failure {
+                Err(EdgeError::bad_gateway_with_detail(
+                    "native optimizer unavailable",
+                    BadGatewayReason::ImageOptimizerUnavailable,
+                    detail,
+                ))
+            } else {
+                Ok(Reply(Arc::clone(&released)))
+            }
+        });
+        assert_eq!(
+            calls.get(),
+            1,
+            "positive submillisecond budgets must dispatch"
+        );
+        assert_eq!(budget.deadline.instant(), deadline);
+        assert_eq!(budget.duration, duration);
+        assert_eq!(clock.now(), returned_at);
+        if host_return >= duration {
+            assert!(
+                matches!(&result, Err(EdgeError::GatewayTimeout { cause: selected, .. }) if *selected == cause)
+            );
+        } else if provider_failure {
+            assert!(matches!(
+                &result,
+                Err(EdgeError::BadGateway {
+                    reason: BadGatewayReason::ImageOptimizerUnavailable,
+                    ..
+                })
+            ));
+        } else {
+            assert!(result.is_ok());
+        }
+        if provider_failure {
+            assert_eq!(
+                result
+                    .as_ref()
+                    .err()
+                    .expect("provider failure")
+                    .provider_failure_detail(),
+                Some(&detail)
+            );
+        }
+        drop(result);
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            u64::from(!provider_failure)
+        );
+    }
+
+    #[test]
+    fn ez_8_acceptance_02_submillisecond_host_call_budget_matrix() {
+        for nanos in [1, 100_000, 999_999, 1_000_000, 1_000_001] {
+            let duration = Duration::from_nanos(nanos);
+            let before_deadline = duration
+                .checked_sub(Duration::from_nanos(1))
+                .expect("positive budget");
+            for cause in [
+                BudgetSource::Default,
+                BudgetSource::PerCallTimeout,
+                BudgetSource::RequestDeadline,
+                BudgetSource::BatchCutoff,
+            ] {
+                for preparation in [Duration::ZERO, before_deadline] {
+                    for returned in [
+                        before_deadline,
+                        duration,
+                        duration + Duration::from_nanos(1),
+                    ] {
+                        for failed in [false, true] {
+                            scripted_optimizer_return(
+                                duration,
+                                cause,
+                                preparation,
+                                returned,
+                                failed,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ez_8_acceptance_02_expired_budgets_skip_host_and_horizon_remains_unknown() {
+        use edgezero_core::MonotonicClock;
+        use std::cell::Cell;
+        for cause in [
+            BudgetSource::Default,
+            BudgetSource::PerCallTimeout,
+            BudgetSource::RequestDeadline,
+            BudgetSource::BatchCutoff,
+        ] {
+            for nanos in [0, 1, 100_000, 999_999, 1_000_000, 1_000_001] {
+                let start = MonotonicInstant::now();
+                let duration = Duration::from_nanos(nanos);
+                let deadline = start + duration;
+                for now in [deadline, deadline + Duration::from_nanos(1)] {
+                    let calls = Cell::new(0_usize);
+                    let result = synchronous_send_until(
+                        DispatchBudget {
+                            cause,
+                            duration,
+                            deadline: Deadline::at_instant(deadline),
+                        },
+                        &MonotonicClock::new(move || now),
+                        || {
+                            calls.set(calls.get().checked_add(1).expect("host call count"));
+                            Ok(())
+                        },
+                    );
+                    assert_eq!(calls.get(), 0);
+                    assert!(
+                        matches!(result, Err(EdgeError::GatewayTimeout { cause: selected, .. }) if selected == cause)
+                    );
+                }
+            }
+            // A scripted overrun is not a finite bound on the uninterruptible host call.
+            for failed in [false, true] {
+                scripted_optimizer_return(
+                    Duration::from_micros(100),
+                    cause,
+                    Duration::ZERO,
+                    Duration::from_secs(3),
+                    failed,
+                );
+            }
+        }
+    }
 
     #[test]
     fn image_optimizer_sync_call_preserves_original_deadline_and_releases_late_response() {

@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
-  "source_digest": "d434beb87106405004315a016b5d5787ec07c3adc25080504f2cb4264a4a11c2",
-  "status": "partially activated inventory; EZ-23 local acceptance 01-12, EZ-9 unit acceptance 01-15 plus local runtime 16/17, EZ-1 core acceptance 07 plus Axum HTTP/1 acceptance 01/04/08, Axum acceptance 09/10/11/12/14 and pending chunked Axum timing criterion 06, plus 22 provider-local real-ingress forwarding legs for criteria 01/03/04/08/09/10/11/12/14, EZ-2 unit acceptance 01 on all four adapters and Fastly registration-observation acceptance 22, EZ-3 core acceptance 04 (ordering clause only) plus unit acceptance 08 on all four adapters, EZ-4 core acceptance 01, EZ-5 core acceptance 01/02/03/10/11 and ten local encoding/negotiation/mixed-batch/relay legs for criteria 04/05/06/07 plus each adapter's unit acceptance 09/10/11 (Spin combines adapter-visible normalization, native SDK disposal and real host-wire controls), EZ-6 core acceptance 13/15/17/22 and EZ-7 core acceptance 01/02/03 plus native runtime acceptance 04 bind executable guarded commands; EZ-6 acceptance 22 runtime legs bind the same-candidate core identity companion and native recovery matrix; EZ-10 local buffered/streamed overflow acceptance 05/06 on all four runtimes and chunked-ingress acceptance 03 on Viceroy/workerd/Spin bind the existing guarded overflow suite; EZ-10 core reader/declared-length acceptance 01/02, Axum pipeline/custom-renderer acceptance 03/07 and actual scaffold/demo acceptance 08 bind the existing owning commands; the shared core guard runs one complete library rather than only outbound::; EZ-4 zero-connect rejection and capability metadata on all four adapters plus EZ-8 optimizer readback in core and unsupported modes on Axum/Cloudflare/Spin bind twelve additional unit legs; Axum/Cloudflare/Spin connect-setting boundary proofs and Fastly prepared optimizer mapping bind four more unit legs with mandatory same-candidate core companions; typed-focus numeric and compiler acceptance binds the existing grouped Rust check with four compiler and three numeric proofs; Fastly timeout-setter observation remains planned; Fastly post-preparation dispatch acceptance binds its actual 500 ms/26 ms SDK proof with expiry and backwards-clock guards; 358 other legs remain planned; readiness is not qualification or applicability approval; mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2); no hosted forwarding or lifetime-suite timing credit or EZ-25.42 adoption",
+  "source_digest": "431eed70e0f4ea0fcab5ddc186a185147a27bf9f5eb0515a95523c572ba3a1b2",
+  "status": "Required-local acceptance reconciliation in progress. Run the existing evidence checker with --coverage for derived binding counts and explicit local, external, conditional and unpromoted follow-up scope. Readiness is not qualification or applicability approval. Mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2). Hosted and exact-candidate qualification remain separate; no EZ-25.42 adoption.",
   "external_prerequisites": [
     {
       "requirement": "EZ-8",
@@ -24,7 +24,9 @@
     {
       "id": "hosted HTTP3 enabled@hosted-fastly/http3",
       "status": "pending",
-      "scope": ["EZ-1/acceptance/02@hosted-fastly/http3"],
+      "scope": [
+        "EZ-1/acceptance/02@hosted-fastly/http3"
+      ],
       "owner": "P2",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -35,7 +37,9 @@
     {
       "id": "EZ-16 present@hosted-fastly",
       "status": "pending",
-      "scope": ["EZ-2/acceptance/10b@hosted-fastly"],
+      "scope": [
+        "EZ-2/acceptance/10b@hosted-fastly"
+      ],
       "owner": "F6a",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -46,7 +50,9 @@
     {
       "id": "previous-record backend configuration changed@hosted-fastly",
       "status": "pending",
-      "scope": ["EZ-2/acceptance/13b@hosted-fastly"],
+      "scope": [
+        "EZ-2/acceptance/13b@hosted-fastly"
+      ],
       "owner": "D1b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -113,7 +119,9 @@
     {
       "id": "EZ-5.9 adopted@unit/core",
       "status": "pending",
-      "scope": ["EZ-5/acceptance/11b@unit/core"],
+      "scope": [
+        "EZ-5/acceptance/11b@unit/core"
+      ],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -124,7 +132,9 @@
     {
       "id": "EZ-5.10 adopted@unit/core",
       "status": "pending",
-      "scope": ["EZ-5/acceptance/12@unit/core"],
+      "scope": [
+        "EZ-5/acceptance/12@unit/core"
+      ],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -135,7 +145,9 @@
     {
       "id": "EZ-5.10 adopted@unit/axum",
       "status": "pending",
-      "scope": ["EZ-5/acceptance/12@unit/axum"],
+      "scope": [
+        "EZ-5/acceptance/12@unit/axum"
+      ],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -146,7 +158,9 @@
     {
       "id": "EZ-5.10 adopted@unit/fastly",
       "status": "pending",
-      "scope": ["EZ-5/acceptance/12@unit/fastly"],
+      "scope": [
+        "EZ-5/acceptance/12@unit/fastly"
+      ],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -157,7 +171,9 @@
     {
       "id": "EZ-5.10 adopted@unit/cloudflare",
       "status": "pending",
-      "scope": ["EZ-5/acceptance/12@unit/cloudflare"],
+      "scope": [
+        "EZ-5/acceptance/12@unit/cloudflare"
+      ],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -168,7 +184,9 @@
     {
       "id": "EZ-5.10 adopted@unit/spin",
       "status": "pending",
-      "scope": ["EZ-5/acceptance/12@unit/spin"],
+      "scope": [
+        "EZ-5/acceptance/12@unit/spin"
+      ],
       "owner": "P3",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -179,7 +197,9 @@
     {
       "id": "reusable-sandbox adoption@unit/fastly/both-wrappers",
       "status": "pending",
-      "scope": ["EZ-6/acceptance/23b@unit/fastly/both-wrappers"],
+      "scope": [
+        "EZ-6/acceptance/23b@unit/fastly/both-wrappers"
+      ],
       "owner": "F1",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -190,7 +210,9 @@
     {
       "id": "reusable-sandbox adoption@viceroy",
       "status": "pending",
-      "scope": ["EZ-6/acceptance/23b@viceroy"],
+      "scope": [
+        "EZ-6/acceptance/23b@viceroy"
+      ],
       "owner": "F1",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -201,7 +223,9 @@
     {
       "id": "EZ-11 present@viceroy",
       "status": "pending",
-      "scope": ["EZ-8/acceptance/06b@viceroy"],
+      "scope": [
+        "EZ-8/acceptance/06b@viceroy"
+      ],
       "owner": "F3a",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -212,7 +236,9 @@
     {
       "id": "EZ-14 present@axum",
       "status": "pending",
-      "scope": ["EZ-9/acceptance/16b@axum"],
+      "scope": [
+        "EZ-9/acceptance/16b@axum"
+      ],
       "owner": "F4",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -223,7 +249,9 @@
     {
       "id": "EZ-14 present@viceroy",
       "status": "pending",
-      "scope": ["EZ-9/acceptance/16b@viceroy"],
+      "scope": [
+        "EZ-9/acceptance/16b@viceroy"
+      ],
       "owner": "F4",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -234,7 +262,9 @@
     {
       "id": "EZ-14 present@workerd",
       "status": "pending",
-      "scope": ["EZ-9/acceptance/16b@workerd"],
+      "scope": [
+        "EZ-9/acceptance/16b@workerd"
+      ],
       "owner": "F4",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -245,7 +275,9 @@
     {
       "id": "EZ-14 present@spin",
       "status": "pending",
-      "scope": ["EZ-9/acceptance/16b@spin"],
+      "scope": [
+        "EZ-9/acceptance/16b@spin"
+      ],
       "owner": "F4",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -256,7 +288,9 @@
     {
       "id": "EZ-10 overflow and EZ-19 header composition present@unit/axum",
       "status": "pending",
-      "scope": ["EZ-19/acceptance/08@unit/axum"],
+      "scope": [
+        "EZ-19/acceptance/08@unit/axum"
+      ],
       "owner": "F7b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -267,7 +301,9 @@
     {
       "id": "EZ-10 overflow and EZ-19 header composition present@unit/fastly",
       "status": "pending",
-      "scope": ["EZ-19/acceptance/08@unit/fastly"],
+      "scope": [
+        "EZ-19/acceptance/08@unit/fastly"
+      ],
       "owner": "F7b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -278,7 +314,9 @@
     {
       "id": "EZ-10 overflow and EZ-19 header composition present@unit/cloudflare",
       "status": "pending",
-      "scope": ["EZ-19/acceptance/08@unit/cloudflare"],
+      "scope": [
+        "EZ-19/acceptance/08@unit/cloudflare"
+      ],
       "owner": "F7b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -289,7 +327,9 @@
     {
       "id": "EZ-10 overflow and EZ-19 header composition present@unit/spin",
       "status": "pending",
-      "scope": ["EZ-19/acceptance/08@unit/spin"],
+      "scope": [
+        "EZ-19/acceptance/08@unit/spin"
+      ],
       "owner": "F7b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -301,7 +341,9 @@
       "id": "EZ-20.7 adopted@workerd",
       "status": "pending",
       "implementation_adoption": "Requester approved same-release implementation on 2026-10-21; see docs/audits/evidence/2026-10-21-declared-kv.json. Local implementation evidence does not supply the separate release approval fields below.",
-      "scope": ["EZ-20/acceptance/04@workerd"],
+      "scope": [
+        "EZ-20/acceptance/04@workerd"
+      ],
       "owner": "F8",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -313,7 +355,9 @@
       "id": "EZ-20.7 adopted@spin",
       "status": "pending",
       "implementation_adoption": "Requester approved same-release implementation on 2026-10-21; see docs/audits/evidence/2026-10-21-declared-kv.json. Local implementation evidence does not supply the separate release approval fields below.",
-      "scope": ["EZ-20/acceptance/04@spin"],
+      "scope": [
+        "EZ-20/acceptance/04@spin"
+      ],
       "owner": "F8",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -324,7 +368,9 @@
     {
       "id": "EZ-22.8 adopted@workerd/retained-instance",
       "status": "pending",
-      "scope": ["EZ-22/acceptance/07b@workerd/retained-instance"],
+      "scope": [
+        "EZ-22/acceptance/07b@workerd/retained-instance"
+      ],
       "owner": "F9a",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -335,7 +381,9 @@
     {
       "id": "EZ-22.8 adopted@spin/retained-instance",
       "status": "pending",
-      "scope": ["EZ-22/acceptance/07b@spin/retained-instance"],
+      "scope": [
+        "EZ-22/acceptance/07b@spin/retained-instance"
+      ],
       "owner": "F9a",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -346,7 +394,9 @@
     {
       "id": "EZ-22.10 adopted@unit/core",
       "status": "pending",
-      "scope": ["EZ-22/acceptance/08@unit/core"],
+      "scope": [
+        "EZ-22/acceptance/08@unit/core"
+      ],
       "owner": "F9a",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -376,7 +426,9 @@
     {
       "id": "EZ-24.11 adopted@unit/core",
       "status": "pending",
-      "scope": ["EZ-24/acceptance/12@unit/core"],
+      "scope": [
+        "EZ-24/acceptance/12@unit/core"
+      ],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -387,7 +439,9 @@
     {
       "id": "EZ-24.11 adopted@unit/core-wasip1",
       "status": "pending",
-      "scope": ["EZ-24/acceptance/12@unit/core-wasip1"],
+      "scope": [
+        "EZ-24/acceptance/12@unit/core-wasip1"
+      ],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -398,7 +452,9 @@
     {
       "id": "EZ-24.11 adopted and JS target adopted@unit/core-js",
       "status": "pending",
-      "scope": ["EZ-24/acceptance/12@unit/core-js"],
+      "scope": [
+        "EZ-24/acceptance/12@unit/core-js"
+      ],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -409,7 +465,9 @@
     {
       "id": "EZ-14 present@unit/core",
       "status": "pending",
-      "scope": ["EZ-24/acceptance/14@unit/core"],
+      "scope": [
+        "EZ-24/acceptance/14@unit/core"
+      ],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -420,7 +478,9 @@
     {
       "id": "EZ-14 present@unit/core-wasip1",
       "status": "pending",
-      "scope": ["EZ-24/acceptance/14@unit/core-wasip1"],
+      "scope": [
+        "EZ-24/acceptance/14@unit/core-wasip1"
+      ],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -431,7 +491,9 @@
     {
       "id": "EZ-14 present and EZ-24.2 JS target adopted@unit/core-js",
       "status": "pending",
-      "scope": ["EZ-24/acceptance/14@unit/core-js"],
+      "scope": [
+        "EZ-24/acceptance/14@unit/core-js"
+      ],
       "owner": "P6",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -442,7 +504,9 @@
     {
       "id": "EZ-25.42 adopted@edgezero-ci",
       "status": "pending",
-      "scope": ["EZ-25/acceptance/03@edgezero-ci"],
+      "scope": [
+        "EZ-25/acceptance/03@edgezero-ci"
+      ],
       "owner": "Q1",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -453,7 +517,9 @@
     {
       "id": "EZ-24.12 adopted@axum/demo",
       "status": "pending",
-      "scope": ["EZ-24/requirements/12@axum/demo"],
+      "scope": [
+        "EZ-24/requirements/12@axum/demo"
+      ],
       "owner": "F10b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -464,7 +530,9 @@
     {
       "id": "EZ-24.12 adopted@axum/generated",
       "status": "pending",
-      "scope": ["EZ-24/requirements/12@axum/generated"],
+      "scope": [
+        "EZ-24/requirements/12@axum/generated"
+      ],
       "owner": "F10b",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -475,7 +543,9 @@
     {
       "id": "EZ-25.43 adopted@edgezero-ci",
       "status": "pending",
-      "scope": ["EZ-25/acceptance/05b@edgezero-ci"],
+      "scope": [
+        "EZ-25/acceptance/05b@edgezero-ci"
+      ],
       "owner": "Q1",
       "ci_owner": null,
       "edgezero_approver": null,
@@ -2044,17 +2114,17 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-2-acceptance-02-viceroy",
-      "sentinel": "ez_2_acceptance_02_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-2/acceptance/02",
+      "sentinel": "fastly-budget-inventory",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Given one inbound request that runs two batches to one loopback origin with per-call timeouts of 800 ms and cutoffs leaving 640 ms and 655 ms, when both complete, then the EZ-2.13 observation reports one registration and one distinct configuration.",
-      "artifact_path": "outbound/EZ-2/acceptance/02/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
       "case_id": "EZ-2/acceptance/03",
       "source_id": "EZ-2/acceptance/03",
-      "source_digest": "d3c56eda047e53cf3dc437e8d777d2b288e075f6d4bef0ad3fae1f5c0527379c",
+      "source_digest": "421f6a4d614cf501246d8896855b8afa77553a244d7630d584193870e0b506d1",
       "requirement_ids": [
         "EZ-2.1",
         "EZ-2.2",
@@ -2082,12 +2152,13 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-2-acceptance-03-viceroy",
-      "sentinel": "ez_2_acceptance_03_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-2/acceptance/03",
-      "expected": "Given one inbound request whose sends differ only in scheme, port, Host authority, TLS settings, or connect timeout, then the observation reports one distinct configuration per variant.",
-      "artifact_path": "outbound/EZ-2/acceptance/03/viceroy.json",
-      "implementation": "planned",
-      "comparison": false
+      "sentinel": "fastly-budget-inventory",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
+      "expected": "Given one inbound request with a baseline send and four sends that each differ from it only in scheme, port, Host authority, or configured connect timeout, then the observation reports five distinct configurations and five registrations. Native Fastly SDK readback MUST confirm TLS is enabled for HTTPS and disabled for HTTP; the baseline retains full certificate verification against the URI host and the URI-derived SNI policy. This checks backend identity and fixed TLS configuration, not connect-phase enforcement, successful TLS handshakes or pooled reuse. No independently configurable TLS mode is required until the unpromoted EZ-12 follow-up is adopted.",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
+      "comparison": false,
+      "companion_case": "EZ-2/acceptance/22@unit/fastly"
     },
     {
       "case_id": "EZ-2/acceptance/04",
@@ -2120,11 +2191,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-2-acceptance-04-viceroy",
-      "sentinel": "ez_2_acceptance_04_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-2/acceptance/04",
+      "sentinel": "fastly-budget-inventory",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Given a loopback origin that delays its response head by 500 ms and a request with a 100 ms timeout, when sent, then it fails with 504 and `BudgetSource::PerCallTimeout` between 100 and 105 ms after dispatch. (At F, by reading the code, Viceroy's 75 ms first-byte timer fires first and the request fails with an internal error at about 75 ms.)",
-      "artifact_path": "outbound/EZ-2/acceptance/04/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -2158,11 +2229,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-2-acceptance-05-viceroy",
-      "sentinel": "ez_2_acceptance_05_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-2/acceptance/05",
+      "sentinel": "fastly-budget-inventory",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Given an origin that sends its head at once and then one body byte every 300 ms, and a buffered request with a 500 ms timeout, then it fails with 504 between 500 and 505 ms. Repeat with a pending read of a streamed response; that read fails in the same window. The record verifies readiness handling and reads do not enter an uninterruptible host operation; a late-read fallback does not pass.",
-      "artifact_path": "outbound/EZ-2/acceptance/05/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -2196,11 +2267,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-2-acceptance-06-viceroy",
-      "sentinel": "ez_2_acceptance_06_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-2/acceptance/06",
+      "sentinel": "fastly-budget-inventory",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Given a batch with a 1 s cutoff, one slot to an origin that never answers with a 200 ms timeout, and two fast slots, then the silent slot's 504 item arrives between 200 and 205 ms and the batch completes.\n\nHosted Fastly, single-request mode. Who produces each result follows EZ-Q1.4. EdgeZero produces criteria 1 to 6. Criteria 11, 12, 13b and 14 need settings Trusted Server's configuration cannot express (a controllable slow origin, a 90 s timeout, a one-slot batch to a test origin, a second EdgeZero commit), so EdgeZero provides a qualification build at the pinned commit and TS deploys it to a TS staging service. TS produces criteria 7 to 10 and 13a with its own builds, and criterion 15. The baseline is a Trusted Server build of `main` at `a9037770a` with TS PR #1123, which registers its own stable backends. The candidate is TS's cut build at the EdgeZero commit TS pins. Criteria 7 to 10 replay a fixed page-view mix at a fixed rate with build order randomized, and report p50, p95, p99, and sample counts per POP. A bound measured inside the guest from dispatch or a deadline keeps its stated tolerance on hosted Fastly. The thresholds in criteria 7 to 10 are Trusted Server's proposed product thresholds (Open question 8).",
-      "artifact_path": "outbound/EZ-2/acceptance/06/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -2359,7 +2430,10 @@
       "case_id": "EZ-2/acceptance/10b",
       "source_id": "EZ-2/acceptance/10",
       "source_digest": "94a115b099a40a89e22c18dd0b54ab51bada5b9644d35d0f0480c3060557132f",
-      "requirement_ids": ["EZ-2.13", "EZ-16.1"],
+      "requirement_ids": [
+        "EZ-2.13",
+        "EZ-16.1"
+      ],
       "environment": "hosted-fastly",
       "applicability": "conditional",
       "approval": "EZ-16 present@hosted-fastly",
@@ -2908,7 +2982,8 @@
         "outbound::fastly_impl::tests::registration_observation_tracks_cache_hits_failures_and_retries",
         "outbound::fastly_impl::tests::registration_observation_retains_late_success_without_renewing_budget",
         "outbound::fastly_impl::tests::retained_client_records_registration_in_each_invoking_callback",
-        "request::synthesis_tests::registration_observation_is_canonical_before_prepare_and_in_handler"
+        "request::synthesis_tests::registration_observation_is_canonical_before_prepare_and_in_handler",
+        "outbound::fastly_impl::tests::b31_registered_transport_preserves_origin_and_wire_authority"
       ],
       "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "**EZ-2.13 warning boundary, any host with injected time and a recording logger.** A backend registration lasting just below 50 ms emits no slow-registration warning; durations of exactly 50 ms and above each emit one record at `warn` when that level is enabled. Cover both successful and failed registration. Assert request-local registration/configuration counts and total/longest durations, and unchanged response status/body/public errors. No query, credential or raw header is logged. This is a deterministic log/observation assertion, not a bound on provider registration latency. EdgeZero supplies this result in the EZ-Q1 record.",
@@ -2969,11 +3044,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-3-acceptance-02-unit-fastly",
-      "sentinel": "ez_3_acceptance_02_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_3_acceptance_02_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "outbound::fastly_impl::tests::ez_3_acceptance_02_twenty_cold_slots_reach_sdk_dispatch",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Given a batch of 20 slots to 20 new origins whose registrations each take 5 ms, and a 1 s cutoff, then all 20 are sent and none fails with an internal error.",
-      "artifact_path": "outbound/EZ-3/acceptance/02/unit/fastly.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/runtime-unit-tests.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -2997,11 +3072,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-3-acceptance-03-unit-fastly",
-      "sentinel": "ez_3_acceptance_03_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_3_acceptance_03_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "outbound::fastly_impl::tests::ez_3_acceptance_03_expired_later_slot_skips_sdk_registration_and_send",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Given a batch with a 1 s cutoff where the first slot's registration runs first and takes 20 ms, and the second slot has a 10 ms timeout, then the second slot yields 504 with `BudgetSource::PerCallTimeout`, is not sent, causes no registration, and the batch continues.",
-      "artifact_path": "outbound/EZ-3/acceptance/03/unit/fastly.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/runtime-unit-tests.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3025,12 +3100,17 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-3-acceptance-04-unit-fastly",
-      "sentinel": "ez_3_acceptance_04_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_3_acceptance_04_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "outbound::fastly_impl::tests::ez_3_acceptance_04_known_first_sdk_dispatch_preserves_completion_and_input_order",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Given a batch ordered new, known, new, known, then both known-origin slots SHOULD be sent before the first registration, the run records the order, and collection restores input-index order. Unit, given slot 1 finishes before slot 0, `next` returns indices 1 then 0 while the collected vector remains indexed 0 then 1.\n\nViceroy 0.21.0:",
-      "artifact_path": "outbound/EZ-3/acceptance/04/unit/fastly.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/redirect/fastly/runtime-unit-tests.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "outbound::fastly_impl::tests::ez_3_acceptance_04_warm_priority_uses_the_per_call_backend_anchor",
+        "outbound::fastly_impl::tests::request_plan_keeps_streamed_body_and_original_context_without_sdk_io",
+        "outbound::fastly_impl::tests::request_plan_registration_lookup_rejects_every_identity_collision"
+      ]
     },
     {
       "case_id": "EZ-3/acceptance/04",
@@ -3081,11 +3161,11 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-3-acceptance-05-viceroy",
-      "sentinel": "ez_3_acceptance_05_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-3/acceptance/05",
+      "sentinel": "fastly-budget-inventory",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Given a 1 s budget, more than 25 ms passing before sending, and a loopback origin that answers 200, when the request is sent, then it returns 200. (At F it fails with the dispatch-slack internal error.)",
-      "artifact_path": "outbound/EZ-3/acceptance/05/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3346,12 +3426,13 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-01-unit-fastly",
-      "sentinel": "ez_4_acceptance_01_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_01_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "outbound::fastly_impl::tests::configured_connect_timeout_reads_registered_sdk_timeout_settings",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Given a request with a 1 s connect timeout, when it goes through `into_parts` and `from_parts` and through a redirect-hop rebuild, then the connect timeout read back under EZ-4.11 is 1 s. A recording head-first client MUST also observe that setting through the prepared dispatch request without shortening its aggregate budget. Fastly and Spin mapping tests MUST observe the value passed to the provider timeout setter; Axum and Cloudflare retain their documented BestEffort acceptance.",
-      "artifact_path": "outbound/EZ-4/acceptance/01/unit/fastly.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/redirect/fastly/runtime-unit-tests.log",
+      "implementation": "ready",
+      "comparison": false,
+      "companion_case": "EZ-4/acceptance/01@unit/core"
     },
     {
       "case_id": "EZ-4/acceptance/01",
@@ -3566,10 +3647,10 @@
       "task": "D1c",
       "substep": "EZ-4-acceptance-03-unit-spin",
       "sentinel": "ez_4_acceptance_03_unit_spin",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_03_unit_spin cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "Given each kind of Spin host refusal of the setting, the request completes within its budget and reports no error for the refusal.",
-      "artifact_path": "outbound/EZ-4/acceptance/03/unit/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/async.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3720,11 +3801,11 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-05-axum",
-      "sentinel": "ez_4_acceptance_05_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-4/acceptance/05",
+      "sentinel": "configured_connect_timeout_reuses_shared_keep_alive_transport",
+      "command": "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets",
       "expected": "Given a request with a 1 ms connect timeout to a loopback origin that accepts at once, the request succeeds (BestEffort).\n\nSpin 4.1:",
-      "artifact_path": "outbound/EZ-4/acceptance/05/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/axum/native-tests.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3752,10 +3833,10 @@
       "task": "D1c",
       "substep": "EZ-4-acceptance-05-workerd",
       "sentinel": "ez_4_acceptance_05_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-4/acceptance/05",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-wire --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/workerd",
       "expected": "Given a request with a 1 ms connect timeout to a loopback origin that accepts at once, the request succeeds (BestEffort).\n\nSpin 4.1:",
-      "artifact_path": "outbound/EZ-4/acceptance/05/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3783,10 +3864,10 @@
       "task": "D1c",
       "substep": "EZ-4-acceptance-06-spin",
       "sentinel": "ez_4_acceptance_06_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-4/acceptance/06",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Given a 200 ms connect timeout to a controlled destination that silently drops connection attempts without rejecting them, and a 2 s budget, the request fails before the budget with the connect-timeout cause, or, if the host ignores the setting, at the budget with the budget's source. The run records the destination's drop policy and which outcome occurred. A destination that immediately refuses or rejects the connection is a separate unreachable-error case, not this timeout fixture.\n\nViceroy 0.21.0:",
-      "artifact_path": "outbound/EZ-4/acceptance/06/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3814,10 +3895,10 @@
       "task": "D1c",
       "substep": "EZ-4-acceptance-07-viceroy",
       "sentinel": "ez_4_acceptance_07_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-4/acceptance/07",
+      "command": "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
       "expected": "Given a loopback origin that accepts at once and sends its head after 900 ms, a request with a 1000 ms timeout and no connect timeout succeeds. (At F it fails at about 750 ms with an internal error.)\n\nHosted Fastly, single-request mode. Viceroy 0.21.0 does not enforce connect timeouts, so these criteria need hosted Fastly. Criterion 8 uses a controlled network fault fixture, so it runs on EdgeZero's qualification build deployed by TS. TS produces criterion 9 with its own builds, against the EZ-2 baseline (EZ-Q1.4). The bounds in criterion 8 are measured inside the guest and keep their stated tolerance.",
-      "artifact_path": "outbound/EZ-4/acceptance/07/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -3937,11 +4018,11 @@
       "owner": "EdgeZero",
       "task": "D1c",
       "substep": "EZ-4-acceptance-11-unit-fastly",
-      "sentinel": "ez_4_acceptance_11_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_4_acceptance_11_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "outbound::fastly_impl::tests::ez_4_acceptance_11_independent_connect_preserves_full_head_budget",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Unit, Fastly. A 15 s request with an explicit 1 s connect timeout is eligible for dispatch under EZ-2.10. A connect expiry at 1 s has `BudgetSource::ConnectTimeout`; an expired governing budget wins ties and late observation, retaining its original source. Neither the configured connect timeout nor the error classifier may shorten the response-head budget.",
-      "artifact_path": "outbound/EZ-4/acceptance/11/unit/fastly.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/runtime-unit-tests.log",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -4431,7 +4512,9 @@
       "case_id": "EZ-5/acceptance/09b",
       "source_id": "EZ-5/acceptance/09",
       "source_digest": "dc59f01847a83284dc02103e7a81568b8d7bf68439bc659252d8ec58d0617b2f",
-      "requirement_ids": ["EZ-5.9"],
+      "requirement_ids": [
+        "EZ-5.9"
+      ],
       "environment": "unit/axum",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/axum",
@@ -4482,7 +4565,9 @@
       "case_id": "EZ-5/acceptance/09b",
       "source_id": "EZ-5/acceptance/09",
       "source_digest": "dc59f01847a83284dc02103e7a81568b8d7bf68439bc659252d8ec58d0617b2f",
-      "requirement_ids": ["EZ-5.9"],
+      "requirement_ids": [
+        "EZ-5.9"
+      ],
       "environment": "unit/fastly",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/fastly",
@@ -4533,7 +4618,9 @@
       "case_id": "EZ-5/acceptance/09b",
       "source_id": "EZ-5/acceptance/09",
       "source_digest": "dc59f01847a83284dc02103e7a81568b8d7bf68439bc659252d8ec58d0617b2f",
-      "requirement_ids": ["EZ-5.9"],
+      "requirement_ids": [
+        "EZ-5.9"
+      ],
       "environment": "unit/cloudflare",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/cloudflare",
@@ -4584,7 +4671,9 @@
       "case_id": "EZ-5/acceptance/09b",
       "source_id": "EZ-5/acceptance/09",
       "source_digest": "dc59f01847a83284dc02103e7a81568b8d7bf68439bc659252d8ec58d0617b2f",
-      "requirement_ids": ["EZ-5.9"],
+      "requirement_ids": [
+        "EZ-5.9"
+      ],
       "environment": "unit/spin",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/spin",
@@ -4816,7 +4905,9 @@
       "case_id": "EZ-5/acceptance/11b",
       "source_id": "EZ-5/acceptance/11",
       "source_digest": "1d3648f27ff90f9c9635d63b43d0730fe62082725e04c1817fa42991cf5b0794",
-      "requirement_ids": ["EZ-5.9"],
+      "requirement_ids": [
+        "EZ-5.9"
+      ],
       "environment": "unit/core",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/core",
@@ -4871,7 +4962,9 @@
       "case_id": "EZ-5/acceptance/11b",
       "source_id": "EZ-5/acceptance/11",
       "source_digest": "1d3648f27ff90f9c9635d63b43d0730fe62082725e04c1817fa42991cf5b0794",
-      "requirement_ids": ["EZ-5.9"],
+      "requirement_ids": [
+        "EZ-5.9"
+      ],
       "environment": "unit/axum",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/axum",
@@ -4929,7 +5022,9 @@
       "case_id": "EZ-5/acceptance/11b",
       "source_id": "EZ-5/acceptance/11",
       "source_digest": "1d3648f27ff90f9c9635d63b43d0730fe62082725e04c1817fa42991cf5b0794",
-      "requirement_ids": ["EZ-5.9"],
+      "requirement_ids": [
+        "EZ-5.9"
+      ],
       "environment": "unit/fastly",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/fastly",
@@ -4986,7 +5081,9 @@
       "case_id": "EZ-5/acceptance/11b",
       "source_id": "EZ-5/acceptance/11",
       "source_digest": "1d3648f27ff90f9c9635d63b43d0730fe62082725e04c1817fa42991cf5b0794",
-      "requirement_ids": ["EZ-5.9"],
+      "requirement_ids": [
+        "EZ-5.9"
+      ],
       "environment": "unit/cloudflare",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/cloudflare",
@@ -5042,7 +5139,9 @@
       "case_id": "EZ-5/acceptance/11b",
       "source_id": "EZ-5/acceptance/11",
       "source_digest": "1d3648f27ff90f9c9635d63b43d0730fe62082725e04c1817fa42991cf5b0794",
-      "requirement_ids": ["EZ-5.9"],
+      "requirement_ids": [
+        "EZ-5.9"
+      ],
       "environment": "unit/spin",
       "applicability": "conditional",
       "approval": "EZ-5.9 adopted@unit/spin",
@@ -5061,7 +5160,9 @@
       "case_id": "EZ-5/acceptance/12",
       "source_id": "EZ-5/acceptance/12",
       "source_digest": "955c0ef5b1050edb9d6d6825205e5924daecaad2213736f77e15721cd50098b5",
-      "requirement_ids": ["EZ-5.10"],
+      "requirement_ids": [
+        "EZ-5.10"
+      ],
       "environment": "unit/core",
       "applicability": "conditional",
       "approval": "EZ-5.10 adopted@unit/core",
@@ -5080,7 +5181,9 @@
       "case_id": "EZ-5/acceptance/12",
       "source_id": "EZ-5/acceptance/12",
       "source_digest": "955c0ef5b1050edb9d6d6825205e5924daecaad2213736f77e15721cd50098b5",
-      "requirement_ids": ["EZ-5.10"],
+      "requirement_ids": [
+        "EZ-5.10"
+      ],
       "environment": "unit/axum",
       "applicability": "conditional",
       "approval": "EZ-5.10 adopted@unit/axum",
@@ -5099,7 +5202,9 @@
       "case_id": "EZ-5/acceptance/12",
       "source_id": "EZ-5/acceptance/12",
       "source_digest": "955c0ef5b1050edb9d6d6825205e5924daecaad2213736f77e15721cd50098b5",
-      "requirement_ids": ["EZ-5.10"],
+      "requirement_ids": [
+        "EZ-5.10"
+      ],
       "environment": "unit/fastly",
       "applicability": "conditional",
       "approval": "EZ-5.10 adopted@unit/fastly",
@@ -5118,7 +5223,9 @@
       "case_id": "EZ-5/acceptance/12",
       "source_id": "EZ-5/acceptance/12",
       "source_digest": "955c0ef5b1050edb9d6d6825205e5924daecaad2213736f77e15721cd50098b5",
-      "requirement_ids": ["EZ-5.10"],
+      "requirement_ids": [
+        "EZ-5.10"
+      ],
       "environment": "unit/cloudflare",
       "applicability": "conditional",
       "approval": "EZ-5.10 adopted@unit/cloudflare",
@@ -5137,7 +5244,9 @@
       "case_id": "EZ-5/acceptance/12",
       "source_id": "EZ-5/acceptance/12",
       "source_digest": "955c0ef5b1050edb9d6d6825205e5924daecaad2213736f77e15721cd50098b5",
-      "requirement_ids": ["EZ-5.10"],
+      "requirement_ids": [
+        "EZ-5.10"
+      ],
       "environment": "unit/spin",
       "applicability": "conditional",
       "approval": "EZ-5.10 adopted@unit/spin",
@@ -5197,10 +5306,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-01-axum",
       "sentinel": "ez_6_acceptance_01_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/01",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Slow origin. Axum, workerd, Spin 4.1, Viceroy 0.21.0, hosted Fastly. Given the origin is begun at 2 and its head arrives at 700, the page body arrives in chunks at 700, 900, and 1,300, the batch starts at 34 with cutoff 534, A answers at 180, B at 320, and C at 900, when the application waits for the origin head and checks the batch at 701, then it gets A with elapsed 146, B with elapsed 286, and `Cutoff` with C unresolved. At F, the same flow loses A and B on Fastly and sends no bidder request on the other adapters.",
-      "artifact_path": "outbound/EZ-6/acceptance/01/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5248,10 +5357,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-01-viceroy",
       "sentinel": "ez_6_acceptance_01_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/01",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Slow origin. Axum, workerd, Spin 4.1, Viceroy 0.21.0, hosted Fastly. Given the origin is begun at 2 and its head arrives at 700, the page body arrives in chunks at 700, 900, and 1,300, the batch starts at 34 with cutoff 534, A answers at 180, B at 320, and C at 900, when the application waits for the origin head and checks the batch at 701, then it gets A with elapsed 146, B with elapsed 286, and `Cutoff` with C unresolved. At F, the same flow loses A and B on Fastly and sends no bidder request on the other adapters.",
-      "artifact_path": "outbound/EZ-6/acceptance/01/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5299,10 +5408,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-01-workerd",
       "sentinel": "ez_6_acceptance_01_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/01",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Slow origin. Axum, workerd, Spin 4.1, Viceroy 0.21.0, hosted Fastly. Given the origin is begun at 2 and its head arrives at 700, the page body arrives in chunks at 700, 900, and 1,300, the batch starts at 34 with cutoff 534, A answers at 180, B at 320, and C at 900, when the application waits for the origin head and checks the batch at 701, then it gets A with elapsed 146, B with elapsed 286, and `Cutoff` with C unresolved. At F, the same flow loses A and B on Fastly and sends no bidder request on the other adapters.",
-      "artifact_path": "outbound/EZ-6/acceptance/01/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5350,10 +5459,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-01-spin",
       "sentinel": "ez_6_acceptance_01_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/01",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Slow origin. Axum, workerd, Spin 4.1, Viceroy 0.21.0, hosted Fastly. Given the origin is begun at 2 and its head arrives at 700, the page body arrives in chunks at 700, 900, and 1,300, the batch starts at 34 with cutoff 534, A answers at 180, B at 320, and C at 900, when the application waits for the origin head and checks the batch at 701, then it gets A with elapsed 146, B with elapsed 286, and `Cutoff` with C unresolved. At F, the same flow loses A and B on Fastly and sends no bidder request on the other adapters.",
-      "artifact_path": "outbound/EZ-6/acceptance/01/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5452,10 +5561,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-02-axum",
       "sentinel": "ez_6_acceptance_02_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/02",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Fast origin with mediator. Axum, workerd, Spin 4.1, Viceroy 0.21.0, hosted Fastly. Given the origin head at 120, a body chunk at 260, and A, B, C answering at 180, 320, and 400, when the application waits on the batch at 260, then it gets A, then B, then C and `Completed` at 400. A `send` at 400 built with `OutboundRequest::deadline` set to the cutoff and `OutboundRequest::timeout` set to 1,000 ms gets a 134 ms budget with the request deadline as its cause. If that origin stays silent, the send fails with a gateway timeout at 534.",
-      "artifact_path": "outbound/EZ-6/acceptance/02/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5503,10 +5612,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-02-viceroy",
       "sentinel": "ez_6_acceptance_02_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/02",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Fast origin with mediator. Axum, workerd, Spin 4.1, Viceroy 0.21.0, hosted Fastly. Given the origin head at 120, a body chunk at 260, and A, B, C answering at 180, 320, and 400, when the application waits on the batch at 260, then it gets A, then B, then C and `Completed` at 400. A `send` at 400 built with `OutboundRequest::deadline` set to the cutoff and `OutboundRequest::timeout` set to 1,000 ms gets a 134 ms budget with the request deadline as its cause. If that origin stays silent, the send fails with a gateway timeout at 534.",
-      "artifact_path": "outbound/EZ-6/acceptance/02/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5554,10 +5663,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-02-workerd",
       "sentinel": "ez_6_acceptance_02_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/02",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Fast origin with mediator. Axum, workerd, Spin 4.1, Viceroy 0.21.0, hosted Fastly. Given the origin head at 120, a body chunk at 260, and A, B, C answering at 180, 320, and 400, when the application waits on the batch at 260, then it gets A, then B, then C and `Completed` at 400. A `send` at 400 built with `OutboundRequest::deadline` set to the cutoff and `OutboundRequest::timeout` set to 1,000 ms gets a 134 ms budget with the request deadline as its cause. If that origin stays silent, the send fails with a gateway timeout at 534.",
-      "artifact_path": "outbound/EZ-6/acceptance/02/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5605,10 +5714,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-02-spin",
       "sentinel": "ez_6_acceptance_02_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/02",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Fast origin with mediator. Axum, workerd, Spin 4.1, Viceroy 0.21.0, hosted Fastly. Given the origin head at 120, a body chunk at 260, and A, B, C answering at 180, 320, and 400, when the application waits on the batch at 260, then it gets A, then B, then C and `Completed` at 400. A `send` at 400 built with `OutboundRequest::deadline` set to the cutoff and `OutboundRequest::timeout` set to 1,000 ms gets a 134 ms budget with the request deadline as its cause. If that origin stays silent, the send fails with a gateway timeout at 534.",
-      "artifact_path": "outbound/EZ-6/acceptance/02/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5707,10 +5816,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-03-axum",
       "sentinel": "ez_6_acceptance_03_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/03",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "CPU stretch. Axum, workerd, Spin 4.1, Viceroy 0.21.0. Given the application does CPU work from 520 to 560 without awaiting and B answers at 530, then B is either delivered with elapsed 496, where the adapter recorded its arrival during the CPU work, or not delivered, with the batch reporting `Cutoff` and B unresolved. B is never delivered with an elapsed time of 500 or more. The run records which.",
-      "artifact_path": "outbound/EZ-6/acceptance/03/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5758,10 +5867,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-03-viceroy",
       "sentinel": "ez_6_acceptance_03_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/03",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "CPU stretch. Axum, workerd, Spin 4.1, Viceroy 0.21.0. Given the application does CPU work from 520 to 560 without awaiting and B answers at 530, then B is either delivered with elapsed 496, where the adapter recorded its arrival during the CPU work, or not delivered, with the batch reporting `Cutoff` and B unresolved. B is never delivered with an elapsed time of 500 or more. The run records which.",
-      "artifact_path": "outbound/EZ-6/acceptance/03/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5809,10 +5918,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-03-workerd",
       "sentinel": "ez_6_acceptance_03_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/03",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "CPU stretch. Axum, workerd, Spin 4.1, Viceroy 0.21.0. Given the application does CPU work from 520 to 560 without awaiting and B answers at 530, then B is either delivered with elapsed 496, where the adapter recorded its arrival during the CPU work, or not delivered, with the batch reporting `Cutoff` and B unresolved. B is never delivered with an elapsed time of 500 or more. The run records which.",
-      "artifact_path": "outbound/EZ-6/acceptance/03/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5860,10 +5969,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-03-spin",
       "sentinel": "ez_6_acceptance_03_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/03",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "CPU stretch. Axum, workerd, Spin 4.1, Viceroy 0.21.0. Given the application does CPU work from 520 to 560 without awaiting and B answers at 530, then B is either delivered with elapsed 496, where the adapter recorded its arrival during the CPU work, or not delivered, with the batch reporting `Cutoff` and B unresolved. B is never delivered with an elapsed time of 500 or more. The run records which.",
-      "artifact_path": "outbound/EZ-6/acceptance/03/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5911,10 +6020,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-04-axum",
       "sentinel": "ez_6_acceptance_04_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/04",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Begin puts the request on its way. Every adapter. Given begin returns and the application then awaits an unrelated operation (a timer or a KV read) for 100 ms without any other EdgeZero outbound call, then the origin receives the request within that window.",
-      "artifact_path": "outbound/EZ-6/acceptance/04/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -5962,10 +6071,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-04-viceroy",
       "sentinel": "ez_6_acceptance_04_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/04",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Begin puts the request on its way. Every adapter. Given begin returns and the application then awaits an unrelated operation (a timer or a KV read) for 100 ms without any other EdgeZero outbound call, then the origin receives the request within that window.",
-      "artifact_path": "outbound/EZ-6/acceptance/04/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6013,10 +6122,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-04-workerd",
       "sentinel": "ez_6_acceptance_04_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/04",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Begin puts the request on its way. Every adapter. Given begin returns and the application then awaits an unrelated operation (a timer or a KV read) for 100 ms without any other EdgeZero outbound call, then the origin receives the request within that window.",
-      "artifact_path": "outbound/EZ-6/acceptance/04/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6064,10 +6173,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-04-spin",
       "sentinel": "ez_6_acceptance_04_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/04",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Begin puts the request on its way. Every adapter. Given begin returns and the application then awaits an unrelated operation (a timer or a KV read) for 100 ms without any other EdgeZero outbound call, then the origin receives the request within that window.",
-      "artifact_path": "outbound/EZ-6/acceptance/04/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6115,10 +6224,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-05-axum",
       "sentinel": "ez_6_acceptance_05_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/05",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Unpolled batch. Every adapter. Given a batch that the application does not check for 300 ms while it awaits an unrelated EdgeZero operation, then every bidder receives its request within that window.",
-      "artifact_path": "outbound/EZ-6/acceptance/05/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6166,10 +6275,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-05-viceroy",
       "sentinel": "ez_6_acceptance_05_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/05",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Unpolled batch. Every adapter. Given a batch that the application does not check for 300 ms while it awaits an unrelated EdgeZero operation, then every bidder receives its request within that window.",
-      "artifact_path": "outbound/EZ-6/acceptance/05/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6217,10 +6326,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-05-workerd",
       "sentinel": "ez_6_acceptance_05_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/05",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Unpolled batch. Every adapter. Given a batch that the application does not check for 300 ms while it awaits an unrelated EdgeZero operation, then every bidder receives its request within that window.",
-      "artifact_path": "outbound/EZ-6/acceptance/05/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6268,10 +6377,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-05-spin",
       "sentinel": "ez_6_acceptance_05_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/05",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Unpolled batch. Every adapter. Given a batch that the application does not check for 300 ms while it awaits an unrelated EdgeZero operation, then every bidder receives its request within that window.",
-      "artifact_path": "outbound/EZ-6/acceptance/05/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6319,10 +6428,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-06-viceroy",
       "sentinel": "ez_6_acceptance_06_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/06",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Arrival during origin body reads. Viceroy 0.21.0 and hosted Fastly. Given the origin sends body chunks at 100 and 800 and B answers at 320, when the application only reads the origin body, then B is delivered with elapsed 286.",
-      "artifact_path": "outbound/EZ-6/acceptance/06/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6421,10 +6530,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-07-viceroy",
       "sentinel": "ez_6_acceptance_07_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/07",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Trickling slot. Viceroy 0.21.0 and hosted Fastly. Given a bidder sends its head at 100 and its body at 600 while the origin streams a chunk every 50 ms, then the origin chunks keep reaching the application between 100 and 600 without a stall caused by reading the bidder body. With a 534 cutoff, that bidder is unresolved and the batch reports `Cutoff` by 539. A body-readiness or blocking-read fallback that delays the application until 600 does not pass.",
-      "artifact_path": "outbound/EZ-6/acceptance/07/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6523,10 +6632,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-08-viceroy",
       "sentinel": "ez_6_acceptance_08_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/08",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Send during a live batch. Viceroy 0.21.0 and hosted Fastly. Same as scenario 1, but the origin is forwarded with `send` after the batch starts. A and B are delivered.",
-      "artifact_path": "outbound/EZ-6/acceptance/08/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6625,10 +6734,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-09-axum",
       "sentinel": "ez_6_acceptance_09_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/09",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Caps while waiting. Every adapter. Given a bidder slot with a 1 MiB decoded cap and a 64 KiB buffered cap, whose gzip body decodes to 128 KiB and trickles in over 300 ms, then the slot fails with the buffered-cap error before the body ends.",
-      "artifact_path": "outbound/EZ-6/acceptance/09/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6676,10 +6785,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-09-viceroy",
       "sentinel": "ez_6_acceptance_09_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/09",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Caps while waiting. Every adapter. Given a bidder slot with a 1 MiB decoded cap and a 64 KiB buffered cap, whose gzip body decodes to 128 KiB and trickles in over 300 ms, then the slot fails with the buffered-cap error before the body ends.",
-      "artifact_path": "outbound/EZ-6/acceptance/09/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6727,10 +6836,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-09-workerd",
       "sentinel": "ez_6_acceptance_09_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/09",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Caps while waiting. Every adapter. Given a bidder slot with a 1 MiB decoded cap and a 64 KiB buffered cap, whose gzip body decodes to 128 KiB and trickles in over 300 ms, then the slot fails with the buffered-cap error before the body ends.",
-      "artifact_path": "outbound/EZ-6/acceptance/09/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6778,10 +6887,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-09-spin",
       "sentinel": "ez_6_acceptance_09_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/09",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Caps while waiting. Every adapter. Given a bidder slot with a 1 MiB decoded cap and a 64 KiB buffered cap, whose gzip body decodes to 128 KiB and trickles in over 300 ms, then the slot fails with the buffered-cap error before the body ends.",
-      "artifact_path": "outbound/EZ-6/acceptance/09/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6931,10 +7040,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-11-axum",
       "sentinel": "ez_6_acceptance_11_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/11",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Write deadline. Axum, workerd, Spin 4.1. Given a response with a 1 s write deadline whose body waits on a batch with a 3 s cutoff, then the response ends with the write-deadline outcome, and the batch's in-flight requests are released. On Viceroy 0.21.0 and hosted Fastly the run records the outcome, because EZ-6.24 is a SHOULD there.",
-      "artifact_path": "outbound/EZ-6/acceptance/11/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -6982,10 +7091,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-11-viceroy",
       "sentinel": "ez_6_acceptance_11_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/11",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Write deadline. Axum, workerd, Spin 4.1. Given a response with a 1 s write deadline whose body waits on a batch with a 3 s cutoff, then the response ends with the write-deadline outcome, and the batch's in-flight requests are released. On Viceroy 0.21.0 and hosted Fastly the run records the outcome, because EZ-6.24 is a SHOULD there.",
-      "artifact_path": "outbound/EZ-6/acceptance/11/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7033,10 +7142,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-11-workerd",
       "sentinel": "ez_6_acceptance_11_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/11",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Write deadline. Axum, workerd, Spin 4.1. Given a response with a 1 s write deadline whose body waits on a batch with a 3 s cutoff, then the response ends with the write-deadline outcome, and the batch's in-flight requests are released. On Viceroy 0.21.0 and hosted Fastly the run records the outcome, because EZ-6.24 is a SHOULD there.",
-      "artifact_path": "outbound/EZ-6/acceptance/11/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7084,10 +7193,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-11-spin",
       "sentinel": "ez_6_acceptance_11_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/11",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Write deadline. Axum, workerd, Spin 4.1. Given a response with a 1 s write deadline whose body waits on a batch with a 3 s cutoff, then the response ends with the write-deadline outcome, and the batch's in-flight requests are released. On Viceroy 0.21.0 and hosted Fastly the run records the outcome, because EZ-6.24 is a SHOULD there.",
-      "artifact_path": "outbound/EZ-6/acceptance/11/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7185,11 +7294,11 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-12-axum",
-      "sentinel": "ez_6_acceptance_12_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/12",
+      "sentinel": "native_buffered_begin_send_parity_axum",
+      "command": "scripts/test_integration.sh --adapter axum --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/axum",
       "expected": "Parity. Every adapter. For buffered uploads, a begun request and `send` produce the same outcomes on EdgeZero's existing outbound contract cases, including client defaults.",
-      "artifact_path": "outbound/EZ-6/acceptance/12/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/axum/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7236,11 +7345,11 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-12-viceroy",
-      "sentinel": "ez_6_acceptance_12_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/12",
+      "sentinel": "native_buffered_begin_send_parity_fastly",
+      "command": "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
       "expected": "Parity. Every adapter. For buffered uploads, a begun request and `send` produce the same outcomes on EdgeZero's existing outbound contract cases, including client defaults.",
-      "artifact_path": "outbound/EZ-6/acceptance/12/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7287,11 +7396,11 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-12-workerd",
-      "sentinel": "ez_6_acceptance_12_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/12",
+      "sentinel": "native_buffered_begin_send_parity_cloudflare",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-wire --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/workerd",
       "expected": "Parity. Every adapter. For buffered uploads, a begun request and `send` produce the same outcomes on EdgeZero's existing outbound contract cases, including client defaults.",
-      "artifact_path": "outbound/EZ-6/acceptance/12/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7338,11 +7447,11 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-12-spin",
-      "sentinel": "ez_6_acceptance_12_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/12",
+      "sentinel": "native_buffered_begin_send_parity_spin",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "Parity. Every adapter. For buffered uploads, a begun request and `send` produce the same outcomes on EdgeZero's existing outbound contract cases, including client defaults.",
-      "artifact_path": "outbound/EZ-6/acceptance/12/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7441,10 +7550,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-13-axum",
       "sentinel": "ez_6_acceptance_13_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/13",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Upload rules. Unit and every adapter. Begin rejects a POST with a streamed body as an invalid request before sending. Begin accepts a bodiless GET built from an inbound request. `send` forwards a POST with a streamed body.",
-      "artifact_path": "outbound/EZ-6/acceptance/13/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7492,10 +7601,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-13-viceroy",
       "sentinel": "ez_6_acceptance_13_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/13",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Upload rules. Unit and every adapter. Begin rejects a POST with a streamed body as an invalid request before sending. Begin accepts a bodiless GET built from an inbound request. `send` forwards a POST with a streamed body.",
-      "artifact_path": "outbound/EZ-6/acceptance/13/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7543,10 +7652,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-13-workerd",
       "sentinel": "ez_6_acceptance_13_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/13",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Upload rules. Unit and every adapter. Begin rejects a POST with a streamed body as an invalid request before sending. Begin accepts a bodiless GET built from an inbound request. `send` forwards a POST with a streamed body.",
-      "artifact_path": "outbound/EZ-6/acceptance/13/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7594,10 +7703,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-13-spin",
       "sentinel": "ez_6_acceptance_13_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/13",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Upload rules. Unit and every adapter. Begin rejects a POST with a streamed body as an invalid request before sending. Begin accepts a bodiless GET built from an inbound request. `send` forwards a POST with a streamed body.",
-      "artifact_path": "outbound/EZ-6/acceptance/13/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7645,10 +7754,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-14-axum",
       "sentinel": "ez_6_acceptance_14_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/14",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Timeout before the cutoff. Every adapter. Given a fourth bidder D in the scenario 1 batch with a 300 ms per-call timeout that never answers, then the batch delivers D as a gateway timeout naming the per-call timeout, with elapsed 300, before it reports `Cutoff`.",
-      "artifact_path": "outbound/EZ-6/acceptance/14/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7696,10 +7805,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-14-viceroy",
       "sentinel": "ez_6_acceptance_14_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/14",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Timeout before the cutoff. Every adapter. Given a fourth bidder D in the scenario 1 batch with a 300 ms per-call timeout that never answers, then the batch delivers D as a gateway timeout naming the per-call timeout, with elapsed 300, before it reports `Cutoff`.",
-      "artifact_path": "outbound/EZ-6/acceptance/14/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7747,10 +7856,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-14-workerd",
       "sentinel": "ez_6_acceptance_14_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/14",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Timeout before the cutoff. Every adapter. Given a fourth bidder D in the scenario 1 batch with a 300 ms per-call timeout that never answers, then the batch delivers D as a gateway timeout naming the per-call timeout, with elapsed 300, before it reports `Cutoff`.",
-      "artifact_path": "outbound/EZ-6/acceptance/14/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7798,10 +7907,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-14-spin",
       "sentinel": "ez_6_acceptance_14_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/14",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Timeout before the cutoff. Every adapter. Given a fourth bidder D in the scenario 1 batch with a 300 ms per-call timeout that never answers, then the batch delivers D as a gateway timeout naming the per-call timeout, with elapsed 300, before it reports `Cutoff`.",
-      "artifact_path": "outbound/EZ-6/acceptance/14/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7903,10 +8012,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-16-axum",
       "sentinel": "ez_6_acceptance_16_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/16",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Waiting `next` ends at the cutoff. Every adapter. Given a batch with a 200 ms cutoff and no slot answering, then a waiting `next` returns `Cutoff` within 205 ms. Repeat with response headers already received but the body permanently pending; the same bound holds and the slot stays unresolved.",
-      "artifact_path": "outbound/EZ-6/acceptance/16/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -7954,10 +8063,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-16-viceroy",
       "sentinel": "ez_6_acceptance_16_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/16",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Waiting `next` ends at the cutoff. Every adapter. Given a batch with a 200 ms cutoff and no slot answering, then a waiting `next` returns `Cutoff` within 205 ms. Repeat with response headers already received but the body permanently pending; the same bound holds and the slot stays unresolved.",
-      "artifact_path": "outbound/EZ-6/acceptance/16/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8005,10 +8114,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-16-workerd",
       "sentinel": "ez_6_acceptance_16_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/16",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Waiting `next` ends at the cutoff. Every adapter. Given a batch with a 200 ms cutoff and no slot answering, then a waiting `next` returns `Cutoff` within 205 ms. Repeat with response headers already received but the body permanently pending; the same bound holds and the slot stays unresolved.",
-      "artifact_path": "outbound/EZ-6/acceptance/16/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8056,10 +8165,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-16-spin",
       "sentinel": "ez_6_acceptance_16_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/16",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Waiting `next` ends at the cutoff. Every adapter. Given a batch with a 200 ms cutoff and no slot answering, then a waiting `next` returns `Cutoff` within 205 ms. Repeat with response headers already received but the body permanently pending; the same bound holds and the slot stays unresolved.",
-      "artifact_path": "outbound/EZ-6/acceptance/16/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8158,10 +8267,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-17-axum",
       "sentinel": "ez_6_acceptance_17_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/17",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Cancellation report. Unit and every adapter. Given a batch with one slot recorded but not delivered and one still in flight, when it is cancelled, then both indices are reported as undelivered.",
-      "artifact_path": "outbound/EZ-6/acceptance/17/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8209,10 +8318,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-17-viceroy",
       "sentinel": "ez_6_acceptance_17_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/17",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Cancellation report. Unit and every adapter. Given a batch with one slot recorded but not delivered and one still in flight, when it is cancelled, then both indices are reported as undelivered.",
-      "artifact_path": "outbound/EZ-6/acceptance/17/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8260,10 +8369,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-17-workerd",
       "sentinel": "ez_6_acceptance_17_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/17",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Cancellation report. Unit and every adapter. Given a batch with one slot recorded but not delivered and one still in flight, when it is cancelled, then both indices are reported as undelivered.",
-      "artifact_path": "outbound/EZ-6/acceptance/17/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8311,10 +8420,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-17-spin",
       "sentinel": "ez_6_acceptance_17_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/17",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Cancellation report. Unit and every adapter. Given a batch with one slot recorded but not delivered and one still in flight, when it is cancelled, then both indices are reported as undelivered.",
-      "artifact_path": "outbound/EZ-6/acceptance/17/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8362,10 +8471,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-18-axum",
       "sentinel": "ez_6_acceptance_18_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/18",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Check inside a streamed body. Every adapter. Given a streamed response body that checks the batch between chunks while two slots are still in flight, then each check returns \"nothing new\" in under 5 ms.",
-      "artifact_path": "outbound/EZ-6/acceptance/18/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8413,10 +8522,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-18-viceroy",
       "sentinel": "ez_6_acceptance_18_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/18",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Check inside a streamed body. Every adapter. Given a streamed response body that checks the batch between chunks while two slots are still in flight, then each check returns \"nothing new\" in under 5 ms.",
-      "artifact_path": "outbound/EZ-6/acceptance/18/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8464,10 +8573,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-18-workerd",
       "sentinel": "ez_6_acceptance_18_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/18",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Check inside a streamed body. Every adapter. Given a streamed response body that checks the batch between chunks while two slots are still in flight, then each check returns \"nothing new\" in under 5 ms.",
-      "artifact_path": "outbound/EZ-6/acceptance/18/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8515,10 +8624,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-18-spin",
       "sentinel": "ez_6_acceptance_18_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/18",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Check inside a streamed body. Every adapter. Given a streamed response body that checks the batch between chunks while two slots are still in flight, then each check returns \"nothing new\" in under 5 ms.",
-      "artifact_path": "outbound/EZ-6/acceptance/18/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8566,10 +8675,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-19-viceroy",
       "sentinel": "ez_6_acceptance_19_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/19",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Work after delivery. Viceroy 0.21.0. Given a serving callback that, after delivery, starts a three-slot batch with a client it keeps and collects it, then all three results are delivered with arrival-based elapsed values, and nothing from that batch is still in flight after the callback returns.",
-      "artifact_path": "outbound/EZ-6/acceptance/19/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8617,10 +8726,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-20-axum",
       "sentinel": "ez_6_acceptance_20_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/20",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Work after response handoff. Axum, workerd, and Spin 4.1. A streamed response owns a begun origin request and a bidder batch whose results are still pending when request dispatch or the platform callback returns. The body then collects both and streams their results successfully. Handoff does not cancel either exchange or release its resources early.",
-      "artifact_path": "outbound/EZ-6/acceptance/20/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8668,10 +8777,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-20-workerd",
       "sentinel": "ez_6_acceptance_20_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/20",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Work after response handoff. Axum, workerd, and Spin 4.1. A streamed response owns a begun origin request and a bidder batch whose results are still pending when request dispatch or the platform callback returns. The body then collects both and streams their results successfully. Handoff does not cancel either exchange or release its resources early.",
-      "artifact_path": "outbound/EZ-6/acceptance/20/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8719,10 +8828,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-20-spin",
       "sentinel": "ez_6_acceptance_20_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/20",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Work after response handoff. Axum, workerd, and Spin 4.1. A streamed response owns a begun origin request and a bidder batch whose results are still pending when request dispatch or the platform callback returns. The body then collects both and streams their results successfully. Handoff does not cancel either exchange or release its resources early.",
-      "artifact_path": "outbound/EZ-6/acceptance/20/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -8769,12 +8878,15 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-21-unit-axum",
-      "sentinel": "ez_6_acceptance_21_unit_axum",
-      "command": "scripts/run_test_nonzero.sh ez_6_acceptance_21_unit_axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils",
+      "sentinel": "service::tests::attached_progress_closes_before_retained_handles_on_terminal_egress",
+      "command": "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets",
       "expected": "Response-owned cleanup. Unit for each adapter and Axum, workerd, and Spin 4.1. Repeat the response-owned setup with normal body completion, disconnect, expired write deadline, source failure, and explicit cancellation, wherever observable. Each path releases body-owned exchanges and SDK-owned resources exactly once, stops guest-side polling, and preserves the adapter's documented host-cancellation limitations. Unit and Viceroy 0.21.0 keep a separate callback-owned exchange pending on the same client before response cleanup, then prove cleanup neither cancels it nor stops its observation: that exchange completes in the still-active Fastly callback, which can also start new post-delivery work. A client-wide cancellation that destroys both owners does not pass.",
-      "artifact_path": "outbound/EZ-6/acceptance/21/unit/axum.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/redirect/axum/native-tests.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "service::tests::response_body_scope_keeps_native_work_live_until_eof_or_drop"
+      ]
     },
     {
       "case_id": "EZ-6/acceptance/21",
@@ -8820,12 +8932,18 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-21-unit-fastly",
-      "sentinel": "ez_6_acceptance_21_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_6_acceptance_21_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "response::tests::body_created_batches_end_at_egress_without_closing_callback_work",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Response-owned cleanup. Unit for each adapter and Axum, workerd, and Spin 4.1. Repeat the response-owned setup with normal body completion, disconnect, expired write deadline, source failure, and explicit cancellation, wherever observable. Each path releases body-owned exchanges and SDK-owned resources exactly once, stops guest-side polling, and preserves the adapter's documented host-cancellation limitations. Unit and Viceroy 0.21.0 keep a separate callback-owned exchange pending on the same client before response cleanup, then prove cleanup neither cancels it nor stops its observation: that exchange completes in the still-active Fastly callback, which can also start new post-delivery work. A client-wide cancellation that destroys both owners does not pass.",
-      "artifact_path": "outbound/EZ-6/acceptance/21/unit/fastly.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/redirect/fastly/runtime-unit-tests.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "response::tests::pending_body_write_deadline_releases_only_response_work",
+        "outbound::scope::tests::response_scope_closes_only_response_created_work",
+        "lifecycle::tests::callback_scope_exit_releases_unpolled_send_and_begin_before_cross_scope_polling",
+        "lifecycle::tests::callback_scope_exit_releases_retained_batch_driver"
+      ]
     },
     {
       "case_id": "EZ-6/acceptance/21",
@@ -8871,12 +8989,15 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-21-unit-cloudflare",
-      "sentinel": "ez_6_acceptance_21_unit_cloudflare",
-      "command": "scripts/run_test_nonzero.sh ez_6_acceptance_21_unit_cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features test-utils",
+      "sentinel": "request::tests::attached_progress_closes_on_worker_terminal_paths_before_retained_handles",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/cloudflare cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cloudflare,test-utils --target wasm32-unknown-unknown --lib",
       "expected": "Response-owned cleanup. Unit for each adapter and Axum, workerd, and Spin 4.1. Repeat the response-owned setup with normal body completion, disconnect, expired write deadline, source failure, and explicit cancellation, wherever observable. Each path releases body-owned exchanges and SDK-owned resources exactly once, stops guest-side polling, and preserves the adapter's documented host-cancellation limitations. Unit and Viceroy 0.21.0 keep a separate callback-owned exchange pending on the same client before response cleanup, then prove cleanup neither cancels it nor stops its observation: that exchange completes in the still-active Fastly callback, which can also start new post-delivery work. A client-wide cancellation that destroys both owners does not pass.",
-      "artifact_path": "outbound/EZ-6/acceptance/21/unit/cloudflare.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/redirect/cloudflare/runtime-unit-tests.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "request::tests::response_body_scope_keeps_fetches_live_until_eof_or_source_error"
+      ]
     },
     {
       "case_id": "EZ-6/acceptance/21",
@@ -8922,12 +9043,16 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-21-unit-spin",
-      "sentinel": "ez_6_acceptance_21_unit_spin",
-      "command": "scripts/run_test_nonzero.sh ez_6_acceptance_21_unit_spin cargo test --offline --locked -p edgezero-adapter-spin --no-default-features --features test-utils",
+      "sentinel": "response::tests::handoff::attached_owner_survives_callback_return_and_eof_until_sdk_completion",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "Response-owned cleanup. Unit for each adapter and Axum, workerd, and Spin 4.1. Repeat the response-owned setup with normal body completion, disconnect, expired write deadline, source failure, and explicit cancellation, wherever observable. Each path releases body-owned exchanges and SDK-owned resources exactly once, stops guest-side polling, and preserves the adapter's documented host-cancellation limitations. Unit and Viceroy 0.21.0 keep a separate callback-owned exchange pending on the same client before response cleanup, then prove cleanup neither cancels it nor stops its observation: that exchange completes in the still-active Fastly callback, which can also start new post-delivery work. A client-wide cancellation that destroys both owners does not pass.",
-      "artifact_path": "outbound/EZ-6/acceptance/21/unit/spin.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/redirect/spin/native-tests.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "response::tests::handoff::attached_owner_closes_on_source_deadline_write_and_finish_failures",
+        "response::tests::handoff::attached_owner_closes_on_coordinator_cancellation_at_every_await"
+      ]
     },
     {
       "case_id": "EZ-6/acceptance/21",
@@ -8974,10 +9099,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-21-axum",
       "sentinel": "ez_6_acceptance_21_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-6/acceptance/21",
+      "command": "scripts/test_integration.sh --adapter axum --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/axum",
       "expected": "Response-owned cleanup. Unit for each adapter and Axum, workerd, and Spin 4.1. Repeat the response-owned setup with normal body completion, disconnect, expired write deadline, source failure, and explicit cancellation, wherever observable. Each path releases body-owned exchanges and SDK-owned resources exactly once, stops guest-side polling, and preserves the adapter's documented host-cancellation limitations. Unit and Viceroy 0.21.0 keep a separate callback-owned exchange pending on the same client before response cleanup, then prove cleanup neither cancels it nor stops its observation: that exchange completes in the still-active Fastly callback, which can also start new post-delivery work. A client-wide cancellation that destroys both owners does not pass.",
-      "artifact_path": "outbound/EZ-6/acceptance/21/axum.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/axum/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9025,10 +9150,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-21-workerd",
       "sentinel": "ez_6_acceptance_21_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-6/acceptance/21",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/workerd",
       "expected": "Response-owned cleanup. Unit for each adapter and Axum, workerd, and Spin 4.1. Repeat the response-owned setup with normal body completion, disconnect, expired write deadline, source failure, and explicit cancellation, wherever observable. Each path releases body-owned exchanges and SDK-owned resources exactly once, stops guest-side polling, and preserves the adapter's documented host-cancellation limitations. Unit and Viceroy 0.21.0 keep a separate callback-owned exchange pending on the same client before response cleanup, then prove cleanup neither cancels it nor stops its observation: that exchange completes in the still-active Fastly callback, which can also start new post-delivery work. A client-wide cancellation that destroys both owners does not pass.",
-      "artifact_path": "outbound/EZ-6/acceptance/21/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9076,10 +9201,10 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-21-spin",
       "sentinel": "ez_6_acceptance_21_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-6/acceptance/21",
+      "command": "scripts/test_integration.sh --adapter spin --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/spin",
       "expected": "Response-owned cleanup. Unit for each adapter and Axum, workerd, and Spin 4.1. Repeat the response-owned setup with normal body completion, disconnect, expired write deadline, source failure, and explicit cancellation, wherever observable. Each path releases body-owned exchanges and SDK-owned resources exactly once, stops guest-side polling, and preserves the adapter's documented host-cancellation limitations. Unit and Viceroy 0.21.0 keep a separate callback-owned exchange pending on the same client before response cleanup, then prove cleanup neither cancels it nor stops its observation: that exchange completes in the still-active Fastly callback, which can also start new post-delivery work. A client-wide cancellation that destroys both owners does not pass.",
-      "artifact_path": "outbound/EZ-6/acceptance/21/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/spin/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9126,11 +9251,11 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-21-viceroy-callback-owner",
-      "sentinel": "ez_6_acceptance_21_viceroy_callback_owner",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/21",
+      "sentinel": "ez_6_acceptance_21_viceroy",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Response-owned cleanup. Unit for each adapter and Axum, workerd, and Spin 4.1. Repeat the response-owned setup with normal body completion, disconnect, expired write deadline, source failure, and explicit cancellation, wherever observable. Each path releases body-owned exchanges and SDK-owned resources exactly once, stops guest-side polling, and preserves the adapter's documented host-cancellation limitations. Unit and Viceroy 0.21.0 keep a separate callback-owned exchange pending on the same client before response cleanup, then prove cleanup neither cancels it nor stops its observation: that exchange completes in the still-active Fastly callback, which can also start new post-delivery work. A client-wide cancellation that destroys both owners does not pass.",
-      "artifact_path": "outbound/EZ-6/acceptance/21/viceroy/callback-owner.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -9442,18 +9567,25 @@
       "owner": "EdgeZero",
       "task": "D6",
       "substep": "EZ-6-acceptance-23-unit-fastly-both-wrappers",
-      "sentinel": "ez_6_acceptance_23_unit_fastly_both_wrappers",
-      "command": "scripts/run_test_nonzero.sh ez_6_acceptance_23_unit_fastly_both_wrappers cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "callback_cleanup::tests::callback_mode_accepts_only_exact_case_tokens",
+      "command": "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
       "expected": "Callback-scope cleanup. Unit for both Fastly lifecycle wrappers and Viceroy 0.21.0. A custom callback retains a pending callback-owned exchange in state outside the callback, completes response delivery, starts post-delivery work, then returns an error before that exchange finishes. Response cleanup leaves the exchange live until callback return; callback return stops its guest-side work and releases SDK-owned resources exactly once even though the public handle remains retained. Repeat with a normal return and an early error before delivery, without inventing a replacement response. Unit tests cover unwinding where supported, not process-abort teardown. Single-request mode must pass; a next-request isolation leg is conditional on reusable-sandbox adoption, not a prerequisite for this cleanup.",
-      "artifact_path": "outbound/EZ-6/acceptance/23/unit/fastly/both-wrappers.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/redirect/fastly/fixture-check.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "callback_cleanup::tests::native_operation_cleanup_requires_real_pending_ownership_and_release",
+        "callback_cleanup::tests::native_operation_evidence_remains_bounded_with_all_five_roles"
+      ],
+      "companion_case": "EZ-6/acceptance/21@unit/fastly"
     },
     {
       "case_id": "EZ-6/acceptance/23b",
       "source_id": "EZ-6/acceptance/23",
       "source_digest": "9367265200604b97708ec941ce019be407122026eb1c79e4720091db9fc5323d",
-      "requirement_ids": ["EZ-6.31"],
+      "requirement_ids": [
+        "EZ-6.31"
+      ],
       "environment": "unit/fastly/both-wrappers",
       "applicability": "conditional",
       "approval": "reusable-sandbox adoption@unit/fastly/both-wrappers",
@@ -9513,17 +9645,19 @@
       "task": "D6",
       "substep": "EZ-6-acceptance-23-viceroy",
       "sentinel": "ez_6_acceptance_23_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-6/acceptance/23",
+      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
       "expected": "Callback-scope cleanup. Unit for both Fastly lifecycle wrappers and Viceroy 0.21.0. A custom callback retains a pending callback-owned exchange in state outside the callback, completes response delivery, starts post-delivery work, then returns an error before that exchange finishes. Response cleanup leaves the exchange live until callback return; callback return stops its guest-side work and releases SDK-owned resources exactly once even though the public handle remains retained. Repeat with a normal return and an early error before delivery, without inventing a replacement response. Unit tests cover unwinding where supported, not process-abort teardown. Single-request mode must pass; a next-request isolation leg is conditional on reusable-sandbox adoption, not a prerequisite for this cleanup.",
-      "artifact_path": "outbound/EZ-6/acceptance/23/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/lifetimes/viceroy/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
       "case_id": "EZ-6/acceptance/23b",
       "source_id": "EZ-6/acceptance/23",
       "source_digest": "9367265200604b97708ec941ce019be407122026eb1c79e4720091db9fc5323d",
-      "requirement_ids": ["EZ-6.31"],
+      "requirement_ids": [
+        "EZ-6.31"
+      ],
       "environment": "viceroy",
       "applicability": "conditional",
       "approval": "reusable-sandbox adoption@viceroy",
@@ -10042,12 +10176,19 @@
       "owner": "EdgeZero",
       "task": "D1d",
       "substep": "EZ-8-acceptance-02-unit-fastly",
-      "sentinel": "ez_8_acceptance_02_unit_fastly",
-      "command": "scripts/run_test_nonzero.sh ez_8_acceptance_02_unit_fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features test-utils",
+      "sentinel": "outbound::fastly_impl::tests::ez_8_acceptance_02_deadline_only_backend_policy_covers_every_boundary",
+      "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Unit with injected time and a scripted host-call boundary. Budgets of 1 ns, 100 microseconds, 999,999 ns, 1 ms, and 1,000,001 ns keep their original deadlines and attributed timeout sources. Zero/expired budgets dispatch nothing. With the same 1 s per-call timeout and different absolute deadlines (including a 100-microsecond effective budget), plain and optimized requests retain the same eligible backend `K` and timers; the synchronous blocking horizon remains explicitly UNKNOWN until provider evidence. Cover each deadline-only policy boundary and maximum-domain case, preparation consuming almost all budget, and registration returning late. A successful or failed host return at `D` becomes the original attributed 504; no pre-dispatch refusal is counted as proof of a bounded host call. A timely optimized head followed by a permanently pending body retains its original deadline and measured +5 ms qualification target, without a hard scheduler guarantee or an uninterruptible body-read fallback.",
-      "artifact_path": "outbound/EZ-8/acceptance/02/unit/fastly.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/redirect/fastly/runtime-unit-tests.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "outbound::fastly_impl::tests::ez_8_acceptance_02_effective_deadlines_keep_the_registered_backend",
+        "outbound::fastly_impl::tests::ez_8_acceptance_02_late_registration_skips_optimizer_and_retains_backend",
+        "outbound::fastly_impl::tests::ez_8_acceptance_02_timely_scripted_head_keeps_pending_body_deadline",
+        "outbound::send_failure_policy_tests::ez_8_acceptance_02_submillisecond_host_call_budget_matrix",
+        "outbound::send_failure_policy_tests::ez_8_acceptance_02_expired_budgets_skip_host_and_horizon_remains_unknown"
+      ]
     },
     {
       "case_id": "EZ-8/acceptance/03",
@@ -10273,12 +10414,15 @@
       "owner": "EdgeZero",
       "task": "D1d",
       "substep": "EZ-8-acceptance-04-axum",
-      "sentinel": "ez_8_acceptance_04_axum",
-      "command": "scripts/test_integration.sh --adapter axum --suite outbound-cutover --case EZ-8/acceptance/04",
+      "sentinel": "outbound::clock_tests::image_optimizer_batch_rejection_keeps_live_plain_sibling",
+      "command": "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets",
       "expected": "Axum. Given a local origin, when a GET with options is sent, then the result is cross-cutting requirement 2's rejection with status 400 naming the option and `axum`, and the origin accepts no connection. Given a GET built from an inbound request whose body is an unread stream, with options, then the result is the same rejection and the inbound body is not read. Given a two-slot batch with options on slot 0, then slot 0 fails with the rejection, slot 1 returns 200, and the batch completes.",
-      "artifact_path": "outbound/EZ-8/acceptance/04/axum.json",
-      "implementation": "planned",
-      "comparison": false
+      "artifact_path": "outbound/redirect/axum/native-tests.log",
+      "implementation": "ready",
+      "comparison": false,
+      "additional_sentinels": [
+        "outbound::clock_tests::image_optimizer_rejection_precedes_pending_body_and_expired_budget"
+      ]
     },
     {
       "case_id": "EZ-8/acceptance/05",
@@ -10311,10 +10455,10 @@
       "task": "D1d",
       "substep": "EZ-8-acceptance-05-workerd",
       "sentinel": "ez_8_acceptance_05_workerd",
-      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-cutover --case EZ-8/acceptance/05",
+      "command": "scripts/test_integration.sh --adapter cloudflare --suite outbound-wire --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/workerd",
       "expected": "workerd and Spin 4.1. A single send and a batch slot with options each return the rejection, and no fetch or WASI request is made.",
-      "artifact_path": "outbound/EZ-8/acceptance/05/workerd.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/workerd/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10348,10 +10492,10 @@
       "task": "D1d",
       "substep": "EZ-8-acceptance-05-spin",
       "sentinel": "ez_8_acceptance_05_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-8/acceptance/05",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "workerd and Spin 4.1. A single send and a batch slot with options each return the rejection, and no fetch or WASI request is made.",
-      "artifact_path": "outbound/EZ-8/acceptance/05/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -10385,17 +10529,20 @@
       "task": "D1d",
       "substep": "EZ-8-acceptance-06-viceroy",
       "sentinel": "ez_8_acceptance_06_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-8/acceptance/06",
+      "command": "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
       "expected": "Viceroy 0.21.0. Given a GET with options to a reachable origin, then the result is a 502 with the EZ-8.11 reason and the origin receives no request. This shows the options reached the platform, not that Image Optimizer ran, and the hosted criterion is the proof. Given POST with options, GET with a body, or GET with cache bypass, then each gets the rejection, and EZ-2.13's statistics show no registration. Once EZ-11 lands, the same holds for GET with cache tagging. Given a two-slot batch with options on slot 0, then slot 0 fails and slot 1 reaches the origin. Given an optimized GET and a plain GET to one origin with the same transport settings, then EZ-2.13's statistics report one distinct backend configuration.",
-      "artifact_path": "outbound/EZ-8/acceptance/06/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
       "case_id": "EZ-8/acceptance/06b",
       "source_id": "EZ-8/acceptance/06",
       "source_digest": "e1375e35a5b0d640f6648371d1d1406f34a1b968077ad3a3059e0973dff88fe1",
-      "requirement_ids": ["EZ-8.6", "EZ-11.1"],
+      "requirement_ids": [
+        "EZ-8.6",
+        "EZ-11.1"
+      ],
       "environment": "viceroy",
       "applicability": "conditional",
       "approval": "EZ-11 present@viceroy",
@@ -10441,10 +10588,10 @@
       "task": "D1d",
       "substep": "EZ-8-acceptance-07-viceroy",
       "sentinel": "ez_8_acceptance_07_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-8/acceptance/07",
+      "command": "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
       "expected": "Viceroy 0.21.0. Given a plain send whose URI has percent-encoded path bytes and a query, then the origin records a request target equal to `OutboundRequest::uri`, and application-set headers arrive unchanged except for documented normalization.",
-      "artifact_path": "outbound/EZ-8/acceptance/07/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -11256,7 +11403,10 @@
       "case_id": "EZ-9/acceptance/16b",
       "source_id": "EZ-9/acceptance/16",
       "source_digest": "076cf85dd7d3c073f9b40ad3ea6b2ab3fae4563dc9950c587b18c2f79a2ff661",
-      "requirement_ids": ["EZ-9.9", "EZ-14.11"],
+      "requirement_ids": [
+        "EZ-9.9",
+        "EZ-14.11"
+      ],
       "environment": "axum",
       "applicability": "conditional",
       "approval": "EZ-14 present@axum",
@@ -11314,7 +11464,10 @@
       "case_id": "EZ-9/acceptance/16b",
       "source_id": "EZ-9/acceptance/16",
       "source_digest": "076cf85dd7d3c073f9b40ad3ea6b2ab3fae4563dc9950c587b18c2f79a2ff661",
-      "requirement_ids": ["EZ-9.9", "EZ-14.11"],
+      "requirement_ids": [
+        "EZ-9.9",
+        "EZ-14.11"
+      ],
       "environment": "viceroy",
       "applicability": "conditional",
       "approval": "EZ-14 present@viceroy",
@@ -11372,7 +11525,10 @@
       "case_id": "EZ-9/acceptance/16b",
       "source_id": "EZ-9/acceptance/16",
       "source_digest": "076cf85dd7d3c073f9b40ad3ea6b2ab3fae4563dc9950c587b18c2f79a2ff661",
-      "requirement_ids": ["EZ-9.9", "EZ-14.11"],
+      "requirement_ids": [
+        "EZ-9.9",
+        "EZ-14.11"
+      ],
       "environment": "workerd",
       "applicability": "conditional",
       "approval": "EZ-14 present@workerd",
@@ -11430,7 +11586,10 @@
       "case_id": "EZ-9/acceptance/16b",
       "source_id": "EZ-9/acceptance/16",
       "source_digest": "076cf85dd7d3c073f9b40ad3ea6b2ab3fae4563dc9950c587b18c2f79a2ff661",
-      "requirement_ids": ["EZ-9.9", "EZ-14.11"],
+      "requirement_ids": [
+        "EZ-9.9",
+        "EZ-14.11"
+      ],
       "environment": "spin",
       "applicability": "conditional",
       "approval": "EZ-14 present@spin",
@@ -11556,10 +11715,10 @@
       "task": "P5",
       "substep": "EZ-9-acceptance-18-viceroy",
       "sentinel": "ez_9_acceptance_18_viceroy",
-      "command": "scripts/test_integration.sh --adapter fastly --suite outbound-cutover --case EZ-9/acceptance/18",
+      "command": "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
       "expected": "Viceroy 0.21.0. A two-hop chain to two loopback origins with one per-call timeout leaves EZ-2.13's statistics showing the same two backend configurations as two single sends to those origins with that timeout.",
-      "artifact_path": "outbound/EZ-9/acceptance/18/viceroy.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/fastly/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -11595,10 +11754,10 @@
       "task": "P5",
       "substep": "EZ-9-acceptance-19-spin",
       "sentinel": "ez_9_acceptance_19_spin",
-      "command": "scripts/test_integration.sh --adapter spin --suite outbound-cutover --case EZ-9/acceptance/19",
+      "command": "scripts/test_integration.sh --adapter spin --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/spin",
       "expected": "Spin 4.1. A redirect to a plain-HTTP host that is not declared fails at that hop with Spin's denial, which F maps to 400 (`edgezero:crates/edgezero-adapter-spin/src/outbound.rs:1358-1364`). That Spin 4.1 reports this case as `HttpRequestDenied` is **Unverified**, and this criterion records what it reports.",
-      "artifact_path": "outbound/EZ-9/acceptance/19/spin.json",
-      "implementation": "planned",
+      "artifact_path": "outbound/redirect/spin/wire/events.jsonl",
+      "implementation": "ready",
       "comparison": false
     },
     {
@@ -12949,7 +13108,12 @@
       "case_id": "EZ-13/acceptance/01",
       "source_id": "EZ-13/acceptance/01",
       "source_digest": "4d652ab0a99f09ef7e062522b05f795ca06e7135ba94a23c87aaedd1e6b77f64",
-      "requirement_ids": ["EZ-13.1", "EZ-13.2", "EZ-13.3", "EZ-13.4"],
+      "requirement_ids": [
+        "EZ-13.1",
+        "EZ-13.2",
+        "EZ-13.3",
+        "EZ-13.4"
+      ],
       "environment": "spin",
       "applicability": "follow-up",
       "approval": null,
@@ -12968,7 +13132,12 @@
       "case_id": "EZ-13/acceptance/02",
       "source_id": "EZ-13/acceptance/02",
       "source_digest": "c23920bd0d5cc25e83b131caa5c8ae5556fe43f53536df46cd71b734ee8327e0",
-      "requirement_ids": ["EZ-13.1", "EZ-13.2", "EZ-13.3", "EZ-13.4"],
+      "requirement_ids": [
+        "EZ-13.1",
+        "EZ-13.2",
+        "EZ-13.3",
+        "EZ-13.4"
+      ],
       "environment": "spin",
       "applicability": "follow-up",
       "approval": null,
@@ -12987,7 +13156,12 @@
       "case_id": "EZ-13/acceptance/03",
       "source_id": "EZ-13/acceptance/03",
       "source_digest": "2cab3d473eeead7a8a4d066b532c75537b7d0d8dfc6dc651071aea89c55aa51c",
-      "requirement_ids": ["EZ-13.1", "EZ-13.2", "EZ-13.3", "EZ-13.4"],
+      "requirement_ids": [
+        "EZ-13.1",
+        "EZ-13.2",
+        "EZ-13.3",
+        "EZ-13.4"
+      ],
       "environment": "consumer-spin",
       "applicability": "follow-up",
       "approval": null,
@@ -16039,7 +16213,9 @@
       "case_id": "EZ-22/acceptance/07b",
       "source_id": "EZ-22/acceptance/07",
       "source_digest": "ae01686760141a5d6e7d9ceef0fffdcae177fdabe578caedfd1864473575523f",
-      "requirement_ids": ["EZ-22.8"],
+      "requirement_ids": [
+        "EZ-22.8"
+      ],
       "environment": "workerd/retained-instance",
       "applicability": "conditional",
       "approval": "EZ-22.8 adopted@workerd/retained-instance",
@@ -16090,7 +16266,9 @@
       "case_id": "EZ-22/acceptance/07b",
       "source_id": "EZ-22/acceptance/07",
       "source_digest": "ae01686760141a5d6e7d9ceef0fffdcae177fdabe578caedfd1864473575523f",
-      "requirement_ids": ["EZ-22.8"],
+      "requirement_ids": [
+        "EZ-22.8"
+      ],
       "environment": "spin/retained-instance",
       "applicability": "conditional",
       "approval": "EZ-22.8 adopted@spin/retained-instance",
@@ -18607,7 +18785,9 @@
       "case_id": "EZ-18/acceptance/03b",
       "source_id": "EZ-18/acceptance/03",
       "source_digest": "b0f560193d9b89adddeda14327d46ad84a504177aece21342e9b7396533406d8",
-      "requirement_ids": ["EZ-18.5"],
+      "requirement_ids": [
+        "EZ-18.5"
+      ],
       "environment": "hosted-fastly/http1",
       "applicability": "follow-up",
       "approval": null,
@@ -18627,7 +18807,9 @@
       "case_id": "EZ-18/acceptance/03b",
       "source_id": "EZ-18/acceptance/03",
       "source_digest": "b0f560193d9b89adddeda14327d46ad84a504177aece21342e9b7396533406d8",
-      "requirement_ids": ["EZ-18.5"],
+      "requirement_ids": [
+        "EZ-18.5"
+      ],
       "environment": "hosted-fastly/http2",
       "applicability": "follow-up",
       "approval": null,
@@ -18647,7 +18829,9 @@
       "case_id": "EZ-24/requirements/12",
       "source_id": "EZ-24.12",
       "source_digest": "99bbb8bf53e20c00884675bc178f50cc62ac2deefdbfd56834f34cd3c3bb6879",
-      "requirement_ids": ["EZ-24.12"],
+      "requirement_ids": [
+        "EZ-24.12"
+      ],
       "environment": "axum/demo",
       "applicability": "conditional",
       "approval": "EZ-24.12 adopted@axum/demo",
@@ -18668,7 +18852,9 @@
       "case_id": "EZ-24/requirements/12",
       "source_id": "EZ-24.12",
       "source_digest": "99bbb8bf53e20c00884675bc178f50cc62ac2deefdbfd56834f34cd3c3bb6879",
-      "requirement_ids": ["EZ-24.12"],
+      "requirement_ids": [
+        "EZ-24.12"
+      ],
       "environment": "axum/generated",
       "applicability": "conditional",
       "approval": "EZ-24.12 adopted@axum/generated",
@@ -18689,7 +18875,9 @@
       "case_id": "EZ-25/acceptance/05b",
       "source_id": "EZ-25/acceptance/05",
       "source_digest": "1f720daf578c15ddb539ea9eee47fbc90d9a061b54b6218d9699b16638dbc7aa",
-      "requirement_ids": ["EZ-25.43"],
+      "requirement_ids": [
+        "EZ-25.43"
+      ],
       "environment": "edgezero-ci",
       "applicability": "conditional",
       "approval": "EZ-25.43 adopted@edgezero-ci",

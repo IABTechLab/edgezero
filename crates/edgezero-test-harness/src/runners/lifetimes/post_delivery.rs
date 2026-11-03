@@ -47,9 +47,15 @@ pub(super) fn check(
                 && reply["body_bytes"] == json!(expected),
             "invalid post-delivery response",
         )?;
-        let (all, end) = protocol::wait_validated(log, cursor, PREFIX, 1, 1, &|_, record| {
-            validate(record, &token)
-        })?;
+        let (all, end) = protocol::wait_validated(
+            log,
+            cursor,
+            PREFIX,
+            1,
+            1,
+            Instant::now() + Duration::from_secs(2),
+            &|_, record| validate(record, &token),
+        )?;
         evidence = all;
         cursor.offset = end;
         Ok(())

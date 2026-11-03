@@ -8,10 +8,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "outbound_progress/budgets.rs"]
+mod budgets;
 #[path = "outbound_progress/cleanup.rs"]
 mod cleanup;
 #[path = "outbound_progress/post_delivery.rs"]
 mod post_delivery;
+#[path = "outbound_progress/transport.rs"]
+mod transport;
 
 struct Runtime;
 
@@ -74,6 +78,9 @@ fn main() -> Result<(), fastly::Error> {
     fastly::init();
     fixture_core::init_fixture_logging(telemetry)?;
     let mut request = fastly::Request::from_client();
+    if request.get_path().starts_with("/progress/budgets/") {
+        return budgets::run(request);
+    }
     if request.get_path() == "/progress/lifetimes/response-cleanup" {
         return cleanup::run(request);
     }
@@ -149,6 +156,9 @@ fn main() -> Result<(), fastly::Error> {
         edgezero_adapter_fastly::request::FastlyService::new(&app).send_request_with_hooks(
             request,
             |request, scratch| {
+                if request.get_path().starts_with("/progress/transport/") {
+                    scratch.insert(fixture_core::qualification::transport::BackendSnapshot(transport::snapshot));
+                }
                 if request.get_path().starts_with("/progress/forward/") {
                     scratch.insert(fixture_core::qualification::forwarding::BackendSnapshot(|| {
                         let stats = edgezero_adapter_fastly::context::FastlyOutboundObservation::current()

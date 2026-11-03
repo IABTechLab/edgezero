@@ -1,6 +1,8 @@
 #[cfg(target_arch = "wasm32")]
 mod sdk {
-    use fixture_spin_support::outbound::eager_outbound_paths_hold;
+    use fixture_spin_support::outbound::{
+        connect_timeout_fallback_holds, eager_outbound_paths_hold,
+    };
     use spin_sdk::wasip3;
     use spin_sdk::wasip3::exports::cli::run::Guest;
 
@@ -13,6 +15,11 @@ mod sdk {
             reason = "the executable SDK fixture reports its nonzero result to the local runner"
         )]
         async fn run() -> Result<(), ()> {
+            if !connect_timeout_fallback_holds().await {
+                eprintln!("Spin refused-connect-option checks failed");
+                return Err(());
+            }
+            println!("ez_4_acceptance_03_unit_spin: passed");
             eager_outbound_paths_hold().await.map_err(|error| {
                 eprintln!("Spin eager SDK checks failed: {error}");
             })?;

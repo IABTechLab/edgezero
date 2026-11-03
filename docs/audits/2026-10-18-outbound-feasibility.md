@@ -2,6 +2,49 @@
 
 ## Status
 
+Current implementation and coverage authority is the
+[required-local closeout](../superpowers/plans/2026-10-18-trusted-server-outbound-implementation.md#required-local-acceptance-closeout-2026-11-02).
+All 217 required-local legs now have executable bindings; this is not passing execution or
+qualification. The dated gate checkpoints below retain their original decisions and negative
+observations, not blanket implementation stops after later scoped approvals. Frozen-candidate,
+consumer and hosted evidence remain separate, and no capability is promoted by local coverage.
+
+### Native Workers Abort Negative Control (2026-11-02)
+
+One bounded localhost-only SDK control used Wrangler 4.151.1, Miniflare 5.20261012.1-beta and
+workerd 1.20261012.1 with compatibility date `2026-04-22` and `enable_request_signal`. It reused
+the fixture launcher's official configuration mapper and constructor, not `dispatchFetch`.
+The native `TransformStream` worker wrote `edgezero-native-abort-control\n`, waited 100 ms after
+the write resolved, then called either `writer.abort(undefined)` or
+`writer.abort(new Error("response delivery aborted"))`, immediately releasing the writer lock.
+
+Both actual HTTP/1.1 `curl --raw --max-time 5` requests returned `200 OK`, exit 0, and the same
+41 bytes: `1e\r\nedgezero-native-abort-control\n\r\n0\r\n\r\n`. Both abort promises fulfilled;
+`writer.closed` rejected with the respective undefined/Error reason. The owned server process
+group was absent after disposal; the complete control took 950 ms within its 10-second bound.
+
+Local, uncommitted artifacts are in `/private/tmp/edgezero-native-abort-control.LRzJqQ/`:
+`summary.json` retains settings, raw bytes, curl exits, cleanup and all SDK/source hashes;
+`worker.mjs` SHA-256 is `f318ff267f304e7ceb454900d829dea5ec5d1591d544b2eb64ce30d29a4c9dd0`;
+workerd binary SHA-256 is `2449d1a1404e54b832fd3265fd61803072438bf7559b7b28d491fd5f24a627bf`.
+The [pinned stream implementation](https://github.com/cloudflare/workerd/blob/v1.20261012.1/src/workerd/api/streams/standard.c%2B%2B)
+is source context, not additional executed evidence.
+
+One separately authorized direct-worker TCP probe reused that exact worker source and checked
+the same SDK hashes. The official converter preserved `unsafeDirectSockets` under the worker's
+`dev` settings; `unsafeGetDirectURL(workerName, "default")` selected a different localhost socket
+from `ready`. The sole direct `/error` request again returned complete `200 OK`, curl exit 0 and
+identical 41 raw bytes including the terminal zero chunk, in 105.177 ms. Its new artifacts are in
+`/private/tmp/edgezero-native-direct-abort.VyvsQd/summary.json`; controller SHA-256 is
+`989068c64ae9ac71d1032124567d2ff0c0b2aff74de2a70c35efa8e607f05c0e`. It took 995 ms overall;
+both children were reaped and the owned server group was absent after cleanup. Original artifacts
+were not overwritten.
+
+These controls falsify the explicit-Error-only repair hypothesis for the pinned entry and direct
+native HTTP paths, not merely the entry wrapper. They do not justify a production abort patch,
+prove universal provider impossibility, characterize hosted Cloudflare, or qualify any EdgeZero
+acceptance leg. No expectation is relaxed and no production transport is changed.
+
 ### Dispatch-Slack Retirement (2026-10-27)
 
 The requester authorized removing the fixed 25 ms dispatch-slack guard and its test injection
@@ -146,7 +189,10 @@ initialization, not registration; the explicit system bundle above fixes that ru
 
 These identities describe the local run, not retained release binaries. The result establishes
 SDK serialization/local registration acceptance for the supplied vectors only. Viceroy does not
-enforce Connect and its timing getters remain unavailable. Stored-value readback, hosted acceptance,
+enforce Connect and its timing getters were unavailable in that stock-runtime checkpoint.
+The later [local timeout-readback repair](evidence/2026-11-02-viceroy-timeout-readback.json)
+records actual SDK getter controls separately, without adding connect-timeout enforcement.
+Stored-value readback at that historical checkpoint, hosted acceptance,
 timer enforcement, pooling, resource accounting/retirement, cancellation and G2 readiness are not
 proved. The proposal's arithmetic, approval requirements and failed readiness evidence remain
 unchanged; no production backend/timer/slack policy, runtime pin, capability or acceptance leg changes.

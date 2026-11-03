@@ -71,6 +71,123 @@ const localOverflowProofKeys = new Set([
   "EZ-10/acceptance/08@axum/demo",
 ]);
 
+// Frozen from the reviewed 153-ready/358-planned closeout baseline.
+const localCloseoutKeys = new Set([
+  "EZ-2/acceptance/02@viceroy",
+  "EZ-2/acceptance/03@viceroy",
+  "EZ-2/acceptance/04@viceroy",
+  "EZ-2/acceptance/05@viceroy",
+  "EZ-2/acceptance/06@viceroy",
+  "EZ-3/acceptance/02@unit/fastly",
+  "EZ-3/acceptance/03@unit/fastly",
+  "EZ-3/acceptance/04@unit/fastly",
+  "EZ-3/acceptance/05@viceroy",
+  "EZ-4/acceptance/01@unit/fastly",
+  "EZ-4/acceptance/03@unit/spin",
+  "EZ-4/acceptance/05@axum",
+  "EZ-4/acceptance/05@workerd",
+  "EZ-4/acceptance/06@spin",
+  "EZ-4/acceptance/07@viceroy",
+  "EZ-4/acceptance/11@unit/fastly",
+  "EZ-6/acceptance/01@axum",
+  "EZ-6/acceptance/01@viceroy",
+  "EZ-6/acceptance/01@workerd",
+  "EZ-6/acceptance/01@spin",
+  "EZ-6/acceptance/02@axum",
+  "EZ-6/acceptance/02@viceroy",
+  "EZ-6/acceptance/02@workerd",
+  "EZ-6/acceptance/02@spin",
+  "EZ-6/acceptance/03@axum",
+  "EZ-6/acceptance/03@viceroy",
+  "EZ-6/acceptance/03@workerd",
+  "EZ-6/acceptance/03@spin",
+  "EZ-6/acceptance/04@axum",
+  "EZ-6/acceptance/04@viceroy",
+  "EZ-6/acceptance/04@workerd",
+  "EZ-6/acceptance/04@spin",
+  "EZ-6/acceptance/05@axum",
+  "EZ-6/acceptance/05@viceroy",
+  "EZ-6/acceptance/05@workerd",
+  "EZ-6/acceptance/05@spin",
+  "EZ-6/acceptance/06@viceroy",
+  "EZ-6/acceptance/07@viceroy",
+  "EZ-6/acceptance/08@viceroy",
+  "EZ-6/acceptance/09@axum",
+  "EZ-6/acceptance/09@viceroy",
+  "EZ-6/acceptance/09@workerd",
+  "EZ-6/acceptance/09@spin",
+  "EZ-6/acceptance/11@axum",
+  "EZ-6/acceptance/11@viceroy",
+  "EZ-6/acceptance/11@workerd",
+  "EZ-6/acceptance/11@spin",
+  "EZ-6/acceptance/12@axum",
+  "EZ-6/acceptance/12@viceroy",
+  "EZ-6/acceptance/12@workerd",
+  "EZ-6/acceptance/12@spin",
+  "EZ-6/acceptance/13@axum",
+  "EZ-6/acceptance/13@viceroy",
+  "EZ-6/acceptance/13@workerd",
+  "EZ-6/acceptance/13@spin",
+  "EZ-6/acceptance/14@axum",
+  "EZ-6/acceptance/14@viceroy",
+  "EZ-6/acceptance/14@workerd",
+  "EZ-6/acceptance/14@spin",
+  "EZ-6/acceptance/16@axum",
+  "EZ-6/acceptance/16@viceroy",
+  "EZ-6/acceptance/16@workerd",
+  "EZ-6/acceptance/16@spin",
+  "EZ-6/acceptance/17@axum",
+  "EZ-6/acceptance/17@viceroy",
+  "EZ-6/acceptance/17@workerd",
+  "EZ-6/acceptance/17@spin",
+  "EZ-6/acceptance/18@axum",
+  "EZ-6/acceptance/18@viceroy",
+  "EZ-6/acceptance/18@workerd",
+  "EZ-6/acceptance/18@spin",
+  "EZ-6/acceptance/19@viceroy",
+  "EZ-6/acceptance/20@axum",
+  "EZ-6/acceptance/20@workerd",
+  "EZ-6/acceptance/20@spin",
+  "EZ-6/acceptance/21@unit/axum",
+  "EZ-6/acceptance/21@unit/fastly",
+  "EZ-6/acceptance/21@unit/cloudflare",
+  "EZ-6/acceptance/21@unit/spin",
+  "EZ-6/acceptance/21@axum",
+  "EZ-6/acceptance/21@workerd",
+  "EZ-6/acceptance/21@spin",
+  "EZ-6/acceptance/21@viceroy/callback-owner",
+  "EZ-6/acceptance/23@unit/fastly/both-wrappers",
+  "EZ-6/acceptance/23@viceroy",
+  "EZ-8/acceptance/02@unit/fastly",
+  "EZ-8/acceptance/04@axum",
+  "EZ-8/acceptance/05@workerd",
+  "EZ-8/acceptance/05@spin",
+  "EZ-8/acceptance/06@viceroy",
+  "EZ-8/acceptance/07@viceroy",
+  "EZ-9/acceptance/18@viceroy",
+  "EZ-9/acceptance/19@spin",
+]);
+const localCloseoutKeyDigest =
+  "d57706880e4a496a4a23d4a7ca02026a2c2ba3b52528ef4c4f92adad2e5f0dec";
+const localCloseoutUnchangedDigest =
+  "f7e99d663de8c037ece6a46929448b77d1dc48539854fceeb529fb4f0b146803";
+const localCloseoutScopeDigest =
+  "fb3bf7503c46a6f3987f9063964a23c306a3c6cc65bff8c7e44383e7fec9ffb1";
+const localCloseoutArtifacts = new Map([
+  ...[
+    "EZ-3/acceptance/02@unit/fastly",
+    "EZ-3/acceptance/03@unit/fastly",
+    "EZ-3/acceptance/04@unit/fastly",
+    "EZ-4/acceptance/01@unit/fastly",
+    "EZ-4/acceptance/11@unit/fastly",
+    "EZ-8/acceptance/02@unit/fastly",
+  ].map((key) => [key, "outbound/redirect/fastly/runtime-unit-tests.log"]),
+  ...["EZ-4/acceptance/05@axum", "EZ-8/acceptance/04@axum"].map((key) => [
+    key,
+    "outbound/redirect/axum/native-tests.log",
+  ]),
+]);
+
 test("CI argument inspection preserves exact string values and trailing commas", () => {
   assert.deepEqual(
     rustStringArrays(
@@ -184,6 +301,824 @@ function ciOwnsCommand(workflow, command) {
     ),
   );
 }
+
+function executionSources() {
+  return Object.fromEntries(
+    Object.entries({
+      launcher: "scripts/test_integration.sh",
+      args: "crates/edgezero-test-harness/src/main.rs",
+      runners: "crates/edgezero-test-harness/src/runners.rs",
+      lifetimes: "crates/edgezero-test-harness/src/runners/lifetimes.rs",
+      wire: "crates/edgezero-test-harness/src/runners/wire.rs",
+    }).map(([name, path]) => [
+      name,
+      readFileSync(new URL(`../${path}`, import.meta.url), "utf8"),
+    ]),
+  );
+}
+
+function runtimeBinding(adapter, suite = "outbound-lifetimes") {
+  const environment =
+    { fastly: "viceroy", cloudflare: "workerd" }[adapter] ?? adapter;
+  const directory = suite === "outbound-lifetimes" ? "lifetimes" : "redirect";
+  return {
+    environment,
+    command: `scripts/test_integration.sh --adapter ${adapter} --suite ${suite} --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/${directory}/${environment}`,
+    artifact_path: `outbound/${directory}/${environment}/events.jsonl`,
+  };
+}
+
+// Inspect code tokens, not comments or text embedded in Rust strings.
+function rustTokens(source) {
+  const tokens = [];
+  const lexeme =
+    /\s+|\/\/[^\n]*|\/\*|r(#+)"[\s\S]*?"\1|r"[^"]*"|"(?:\\[\s\S]|[^"\\])*"|'(?:\\.|[^'\\])'|[A-Za-z_][A-Za-z_0-9]*|[^\s]/gy;
+  while (lexeme.lastIndex < source.length) {
+    const match = lexeme.exec(source);
+    if (!match) return [];
+    const token = match[0];
+    if (token === "/*") {
+      let depth = 1;
+      let end = lexeme.lastIndex;
+      while (depth && end < source.length) {
+        const pair = source.slice(end, end + 2);
+        if (pair === "/*") {
+          depth++;
+          end += 2;
+        } else if (pair === "*/") {
+          depth--;
+          end += 2;
+        } else end++;
+      }
+      if (depth) return [];
+      lexeme.lastIndex = end;
+    } else if (!/^\s|^\/\//.test(token)) tokens.push(token);
+  }
+  return tokens.filter(
+    (token, index) => token !== "," || ![")", "]"].includes(tokens[index + 1]),
+  );
+}
+
+function rustContains(tokens, fragment) {
+  const expected = rustTokens(fragment);
+  return (
+    expected.length > 0 &&
+    tokens.some((_, start) =>
+      expected.every((token, offset) => tokens[start + offset] === token),
+    )
+  );
+}
+
+function rustBody(tokens, name) {
+  let starts = [];
+  let nesting = 0;
+  let shallowest = Infinity;
+  for (let index = 0; index < tokens.length; index++) {
+    if (tokens[index] === "{") nesting++;
+    if (tokens[index] === "}") nesting--;
+    if (
+      tokens[index] === "fn" &&
+      tokens[index + 1] === name &&
+      ["(", "<"].includes(tokens[index + 2])
+    ) {
+      if (nesting < shallowest) {
+        starts = [];
+        shallowest = nesting;
+      }
+      if (nesting === shallowest) starts.push(index);
+    }
+  }
+  if (starts.length !== 1) return [];
+  const start = tokens.indexOf("{", starts[0]);
+  if (start < 0) return [];
+  let depth = 1;
+  let end = start + 1;
+  for (; depth && end < tokens.length; end++) {
+    if (tokens[end] === "{") depth++;
+    if (tokens[end] === "}") depth--;
+  }
+  return depth ? [] : tokens.slice(start + 1, end - 1);
+}
+
+test("execution ownership source inspection excludes comments, strings and ambiguous functions", () => {
+  const fragment = "require(verified)?;";
+  for (const source of [
+    `// ${fragment}`,
+    `/* outer /* nested */ ${fragment} */`,
+    JSON.stringify(fragment),
+    `r###"${fragment}"###`,
+  ])
+    assert.equal(rustContains(rustTokens(source), fragment), false, source);
+  const source = `impl Inner { fn run() { ignored(); } }
+    fn run<T>() { let brace = '}'; checked(value,); }`;
+  assert.ok(
+    rustContains(rustBody(rustTokens(source), "run"), "checked(value);"),
+  );
+  assert.deepEqual(rustBody(rustTokens("fn run() {} fn run() {}"), "run"), []);
+  assert.deepEqual(rustTokens("/* unterminated"), []);
+});
+
+function registeredExecution(workflow, sources, adapter, suite) {
+  const code = Object.fromEntries(
+    ["args", "runners", "lifetimes", "wire"].map((name) => [
+      name,
+      rustTokens(sources[name]),
+    ]),
+  );
+  const body = (file, name) => rustBody(code[file], name);
+  const has = (file, name, fragment) =>
+    rustContains(body(file, name), fragment);
+  const selector =
+    suite === "outbound-lifetimes"
+      ? "outbound_lifetimes_selects_exactly_one_explicit_provider"
+      : "outbound_wire_suite_is_explicit_and_selects_one_supported_provider";
+  const host = parse(workflow, { version: "1.2", uniqueKeys: true })?.jobs?.[
+    "host-tests"
+  ];
+  const harnessTests =
+    "cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml";
+  if (
+    !host ||
+    host.if !== undefined ||
+    !host.strategy?.matrix?.suite?.includes("workspace") ||
+    !host.steps?.some(
+      (step) =>
+        step.if === "matrix.suite == 'workspace'" &&
+        step.run?.split("\n").includes(harnessTests),
+    )
+  )
+    return false;
+  if (
+    sources.launcher.trimEnd().split("\n").at(-1) !==
+    'exec "${CARGO:-cargo}" run --quiet --locked --manifest-path "$REPO_DIR/crates/edgezero-test-harness/Cargo.toml" -- "$@"'
+  )
+    return false;
+  if (
+    !has(
+      "args",
+      "parse_from",
+      `require(
+    ["smoke", "benchmark", "assembly", "outbound-readiness", "outbound-client-progress",
+     "outbound-progress", "outbound-overflow", "outbound-wire", "outbound-lifetimes",
+     "response-framing", "synthesized-headers", "ingress-fidelity", "ci"].contains(&a.suite.as_str()), "unknown suite")?;`,
+    ) ||
+    !has(
+      "args",
+      "parse_from",
+      'require(!matches!(a.suite.as_str(), "outbound-wire" | "outbound-lifetimes") || (adapter_selected && a.adapter != "all"), "wire and lifetime suites require one explicit adapter")?;',
+    ) ||
+    !rustContains(code.args, `#[test] fn ${selector}()`) ||
+    !has(
+      "args",
+      selector,
+      'for adapter in ["fastly", "axum", "cloudflare", "spin", "all"] {',
+    ) ||
+    !has(
+      "args",
+      selector,
+      'assert_eq!(result.is_ok(), adapter != "all", "{adapter}");',
+    ) ||
+    !has(
+      "args",
+      selector,
+      `assert!(Args::parse_from(["--suite", "${suite}"].map(str::to_owned)).is_err());`,
+    ) ||
+    !has(
+      "args",
+      "run",
+      'else if adapter == "fastly" { runners::fastly(&args, &path, &mut records) } else { runners::provider(adapter, &args, &path, &mut records) }',
+    )
+  )
+    return false;
+  if (
+    adapter === "fastly" &&
+    suite === "outbound-lifetimes" &&
+    (!has(
+      "lifetimes",
+      "checks",
+      'match wire::qualify_budgets(adapter, port, records) { Ok(count) => executed += count, Err(error) => failures.push(format!("budget-qualification: {error}")), }',
+    ) ||
+      !has("wire", "qualify_budgets", "budgets::run(adapter, port, records)") ||
+      rustContains(body("wire", "progress_wire"), "budgets::run(") ||
+      rustContains(body("wire", "progress_wire"), "qualify_budgets("))
+  )
+    return false;
+  const route = adapter === "fastly" ? "fastly" : "provider";
+  const selected = adapter === "fastly" ? '"fastly"' : "name";
+  const controller = suite === "outbound-lifetimes" ? "lifetimes" : "wire";
+  if (
+    !has(
+      "runners",
+      route,
+      `if args.suite == "${suite}" { return ${controller}::run(${selected}, run, records); }`,
+    ) ||
+    !has(
+      "wire",
+      "progress_suite",
+      "let result = check(port, origins, records)?;",
+    ) ||
+    !has(
+      "wire",
+      "progress_suite",
+      "let outcome = finish_wire(name, &mut process, origins, &state, records, outcome);",
+    ) ||
+    !has(
+      "wire",
+      "progress_suite",
+      'settle(records, &log, json!({"adapter":name,"suite":suite}), json!({}), outcome)',
+    )
+  )
+    return false;
+  if (suite === "outbound-lifetimes")
+    return (
+      has(
+        "lifetimes",
+        "run",
+        'let outcome = wire::progress_suite(name, "outbound-lifetimes", run, records,',
+      ) &&
+      has("lifetimes", "run", "checks(name, port, origins,") &&
+      has(
+        "lifetimes",
+        "run",
+        "let count = combined_count(outcome, tail, callbacks)?;",
+      ) &&
+      has("lifetimes", "run", "if let Some(count) = count {") &&
+      has(
+        "lifetimes",
+        "checks",
+        'require(failures.is_empty(), failures.join("; "))?;',
+      ) &&
+      has(
+        "lifetimes",
+        "combined_count",
+        'require(failures.is_empty(), failures.join("; "))?;',
+      )
+    );
+  return (
+    has(
+      "wire",
+      "run",
+      '"cloudflare" => return progress_wire("cloudflare", run, records),',
+    ) &&
+    has(
+      "wire",
+      "progress_wire",
+      'let result = progress_suite(name, "outbound-wire", run, records,',
+    ) &&
+    has("wire", "progress_wire", "matrix.run()?;")
+  );
+}
+
+function executionOwnsCommand(workflow, row, sources = executionSources()) {
+  const strictBudget =
+    row.environment === "viceroy" &&
+    (/^EZ-2\/acceptance\/0[2-6]$/.test(row.case_id) ||
+      row.case_id === "EZ-3/acceptance/05");
+  if (!row.command.startsWith("scripts/test_integration.sh "))
+    return !strictBudget && ciOwnsCommand(workflow, row.command) ? "ci" : null;
+  const command = row.command.match(
+    /^scripts\/test_integration\.sh --adapter (axum|cloudflare|fastly|spin) --suite (ci|outbound-lifetimes|outbound-wire) --output (\S+)$/,
+  );
+  if (!command) return null;
+  const [, adapter, suite, output] = command;
+  if (suite === "ci")
+    return !strictBudget && ciOwnsCommand(workflow, row.command) ? "ci" : null;
+  if (suite === "outbound-wire" && adapter !== "cloudflare") return null;
+  const expected = runtimeBinding(adapter, suite);
+  if (
+    row.environment !== expected.environment &&
+    !(
+      suite === "outbound-lifetimes" &&
+      adapter === "fastly" &&
+      row.environment === "viceroy/callback-owner"
+    )
+  )
+    return null;
+  if (
+    output !== expected.command.split(" --output ")[1] ||
+    row.artifact_path !== expected.artifact_path
+  )
+    return null;
+  if (!registeredExecution(workflow, sources, adapter, suite)) return null;
+  if (suite === "outbound-lifetimes") return "qualification";
+  const ci =
+    "scripts/test_integration.sh --adapter cloudflare --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/cloudflare";
+  return ciOwnsCommand(workflow, ci) ? "registered-functional" : null;
+}
+
+test("execution ownership distinguishes strict qualification from automatic CI", () => {
+  const { workflow } = closeoutInputs();
+  for (const adapter of ["axum", "cloudflare", "fastly", "spin"]) {
+    const row = runtimeBinding(adapter);
+    assert.equal(ciOwnsCommand(workflow, row.command), false);
+    assert.equal(executionOwnsCommand(workflow, row), "qualification", adapter);
+  }
+  const callback = {
+    ...runtimeBinding("fastly"),
+    environment: "viceroy/callback-owner",
+  };
+  assert.equal(executionOwnsCommand(workflow, callback), "qualification");
+  assert.equal(
+    executionOwnsCommand(workflow, { command: spinCiCommand }),
+    "ci",
+  );
+  const cloudflare = runtimeBinding("cloudflare", "outbound-wire");
+  assert.equal(
+    executionOwnsCommand(workflow, cloudflare),
+    "registered-functional",
+  );
+  assert.equal(
+    executionOwnsCommand(workflow + `\n# ${cloudflare.command}`, cloudflare),
+    "registered-functional",
+    "a comment cannot convert a registered functional command into a CI invocation",
+  );
+});
+
+test("execution ownership rejects noncanonical qualification commands and artifacts", () => {
+  const { workflow } = closeoutInputs();
+  const row = runtimeBinding("fastly");
+  for (const command of [
+    row.command + " --skip-build",
+    row.command + " --adapter fastly",
+    row.command + " && true",
+    row.command + "; true",
+    row.command.replace("--adapter fastly", "--adapter all"),
+    row.command.replace("--adapter fastly ", ""),
+    row.command.replace("--adapter fastly", "--adapter unknown"),
+    row.command.replace("--suite outbound-lifetimes", "--suite smoke"),
+    row.command.replace("lifetimes/viceroy", "lifetimes/fastly"),
+    row.command.replace(/--output .+$/, '--output "$run"'),
+    row.command.replace(
+      "--adapter fastly --suite outbound-lifetimes",
+      "--suite outbound-lifetimes --adapter fastly",
+    ),
+  ]) {
+    assert.equal(
+      executionOwnsCommand(workflow + `\n# ${command}`, { ...row, command }),
+      null,
+      command,
+    );
+  }
+  for (const change of [
+    { environment: "unit/fastly" },
+    { environment: "workerd" },
+    { artifact_path: "outbound/lifetimes/viceroy/raw.log" },
+    { artifact_path: "outbound/lifetimes/viceroy/events.jsonl.bak" },
+    { artifact_path: "outbound/lifetimes/fastly/events.jsonl" },
+  ])
+    assert.equal(executionOwnsCommand(workflow, { ...row, ...change }), null);
+  assert.equal(
+    executionOwnsCommand(workflow, runtimeBinding("axum", "outbound-wire")),
+    null,
+  );
+});
+
+test("execution ownership keeps the six strict Fastly budget legs outside automatic CI", () => {
+  const { workflow } = closeoutInputs();
+  const ci =
+    "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly";
+  assert.equal(ciOwnsCommand(workflow, ci), true);
+  for (const case_id of [
+    ...["02", "03", "04", "05", "06"].map(
+      (number) => `EZ-2/acceptance/${number}`,
+    ),
+    "EZ-3/acceptance/05",
+  ]) {
+    const row = { ...runtimeBinding("fastly"), case_id };
+    assert.equal(executionOwnsCommand(workflow, row), "qualification", case_id);
+    assert.equal(
+      executionOwnsCommand(workflow, { ...row, command: ci }),
+      null,
+      case_id,
+    );
+  }
+});
+
+test("execution ownership requires real selector, dispatch and guarded controller sources", () => {
+  const { workflow } = closeoutInputs();
+  const original = executionSources();
+  const row = runtimeBinding("fastly");
+  assert.equal(executionOwnsCommand(workflow, row, original), "qualification");
+  for (const [file, before, after] of [
+    ["launcher", '"$@"', '"--suite" "smoke"'],
+    ["launcher", 'exec "${CARGO:-cargo}"', '# exec "${CARGO:-cargo}"'],
+    ["args", '|| (adapter_selected && a.adapter != "all")', "|| true"],
+    ["args", '                "outbound-lifetimes",\n', ""],
+    [
+      "args",
+      "fn outbound_lifetimes_selects_exactly_one_explicit_provider()",
+      "fn obsolete_selector()",
+    ],
+    [
+      "runners",
+      'return lifetimes::run("fastly", run, records);',
+      'return wire::run("fastly", run, records);',
+    ],
+    [
+      "lifetimes",
+      "let outcome = wire::progress_suite(",
+      "let outcome = unused_suite(",
+    ],
+    [
+      "lifetimes",
+      "let count = combined_count(outcome, tail, callbacks)?;",
+      "let count = Some(1);",
+    ],
+    [
+      "lifetimes",
+      'require(failures.is_empty(), failures.join("; "))?;',
+      "let _ = failures;",
+    ],
+    [
+      "lifetimes",
+      'Err(error) => failures.push(format!("budget-qualification: {error}"))',
+      "Err(_error) => {}",
+    ],
+    ["wire", "budgets::run(adapter, port, records)", "Ok(6)"],
+    [
+      "wire",
+      "let result = check(port, origins, records)?;",
+      "let result = Ok(());",
+    ],
+    [
+      "wire",
+      "let outcome = finish_wire(name, &mut process, origins, &state, records, outcome);",
+      "let outcome = outcome;",
+    ],
+  ]) {
+    assert.ok(original[file].includes(before), `${file}: mutation must apply`);
+    const changed =
+      original[file].replace(before, after) + `\n/* ${before} */\n`;
+    assert.equal(
+      executionOwnsCommand(workflow, row, { ...original, [file]: changed }),
+      null,
+      `${file}: ${before}`,
+    );
+  }
+  const cloudflare = runtimeBinding("cloudflare", "outbound-wire");
+  assert.equal(
+    executionOwnsCommand("", cloudflare, original),
+    null,
+    "functional registration still needs the existing provider CI setup",
+  );
+  const changed = original.runners.replace(
+    "return wire::run(name, run, records);",
+    "return smoke::run(name, run, records);",
+  );
+  assert.notEqual(changed, original.runners);
+  assert.equal(
+    executionOwnsCommand(workflow, cloudflare, {
+      ...original,
+      runners: changed,
+    }),
+    null,
+  );
+  for (const change of [
+    (job) => {
+      job.if = false;
+    },
+    (job) => {
+      job.strategy.matrix.suite = job.strategy.matrix.suite.filter(
+        (suite) => suite !== "workspace",
+      );
+    },
+    (job) => {
+      job.steps.find(
+        (step) => step.name === "Lifecycle fixture host tests",
+      ).if = false;
+    },
+    (job) => {
+      job.steps.find(
+        (step) => step.name === "Lifecycle fixture host tests",
+      ).run =
+        "# cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml";
+    },
+  ]) {
+    const changedWorkflow = parse(workflow, {
+      version: "1.2",
+      uniqueKeys: true,
+    });
+    change(changedWorkflow.jobs["host-tests"]);
+    assert.equal(
+      executionOwnsCommand(stringify(changedWorkflow), row, original),
+      null,
+      "selector unit tests must retain their existing CI owner",
+    );
+  }
+});
+
+function caseKey(row) {
+  return `${row.case_id}@${row.environment}`;
+}
+
+function canonicalCloseout(value) {
+  if (Array.isArray(value)) return value.map(canonicalCloseout);
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalCloseout(value[key])]),
+    );
+  return value;
+}
+
+function closeoutDigest(value) {
+  return digest(JSON.stringify(canonicalCloseout(value)));
+}
+
+function assertCloseoutFrozen(manifest) {
+  assert.equal(localCloseoutKeys.size, 93);
+  assert.equal(
+    closeoutDigest([...localCloseoutKeys].sort()),
+    localCloseoutKeyDigest,
+  );
+  const ordered = manifest.cases.toSorted((left, right) =>
+    caseKey(left) < caseKey(right)
+      ? -1
+      : caseKey(left) > caseKey(right)
+        ? 1
+        : 0,
+  );
+  const selected = ordered.filter((row) => localCloseoutKeys.has(caseKey(row)));
+  assert.equal(
+    selected.length,
+    93,
+    "every frozen closeout key must remain present",
+  );
+  assert.equal(
+    closeoutDigest({
+      schema: manifest.schema,
+      source: manifest.source,
+      source_digest: manifest.source_digest,
+      external_prerequisites: manifest.external_prerequisites,
+      decisions: manifest.decisions,
+      cases: ordered.filter((row) => !localCloseoutKeys.has(caseKey(row))),
+    }),
+    localCloseoutUnchangedDigest,
+    "non-closeout bindings, approvals and external gates must not change",
+  );
+  const bindingFields = new Set([
+    "sentinel",
+    "additional_sentinels",
+    "command",
+    "artifact_path",
+    "implementation",
+    "companion_case",
+  ]);
+  assert.equal(
+    closeoutDigest(
+      selected.map((row) =>
+        Object.fromEntries(
+          Object.entries(row).filter(([field]) => !bindingFields.has(field)),
+        ),
+      ),
+    ),
+    localCloseoutScopeDigest,
+    "closeout may change bindings, not requirements or applicability",
+  );
+}
+
+function assertLocalArtifactBindings(manifest) {
+  assert.equal(localCloseoutArtifacts.size, 8);
+  const rows = new Map(manifest.cases.map((row) => [caseKey(row), row]));
+  for (const [key, artifact] of localCloseoutArtifacts) {
+    assert.ok(
+      localCloseoutKeys.has(key),
+      `${key}: artifact repair must stay in the frozen 93`,
+    );
+    assert.ok(rows.has(key), `${key}: missing artifact owner`);
+    assert.equal(
+      rows.get(key).artifact_path,
+      artifact,
+      `${key}: wrong captured CI log`,
+    );
+  }
+}
+
+function assertLocalCloseout(manifest, spec, workflow) {
+  assertCloseoutFrozen(manifest);
+  assertLocalArtifactBindings(manifest);
+  assert.deepEqual(validateManifest(manifest, spec), {
+    criteria: 255,
+    legs: 511,
+    planned: 265,
+  });
+  const report = checker.inventoryCoverage(manifest, spec);
+  assert.equal(report.qualified, false);
+  assert.equal(report.local_bindings_complete, true);
+  assert.deepEqual(report.local_pending, []);
+  assert.deepEqual(report.summary, {
+    "required-local": { ready: 217, planned: 0 },
+    "required-external": { ready: 0, planned: 44 },
+    "conditional-pending": { ready: 0, planned: 50 },
+    "follow-up-not-promoted": { ready: 29, planned: 171 },
+    "approved-deferred": { ready: 0, planned: 0 },
+  });
+  assert.equal(
+    manifest.cases.filter((row) => row.implementation === "ready").length,
+    246,
+  );
+  assert.ok(
+    manifest.decisions.every((decision) => decision.status === "pending"),
+  );
+  const rows = new Map(manifest.cases.map((row) => [caseKey(row), row]));
+  const ownerFor = (environment) => {
+    if (/^(?:unit\/)?fastly(?:\/|$)|^viceroy(?:\/|$)/.test(environment))
+      return "fastly";
+    if (/^(?:unit\/)?cloudflare(?:\/|$)|^workerd(?:\/|$)/.test(environment))
+      return "cloudflare";
+    if (/^(?:unit\/)?axum(?:\/|$)/.test(environment)) return "axum";
+    if (/^(?:unit\/)?spin(?:\/|$)/.test(environment)) return "spin";
+    assert.fail(`no existing local owner for ${environment}`);
+  };
+  for (const key of localCloseoutKeys) {
+    const row = rows.get(key);
+    assert.equal(row.implementation, "ready", key);
+    assert.equal(row.applicability, "blocking", key);
+    assert.equal(row.approval, null, key);
+    assert.equal(row.condition, null, key);
+    assert.ok(
+      executionOwnsCommand(workflow, row),
+      `${key}: an existing registered execution owner must own the exact command`,
+    );
+    const names = [row.sentinel, ...(row.additional_sentinels ?? [])];
+    assert.equal(
+      new Set(names).size,
+      names.length,
+      `${key}: duplicate proof names`,
+    );
+    const owner = ownerFor(row.environment);
+    if (row.command.startsWith("scripts/test_integration.sh ")) {
+      assert.equal(
+        row.command.split(" ")[2],
+        owner,
+        `${key}: wrong runtime owner`,
+      );
+    } else {
+      const [prefix, cargo] = row.command.split(" cargo ");
+      const options = prefix.split(" ");
+      const argumentsList = cargo.split(" ");
+      assert.equal(
+        argumentsList[argumentsList.indexOf("-p") + 1],
+        `edgezero-adapter-${owner}`,
+        key,
+      );
+      const inventoryAt = options.indexOf("--inventory");
+      assert.ok(inventoryAt >= 0, `${key}: reuse the owning inventory guard`);
+      const guarded = checker.readySentinels(
+        manifest,
+        options[inventoryAt + 1],
+        row.command,
+      );
+      for (const name of names)
+        assert.ok(
+          guarded.includes(name),
+          `${key}: ${name} is not required by its CI invocation`,
+        );
+    }
+    if (row.companion_case !== undefined) {
+      assert.equal(
+        rows.get(row.companion_case)?.implementation,
+        "ready",
+        `${key}: missing ready companion`,
+      );
+    }
+  }
+}
+
+function closeoutInputs() {
+  return {
+    manifest: JSON.parse(
+      readFileSync(
+        new URL(
+          "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ),
+    spec: readFileSync(
+      new URL(
+        "../docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    workflow: readFileSync(
+      new URL("../.github/workflows/test.yml", import.meta.url),
+      "utf8",
+    ),
+  };
+}
+
+test("local closeout artifact bindings use exactly the eight captured CI logs", () => {
+  const { manifest } = closeoutInputs();
+  assertCloseoutFrozen(manifest);
+  assertLocalArtifactBindings(manifest);
+});
+
+test("local closeout artifact bindings reject old placeholders, wrong providers and wrong phases", async (t) => {
+  const { manifest } = closeoutInputs();
+  const valid = clone(manifest);
+  for (const [key, artifact] of localCloseoutArtifacts) {
+    valid.cases.find((row) => caseKey(row) === key).artifact_path = artifact;
+  }
+  assertLocalArtifactBindings(valid);
+  for (const [key, artifact] of localCloseoutArtifacts) {
+    const fastly = key.endsWith("@unit/fastly");
+    for (const [label, invalidArtifact] of [
+      [
+        "old placeholder",
+        fastly
+          ? "outbound/unit/fastly/raw.log"
+          : "outbound/axum/native-tcp/raw.log",
+      ],
+      [
+        "wrong provider",
+        artifact.replace(fastly ? "/fastly/" : "/axum/", "/cloudflare/"),
+      ],
+      ["wrong phase", artifact.replace(/[^/]+$/, "sdk-tests.log")],
+    ]) {
+      const invalid = clone(valid);
+      invalid.cases.find((row) => caseKey(row) === key).artifact_path =
+        invalidArtifact;
+      await t.test(`${key}: ${label}`, () => {
+        assert.throws(() => assertLocalArtifactBindings(invalid), {
+          name: "AssertionError",
+        });
+      });
+    }
+  }
+});
+
+test("required local closeout binds exactly the frozen 93 keys through registered execution owners", () => {
+  const { manifest, spec, workflow } = closeoutInputs();
+  assertLocalCloseout(manifest, spec, workflow);
+});
+
+test("local closeout cannot promote siblings, mutate scope or replace existing bindings", () => {
+  const { manifest } = closeoutInputs();
+  assertCloseoutFrozen(manifest);
+  for (const change of [
+    (value) => {
+      value.cases.find(
+        (row) =>
+          !localCloseoutKeys.has(caseKey(row)) &&
+          row.implementation === "planned",
+      ).implementation = "ready";
+    },
+    (value) => {
+      value.cases.find(
+        (row) =>
+          !localCloseoutKeys.has(caseKey(row)) &&
+          row.implementation === "ready",
+      ).sentinel = "replacement_proof";
+    },
+    (value) => {
+      value.decisions[0].status = "approved";
+    },
+    (value) => {
+      value.cases.find((row) =>
+        localCloseoutKeys.has(caseKey(row)),
+      ).applicability = "follow-up";
+    },
+    (value) => {
+      value.cases.find((row) => localCloseoutKeys.has(caseKey(row))).expected =
+        "weaker assertion";
+    },
+  ]) {
+    const invalid = clone(manifest);
+    change(invalid);
+    assert.throws(() => assertCloseoutFrozen(invalid));
+  }
+});
+
+test("local closeout rejects missing bindings and commands owned by another adapter", () => {
+  const { manifest, spec, workflow } = closeoutInputs();
+  assertLocalCloseout(manifest, spec, workflow);
+  const first = [...localCloseoutKeys][0];
+  for (const change of [
+    (row) => {
+      row.implementation = "planned";
+    },
+    (row) => {
+      row.command = "cargo test --lib";
+    },
+    (row) => {
+      row.command = manifest.cases.find(
+        (entry) => entry.environment === "axum/native-tcp",
+      ).command;
+    },
+    (row) => {
+      row.companion_case = "EZ-99/acceptance/01@unit/core";
+    },
+  ]) {
+    const invalid = clone(manifest);
+    change(invalid.cases.find((row) => caseKey(row) === first));
+    assert.throws(() => assertLocalCloseout(invalid, spec, workflow));
+  }
+});
+
 test("integration CI ownership requires the paired canonical output and invocation", () => {
   const directory =
     "crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/";
@@ -324,6 +1259,283 @@ function inventory(input = source) {
     })),
   };
 }
+
+test("coverage separates required local gaps from external evidence without qualifying", () => {
+  assert.equal(typeof checker.inventoryCoverage, "function");
+  const manifest = inventory();
+  manifest.cases[0].implementation = "planned";
+  const coverage = checker.inventoryCoverage(
+    manifest,
+    source,
+    fixtureLegPolicy(source),
+  );
+  assert.equal(coverage.qualified, false);
+  assert.equal(coverage.local_bindings_complete, false);
+  assert.equal(coverage.summary["required-local"].ready, 1);
+  assert.equal(coverage.summary["required-local"].planned, 1);
+  assert.equal(coverage.legs.length, manifest.cases.length);
+  assert.deepEqual(coverage.local_pending, ["EZ-1/acceptance/01@axum"]);
+  manifest.cases[0].implementation = "ready";
+  const complete = checker.inventoryCoverage(
+    manifest,
+    source,
+    fixtureLegPolicy(source),
+  );
+  assert.equal(complete.local_bindings_complete, true);
+  assert.equal(complete.qualified, false);
+});
+
+test("coverage does not invent approval for conditional and unpromoted follow-up legs", () => {
+  assert.equal(typeof checker.inventoryCoverage, "function");
+  const input = source.replaceAll("EZ-1", "EZ-24");
+  const manifest = inventory(input);
+  manifest.cases[0].applicability = "conditional";
+  manifest.cases[0].condition = "explicit optional target adopted";
+  manifest.cases[0].approval = "optional";
+  manifest.cases[1].applicability = "follow-up";
+  manifest.decisions = [
+    { id: "optional", status: "pending", scope: ["EZ-24/acceptance/01@axum"] },
+  ];
+  const pending = checker.inventoryCoverage(
+    manifest,
+    input,
+    fixtureLegPolicy(input),
+  );
+  assert.equal(pending.summary["conditional-pending"].ready, 1);
+  assert.equal(pending.summary["follow-up-not-promoted"].ready, 1);
+  assert.equal(pending.summary["approved-deferred"].ready, 0);
+  assert.equal(pending.legs[0].condition, "explicit optional target adopted");
+  for (const status of ["pending", "rejected"]) {
+    manifest.decisions[0].status = status;
+    assert.equal(
+      checker.inventoryCoverage(manifest, input, fixtureLegPolicy(input))
+        .summary["approved-deferred"].ready,
+      0,
+    );
+  }
+  manifest.decisions[0] = {
+    ...manifest.decisions[0],
+    status: "approved",
+    action: "present",
+  };
+  assert.throws(
+    () => checker.inventoryCoverage(manifest, input, fixtureLegPolicy(input)),
+    /approval/,
+  );
+});
+
+test("coverage keeps consumer and hosted legs external and never waives a reuse suffix", () => {
+  assert.equal(typeof checker.inventoryCoverage, "function");
+  const manifest = inventory();
+  for (const [index, environment] of [
+    "consumer-viceroy",
+    "hosted-fastly",
+  ].entries()) {
+    manifest.cases[index].environment = environment;
+    manifest.cases[index].implementation = "planned";
+  }
+  const policy = digest(
+    JSON.stringify(
+      manifest.cases.map((c) => `${c.case_id}@${c.environment}`).sort(),
+    ),
+  );
+  const coverage = checker.inventoryCoverage(manifest, source, policy);
+  assert.equal(coverage.summary["required-external"].planned, 2);
+  assert.equal(coverage.local_bindings_complete, true);
+  assert.equal(coverage.qualified, false);
+  manifest.cases[0].environment = "viceroy/reuse";
+  const changed = digest(
+    JSON.stringify(
+      manifest.cases.map((c) => `${c.case_id}@${c.environment}`).sort(),
+    ),
+  );
+  const reuse = checker.inventoryCoverage(manifest, source, changed);
+  assert.deepEqual(reuse.local_pending, ["EZ-1/acceptance/01@viceroy/reuse"]);
+  assert.throws(() => checker.inventoryCoverage(manifest, source), /leg set/);
+});
+
+test("coverage partitions the reviewed inventory without treating pending scope as approved", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      new URL(
+        "../crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  const input = readFileSync(
+    new URL(
+      "../docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const report = checker.inventoryCoverage(manifest, input);
+  assert.equal(report.criteria, 255);
+  assert.equal(report.total_legs, 511);
+  assert.equal(new Set(report.legs.map((leg) => leg.id)).size, 511);
+  assert.equal(
+    Object.values(report.summary).reduce(
+      (sum, group) => sum + group.ready + group.planned,
+      0,
+    ),
+    511,
+  );
+  for (const leg of report.legs) {
+    if (leg.category === "approved-deferred")
+      assert.equal(leg.approval_status, "approved");
+    if (leg.category === "required-local") assert.equal(leg.location, "local");
+    if (leg.id.includes("@consumer-")) assert.equal(leg.location, "external");
+  }
+  assert.equal(report.qualified, false);
+  assert.equal(
+    report.local_bindings_complete,
+    report.local_pending.length === 0,
+  );
+});
+
+test("coverage requires complete scoped approval before promotion or approved deferral", () => {
+  const input = source.replaceAll("EZ-1", "EZ-24");
+  const manifest = inventory(input);
+  manifest.cases.forEach((entry) => {
+    entry.applicability = "follow-up";
+  });
+  manifest.cases[0].approval = "selected";
+  const approved = {
+    id: "selected",
+    status: "approved",
+    action: "defer",
+    scope: ["EZ-24/acceptance/01@axum"],
+    owner: "fixture-owner",
+    ci_owner: "fixture-ci",
+    edgezero_approver: "fixture-maintainer",
+    consumer_approver: "fixture-consumer",
+    date: "2026-11-02",
+    evidence: "fixture-approval",
+    changelog: "fixture-changelog",
+  };
+  for (const [action, category] of [
+    ["defer", "approved-deferred"],
+    ["promote", "required-local"],
+    ["present", "required-local"],
+  ]) {
+    manifest.decisions = [{ ...approved, action }];
+    const coverage = checker.inventoryCoverage(
+      manifest,
+      input,
+      fixtureLegPolicy(input),
+    );
+    assert.equal(coverage.legs[0].category, category);
+    assert.equal(coverage.legs[1].category, "follow-up-not-promoted");
+    for (const field of [
+      "owner",
+      "ci_owner",
+      "edgezero_approver",
+      "consumer_approver",
+      "date",
+      "evidence",
+    ]) {
+      const invalid = clone(manifest);
+      delete invalid.decisions[0][field];
+      assert.throws(
+        () =>
+          checker.inventoryCoverage(invalid, input, fixtureLegPolicy(input)),
+        /approval/,
+      );
+    }
+  }
+  const invalid = clone(manifest);
+  delete invalid.decisions[0].changelog;
+  assert.throws(
+    () => checker.inventoryCoverage(invalid, input, fixtureLegPolicy(input)),
+    /CHANGELOG/,
+  );
+  manifest.decisions[0] = {
+    ...approved,
+    scope: ["EZ-24/acceptance/01@workerd"],
+  };
+  assert.throws(
+    () => checker.inventoryCoverage(manifest, input, fixtureLegPolicy(input)),
+    /scoped approval/,
+  );
+  const blocking = inventory();
+  blocking.cases[0].approval = "selected";
+  blocking.decisions = [{ ...approved, scope: ["EZ-1/acceptance/01@axum"] }];
+  assert.throws(
+    () => checker.inventoryCoverage(blocking, source, fixtureLegPolicy(source)),
+    /blocking/,
+  );
+});
+
+test("existing evidence CI owner enforces required local binding completeness", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/test.yml", import.meta.url),
+    "utf8",
+  );
+  const owner = workflow
+    .split("- name: Outbound evidence tool contracts")[1]
+    ?.split("- name:")[0];
+  assert.ok(owner, "existing evidence CI owner");
+  assert.match(
+    owner,
+    /node scripts\/check_outbound_cutover_evidence\.mjs --coverage(?:\s|$)/,
+  );
+  assert.equal(
+    workflow.match(
+      /node scripts\/check_outbound_cutover_evidence\.mjs --coverage/g,
+    )?.length,
+    1,
+  );
+});
+
+test("coverage CLI reports binding gaps without converting external gaps to local completion", () => {
+  const { manifest, spec } = closeoutInputs();
+  const { legs, ...expectedSummary } = checker.inventoryCoverage(
+    manifest,
+    spec,
+  );
+  assert.equal(
+    legs.length,
+    511,
+    "the audit API keeps its complete per-leg partition",
+  );
+  const script = fileURLToPath(
+    new URL("./check_outbound_cutover_evidence.mjs", import.meta.url),
+  );
+  const actual = spawnSync(process.execPath, [script, "--coverage"], {
+    encoding: "utf8",
+  });
+  const report = JSON.parse(actual.stdout);
+  assert.equal(
+    Object.hasOwn(report, "legs"),
+    false,
+    "CLI output must omit the per-leg dump",
+  );
+  assert.deepEqual(report, expectedSummary);
+  assert.equal(actual.status, report.local_bindings_complete ? 0 : 1);
+  assert.equal(report.qualified, false);
+  assert.equal(report.summary["required-external"].planned > 0, true);
+  const help = spawnSync(process.execPath, [script, "--help"], {
+    encoding: "utf8",
+  });
+  assert.equal(help.status, 0);
+  assert.match(
+    help.stdout,
+    /Usage:[\s\S]*\n       node scripts\/check_outbound_cutover_evidence\.mjs --coverage \[--inventory INVENTORY\.json\]\n/,
+  );
+  assert.match(
+    help.stdout,
+    /Success means binding completeness only, not passing execution or qualification/,
+  );
+  const invalid = spawnSync(
+    process.execPath,
+    [script, "--coverage", "--candidate", sha],
+    { encoding: "utf8" },
+  );
+  assert.notEqual(invalid.status, 0);
+});
+
 function evidence(manifest = inventory()) {
   return {
     schema: 1,
@@ -380,6 +1592,160 @@ function release(manifest, record, input = source) {
     reviewedLegSetSha256: fixtureLegPolicy(input),
   });
 }
+
+function callbackCompanionInputs() {
+  const { manifest, spec } = closeoutInputs();
+  const isolation = [
+    "response::tests::body_created_batches_end_at_egress_without_closing_callback_work",
+    "response::tests::pending_body_write_deadline_releases_only_response_work",
+    "outbound::scope::tests::response_scope_closes_only_response_created_work",
+    "lifecycle::tests::callback_scope_exit_releases_unpolled_send_and_begin_before_cross_scope_polling",
+    "lifecycle::tests::callback_scope_exit_releases_retained_batch_driver",
+  ];
+  const counters = [
+    "callback_cleanup::tests::native_operation_cleanup_requires_real_pending_ownership_and_release",
+    "callback_cleanup::tests::native_operation_evidence_remains_bounded_with_all_five_roles",
+    "callback_cleanup::tests::callback_mode_accepts_only_exact_case_tokens",
+  ];
+  const unitKey = "EZ-6/acceptance/21@unit/fastly";
+  const callbackKey = "EZ-6/acceptance/23@unit/fastly/both-wrappers";
+  const unit = manifest.cases.find((row) => caseKey(row) === unitKey);
+  const callback = manifest.cases.find((row) => caseKey(row) === callbackKey);
+  Object.assign(unit, {
+    implementation: "ready",
+    sentinel: isolation[0],
+    additional_sentinels: isolation.slice(1),
+    command:
+      "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
+    artifact_path: "outbound/redirect/fastly/runtime-unit-tests.log",
+  });
+  delete unit.companion_case;
+  Object.assign(callback, {
+    implementation: "ready",
+    sentinel: counters[0],
+    additional_sentinels: counters.slice(1),
+    command:
+      "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly",
+    artifact_path: "outbound/redirect/fastly/fixture-check.log",
+    companion_case: unitKey,
+  });
+  return { manifest, spec, isolation, counters, unitKey, callbackKey };
+}
+
+test("Fastly callback companion policies accept the exact five-plus-three proof split", () => {
+  const { manifest, spec } = callbackCompanionInputs();
+  assert.doesNotThrow(() => validateManifest(manifest, spec));
+  for (const row of manifest.cases.filter((row) =>
+    [
+      "EZ-6/acceptance/21@unit/fastly",
+      "EZ-6/acceptance/23@unit/fastly/both-wrappers",
+    ].includes(caseKey(row)),
+  ))
+    row.additional_sentinels.reverse();
+  assert.doesNotThrow(
+    () => validateManifest(manifest, spec),
+    "proof sets do not depend on array order",
+  );
+});
+
+test("Fastly callback companion policies reject missing proofs and wrong companions or owners", async (t) => {
+  const { manifest, spec, isolation, counters, unitKey, callbackKey } =
+    callbackCompanionInputs();
+  assert.doesNotThrow(() => validateManifest(manifest, spec));
+  const changes = [];
+  for (const [key, proofs] of [
+    [unitKey, isolation],
+    [callbackKey, counters],
+  ]) {
+    for (const proof of proofs) {
+      changes.push([
+        `${key}: missing ${proof}`,
+        (value) => {
+          const row = value.cases.find((entry) => caseKey(entry) === key);
+          const names = [row.sentinel, ...row.additional_sentinels].filter(
+            (name) => name !== proof,
+          );
+          row.sentinel = names[0];
+          row.additional_sentinels = names.slice(1);
+        },
+      ]);
+    }
+    changes.push([
+      `${key}: wrong marker`,
+      (value) => {
+        value.cases.find((row) => caseKey(row) === key).sentinel =
+          "unrelated::proof";
+      },
+    ]);
+    changes.push([
+      `${key}: extra marker`,
+      (value) => {
+        value.cases
+          .find((row) => caseKey(row) === key)
+          .additional_sentinels.push("unrelated::extra");
+      },
+    ]);
+  }
+  for (const [key, field, wrong] of [
+    [
+      unitKey,
+      "command",
+      manifest.cases.find((row) => caseKey(row) === callbackKey).command,
+    ],
+    [unitKey, "artifact_path", "outbound/redirect/fastly/sdk-tests.log"],
+    [
+      callbackKey,
+      "command",
+      manifest.cases.find((row) => caseKey(row) === unitKey).command,
+    ],
+    [
+      callbackKey,
+      "artifact_path",
+      "outbound/redirect/fastly/runtime-unit-tests.log",
+    ],
+    [callbackKey, "companion_case", undefined],
+    [callbackKey, "companion_case", "EZ-4/acceptance/01@unit/core"],
+  ])
+    changes.push([
+      `${key}: wrong or missing ${field}`,
+      (value) => {
+        value.cases.find((row) => caseKey(row) === key)[field] = wrong;
+      },
+    ]);
+  for (const [name, change] of changes) {
+    await t.test(name, () => {
+      const invalid = clone(manifest);
+      change(invalid);
+      assert.throws(() => validateManifest(invalid, spec));
+    });
+  }
+});
+
+test("Fastly callback companion policies keep runtime cleanup independent and forbid chains", async (t) => {
+  const { manifest, spec, unitKey, callbackKey } = callbackCompanionInputs();
+  const runtimeKey = "EZ-6/acceptance/23@viceroy";
+  const runtime = manifest.cases.find((row) => caseKey(row) === runtimeKey);
+  Object.assign(runtime, {
+    implementation: "ready",
+    command:
+      "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy",
+    artifact_path: "outbound/lifetimes/viceroy/events.jsonl",
+  });
+  delete runtime.companion_case;
+  assert.doesNotThrow(() => validateManifest(manifest, spec));
+  for (const [key, companion] of [
+    [runtimeKey, unitKey],
+    [runtimeKey, callbackKey],
+    [callbackKey, runtimeKey],
+    [unitKey, "EZ-4/acceptance/01@unit/core"],
+  ])
+    await t.test(`${key}: cannot depend on ${companion}`, () => {
+      const invalid = clone(manifest);
+      invalid.cases.find((row) => caseKey(row) === key).companion_case =
+        companion;
+      assert.throws(() => validateManifest(invalid, spec));
+    });
+});
 
 test("a runtime proof receives no credit without its same-candidate companion", () => {
   const manifest = inventory();
@@ -909,7 +2275,7 @@ test("redirect core criteria bind every required test before one library executi
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 358,
+    planned: 265,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib";
@@ -1316,7 +2682,7 @@ test("core policy conformance binds complete proofs without promoting provider l
     )) {
       assert.equal(
         row.implementation,
-        "planned",
+        localCloseoutKeys.has(caseKey(row)) ? "ready" : "planned",
         `${caseId}@${row.environment}`,
       );
     }
@@ -1549,7 +2915,7 @@ test("connect mapping requires actual provider proofs and the same-candidate cor
       (c) =>
         c.case_id === "EZ-4/acceptance/01" && c.environment === "unit/fastly",
     ).implementation,
-    "planned",
+    "ready",
   );
 });
 
@@ -1603,6 +2969,72 @@ test("Fastly optimizer mapping retains its recording SDK and preflight proofs", 
   }
 });
 
+test("approved TLS baseline keeps configurable verification deferred and binds native readback", () => {
+  const { manifest, spec } = closeoutInputs();
+  const requirement = spec
+    .split("\n")
+    .find((line) => line.startsWith("- **EZ-2.1**"));
+  assert.match(
+    requirement,
+    /blocking baseline.*fixed full certificate verification/,
+  );
+  assert.match(
+    requirement,
+    /independently configurable verification modes remain EZ-12 follow-up/,
+  );
+  const row = manifest.cases.find(
+    (entry) =>
+      entry.case_id === "EZ-2/acceptance/03" && entry.environment === "viceroy",
+  );
+  assert.equal(row.implementation, "ready");
+  assert.equal(row.sentinel, "fastly-budget-inventory");
+  assert.match(
+    row.expected,
+    /five distinct configurations and five registrations/,
+  );
+  assert.match(
+    row.expected,
+    /Native Fastly SDK readback MUST confirm TLS is enabled for HTTPS and disabled for HTTP/,
+  );
+  assert.match(
+    row.expected,
+    /No independently configurable TLS mode is required/,
+  );
+  assert.equal(row.companion_case, "EZ-2/acceptance/22@unit/fastly");
+  const companion = manifest.cases.find(
+    (entry) => caseKey(entry) === row.companion_case,
+  );
+  const readback =
+    "outbound::fastly_impl::tests::b31_registered_transport_preserves_origin_and_wire_authority";
+  assert.ok(companion.additional_sentinels.includes(readback));
+  assert.deepEqual(validateManifest(manifest, spec), {
+    criteria: 255,
+    legs: 511,
+    planned: 265,
+  });
+  for (const entry of manifest.cases.filter((entry) =>
+    entry.case_id.startsWith("EZ-12/"),
+  )) {
+    assert.equal(entry.applicability, "follow-up");
+    assert.equal(entry.implementation, "planned");
+    assert.equal(entry.approval, null);
+  }
+  for (const omit of ["companion", "readback"]) {
+    const invalid = structuredClone(manifest);
+    const changed = invalid.cases.find(
+      (entry) => caseKey(entry) === caseKey(row),
+    );
+    if (omit === "companion") delete changed.companion_case;
+    else
+      invalid.cases.find(
+        (entry) => caseKey(entry) === row.companion_case,
+      ).additional_sentinels = companion.additional_sentinels.filter(
+        (entry) => entry !== readback,
+      );
+    assert.throws(() => validateManifest(invalid, spec), /baseline.*readback/);
+  }
+});
+
 test("approved focus wording separates numeric errors from compile-time invariants", () => {
   const manifest = JSON.parse(
     readFileSync(
@@ -1637,7 +3069,7 @@ test("approved focus wording separates numeric errors from compile-time invarian
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 358,
+    planned: 265,
   });
   const stale = structuredClone(manifest);
   stale.source_digest =
@@ -1875,7 +3307,7 @@ test("Fastly registration observation binds its complete existing unit phase", (
     row.sentinel,
     "context::tests::registration_warning_obeys_fifty_millisecond_boundary",
   );
-  assert.equal(row.additional_sentinels.length, 8);
+  assert.equal(row.additional_sentinels.length, 9);
   assert.ok(
     row.additional_sentinels.includes(
       "outbound::fastly_impl::tests::retained_client_records_registration_in_each_invoking_callback",
@@ -1906,9 +3338,16 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
       "utf8",
     ),
   );
-  assert.match(manifest.status, /358 other legs remain planned/);
-  assert.match(manifest.status, /EZ-1 core acceptance 07/);
-  assert.match(manifest.status, /EZ-3 core acceptance 04/);
+  assert.match(manifest.status, /--coverage for derived binding counts/);
+  assert.match(
+    manifest.status,
+    /Readiness is not qualification or applicability approval\./,
+  );
+  assert.match(
+    manifest.status,
+    /README\.md#mandatory-forwarding-example-doctest/,
+  );
+  assert.match(manifest.status, /no EZ-25\.42 adoption/);
   const bindings = [
     [
       "EZ-1/acceptance/07",
@@ -1969,7 +3408,7 @@ test("forwarding ordering and normalization core proofs bind only their reviewed
     )) {
       assert.equal(
         row.implementation,
-        "planned",
+        localCloseoutKeys.has(caseKey(row)) ? "ready" : "planned",
         `${caseId}@${row.environment}`,
       );
     }
@@ -2487,7 +3926,11 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
   );
   assert.equal(pending.length, 8);
   for (const c of pending) {
-    assert.equal(c.implementation, "planned", `${c.case_id}@${c.environment}`);
+    assert.equal(
+      c.implementation,
+      localCloseoutKeys.has(caseKey(c)) ? "ready" : "planned",
+      `${c.case_id}@${c.environment}`,
+    );
     if (c.case_id.endsWith("/16b")) {
       assert.equal(c.applicability, "conditional");
       assert.equal(c.condition, "EZ-14 present");
@@ -2499,14 +3942,15 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 153);
+  assert.equal(ready.length, 246);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    358,
+    265,
   );
   assert.ok(
     ready.every(
       (c) =>
+        localCloseoutKeys.has(caseKey(c)) ||
         c.case_id.startsWith("EZ-9/acceptance/") ||
         (c.case_id === "EZ-1/acceptance/06" &&
           c.environment === "axum/http1-chunked") ||

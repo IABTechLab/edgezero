@@ -14,6 +14,47 @@ fn cloudflare_runner(configured: Option<std::ffi::OsString>) -> std::ffi::OsStri
     configured.unwrap_or_else(|| "wasm-bindgen-test-runner".into())
 }
 
+fn fixture_check_command(adapter: &str, target: &str, runner: Option<&str>) -> Result<Command> {
+    let mut command = if adapter == "fastly" {
+        require(
+            target == "wasm32-wasip1",
+            "Fastly fixture units require their SDK target",
+        )?;
+        guarded(
+            &[
+                "callback_cleanup::tests::callback_mode_accepts_only_exact_case_tokens\ncallback_cleanup::tests::native_operation_cleanup_requires_real_pending_ownership_and_release\ncallback_cleanup::tests::native_operation_evidence_remains_bounded_with_all_five_roles",
+            ],
+            &[],
+        )
+    } else {
+        Command::new("cargo")
+    };
+    command
+        .args([
+            if adapter == "fastly" { "test" } else { "check" },
+            "--offline",
+            "--locked",
+            "--manifest-path",
+        ])
+        .arg(fixture_root().join("Cargo.toml"))
+        .args([
+            "-p",
+            &format!("fixture-{adapter}"),
+            "--target",
+            target,
+            "--all-targets",
+        ]);
+    if adapter == "fastly" {
+        let runner = runner
+            .filter(|value| !value.trim().is_empty())
+            .ok_or("Fastly fixture tests require the selected Viceroy runner")?;
+        command
+            .args(["--features", "progress"])
+            .env("CARGO_TARGET_WASM32_WASIP1_RUNNER", runner);
+    }
+    Ok(command)
+}
+
 fn nested(adapter: &str, suite: &str, output: &Path) -> Result<Command> {
     let mut command = Command::new(std::env::current_exe()?);
     command
@@ -329,19 +370,20 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
             output,
             records,
         )?;
+        let fixture_runner = if adapter == "fastly" {
+            Some(format!(
+                "{} run",
+                executable("VICEROY_BIN", "viceroy")
+                    .ok_or("Viceroy is not installed")?
+                    .display()
+            ))
+        } else {
+            None
+        };
         phase(
             adapter,
             "fixture-check",
-            Command::new("cargo")
-                .args(["check", "--offline", "--locked", "--manifest-path"])
-                .arg(fixture_root().join("Cargo.toml"))
-                .args([
-                    "-p",
-                    &format!("fixture-{adapter}"),
-                    "--target",
-                    target,
-                    "--all-targets",
-                ]),
+            &mut fixture_check_command(adapter, target, fixture_runner.as_deref())?,
             &repo,
             output,
             records,
@@ -388,6 +430,42 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fastly_fixture_owner_runs_guarded_units_with_the_selected_runtime() {
+        let command =
+            fixture_check_command("fastly", "wasm32-wasip1", Some("/selected/viceroy run"))
+                .unwrap();
+        let args = command
+            .get_args()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(command.get_program(), "bash");
+        assert!(args.contains(&"test") && args.contains(&"--all-targets"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--features", "progress"])
+        );
+        for name in [
+            "callback_cleanup::tests::callback_mode_accepts_only_exact_case_tokens",
+            "callback_cleanup::tests::native_operation_cleanup_requires_real_pending_ownership_and_release",
+            "callback_cleanup::tests::native_operation_evidence_remains_bounded_with_all_five_roles",
+        ] {
+            assert!(args[1].lines().any(|line| line == name));
+        }
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| name == "CARGO_TARGET_WASM32_WASIP1_RUNNER"
+                    && value == Some(std::ffi::OsStr::new("/selected/viceroy run")))
+        );
+        assert!(fixture_check_command("fastly", "wasm32-wasip1", None).is_err());
+        let cloudflare =
+            fixture_check_command("cloudflare", "wasm32-unknown-unknown", None).unwrap();
+        assert_eq!(cloudflare.get_program(), "cargo");
+        assert_eq!(cloudflare.get_args().next().unwrap(), "check");
+        assert!(!cloudflare.get_args().any(|arg| arg == "progress"));
+    }
 
     #[test]
     fn cloudflare_preserves_explicit_cargo_runner_selection() {

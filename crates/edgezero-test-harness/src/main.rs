@@ -5,6 +5,11 @@ mod net;
 mod runners;
 mod startup;
 use evidence::{Result, require};
+use nix::{
+    errno::Errno,
+    sys::signal::{self, Signal},
+    unistd::Pid,
+};
 use serde_json::{Value, json};
 use std::{
     fs::{self, OpenOptions},
@@ -273,8 +278,16 @@ fn request_cancellation() {
         .clone();
     for (id, nested_harness) in groups {
         // A child harness must cascade to its own groups before its owner reaps it.
-        let signal = if nested_harness { "-TERM" } else { "-KILL" };
-        let _ = signal_group(id, signal, Instant::now() + Duration::from_secs(2));
+        let signal = if nested_harness {
+            Signal::SIGTERM
+        } else {
+            Signal::SIGKILL
+        };
+        let _ = signal_target(
+            SignalTarget::Group(id),
+            Some(signal),
+            Instant::now() + Duration::from_secs(2),
+        );
     }
 }
 
@@ -293,6 +306,12 @@ pub fn check_cancelled(cancelled: &AtomicBool) -> std::io::Result<()> {
 enum SignalOutcome {
     Sent,
     Absent,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SignalTarget {
+    Group(u32),
+    Pid(u32),
 }
 
 fn requested_termination(status: ExitStatus, term_sent: bool) -> bool {
@@ -319,83 +338,31 @@ fn wait_for_exit(child: &mut Child, deadline: Instant) -> Result<Option<ExitStat
         thread::sleep(remaining.min(Duration::from_millis(10)));
     }
 }
-fn signal_group(id: u32, signal: &str, deadline: Instant) -> Result<SignalOutcome> {
-    #[cfg(unix)]
-    let target = format!("-{id}");
-    #[cfg(not(unix))]
-    let target = id.to_string();
-    signal_group_command(
-        Command::new("kill")
-            .args([signal, "--", &target])
-            .env("LC_ALL", "C"),
-        deadline,
-    )
+fn signal_target(
+    target: SignalTarget,
+    signal: Option<Signal>,
+    deadline: Instant,
+) -> Result<SignalOutcome> {
+    let (SignalTarget::Group(id) | SignalTarget::Pid(id)) = target;
+    let id = i32::try_from(id).ok().filter(|id| *id > 1).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid signal target ID")
+    })?;
+    require(Instant::now() < deadline, "process signal deadline expired")?;
+    let id = Pid::from_raw(id);
+    let result = match target {
+        SignalTarget::Group(_) => signal::killpg(id, signal),
+        SignalTarget::Pid(_) => signal::kill(id, signal),
+    };
+    require(Instant::now() < deadline, "process signal deadline expired")?;
+    signal_outcome(result)
 }
-fn signal_group_command(command: &mut Command, deadline: Instant) -> Result<SignalOutcome> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    require(
-        !remaining.is_zero(),
-        "process-group signal deadline expired",
-    )?;
-    let execution_deadline = deadline - (remaining / 2).min(Duration::from_secs(1));
-    let path = std::env::temp_dir().join(format!("fixture-signal-{}.log", token()));
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .ok();
-    let captured = file.is_some();
-    let outcome = (|| {
-        let mut helper = command
-            .stdout(Stdio::null())
-            .stderr(file.map_or_else(Stdio::null, Stdio::from))
-            .spawn()?;
-        let status = match wait_for_exit(&mut helper, execution_deadline) {
-            Ok(Some(status)) => status,
-            outcome => {
-                let mut failure = outcome.err().map_or_else(
-                    || {
-                        format!(
-                            "process-group signal helper timed out (pid {})",
-                            helper.id()
-                        )
-                    },
-                    |error| error.to_string(),
-                );
-                if let Err(error) = helper.kill() {
-                    failure.push_str(&format!("; kill signal helper: {error}"));
-                }
-                match wait_for_exit(&mut helper, deadline) {
-                    Ok(Some(_)) => {}
-                    Ok(None) => failure.push_str("; signal helper was not reaped before deadline"),
-                    Err(error) => failure.push_str(&format!("; reap signal helper: {error}")),
-                }
-                return Err(failure.into());
-            }
-        };
-        if status.success() {
-            return Ok(SignalOutcome::Sent);
-        }
-        require(
-            captured,
-            format!("process-group signal failed: {status}; diagnostics unavailable"),
-        )?;
-        let mut diagnostic = String::new();
-        // A descendant may retain stderr; a regular-file read never waits for its EOF.
-        fs::File::open(&path)?
-            .take(4096)
-            .read_to_string(&mut diagnostic)?;
-        require(
-            diagnostic.to_ascii_lowercase().contains("no such process"),
-            format!("process-group signal failed: {status}: {diagnostic}"),
-        )?;
-        Ok(SignalOutcome::Absent)
-    })();
-    if captured {
-        // Diagnostics must not determine whether a successfully sent signal is confirmed.
-        let _ = fs::remove_file(&path);
+
+fn signal_outcome(result: nix::Result<()>) -> Result<SignalOutcome> {
+    match result {
+        Ok(()) => Ok(SignalOutcome::Sent),
+        Err(Errno::ESRCH) => Ok(SignalOutcome::Absent),
+        Err(error) => Err(error.into()),
     }
-    outcome
 }
 pub struct Process(startup::ChildHandle, ProcessState);
 struct ProcessState {
@@ -584,7 +551,11 @@ impl Process {
         }
         let id = self.0.id();
         let term_deadline = Instant::now() + Duration::from_secs(5);
-        let term_sent = match signal_group(id, "-TERM", term_deadline) {
+        let term_sent = match signal_target(
+            SignalTarget::Group(id),
+            Some(Signal::SIGTERM),
+            term_deadline,
+        ) {
             Ok(outcome) => outcome == SignalOutcome::Sent,
             Err(error) => {
                 failures.push(error.to_string());
@@ -604,7 +575,11 @@ impl Process {
         // The parent may have exited while a descendant still holds sockets.
         let kill_deadline = Instant::now() + Duration::from_secs(5);
         #[cfg(unix)]
-        let group_cleaned = match signal_group(id, "-KILL", kill_deadline) {
+        let group_cleaned = match signal_target(
+            SignalTarget::Group(id),
+            Some(Signal::SIGKILL),
+            kill_deadline,
+        ) {
             Ok(_) => true,
             Err(error) => {
                 failures.push(error.to_string());
@@ -615,9 +590,13 @@ impl Process {
         let group_cleaned = true;
         if status.is_none()
             && (cfg!(not(unix)) || !group_cleaned)
-            && let Err(error) = self.0.kill()
+            && let Err(error) =
+                signal_target(SignalTarget::Pid(id), Some(Signal::SIGKILL), kill_deadline)
         {
             failures.push(error.to_string());
+            if let Err(error) = self.0.kill() {
+                failures.push(error.to_string());
+            }
         }
         if status.is_none() {
             match self.0.wait_until(kill_deadline) {
@@ -1110,6 +1089,28 @@ mod process_tests {
         }
     }
 
+    struct GroupCleanup(Option<u32>);
+
+    impl GroupCleanup {
+        fn finish(&mut self) -> Result<()> {
+            if let Some(id) = self.0 {
+                signal_target(
+                    SignalTarget::Group(id),
+                    Some(Signal::SIGKILL),
+                    Instant::now() + Duration::from_secs(2),
+                )?;
+                self.0 = None;
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for GroupCleanup {
+        fn drop(&mut self) {
+            let _ = self.finish();
+        }
+    }
+
     fn static_check_command(fixture: &Fixture, selection: &str) -> Command {
         let mut command = fixture.command("static-check");
         command
@@ -1259,14 +1260,14 @@ mod process_tests {
                     .unwrap()
                     .contains_key(&id.parse().unwrap())
             );
-            assert!(
-                !Command::new("kill")
-                    .args(["-0", "--", id])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .unwrap()
-                    .success()
+            assert_eq!(
+                signal_target(
+                    SignalTarget::Pid(id.parse().unwrap()),
+                    None,
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .unwrap(),
+                SignalOutcome::Absent,
             );
             fs::write(path.join("checked-reaped"), b"complete").unwrap();
             std::mem::forget(fixture);
@@ -1390,68 +1391,16 @@ mod process_tests {
             })
             .unwrap();
         }
-        if mode == "cleanup-tmp" || mode == "cleanup-retry" {
+        if mode == "cleanup-no-tools" {
             let fixture = Fixture(path.clone());
-            let kill = std::env::var_os("EDGEZERO_PROCESS_TEST_KILL").unwrap();
-            let mut runtime = fixture.spawn(if mode == "cleanup-tmp" {
-                "graceful"
-            } else {
-                "descendant"
-            });
+            let mut runtime = fixture.spawn("descendant");
             fixture.ready();
-            let outcome = (|| -> Result<()> {
-                let _ = runtime.finish();
-                require(runtime.0.try_wait()?.is_some(), "runtime survived finish")?;
-                if mode == "cleanup-retry" {
-                    require(
-                        runtime.1.finished.is_none(),
-                        "unconfirmed cleanup was cached",
-                    )?;
-                    require(
-                        LIVE_GROUPS.lock().unwrap().contains_key(&runtime.0.id()),
-                        "unconfirmed group cleanup lost ownership",
-                    )?;
-                    std::os::unix::fs::symlink(&kill, path.join("commands").join("kill"))?;
-                } else {
-                    fs::create_dir(std::env::temp_dir())?;
-                }
-                let _ = runtime.finish();
-                require(
-                    runtime.1.finished.is_some(),
-                    "retry did not confirm cleanup",
-                )?;
-                require(
-                    !LIVE_GROUPS.lock().unwrap().contains_key(&runtime.0.id()),
-                    "confirmed cleanup retained the group",
-                )?;
-                Ok(())
-            })();
-            // Clean up the nested group even when exercising the unfixed implementation.
-            if outcome.is_err() {
-                let _ = Command::new(kill)
-                    .args(["-KILL", "--", &format!("-{}", runtime.0.id())])
-                    .status();
-                let _ = runtime.0.kill();
-                let _ = runtime
-                    .0
-                    .wait_until(Instant::now() + Duration::from_secs(5));
-            }
+            runtime.finish().unwrap();
+            assert!(runtime.0.try_wait().unwrap().is_some());
+            assert!(runtime.1.finished.is_some());
+            assert!(!LIVE_GROUPS.lock().unwrap().contains_key(&runtime.0.id()));
             std::mem::forget(fixture);
-            outcome.unwrap();
             fs::write(path.join("cleanup-checked"), b"complete").unwrap();
-        }
-        if mode == "signal-capture" {
-            let fixture = Fixture(path.clone());
-            assert_eq!(
-                signal_group_command(
-                    &mut fixture.command("signal-orphan"),
-                    Instant::now() + Duration::from_secs(2),
-                )
-                .unwrap(),
-                SignalOutcome::Absent
-            );
-            std::mem::forget(fixture);
-            fs::write(path.join("signal-captured"), b"complete").unwrap();
         }
         if mode == "descendant-worker" {
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -1466,7 +1415,7 @@ mod process_tests {
                 std::hint::black_box(&listener);
             }
         }
-        if matches!(mode.as_str(), "descendant" | "orphan" | "signal-orphan") {
+        if matches!(mode.as_str(), "descendant" | "orphan") {
             let fixture = Fixture(path.clone());
             let mut descendant = fixture.command("descendant-worker").spawn().unwrap();
             // The child intentionally inherits our process group and log descriptors.
@@ -1479,17 +1428,8 @@ mod process_tests {
         std::io::stdout().flush().unwrap();
         std::io::stderr().flush().unwrap();
         fs::write(path.join("ready"), b"ready").unwrap();
-        if mode == "signal-timeout" {
-            // A loaded host may not schedule child initialization before the helper deadline.
-            thread::sleep(Duration::from_secs(1));
-            fs::write(path.join("signal-pid"), std::process::id().to_string()).unwrap();
-        }
         match mode.as_str() {
             "exit-zero" | "orphan" => std::process::exit(0),
-            "signal-orphan" => {
-                eprintln!("No such process");
-                std::process::exit(1);
-            }
             "exit-nonzero" => std::process::exit(7),
             "exit-term-status" => std::process::exit(143),
             _ => loop {
@@ -1524,15 +1464,16 @@ mod process_tests {
                 .unwrap()
                 .parse::<u32>()
                 .unwrap();
+            let mut nested_cleanup = GroupCleanup(Some(runtime));
             let descendant = fs::read_to_string(fixture.0.join("descendant-pid"))
                 .unwrap()
                 .parse::<u32>()
                 .unwrap();
             assert!(alive(runtime) && alive(descendant));
             let started = Instant::now();
-            signal_group(
-                controller.0.id(),
-                "-TERM",
+            signal_target(
+                SignalTarget::Group(controller.0.id()),
+                Some(Signal::SIGTERM),
                 Instant::now() + Duration::from_secs(2),
             )
             .unwrap();
@@ -1543,18 +1484,21 @@ mod process_tests {
             }
             let stopped = !alive(runtime) && !alive(descendant);
             let elapsed = started.elapsed();
+            if stopped {
+                nested_cleanup.0 = None;
+            }
             assert!(
                 controller.0.try_wait().unwrap().is_none(),
                 "owner must still be blocked"
             );
-            let _ = signal_group(runtime, "-KILL", Instant::now() + Duration::from_secs(2));
+            nested_cleanup.finish().unwrap();
             if mode == "cascade-controller" {
                 controller.wait_success().unwrap();
                 assert!(fixture.0.join("cascade-reaped").is_file());
             } else {
-                let _ = signal_group(
-                    controller.0.id(),
-                    "-KILL",
+                let _ = signal_target(
+                    SignalTarget::Group(controller.0.id()),
+                    Some(Signal::SIGKILL),
                     Instant::now() + Duration::from_secs(2),
                 );
                 let _ = controller.finish();
@@ -1570,14 +1514,14 @@ mod process_tests {
 
     #[test]
     fn root_signal_cancellation_reaps_commands_and_descendants() {
-        for signal in ["-INT", "-TERM", "-HUP"] {
+        for signal in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
             let fixture = Fixture::new();
             let mut controller = fixture.spawn("command-controller");
             fixture.ready();
             let port = fixture.descendant_port();
-            signal_group(
-                controller.0.id(),
-                signal,
+            signal_target(
+                SignalTarget::Group(controller.0.id()),
+                Some(signal),
                 Instant::now() + Duration::from_secs(2),
             )
             .unwrap();
@@ -1609,13 +1553,14 @@ mod process_tests {
 
     #[test]
     fn checked_cancellation_reaps_the_command_and_descendants() {
-        for signal in ["-INT", "-TERM", "-HUP"] {
+        for signal in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
             let fixture = Fixture::new();
             let mut controller = fixture.spawn("checked-controller");
             fixture.ready();
             let port = fixture.descendant_port();
-            signal_group_command(
-                Command::new("kill").args([signal, "--", &controller.0.id().to_string()]),
+            signal_target(
+                SignalTarget::Pid(controller.0.id()),
+                Some(signal),
                 Instant::now() + Duration::from_secs(2),
             )
             .unwrap();
@@ -1718,81 +1663,155 @@ mod process_tests {
     }
 
     #[test]
-    fn outbound_wire_process_signal_diagnostics_do_not_wait_for_descendant_eof() {
+    fn outbound_wire_process_signals_distinguish_pid_from_group() {
         let fixture = Fixture::new();
-        let mut process = fixture.spawn("signal-capture");
-        until(|| fixture.0.join("signal-captured").is_file());
+        let mut process = fixture.spawn("descendant");
+        fixture.ready();
         process.check_running().unwrap();
         let port = fixture.descendant_port();
-        process.finish().unwrap();
+        let descendant = fs::read_to_string(fixture.0.join("descendant-pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(
+            signal_target(
+                SignalTarget::Pid(process.0.id()),
+                Some(Signal::SIGTERM),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap(),
+            SignalOutcome::Sent
+        );
+        let status = process
+            .0
+            .wait_until(Instant::now() + Duration::from_secs(2))
+            .unwrap()
+            .expect("owned parent did not stop");
+        assert!(status.success());
+        assert_eq!(
+            signal_target(
+                SignalTarget::Pid(process.0.id()),
+                None,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap(),
+            SignalOutcome::Absent
+        );
+        assert_eq!(
+            signal_target(
+                SignalTarget::Pid(descendant),
+                None,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap(),
+            SignalOutcome::Sent
+        );
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+        process.wait_success().unwrap();
         until(|| std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
     }
 
     #[test]
-    fn outbound_wire_process_cleanup_survives_missing_diagnostics_and_retries_owned_groups() {
-        for mode in ["cleanup-tmp", "cleanup-retry"] {
-            let fixture = Fixture::new();
-            let mut command = fixture.command(mode);
-            command.env(
-                "EDGEZERO_PROCESS_TEST_KILL",
-                executable("KILL_BIN", "kill").unwrap(),
+    fn outbound_wire_process_cleanup_needs_neither_path_nor_temp_diagnostics() {
+        let fixture = Fixture::new();
+        let mut command = fixture.command("cleanup-no-tools");
+        command
+            .env("TMPDIR", fixture.0.join("missing-temp"))
+            .env("PATH", fixture.0.join("missing-commands"));
+        let mut process = Process::spawn(&mut command, &fixture.0.join("runtime.log")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !fixture.0.join("cleanup-checked").is_file() {
+            let health = process.check_running();
+            assert!(
+                health.is_ok(),
+                "{health:?}: {}",
+                fs::read_to_string(fixture.0.join("runtime.log")).unwrap()
             );
-            if mode == "cleanup-tmp" {
-                command.env("TMPDIR", fixture.0.join("missing-temp"));
-            } else {
-                let commands = fixture.0.join("commands");
-                fs::create_dir(&commands).unwrap();
-                command.env("PATH", commands);
-            }
-            let mut process = Process::spawn(&mut command, &fixture.0.join("runtime.log")).unwrap();
-            let deadline = Instant::now() + Duration::from_secs(15);
-            while !fixture.0.join("cleanup-checked").is_file() {
-                let health = process.check_running();
-                assert!(
-                    health.is_ok(),
-                    "{mode}: {health:?}: {}",
-                    fs::read_to_string(fixture.0.join("runtime.log")).unwrap()
+            assert!(Instant::now() < deadline, "cleanup fixture stalled");
+            thread::sleep(Duration::from_millis(10));
+        }
+        process.finish().unwrap();
+    }
+
+    #[test]
+    fn outbound_wire_process_signal_deadline_prevents_owned_child_termination() {
+        let fixture = Fixture::new();
+        let mut process = fixture.spawn("graceful");
+        fixture.ready();
+        let deadline = Instant::now();
+        for target in [
+            SignalTarget::Pid(process.0.id()),
+            SignalTarget::Group(process.0.id()),
+        ] {
+            let error = signal_target(target, Some(Signal::SIGKILL), deadline).unwrap_err();
+            assert!(error.to_string().contains("deadline expired"), "{error}");
+            process.check_running().unwrap();
+        }
+        process.finish().unwrap();
+    }
+
+    #[test]
+    fn outbound_wire_process_signal_rejects_zero_one_and_overflow_ids() {
+        for id in [0, 1, i32::MAX as u32 + 1, u32::MAX] {
+            for target in [SignalTarget::Pid(id), SignalTarget::Group(id)] {
+                let error = signal_target(
+                    target,
+                    Some(Signal::SIGKILL),
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.downcast_ref::<std::io::Error>().unwrap().kind(),
+                    std::io::ErrorKind::InvalidInput
                 );
-                assert!(Instant::now() < deadline, "{mode}: cleanup fixture stalled");
-                thread::sleep(Duration::from_millis(10));
             }
-            process.finish().unwrap();
         }
     }
 
     #[test]
-    fn outbound_wire_process_signal_timeout_reaps_the_helper_before_returning() {
-        let fixture = Fixture::new();
-        let started = Instant::now();
-        let error = signal_group_command(
-            &mut fixture.command("signal-timeout"),
-            Instant::now() + Duration::from_millis(300),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("timed out"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(
-            !fixture.0.join("signal-pid").exists(),
-            "helper must time out before initialization completes"
+    fn outbound_wire_process_signal_only_esrch_means_absent() {
+        assert_eq!(signal_outcome(Ok(())).unwrap(), SignalOutcome::Sent);
+        assert_eq!(
+            signal_outcome(Err(Errno::ESRCH)).unwrap(),
+            SignalOutcome::Absent
         );
-        let message = error.to_string();
-        let pid = message
-            .split_once("(pid ")
-            .unwrap()
-            .1
-            .split_once(')')
-            .unwrap()
-            .0;
-        assert!(pid.parse::<u32>().is_ok(), "{message}");
+        for errno in [Errno::EPERM, Errno::EINVAL, Errno::EINTR] {
+            let error = signal_outcome(Err(errno)).unwrap_err();
+            assert_eq!(error.downcast_ref::<Errno>(), Some(&errno));
+        }
+    }
+
+    #[test]
+    fn outbound_wire_process_nested_group_cleanup_runs_before_signal_error_returns() {
+        let fixture = Fixture::new();
+        let mut process = fixture.spawn("descendant");
+        fixture.ready();
+        let port = fixture.descendant_port();
+        let failure = (|| -> Result<()> {
+            let _cleanup = GroupCleanup(Some(process.0.id()));
+            signal_target(
+                SignalTarget::Pid(process.0.id()),
+                Some(Signal::SIGTERM),
+                Instant::now(),
+            )?;
+            Ok(())
+        })();
         assert!(
-            !Command::new("ps")
-                .args(["-p", pid])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .unwrap()
-                .success(),
-            "signal helper {pid} was not reaped"
+            failure
+                .unwrap_err()
+                .to_string()
+                .contains("deadline expired")
+        );
+        let status = process
+            .0
+            .wait_until(Instant::now() + Duration::from_secs(2))
+            .unwrap()
+            .expect("red-path cleanup did not reap the owned child");
+        assert_eq!(status.signal(), Some(9));
+        until(|| TcpListener::bind(("127.0.0.1", port)).is_ok());
+        assert!(
+            process.finish().is_err(),
+            "SIGKILL must not become successful completion"
         );
     }
 

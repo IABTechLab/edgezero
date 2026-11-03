@@ -29,6 +29,18 @@ const FOCUS_PROOFS = [
   "image_optimizer_focus_y_only",
   "image_optimizer_focus_smart_offsets",
 ];
+const FASTLY_RESPONSE_ISOLATION_PROOFS = [
+  "response::tests::body_created_batches_end_at_egress_without_closing_callback_work",
+  "response::tests::pending_body_write_deadline_releases_only_response_work",
+  "outbound::scope::tests::response_scope_closes_only_response_created_work",
+  "lifecycle::tests::callback_scope_exit_releases_unpolled_send_and_begin_before_cross_scope_polling",
+  "lifecycle::tests::callback_scope_exit_releases_retained_batch_driver",
+];
+const FASTLY_CALLBACK_COUNTER_PROOFS = [
+  "callback_cleanup::tests::native_operation_cleanup_requires_real_pending_ownership_and_release",
+  "callback_cleanup::tests::native_operation_evidence_remains_bounded_with_all_five_roles",
+  "callback_cleanup::tests::callback_mode_accepts_only_exact_case_tokens",
+];
 // Updating the reviewed environment/split set requires a separate policy review.
 const REVIEWED_LEG_SET_SHA256 =
   "5ad5ad13cb3a0ea9d96307f1ec150649a21357490b4b9b26ae59027e0e539ec9";
@@ -258,6 +270,76 @@ export function validateManifest(
       );
     }
     if (
+      c.case_id === "EZ-2/acceptance/03" &&
+      c.environment === "viceroy" &&
+      c.implementation === "ready"
+    ) {
+      const readback = cases.get("EZ-2/acceptance/22@unit/fastly");
+      requireFact(
+        c.sentinel === "fastly-budget-inventory" &&
+          c.command ===
+            "scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/viceroy" &&
+          c.artifact_path === "outbound/lifetimes/viceroy/events.jsonl" &&
+          c.companion_case === "EZ-2/acceptance/22@unit/fastly" &&
+          readback.command ===
+            "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib" &&
+          readback.artifact_path === "outbound/unit/fastly/raw.log" &&
+          readback.additional_sentinels?.includes(
+            "outbound::fastly_impl::tests::b31_registered_transport_preserves_origin_and_wire_authority",
+          ),
+        `${id}: baseline configuration coverage requires its native SDK TLS readback`,
+      );
+    }
+    if (
+      c.case_id === "EZ-6/acceptance/21" &&
+      c.environment === "unit/fastly" &&
+      c.implementation === "ready"
+    ) {
+      const proofs = [c.sentinel, ...(c.additional_sentinels ?? [])];
+      requireFact(
+        c.command ===
+          "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib" &&
+          c.artifact_path ===
+            "outbound/redirect/fastly/runtime-unit-tests.log" &&
+          c.companion_case === undefined &&
+          proofs.length === FASTLY_RESPONSE_ISOLATION_PROOFS.length &&
+          FASTLY_RESPONSE_ISOLATION_PROOFS.every((proof) =>
+            proofs.includes(proof),
+          ),
+        `${id}: Fastly response-isolation proofs must retain all five tests in their runtime-unit owner`,
+      );
+    }
+    if (
+      c.case_id === "EZ-6/acceptance/23" &&
+      c.environment === "unit/fastly/both-wrappers" &&
+      c.implementation === "ready"
+    ) {
+      requireFact(
+        c.companion_case === "EZ-6/acceptance/21@unit/fastly",
+        `${id}: callback cleanup requires its Fastly response-isolation companion`,
+      );
+      const proofs = [c.sentinel, ...(c.additional_sentinels ?? [])];
+      requireFact(
+        c.command ===
+          "scripts/test_integration.sh --adapter fastly --suite ci --output crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/redirect/fastly" &&
+          c.artifact_path === "outbound/redirect/fastly/fixture-check.log" &&
+          proofs.length === FASTLY_CALLBACK_COUNTER_PROOFS.length &&
+          FASTLY_CALLBACK_COUNTER_PROOFS.every((proof) =>
+            proofs.includes(proof),
+          ),
+        `${id}: callback cleanup must retain all three fixture counter tests in their CI owner`,
+      );
+    }
+    if (
+      c.case_id === "EZ-6/acceptance/23" &&
+      c.environment === "viceroy" &&
+      c.implementation === "ready"
+    )
+      requireFact(
+        c.companion_case === undefined,
+        `${id}: callback runtime cleanup must remain an independent proof`,
+      );
+    if (
       c.case_id === "EZ-6/acceptance/22" &&
       c.implementation === "ready" &&
       ["axum", "viceroy", "workerd", "spin"].includes(c.environment)
@@ -358,6 +440,70 @@ function disposition(c, decisions) {
   return ["blocking", "gate"].includes(c.applicability)
     ? "required"
     : "deferred";
+}
+
+// Binding readiness is not a passing execution or a qualification decision.
+export function inventoryCoverage(manifest, source, reviewedLegSetSha256) {
+  const { criteria } = validateManifest(manifest, source, reviewedLegSetSha256);
+  const decisions = new Map(
+    manifest.decisions.map((decision) => [decision.id, decision]),
+  );
+  const summary = Object.fromEntries(
+    [
+      "required-local",
+      "required-external",
+      "conditional-pending",
+      "follow-up-not-promoted",
+      "approved-deferred",
+    ].map((name) => [name, { ready: 0, planned: 0 }]),
+  );
+  const legs = manifest.cases.map((entry) => {
+    const decision = decisions.get(entry.approval);
+    const external = /^(?:hosted-|consumer-)/.test(entry.environment);
+    const required = disposition(entry, decisions) === "required";
+    const category = required
+      ? external
+        ? "required-external"
+        : "required-local"
+      : decision?.status === "approved"
+        ? "approved-deferred"
+        : entry.applicability === "conditional"
+          ? "conditional-pending"
+          : "follow-up-not-promoted";
+    summary[category][entry.implementation]++;
+    return {
+      id: key(entry),
+      category,
+      implementation: entry.implementation,
+      location: external ? "external" : "local",
+      approval: entry.approval,
+      approval_status: decision?.status ?? null,
+      condition:
+        entry.condition ??
+        (category === "follow-up-not-promoted"
+          ? "Follow-up not promoted or confirmed present"
+          : null),
+    };
+  });
+  const localPending = legs
+    .filter(
+      (leg) =>
+        leg.category === "required-local" && leg.implementation === "planned",
+    )
+    .map((leg) => leg.id);
+  return {
+    status: "inventory-coverage",
+    qualified: false,
+    local_bindings_complete: localPending.length === 0,
+    criteria,
+    total_legs: legs.length,
+    summary,
+    local_pending: localPending,
+    pending_decisions: manifest.decisions
+      .filter((decision) => decision.status === "pending")
+      .map((decision) => decision.id),
+    legs,
+  };
 }
 
 function validateMeasurement(measurement) {
@@ -882,7 +1028,10 @@ export function readySentinels(manifest, environment, command) {
 function run(args) {
   if (args.length === 1 && args[0] === "--help") {
     process.stdout.write(
-      "Usage: node scripts/check_outbound_cutover_evidence.mjs --manifest [INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --sentinels ENVIRONMENT [--command EXACT_COMMAND] [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --assemble --candidate SHA --input OBSERVATIONS.json --artifacts DIRECTORY --output NEW_DRAFT.json [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --report|--release --candidate SHA --record RECORD.json --artifacts DIRECTORY [--inventory INVENTORY.json]\nAssembly preserves observations in an unqualified pre-freeze draft and exits nonzero for open release gates. It refuses overwrites.\nManifest validation and sentinel listing permit planned/pending legs; neither qualifies a release.\nApprovals and raw measurements require independent review; this tool does not authenticate telemetry.\n",
+      "Coverage: node scripts/check_outbound_cutover_evidence.mjs --coverage [--inventory INVENTORY.json]\nCoverage exits nonzero for unbound required-local legs. Success means binding completeness only, not passing execution or qualification; hosted/consumer evidence and pending scope remain explicit.\n",
+    );
+    process.stdout.write(
+      "Usage: node scripts/check_outbound_cutover_evidence.mjs --manifest [INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --coverage [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --sentinels ENVIRONMENT [--command EXACT_COMMAND] [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --assemble --candidate SHA --input OBSERVATIONS.json --artifacts DIRECTORY --output NEW_DRAFT.json [--inventory INVENTORY.json]\n       node scripts/check_outbound_cutover_evidence.mjs --report|--release --candidate SHA --record RECORD.json --artifacts DIRECTORY [--inventory INVENTORY.json]\nAssembly preserves observations in an unqualified pre-freeze draft and exits nonzero for open release gates. It refuses overwrites.\nManifest validation and sentinel listing permit planned/pending legs; neither qualifies a release.\nApprovals and raw measurements require independent review; this tool does not authenticate telemetry.\n",
     );
     return;
   }
@@ -890,12 +1039,13 @@ function run(args) {
   requireFact(
     [
       "--manifest",
+      "--coverage",
       "--sentinels",
       "--assemble",
       "--report",
       "--release",
     ].includes(mode),
-    "choose --manifest, --sentinels, --assemble, --report or --release; see --help",
+    "choose --manifest, --coverage, --sentinels, --assemble, --report or --release; see --help",
   );
   const environment = mode === "--sentinels" ? args.shift() : undefined;
   let inventory = resolve(ROOT, INVENTORY);
@@ -941,6 +1091,19 @@ function run(args) {
       readySentinels(manifest, environment, options["--command"]).join("\n") +
         "\n",
     );
+    return;
+  }
+  if (mode === "--coverage") {
+    requireFact(
+      Object.keys(options).every((key) => key === "--inventory"),
+      "coverage mode accepts only an inventory override",
+    );
+    const coverage = inventoryCoverage(manifest, source);
+    const summary = Object.fromEntries(
+      Object.entries(coverage).filter(([key]) => key !== "legs"),
+    );
+    process.stdout.write(JSON.stringify(summary) + "\n");
+    if (!coverage.local_bindings_complete) process.exitCode = 1;
     return;
   }
   if (mode === "--manifest") {

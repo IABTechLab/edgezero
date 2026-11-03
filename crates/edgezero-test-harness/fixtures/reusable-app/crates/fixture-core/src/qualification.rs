@@ -7,6 +7,7 @@ mod overflow;
 pub mod progress;
 mod redirect;
 pub mod response_headers;
+pub mod transport;
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};

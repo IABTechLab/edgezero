@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::iter::repeat_with;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "fastly")]
+#[cfg(any(feature = "fastly", feature = "test-utils"))]
 use std::task::{Context, Waker};
 use std::time::Duration;
 
@@ -88,7 +88,7 @@ impl OutboundHttpClient for Capture {
     }
 }
 
-#[cfg(feature = "fastly")]
+#[cfg(any(feature = "fastly", feature = "test-utils"))]
 pub(super) fn dispatch(request: OutboundRequest, time: OutboundTime) -> OutboundDispatchRequest {
     let mut future = HttpClient::with_client(Capture::new(time, false)).send(request);
     assert!(

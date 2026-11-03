@@ -26,7 +26,7 @@ fn spawn_owned(
 
 impl Hooks for NativeProgressApp {
     fn configure(app: &mut edgezero_core::app::App) -> Result<(), EdgeError> {
-        fixture_core::qualification::response_headers::configure(app)
+        progress::configure(app)
     }
 
     fn routes() -> Result<RouterService, EdgeError> {

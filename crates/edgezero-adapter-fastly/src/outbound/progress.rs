@@ -12,7 +12,8 @@ use async_stream::stream;
 use bytes::Bytes;
 #[cfg(feature = "test-utils")]
 use edgezero_core::outbound::test_support::{
-    NativeBodyRecorder, NativeBodyWaitOutcome, observe_sdk_wait,
+    NativeBodyOwner, NativeBodyRecorder, NativeBodyWaitOutcome, NativeSdkWaitKind,
+    observe_sdk_wait, own_sdk_operation,
 };
 use edgezero_core::{
     BodyStream, Deadline, DispatchBudget, EdgeError, MonotonicClock, MonotonicInstant,
@@ -108,8 +109,27 @@ enum Phase<T: Transport> {
         next: Option<Result<Bytes, EdgeError>>,
         requested: bool,
     },
-    Head(Option<T::Pending>),
+    Head(
+        #[cfg(feature = "test-utils")] NativeBodyOwner<Option<T::Pending>>,
+        #[cfg(not(feature = "test-utils"))] Option<T::Pending>,
+    ),
     HeadReady(Option<Result<T::Head, EdgeError>>),
+}
+
+impl<T: Transport> Phase<T> {
+    fn head_pending(&self) -> Option<&T::Pending> {
+        let Self::Head(owned) = self else {
+            return None;
+        };
+        #[cfg(feature = "test-utils")]
+        {
+            owned.get_ref().as_ref()
+        }
+        #[cfg(not(feature = "test-utils"))]
+        {
+            owned.as_ref()
+        }
+    }
 }
 
 struct Slot<T: Transport> {
@@ -235,8 +255,35 @@ impl<T: Transport + 'static> Progress<T> {
         poll_fn(|cx| self.poll_once(cx, &mut |inner_cx| future.as_mut().poll(inner_cx))).await
     }
 
+    #[cfg(any(test, not(feature = "test-utils")))]
     pub(super) fn head(&self, pending: T::Pending, budget: DispatchBudget) -> Lease<T> {
-        self.register(budget, Phase::Head(Some(pending)))
+        #[cfg(feature = "test-utils")]
+        {
+            self.head_observed(pending, budget, None)
+        }
+        #[cfg(not(feature = "test-utils"))]
+        {
+            self.register(budget, Phase::Head(Some(pending)))
+        }
+    }
+
+    #[cfg(feature = "test-utils")]
+    pub(super) fn head_observed(
+        &self,
+        pending: T::Pending,
+        budget: DispatchBudget,
+        recorder: Option<NativeBodyRecorder>,
+    ) -> Lease<T> {
+        self.head_owned(own_sdk_operation(Some(pending), recorder), budget)
+    }
+
+    #[cfg(feature = "test-utils")]
+    pub(super) fn head_owned(
+        &self,
+        pending: NativeBodyOwner<Option<T::Pending>>,
+        budget: DispatchBudget,
+    ) -> Lease<T> {
+        self.register(budget, Phase::Head(pending))
     }
 
     pub(super) fn new(
@@ -496,8 +543,9 @@ impl<T: Transport> State<T> {
                 entry
                     .as_ref()
                     .is_some_and(|slot| {
-                        matches!(&slot.phase,
-                            Phase::Head(Some(pending)) if T::head_handle(pending).is_none())
+                        slot.phase
+                            .head_pending()
+                            .is_some_and(|pending| T::head_handle(pending).is_none())
                     })
                     .then_some(index)
             })
@@ -512,11 +560,34 @@ impl<T: Transport> State<T> {
         let Phase::Head(owned) = &mut slot.phase else {
             return Err(missing_slot());
         };
+        #[cfg(feature = "test-utils")]
+        let recorder = owned.recorder().cloned();
+        #[cfg(feature = "test-utils")]
+        let pending = owned.get_mut().take().ok_or_else(missing_slot)?;
+        #[cfg(not(feature = "test-utils"))]
         let pending = owned.take().ok_or_else(missing_slot)?;
-        match self.transport.poll_head(pending, slot.budget, &slot.clock) {
-            HeadPoll::Pending(waiting) => slot.phase = Phase::Head(Some(waiting)),
-            HeadPoll::Ready(result) => {
-                slot.phase = Phase::HeadReady(Some(result));
+        let poll = || self.transport.poll_head(pending, slot.budget, &slot.clock);
+        #[cfg(feature = "test-utils")]
+        let result = match recorder {
+            Some(observation) => observation
+                .observe_operation_poll(poll, |result| matches!(result, HeadPoll::Pending(_))),
+            None => poll(),
+        };
+        #[cfg(not(feature = "test-utils"))]
+        let result = poll();
+        match result {
+            HeadPoll::Pending(waiting) => {
+                #[cfg(feature = "test-utils")]
+                {
+                    *owned.get_mut() = Some(waiting);
+                }
+                #[cfg(not(feature = "test-utils"))]
+                {
+                    *owned = Some(waiting);
+                }
+            }
+            HeadPoll::Ready(head) => {
+                slot.phase = Phase::HeadReady(Some(head));
                 if let Some(waker) = slot.waker.take() {
                     self.wakes.push(waker);
                 }
@@ -560,15 +631,19 @@ impl<T: Transport> State<T> {
             .enumerate()
             .filter_map(|(submitted, (index, _))| {
                 let slot = self.slots.get(*index)?.as_ref()?;
-                let Phase::Body {
-                    handle: Some(body),
-                    requested: true,
-                    next: None,
-                } = &slot.phase
-                else {
-                    return None;
-                };
-                T::body_recorder(body).map(|recorder| (submitted, recorder))
+                match &slot.phase {
+                    Phase::Head(owned) => owned
+                        .recorder()
+                        .cloned()
+                        .map(|recorder| (submitted, recorder, NativeSdkWaitKind::HeadReadiness)),
+                    Phase::Body {
+                        handle: Some(body),
+                        requested: true,
+                        next: None,
+                    } => T::body_recorder(body)
+                        .map(|recorder| (submitted, recorder, NativeSdkWaitKind::BodyReadiness)),
+                    Phase::Body { .. } | Phase::HeadReady(_) => None,
+                }
             })
             .collect::<Vec<_>>();
         #[cfg(feature = "test-utils")]
@@ -746,13 +821,13 @@ impl<T: Transport> State<T> {
                 earliest = Some(earliest.map_or(duration, |prior: Duration| prior.min(duration)));
             }
             let handle = match &slot.phase {
-                Phase::Head(Some(pending)) => T::head_handle(pending),
+                Phase::Head(_) => slot.phase.head_pending().and_then(T::head_handle),
                 Phase::Body {
                     handle: Some(handle),
                     requested: true,
                     next: None,
                 } => Some(T::body_handle(handle)),
-                Phase::Head(_) | Phase::Body { .. } | Phase::HeadReady(_) => None,
+                Phase::Body { .. } | Phase::HeadReady(_) => None,
             };
             if let Some(id) = handle {
                 active.push((index, id));
@@ -796,15 +871,15 @@ impl<T: Transport> State<T> {
         };
         for slot in self.slots.iter_mut().flatten().filter(|slot| {
             !slot.expired
-                && matches!(
-                    &slot.phase,
-                    Phase::Head(Some(_))
-                        | Phase::Body {
+                && (slot.phase.head_pending().is_some()
+                    || matches!(
+                        &slot.phase,
+                        Phase::Body {
                             handle: Some(_),
                             next: None,
                             requested: true
                         }
-                )
+                    ))
         }) {
             let now = slot.sample()?;
             let limit = slot.budget.deadline.remaining_at(now).unwrap_or_default();
@@ -1139,6 +1214,118 @@ mod tests {
             remaining,
             opaque,
             released: Rc::clone(released),
+        }
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn head_readiness_observation_never_adds_sdk_calls_or_fabricates_polls() {
+        use edgezero_core::outbound::test_support::{NativeBodyWitness, native_body_recorder};
+        use edgezero_core::{OutboundRequest, OutboundTime};
+
+        for selected_other in [false, true] {
+            let (progress, observed, now) = fixture();
+            let witness = NativeBodyWitness::new();
+            let mut request = OutboundRequest::get("http://example.test/").expect("request");
+            witness.attach(&mut request).expect("attach");
+            let prepared = super::super::testing::dispatch(
+                request,
+                OutboundTime::new(progress.clock(), |_, _| Box::pin(pending())),
+            );
+            let (_, context) = prepared.into_parts();
+            let released = Rc::new(Cell::new(0));
+            let head = progress.head_observed(
+                handle(0, 0, false, &released),
+                budget(&now, 100, BudgetSource::PerCallTimeout),
+                native_body_recorder(&context),
+            );
+            let other = progress.head(
+                handle(1, 0, false, &released),
+                budget(&now, 100, BudgetSource::PerCallTimeout),
+            );
+            let mut active = vec![(head.index, 0)];
+            if selected_other {
+                active.push((other.index, 1));
+            }
+            progress
+                .state
+                .borrow_mut()
+                .select_ready(Duration::from_millis(1), &active)
+                .expect("select");
+            let snapshot = witness.snapshot();
+            assert!(!snapshot.invalid);
+            assert_eq!(snapshot.operation_polls, 0);
+            assert!(snapshot.first_operation_poll.is_none());
+            assert_eq!(snapshot.waits, 0);
+            assert_eq!(snapshot.pending_operation().is_some(), !selected_other);
+            assert_eq!(observed.borrow().waits, [1]);
+            assert_eq!(
+                observed.borrow().domains,
+                if selected_other {
+                    vec![vec![0, 1]]
+                } else {
+                    vec![vec![0]]
+                }
+            );
+            assert_eq!(
+                observed.borrow().polls,
+                if selected_other { vec![1] } else { vec![] }
+            );
+            drop(head);
+            assert_eq!(witness.snapshot().operation_releases, 1);
+            assert_eq!(
+                witness.snapshot().pending_operation().is_some(),
+                !selected_other
+            );
+        }
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn observed_head_owns_one_handle_across_pending_polls_and_releases_before_collection() {
+        use edgezero_core::outbound::test_support::{NativeBodyWitness, native_body_recorder};
+        use edgezero_core::{OutboundRequest, OutboundTime};
+
+        for id in [0_u32, 1] {
+            let (progress, observations, now) = fixture();
+            let witness = NativeBodyWitness::new();
+            let mut request = OutboundRequest::get("http://example.test/").expect("request");
+            witness.attach(&mut request).expect("attach witness");
+            let prepared = super::super::testing::dispatch(
+                request,
+                OutboundTime::new(progress.clock(), |_, _| Box::pin(pending())),
+            );
+            let (_, context) = prepared.into_parts();
+            let released = Rc::new(Cell::new(0));
+            let lease = progress.head_observed(
+                handle(id, 0, false, &released),
+                budget(&now, 100, BudgetSource::PerCallTimeout),
+                native_body_recorder(&context),
+            );
+            assert_eq!(witness.snapshot().operation_acquisitions, 1);
+            progress
+                .state
+                .borrow_mut()
+                .poll_head(lease.index)
+                .expect("one original transport poll");
+            let snapshot = witness.snapshot();
+            assert_eq!(snapshot.operation_polls, 1);
+            assert_eq!(snapshot.ready_operation_polls, u64::from(id != 0));
+            assert_eq!(snapshot.operation_releases, u64::from(id != 0));
+            assert_eq!(
+                snapshot
+                    .first_operation_poll
+                    .expect("transport poll")
+                    .pending,
+                id == 0
+            );
+            assert_eq!(observations.borrow().polls, vec![id]);
+            drop(lease);
+            assert_eq!(released.get(), 1);
+            assert_eq!(witness.snapshot().operation_acquisitions, 1);
+            assert_eq!(witness.snapshot().operation_releases, 1);
+            assert_eq!(witness.snapshot().reads, 0);
+            assert!(!witness.snapshot().invalid);
         }
     }
     async fn collect(mut source: BodyStream) -> Result<usize, EdgeError> {

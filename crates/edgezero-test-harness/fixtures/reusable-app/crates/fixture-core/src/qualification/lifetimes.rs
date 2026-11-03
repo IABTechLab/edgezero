@@ -11,7 +11,7 @@ use edgezero_core::{
     OutboundRequest, OutboundResponse, OutboundScope, OutboundScopeOwner, OutboundSlotResult,
     action,
 };
-use futures::StreamExt as _;
+use futures::{StreamExt as _, TryStreamExt as _};
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
@@ -19,6 +19,9 @@ use std::{
     sync::{Arc, OnceLock},
     time::Duration,
 };
+
+#[cfg(feature = "native-body-witness")]
+mod response_cleanup;
 
 const MAX_CPU_ITERATIONS: u64 = 10_000_000;
 
@@ -44,6 +47,7 @@ struct Report {
     mediator: Option<Value>,
     handoff: Option<Value>,
     native_body: Option<Value>,
+    batch_state: Option<Value>,
 }
 
 impl Probe {
@@ -63,6 +67,15 @@ impl Probe {
                 | "cpu-stretch"
                 | "caps-while-waiting"
                 | "response-handoff"
+                | "batch-write-deadline"
+                | "batch-cancel"
+                | "body-check"
+                | "begin-upload-rules"
+                | "response-owned-cleanup-complete"
+                | "response-owned-cleanup-disconnect"
+                | "response-owned-cleanup-write-deadline"
+                | "response-owned-cleanup-source-error"
+                | "response-owned-cleanup-cancel"
         ) {
             return Err(invalid());
         }
@@ -202,7 +215,7 @@ impl Report {
         json!({"schema":1,"case":probe.case,"token":probe.token,"qualification":false,
             "events":timeline.events,"items":self.items,"slots":self.slots,
             "termination":self.termination,"error":self.error,"origin":self.origin,"mediator":self.mediator,"handoff":self.handoff,
-            "native_body":self.native_body})
+            "native_body":self.native_body,"batch_state":self.batch_state})
     }
 }
 
@@ -808,6 +821,12 @@ fn native_body_report(snapshot: NativeBodySnapshot, timeline: &Timeline) -> Valu
         "first_wait_timeout":snapshot.first_wait_timeout.map(wait),
         "last_wait_timeout":snapshot.last_wait_timeout.map(wait),
         "source_acquisitions":snapshot.source_acquisitions,"source_releases":snapshot.source_releases,
+        "operation_acquisitions":snapshot.operation_acquisitions,"operation_polls":snapshot.operation_polls,
+        "ready_operation_polls":snapshot.ready_operation_polls,"operation_releases":snapshot.operation_releases,
+        "operation_acquired_at_us":snapshot.first_operation_acquisition.and_then(at),
+        "operation_released_at_us":snapshot.first_operation_release.and_then(at),
+        "first_operation_poll":snapshot.first_operation_poll.map(|poll|json!({"started_at_us":at(poll.started_at),
+            "observed_at_us":at(poll.observed_at),"pending":poll.pending})),
         "released_at_us":snapshot.first_release.and_then(at)})
 }
 
@@ -930,16 +949,479 @@ async fn response_handoff(
     )
 }
 
+const BATCH_TERMINAL_PREFIX: &str = "edgezero-lifetime-batch ";
+
+fn batch_prelude(probe: &Probe) -> Value {
+    let mut value = json!({"schema":1,"case":probe.case,"token":probe.token,"phase":"batch-pending",
+        "slots":3,"qualification":false});
+    if probe.case == "batch-write-deadline" {
+        value["cutoff_after_us"] = json!(3_000_000);
+    } else {
+        value["cutoff_at_us"] = json!(534_000);
+        value["delivered"] = json!([0]);
+        value["in_flight"] = json!([1, 2]);
+    }
+    value
+}
+
+fn line(value: &Value) -> Result<Bytes, EdgeError> {
+    let mut bytes = serde_json::to_vec(value).map_err(EdgeError::internal)?;
+    if bytes.len() >= 16 * 1024 {
+        return Err(invalid());
+    }
+    bytes.push(b'\n');
+    Ok(Bytes::from(bytes))
+}
+
+struct BatchSourceDrop(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for BatchSourceDrop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[derive(Default)]
+struct BatchWitness {
+    dropped: Arc<std::sync::atomic::AtomicUsize>,
+    pending: Arc<std::sync::atomic::AtomicBool>,
+    prefix_bytes: std::sync::atomic::AtomicUsize,
+    cutoff_at_us: std::sync::atomic::AtomicU64,
+    #[cfg(feature = "native-body-witness")]
+    native: std::sync::Mutex<Option<BatchNative>>,
+}
+
+#[cfg(feature = "native-body-witness")]
+struct BatchNative {
+    start: MonotonicInstant,
+    witnesses: [NativeBodyWitness; 3],
+}
+
+#[cfg(feature = "native-body-witness")]
+fn buffered_a_complete(snapshot: &NativeBodySnapshot) -> bool {
+    !snapshot.invalid
+        && snapshot.attachments == 1
+        && snapshot.preparations == 1
+        && snapshot.operation_acquisitions == 1
+        && snapshot.operation_releases == 1
+        && snapshot.operation_polls > 0
+        && snapshot.ready_operation_polls == 1
+        && snapshot.heads == 1
+        && snapshot.source_acquisitions == 1
+        && snapshot.source_releases == 1
+        && snapshot.reads > 0
+        && snapshot.ready_reads > 0
+}
+
+#[cfg(feature = "native-body-witness")]
+fn batch_native_complete(snapshots: &[NativeBodySnapshot; 3], cancel: bool) -> bool {
+    buffered_a_complete(&snapshots[0])
+        && snapshots[1].pending_operation().is_some()
+        && (cancel || snapshots[2].pending_operation().is_some())
+}
+
+#[cfg(feature = "native-body-witness")]
+async fn wait_for_batch_native(
+    scope: &OutboundScope,
+    time: &edgezero_core::OutboundTime,
+    cutoff: Deadline,
+    turns: &mut usize,
+    mut observe: impl FnMut() -> Result<bool, EdgeError>,
+) -> Result<(), EdgeError> {
+    let entered = time.clock().now();
+    let mut previous = entered;
+    loop {
+        scope.check()?;
+        let now = time.clock().now();
+        if now < previous || cutoff.is_expired_at(now) {
+            return Err(invalid());
+        }
+        let complete = observe()?;
+        let observed = time.clock().now();
+        if observed < now || cutoff.is_expired_at(observed) {
+            return Err(invalid());
+        }
+        if complete {
+            scope.check()?;
+            return Ok(());
+        }
+        if *turns >= 128 {
+            return Err(invalid());
+        }
+        *turns += 1;
+        previous = observed;
+        let next = observed
+            .checked_add(Duration::from_millis(1))
+            .ok_or_else(invalid)?
+            .min(cutoff.instant());
+        let mut timer = time.wait_until(Deadline::at_instant(next));
+        std::future::poll_fn(|cx| scope.poll(time, entered, cx, timer.as_mut())).await??;
+    }
+}
+
+#[cfg(feature = "native-body-witness")]
+impl BatchNative {
+    fn operation_observation(snapshot: &NativeBodySnapshot, start: MonotonicInstant) -> Value {
+        use edgezero_core::outbound::test_support::NativeOperationPending;
+        let at = |instant: MonotonicInstant| micros(instant.saturating_duration_since(start));
+        match snapshot.pending_operation().or_else(|| {
+            snapshot
+                .first_operation_poll
+                .map(NativeOperationPending::SdkPoll)
+        }) {
+            Some(NativeOperationPending::SdkPoll(poll)) => json!({"kind":"SdkPoll",
+                "pending":poll.pending,"at_us":at(poll.started_at),"observed_at_us":at(poll.observed_at)}),
+            Some(NativeOperationPending::HeadReadinessTimeout(wait)) => {
+                json!({"kind":"HeadReadinessTimeout",
+                "at_us":at(wait.started_at),"observed_at_us":at(wait.observed_at)})
+            }
+            None => Value::Null,
+        }
+    }
+
+    fn json(&self) -> Value {
+        json!(self.witnesses.iter().enumerate().map(|(index, witness)| {
+            let snapshot = witness.snapshot();
+            let at = |instant: MonotonicInstant| micros(instant.saturating_duration_since(self.start));
+            json!({"index":index,"attachments":snapshot.attachments,"preparations":snapshot.preparations,
+                "target_uri":snapshot.preparation.as_ref().map(|prepared|prepared.target.to_string()),"invalid":snapshot.invalid,
+                "budget_cause":snapshot.preparation.as_ref().map(|prepared|format!("{:?}",prepared.budget.cause)),
+                "deadline_at_us":snapshot.preparation.as_ref().map(|prepared|at(prepared.budget.deadline.instant())),
+                "acquisitions":snapshot.operation_acquisitions,"polls":snapshot.operation_polls,
+                "ready_polls":snapshot.ready_operation_polls,"releases":snapshot.operation_releases,
+                "heads":snapshot.heads,"body_acquisitions":snapshot.source_acquisitions,"body_releases":snapshot.source_releases,
+                "reads":snapshot.reads,"ready_reads":snapshot.ready_reads,
+                "operation_observation":Self::operation_observation(&snapshot, self.start),
+                "acquired_at_us":snapshot.first_operation_acquisition.map(at),
+                "released_at_us":snapshot.first_operation_release.map(at)})
+        }).collect::<Vec<_>>())
+    }
+}
+
+impl BatchWitness {
+    fn native_json(&self) -> Value {
+        #[cfg(feature = "native-body-witness")]
+        {
+            self.native
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or(Value::Null, BatchNative::json)
+        }
+        #[cfg(not(feature = "native-body-witness"))]
+        {
+            Value::Null
+        }
+    }
+}
+
+pub(super) fn configure_admission(app: &mut edgezero_core::app::App) {
+    if option_env!("EDGEZERO_QUALIFICATION_SUITE") != Some("outbound-lifetimes") {
+        return;
+    }
+    install_batch_admission(app);
+}
+
+fn install_batch_admission(app: &mut edgezero_core::app::App) {
+    use edgezero_core::{AdmissionDecision, IngressGrant, ResponseEgressCompletion};
+    use std::sync::atomic::Ordering;
+    app.set_ingress_admission_policy(|head| {
+        #[cfg(feature = "native-body-witness")]
+        if let Some((completion,grant)) = response_cleanup::admission(head.target().path(),head.headers()) {
+            return AdmissionDecision::Admit {completion,grant,
+                read_deadline:head.read_deadline_after(edgezero_core::DEFAULT_INBOUND_READ_BUDGET)};
+        }
+        let mut completion = ResponseEgressCompletion::empty();
+        let mut grant = IngressGrant::empty();
+        if head.target().path() == "/progress/lifetimes/batch-write-deadline" {
+            let witness = Arc::new(BatchWitness::default());
+            let observed = Arc::clone(&witness);
+            let token = field(head.headers(), "x-request-token").ok().filter(|token| token.len() <= 64).map(str::to_owned);
+            grant = IngressGrant::new(witness);
+            completion = ResponseEgressCompletion::new(move |report| {
+                let record = json!({"schema":1,"event":"batch-terminal","case":"batch-write-deadline",
+                    "token":token,"qualification":false,"outcome":format!("{:?}",report.outcome),
+                    "body_kind":format!("{:?}",report.body_kind),"bytes_written":report.bytes_written,
+                    "prefix_bytes":observed.prefix_bytes.load(Ordering::SeqCst),"elapsed_us":micros(report.elapsed),
+                    "cutoff_at_us":observed.cutoff_at_us.load(Ordering::SeqCst),
+                    "pending_poll":observed.pending.load(Ordering::SeqCst),"source_drops":observed.dropped.load(Ordering::SeqCst),
+                    "source_failure":report.source_failure.map(|source|source.category()),
+                    "native_operations":observed.native_json()});
+                let line = format!("{BATCH_TERMINAL_PREFIX}{record}");
+                if let Some(sink) = crate::TELEMETRY.get() { sink(&line); } else { eprintln!("{line}"); }
+            });
+        }
+        AdmissionDecision::Admit { completion, grant,
+            read_deadline: head.read_deadline_after(edgezero_core::DEFAULT_INBOUND_READ_BUDGET) }
+    });
+}
+
+async fn prepare_runtime_batch(
+    scope: &OutboundScope,
+    probe: &Probe,
+    client: &HttpClient,
+    timeline: &mut Timeline,
+    witness: &BatchWitness,
+    time: &edgezero_core::OutboundTime,
+) -> Result<(OutboundBatch, Report), EdgeError> {
+    #[cfg(not(feature = "native-body-witness"))]
+    let _ = time;
+    use std::sync::atomic::Ordering;
+    let deadline = probe.case == "batch-write-deadline";
+    if !timeline.remaining(34).is_zero() {
+        return Err(invalid());
+    }
+    let mut requests = ["a", "b", "c"]
+        .into_iter()
+        .map(|role| probe.request(role, timeline))
+        .collect::<Result<Vec<_>, _>>()?;
+    let cancel = probe.case == "batch-cancel";
+    if cancel {
+        // Deliver C's preflight result before A can complete. A remains an actual SDK job.
+        requests[2] = probe
+            .request("c", timeline)?
+            .body(Body::from("invalid GET upload"));
+    }
+    #[cfg(feature = "native-body-witness")]
+    {
+        let native = BatchNative {
+            start: timeline.start,
+            witnesses: std::array::from_fn(|_| NativeBodyWitness::new()),
+        };
+        for (request, witness) in requests.iter_mut().zip(&native.witnesses) {
+            witness.attach(request)?;
+        }
+        *witness.native.lock().unwrap() = Some(native);
+    }
+    let observation_cutoff = if deadline {
+        timeline.clock.deadline_after(Duration::from_secs(3))
+    } else {
+        timeline.deadline_at(534)
+    };
+    witness.cutoff_at_us.store(
+        timeline.elapsed_us(observation_cutoff.instant()),
+        Ordering::SeqCst,
+    );
+    let at = timeline.clock.now();
+    let mut batch = scope.with(|| client.start_batch_until(requests, observation_cutoff))?;
+    timeline.event(
+        "batch-start",
+        at,
+        timeline.clock.now(),
+        json!({"cutoff_at_us":timeline.elapsed_us(observation_cutoff.instant()),"slots":3,"per_call_timeout_us":1_000_000}),
+    );
+    let mut report = Report::default();
+    if cancel {
+        check(&mut batch, &mut report, timeline).await?;
+        if report.items.len() != 1
+            || report.items[0]["index"] != 2
+            || report.items[0]["outcome"]["error"]["kind"] != "bad_request"
+        {
+            return Err(invalid());
+        }
+    }
+    #[cfg(feature = "native-body-witness")]
+    let mut turns = 0;
+    #[cfg(feature = "native-body-witness")]
+    if cancel || probe.case == "body-check" {
+        wait_for_batch_native(scope, time, observation_cutoff, &mut turns, || {
+            let native = witness.native.lock().unwrap();
+            let native = native.as_ref().ok_or_else(invalid)?;
+            Ok(native.witnesses[1..if cancel { 2 } else { 3 }]
+                .iter()
+                .all(|witness| witness.snapshot().pending_operation().is_some()))
+        })
+        .await?;
+    }
+    let ready_request = probe.request("ready", timeline)?;
+    let ready = scope.with(|| client.send(ready_request))?.await?;
+    if ready.status().as_u16() != 204 || !ready.into_bytes_bounded(64).await?.is_empty() {
+        return Err(invalid());
+    }
+    let at = timeline.clock.now();
+    timeline.event("barrier-ready", at, at, json!(true));
+    #[cfg(feature = "native-body-witness")]
+    if cancel || probe.case == "body-check" {
+        wait_for_batch_native(scope, time, observation_cutoff, &mut turns, || {
+            let native = witness.native.lock().unwrap();
+            let native = native.as_ref().ok_or_else(invalid)?;
+            let snapshots = native.witnesses.each_ref().map(NativeBodyWitness::snapshot);
+            Ok(batch_native_complete(&snapshots, cancel))
+        })
+        .await?;
+    }
+    if probe.case == "body-check" {
+        next(&mut batch, &mut report, timeline).await;
+        if report.error.is_some()
+            || report.items.len() != 1
+            || report.items[0]["index"] != 0
+            || report.items[0]["outcome"] != json!({"status":200,"bytes":b"A"})
+        {
+            return Err(invalid());
+        }
+    }
+    Ok((batch, report))
+}
+
+fn batch_body(
+    probe: Probe,
+    batch: OutboundBatch,
+    report: Report,
+    timeline: Timeline,
+    witness: Arc<BatchWitness>,
+) -> Result<Body, EdgeError> {
+    use std::sync::atomic::Ordering;
+    let deadline = probe.case == "batch-write-deadline";
+    let prefix = line(&batch_prelude(&probe))?;
+    witness.prefix_bytes.store(prefix.len(), Ordering::SeqCst);
+    let source_drop = BatchSourceDrop(Arc::clone(&witness.dropped));
+    let pending_poll = Arc::clone(&witness.pending);
+    let source = futures::stream::unfold(
+        (0, batch, report, timeline, probe, source_drop),
+        move |(phase, mut batch, mut report, mut timeline, probe, source_drop)| {
+            let prefix = prefix.clone();
+            let pending = Arc::clone(&pending_poll);
+            let witness = Arc::clone(&witness);
+            async move {
+                let chunk = match phase {
+                    0 => Ok(prefix),
+                    1 if deadline => {
+                        let result = std::future::poll_fn(|cx| {
+                            let mut next = std::pin::pin!(batch.next());
+                            let result = std::future::Future::poll(next.as_mut(), cx);
+                            if result.is_pending() {
+                                pending.store(true, Ordering::SeqCst);
+                            }
+                            result
+                        })
+                        .await;
+                        return Some((
+                            Err(result.err().unwrap_or_else(invalid)),
+                            (4, batch, report, timeline, probe, source_drop),
+                        ));
+                    }
+                    1 | 2 => {
+                        if check(&mut batch, &mut report, &mut timeline).await.is_err() {
+                            return Some((
+                                Err(invalid()),
+                                (4, batch, report, timeline, probe, source_drop),
+                            ));
+                        }
+                        line(timeline.events.last()?)
+                    }
+                    3 => {
+                        report.batch_state = Some(json!({"delivered":[0],"in_flight":[1,2]}));
+                        report.native_body = Some(witness.native_json());
+                        line(&report.json(&probe, &timeline))
+                    }
+                    _ => return None,
+                };
+                Some((
+                    chunk,
+                    (phase + 1, batch, report, timeline, probe, source_drop),
+                ))
+            }
+        },
+    );
+    Ok(Body::from_stream(source))
+}
+
+async fn batch_runtime(
+    ctx: &RequestContext,
+    probe: Probe,
+    mut timeline: Timeline,
+) -> Result<Response, EdgeError> {
+    let native = super::progress::outbound_client(ctx)?;
+    let time = native.time();
+    let client = HttpClient::new(Arc::clone(&native));
+    let deadline = probe.case == "batch-write-deadline";
+    let witness = if deadline {
+        ctx.take_ingress_grant()
+            .and_then(|grant| grant.downcast::<Arc<BatchWitness>>().ok())
+            .ok_or_else(|| {
+                EdgeError::internal(std::io::Error::other(
+                    "batch lifetime admission witness is absent",
+                ))
+            })?
+    } else {
+        Arc::new(BatchWitness::default())
+    };
+    let owner = OutboundScopeOwner::response_body();
+    let scope = owner.with(|| OutboundScope::capture(native.progress()));
+    let body = if deadline {
+        // Egress owns the one-second clock before the 34 ms batch dispatch. The
+        // unchanged per-call timers therefore expire after the response deadline.
+        let delay = super::progress::pause(ctx, timeline.remaining(34))?;
+        Body::from_stream(
+            futures::stream::once(async move {
+                delay.await;
+                let (batch, report) =
+                    prepare_runtime_batch(&scope, &probe, &client, &mut timeline, &witness, &time)
+                        .await?;
+                batch_body(probe, batch, report, timeline, witness)?
+                    .into_stream()
+                    .map_err(|_| invalid())
+            })
+            .try_flatten(),
+        )
+    } else {
+        timeline.wait_until(ctx, 34).await?;
+        let (batch, mut report) =
+            prepare_runtime_batch(&scope, &probe, &client, &mut timeline, &witness, &time).await?;
+        if probe.case == "batch-cancel" {
+            let recorded = witness.native_json();
+            let at = timeline.clock.now();
+            let indices = batch.cancel();
+            timeline.event("cancel", at, timeline.clock.now(), json!(indices));
+            report.batch_state = Some(
+                json!({"recorded_unobserved":0,"recorded_kind":"sdk-buffered-response",
+                "delivered":[2],"in_flight":[1],"cancelled":indices,"before_cancel":recorded}),
+            );
+            report.native_body = Some(witness.native_json());
+            return response_builder()
+                .header("content-type", "application/json")
+                .body(Body::json(&report.json(&probe, &timeline)).map_err(EdgeError::internal)?)
+                .map_err(EdgeError::internal);
+        }
+        batch_body(probe, batch, report, timeline, witness)?
+    };
+    let mut response = response_builder()
+        .header("content-type", "application/x-ndjson")
+        .body(body)
+        .map_err(EdgeError::internal)?;
+    if deadline {
+        response
+            .extensions_mut()
+            .insert(edgezero_core::ResponseEgressDeadline::after(
+                Duration::from_secs(1),
+            ));
+    }
+    owner.attach(response)
+}
+
 #[action]
 pub(super) async fn probe(ctx: RequestContext) -> Result<Response, EdgeError> {
     let case = ctx.path_params().get("case").ok_or_else(invalid)?;
+    #[cfg(feature = "native-body-witness")]
+    if response_cleanup::CASES.contains(&case) {
+        return response_cleanup::handle(ctx).await;
+    }
     let probe = Probe::parse(case, ctx.headers())?;
+    let mut timeline = Timeline::new(ctx.monotonic_clock(), ctx.request_start());
+    if matches!(
+        probe.case.as_str(),
+        "batch-write-deadline" | "batch-cancel" | "body-check"
+    ) {
+        return batch_runtime(&ctx, probe, timeline).await;
+    }
     let client = ctx.http_client().ok_or_else(|| {
         EdgeError::internal(std::io::Error::other(
             "lifetime probe has no injected client",
         ))
     })?;
-    let mut timeline = Timeline::new(ctx.monotonic_clock(), ctx.request_start());
+    if probe.case == "begin-upload-rules" {
+        return upload_rules(ctx, probe, client).await;
+    }
     if probe.case == "response-handoff" {
         return response_handoff(&ctx, probe, client, timeline).await;
     }
@@ -953,6 +1435,59 @@ pub(super) async fn probe(ctx: RequestContext) -> Result<Response, EdgeError> {
         .header("content-type", "application/json")
         .body(Body::json(&report.json(&probe, &timeline)).map_err(EdgeError::internal)?)
         .map_err(EdgeError::internal)
+}
+
+async fn upload_rules(
+    ctx: RequestContext,
+    probe: Probe,
+    client: HttpClient,
+) -> Result<Response, EdgeError> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let target = Uri::builder()
+        .scheme("http")
+        .authority(probe.base.authority().cloned().ok_or_else(invalid)?)
+        .path_and_query(format!("/forward/send/{}", probe.token))
+        .build()
+        .map_err(EdgeError::internal)?;
+    let streamed_post = |polls: Arc<AtomicUsize>| -> Result<OutboundRequest, EdgeError> {
+        OutboundRequest::new(Method::POST, target.clone())?
+            .header("x-request-token", &probe.token)
+            .map(|request| {
+                request
+                    .timeout(Duration::from_secs(5))
+                    .max_response_bytes(64)
+                    .body(Body::from_stream(futures::stream::once(async move {
+                        polls.fetch_add(1, Ordering::SeqCst);
+                        Ok(Bytes::from_static(b"POST"))
+                    })))
+            })
+    };
+    let rejected_polls = Arc::new(AtomicUsize::new(0));
+    let rejected = match client
+        .begin(streamed_post(Arc::clone(&rejected_polls))?)
+        .await
+    {
+        Err(error) => error_report(&error),
+        Ok(pending) => {
+            pending.cancel();
+            return Err(invalid());
+        }
+    };
+    let incoming = ctx.into_request()?;
+    if incoming.method() != Method::GET {
+        return Err(invalid());
+    }
+    let get = OutboundRequest::from_request(incoming, target.clone())?
+        .timeout(Duration::from_secs(5))
+        .max_response_bytes(64);
+    let begun = response_report(client.begin(get).await?.collect().await).await;
+    let sent_polls = Arc::new(AtomicUsize::new(0));
+    let sent = response_report(client.send(streamed_post(Arc::clone(&sent_polls))?).await).await;
+    response_builder().header("content-type","application/json")
+        .body(Body::json(&json!({"schema":1,"case":probe.case,"token":probe.token,"qualification":false,
+            "begin_post":rejected,"begin_post_polls":rejected_polls.load(Ordering::SeqCst),
+            "begin_get":begun,"send_post":sent,"send_post_polls":sent_polls.load(Ordering::SeqCst)}))
+            .map_err(EdgeError::internal)?).map_err(EdgeError::internal)
 }
 
 #[cfg(test)]
@@ -1009,6 +1544,36 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct HandoffJobs(
+        RefCell<futures::stream::FuturesUnordered<futures::future::LocalBoxFuture<'static, ()>>>,
+    );
+
+    struct HandoffProgress(TestTime);
+
+    impl edgezero_core::OutboundProgressRuntime for HandoffProgress {
+        fn poll(
+            &self,
+            scope: &OutboundScope,
+            _: &edgezero_core::OutboundTime,
+            _: MonotonicInstant,
+            cx: &mut std::task::Context<'_>,
+            inner: &mut dyn FnMut(&mut std::task::Context<'_>) -> std::task::Poll<()>,
+        ) -> std::task::Poll<Result<(), EdgeError>> {
+            let jobs = scope.provider_state(HandoffJobs::default)?;
+            if let Ok(mut tasks) = jobs.0.try_borrow_mut() {
+                while let std::task::Poll::Ready(Some(())) = tasks.poll_next_unpin(cx) {}
+            }
+            let result = inner(cx);
+            if result.is_pending() && jobs.0.try_borrow().is_ok_and(|tasks| !tasks.is_empty()) {
+                self.0
+                    .advance_to(self.0.clock().now() + Duration::from_millis(1));
+                cx.waker().wake_by_ref();
+            }
+            result.map(Ok)
+        }
+    }
+
     impl HandoffClient {
         fn queue(
             &self,
@@ -1022,6 +1587,8 @@ mod tests {
                     .unwrap(),
             );
             let (parts, context) = request.into_parts();
+            #[cfg(feature = "native-body-witness")]
+            let recorder = edgezero_core::outbound::test_support::native_body_recorder(&context);
             let role = parts.uri.path().rsplit('/').next().unwrap().to_owned();
             let payload = match role.as_str() {
                 "origin" => b'O',
@@ -1030,7 +1597,12 @@ mod tests {
                 "c" => b'C',
                 _ => panic!("unexpected handoff job"),
             };
-            let (send, mut receive) = futures::channel::oneshot::channel();
+            let (send, receive) = futures::channel::oneshot::channel();
+            #[cfg(feature = "native-body-witness")]
+            let mut receive =
+                edgezero_core::outbound::test_support::own_sdk_operation(receive, recorder.clone());
+            #[cfg(not(feature = "native-body-witness"))]
+            let mut receive = receive;
             assert!(self.jobs.lock().unwrap().insert(role, send).is_none());
             let resources = Arc::clone(&self.resources);
             let owner = edgezero_core::OutboundExchangeOwner::new(move || {
@@ -1038,14 +1610,22 @@ mod tests {
             });
             let polls = Arc::clone(&self.polls);
             Box::pin(async move {
-                std::future::poll_fn(move |cx| {
+                std::future::poll_fn(|cx| {
                     polls.fetch_add(1, Ordering::SeqCst);
                     futures::FutureExt::poll_unpin(&mut receive, cx)
                 })
                 .await
                 .map_err(|_| invalid())?;
+                drop(receive);
+                #[cfg(feature = "native-body-witness")]
+                if let Some(recorder) = &recorder {
+                    recorder.head_received();
+                }
                 let source = futures::stream::once(async move { Ok(Bytes::from(vec![payload])) })
                     .boxed_local();
+                #[cfg(feature = "native-body-witness")]
+                let source =
+                    edgezero_core::outbound::test_support::observe_sdk_stream(source, recorder);
                 edgezero_core::OutboundHead::new(
                     StatusCode::OK,
                     edgezero_core::OutboundHeaderInput::new(
@@ -1065,7 +1645,7 @@ mod tests {
 
     impl edgezero_core::OutboundHttpClient for HandoffClient {
         fn progress(&self) -> Rc<dyn edgezero_core::OutboundProgressRuntime> {
-            Rc::new(IndependentOutboundProgress)
+            Rc::new(HandoffProgress(self.time.clone()))
         }
         fn time(&self) -> edgezero_core::OutboundTime {
             self.time.pair()
@@ -1079,14 +1659,80 @@ mod tests {
         }
         fn dispatch_head(
             &self,
-            _: edgezero_core::OutboundDispatchRequest,
+            request: edgezero_core::OutboundDispatchRequest,
         ) -> edgezero_core::OutboundFuture<edgezero_core::OutboundHead> {
-            Box::pin(async { Err(invalid()) })
+            if request.request().uri().path().ends_with("/ready")
+                && !request
+                    .request()
+                    .uri()
+                    .path()
+                    .contains("batch-write-deadline")
+            {
+                let expected = if request.request().uri().path().contains("batch-cancel") {
+                    2
+                } else {
+                    3
+                };
+                assert!(
+                    self.polls.load(Ordering::SeqCst) >= expected,
+                    "pending operations must be witnessed before the ready request releases A"
+                );
+            }
+            if !request
+                .request()
+                .uri()
+                .path()
+                .contains("batch-write-deadline")
+                && request.request().uri().path().ends_with("/ready")
+                && let Some(send) = self.jobs.lock().unwrap().remove("a")
+            {
+                send.send(()).unwrap();
+            }
+            let (parts, context) = request.into_parts();
+            let calls = Arc::clone(&self.calls);
+            Box::pin(async move {
+                let forward = parts.uri.path().starts_with("/forward/send/");
+                if !forward && !parts.uri.path().ends_with("/ready") {
+                    return Err(invalid());
+                }
+                let bytes = parts.body.into_bytes_bounded(8).await?;
+                if forward {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if !((parts.method == Method::GET && bytes.is_empty())
+                        || (parts.method == Method::POST && bytes == b"POST".as_slice()))
+                    {
+                        return Err(invalid());
+                    }
+                }
+                edgezero_core::OutboundHead::new(
+                    if forward {
+                        StatusCode::CREATED
+                    } else {
+                        StatusCode::NO_CONTENT
+                    },
+                    edgezero_core::OutboundHeaderInput::new(
+                        "unit",
+                        HeaderMap::new(),
+                        edgezero_core::OutboundHeaderFidelity::AdapterVisibleFields,
+                    ),
+                    futures::stream::iter(forward.then(|| Ok(Bytes::from_static(b"end"))))
+                        .boxed_local(),
+                    context,
+                    edgezero_core::OutboundExchangeOwner::new(|| {}),
+                )
+            })
         }
         fn begin(
             &self,
             request: edgezero_core::OutboundDispatchRequest,
         ) -> Result<edgezero_core::OutboundPending, EdgeError> {
+            if request.request().uri().path().starts_with("/forward/send/") {
+                let head = edgezero_core::OutboundHttpClient::dispatch_head(self, request);
+                return Ok(edgezero_core::OutboundPending::new(
+                    Box::pin(async move { head.await?.finish().await }),
+                    edgezero_core::OutboundExchangeOwner::new(|| {}),
+                ));
+            }
             let future = self.queue(request);
             let cancelled = Arc::clone(&self.cancelled);
             let jobs = Arc::clone(&self.jobs);
@@ -1101,27 +1747,32 @@ mod tests {
         fn start_batch_until(&self, batch: edgezero_core::OutboundPreparedBatch) -> OutboundBatch {
             let (context, requests) = batch.into_slots();
             let time = self.time.clock();
-            let futures = requests
-                .into_iter()
-                .map(|(index, request)| {
-                    let response = self.queue(request);
-                    let clock = time.clone();
-                    async move {
-                        let outcome = response.await;
-                        edgezero_core::OutboundBatchDriverEvent::Item {
-                            index,
-                            completed_at: clock.now(),
-                            outcome,
-                        }
-                    }
-                })
-                .collect::<futures::stream::FuturesUnordered<_>>();
+            let background = context
+                .scope()
+                .provider_state(HandoffJobs::default)
+                .unwrap();
+            let (send, receive) = futures::channel::mpsc::unbounded();
+            for (index, request) in requests {
+                let response = self.queue(request);
+                let clock = time.clone();
+                let send = send.clone();
+                background.0.borrow().push(Box::pin(async move {
+                    let outcome = response.await;
+                    let _ = send.unbounded_send(edgezero_core::OutboundBatchDriverEvent::Item {
+                        index,
+                        completed_at: clock.now(),
+                        outcome,
+                    });
+                }));
+            }
+            drop(send);
             let jobs = Arc::clone(&self.jobs);
             let groups = Arc::clone(&self.groups);
             OutboundBatch::from_driver(
                 context,
-                futures,
+                receive,
                 edgezero_core::OutboundExchangeOwner::new(move || {
+                    *background.0.borrow_mut() = futures::stream::FuturesUnordered::new();
                     let mut jobs = jobs.lock().unwrap();
                     for role in ["a", "b", "c"] {
                         jobs.remove(role);
@@ -1132,13 +1783,25 @@ mod tests {
         }
     }
 
-    struct HandoffRuntime(TestTime);
+    struct HandoffRuntime(
+        TestTime,
+        Option<HandoffClient>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    );
     impl super::super::progress::ProbeRuntime for HandoffRuntime {
         fn adapter(&self) -> &'static str {
             "unit"
         }
         fn outbound_client(&self) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
-            Err(invalid())
+            assert_eq!(
+                self.2.fetch_add(1, Ordering::SeqCst),
+                0,
+                "one native factory call"
+            );
+            self.1
+                .clone()
+                .map(|client| Arc::new(client) as Arc<dyn edgezero_core::OutboundHttpClient>)
+                .ok_or_else(invalid)
         }
         fn perform(&self, _: String) -> super::super::progress::Job {
             Box::pin(async { Err(invalid()) })
@@ -1209,7 +1872,7 @@ mod tests {
         };
         let returned = Arc::new(super::super::progress::DispatchReturn::default());
         let router = super::super::progress::router(
-            Arc::new(HandoffRuntime(time.clone())),
+            Arc::new(HandoffRuntime(time.clone(), None, Arc::default())),
             Value::Null,
             has_return_signal.then(|| Arc::clone(&returned)),
         );
@@ -1441,6 +2104,603 @@ mod tests {
                 .unwrap(),
         );
         headers
+    }
+
+    #[test]
+    fn runtime_batch_probes_have_fixed_cases_and_independent_budgets() {
+        let time = TestTime::default();
+        let timeline = Timeline::new(time.clock(), time.clock().now());
+        for case in ["batch-write-deadline", "batch-cancel", "body-check"] {
+            let probe = Probe::parse(case, &headers(case)).expect("supported runtime case");
+            for role in ["a", "b", "c", "ready"] {
+                let parts = probe.request(role, &timeline).unwrap().into_parts();
+                assert_eq!(parts.timeout, Some(Duration::from_secs(1)));
+                assert!(parts.deadline.is_none());
+                assert!(matches!(
+                    parts.response_mode,
+                    ResponseMode::Buffered { max_bytes: 64 }
+                ));
+            }
+        }
+    }
+
+    #[cfg(feature = "native-body-witness")]
+    fn buffered_a_snapshot(body_releases: u64) -> NativeBodySnapshot {
+        NativeBodySnapshot {
+            attachments: 1,
+            preparations: 1,
+            operation_acquisitions: 1,
+            operation_polls: 1,
+            ready_operation_polls: 1,
+            operation_releases: 1,
+            heads: 1,
+            source_acquisitions: 1,
+            source_releases: body_releases,
+            reads: 2,
+            ready_reads: 1,
+            ..NativeBodySnapshot::default()
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn batch_operation_observation_keeps_actual_sdk_poll_and_ready_fallback() {
+        use edgezero_core::outbound::test_support::NativeOperationPoll;
+        let time = TestTime::default();
+        let start = time.clock().now();
+        for pending in [true, false] {
+            let snapshot = NativeBodySnapshot {
+                first_operation_poll: Some(NativeOperationPoll {
+                    started_at: start + Duration::from_micros(34_000),
+                    observed_at: start + Duration::from_micros(34_010),
+                    pending,
+                }),
+                ..NativeBodySnapshot::default()
+            };
+            assert_eq!(
+                BatchNative::operation_observation(&snapshot, start),
+                json!({"kind":"SdkPoll","pending":pending,"at_us":34_000,"observed_at_us":34_010})
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn batch_operation_observation_prioritizes_historical_head_wait_without_fake_poll() {
+        use edgezero_core::outbound::test_support::{NativeBodyWaitOutcome, NativeOperationPoll};
+        let time = TestTime::default();
+        let start = time.clock().now();
+        let mut snapshot = NativeBodySnapshot {
+            first_head_wait_timeout: Some(NativeBodyWait {
+                started_at: start + Duration::from_micros(34_000),
+                observed_at: start + Duration::from_micros(35_000),
+                outcome: NativeBodyWaitOutcome::TimedOut,
+            }),
+            ..NativeBodySnapshot::default()
+        };
+        let expected =
+            json!({"kind":"HeadReadinessTimeout","at_us":34_000,"observed_at_us":35_000});
+        assert_eq!(
+            BatchNative::operation_observation(&snapshot, start),
+            expected
+        );
+        assert_eq!(snapshot.operation_polls, 0);
+        snapshot.first_operation_poll = Some(NativeOperationPoll {
+            started_at: start + Duration::from_micros(36_000),
+            observed_at: start + Duration::from_micros(36_010),
+            pending: false,
+        });
+        assert_eq!(
+            BatchNative::operation_observation(&snapshot, start),
+            expected
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn batch_operation_observation_is_null_for_unprepared_c_and_has_no_old_alias() {
+        let time = TestTime::default();
+        let native = BatchNative {
+            start: time.clock().now(),
+            witnesses: std::array::from_fn(|_| NativeBodyWitness::new()),
+        };
+        for slot in native.json().as_array().unwrap() {
+            assert!(slot.get("first_poll").is_none());
+            assert!(slot.get("pending_operation").is_none());
+            assert_eq!(slot.get("operation_observation"), Some(&Value::Null));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn cancel_barrier_requires_body_release_not_only_a_ready_head() {
+        assert!(!buffered_a_complete(&buffered_a_snapshot(0)));
+        assert!(buffered_a_complete(&buffered_a_snapshot(1)));
+        let mut invalid = buffered_a_snapshot(1);
+        invalid.ready_reads = 0;
+        assert!(!buffered_a_complete(&invalid));
+        invalid = buffered_a_snapshot(1);
+        invalid.invalid = true;
+        assert!(!buffered_a_complete(&invalid));
+        invalid = buffered_a_snapshot(1);
+        invalid.ready_operation_polls = 2;
+        assert!(!buffered_a_complete(&invalid));
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn cancel_barrier_waits_on_paired_timer_until_delayed_eof() {
+        use std::task::{Context, Waker};
+        let time = TestTime::default();
+        let pair = time.pair();
+        let start = time.clock().now();
+        time.advance_to(start + Duration::from_millis(37));
+        let owner = OutboundScopeOwner::response_body();
+        let scope = owner.scope();
+        let released = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&released);
+        let observations = Rc::new(Cell::new(0));
+        let samples = Rc::clone(&observations);
+        let mut turns = 0;
+        let mut wait = Box::pin(wait_for_batch_native(
+            &scope,
+            &pair,
+            Deadline::at_instant(start + Duration::from_millis(534)),
+            &mut turns,
+            move || {
+                samples.set(samples.get() + 1);
+                Ok(buffered_a_complete(&buffered_a_snapshot(u64::from(
+                    observed.get(),
+                ))))
+            },
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(std::future::Future::poll(wait.as_mut(), &mut cx).is_pending());
+        assert_eq!(observations.get(), 1);
+        released.set(true);
+        time.advance_to(start + Duration::from_millis(38));
+        assert!(matches!(
+            std::future::Future::poll(wait.as_mut(), &mut cx),
+            std::task::Poll::Ready(Ok(()))
+        ));
+        assert_eq!(observations.get(), 2);
+        assert_eq!(pair.clock().now(), start + Duration::from_millis(38));
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn cancel_barrier_missing_eof_fails_at_original_cutoff() {
+        use std::task::{Context, Waker};
+        let time = TestTime::default();
+        let pair = time.pair();
+        let start = time.clock().now();
+        time.advance_to(start + Duration::from_micros(533_500));
+        let owner = OutboundScopeOwner::response_body();
+        let scope = owner.scope();
+        let mut turns = 0;
+        let mut wait = Box::pin(wait_for_batch_native(
+            &scope,
+            &pair,
+            Deadline::at_instant(start + Duration::from_millis(534)),
+            &mut turns,
+            || Ok(buffered_a_complete(&buffered_a_snapshot(0))),
+        ));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(std::future::Future::poll(wait.as_mut(), &mut cx).is_pending());
+        time.advance_to(start + Duration::from_millis(534));
+        assert!(matches!(
+            std::future::Future::poll(wait.as_mut(), &mut cx),
+            std::task::Poll::Ready(Err(_))
+        ));
+        assert_eq!(pair.clock().now(), start + Duration::from_millis(534));
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn cancel_barrier_has_at_most_128_timer_turns() {
+        let time = TestTime::default();
+        let start = time.clock().now();
+        time.advance_to(start + Duration::from_millis(34));
+        let timers = Arc::new(AtomicU64::new(0));
+        let count = Arc::clone(&timers);
+        let advanced = time.clone();
+        let pair = edgezero_core::OutboundTime::new(time.clock(), move |deadline, _| {
+            count.fetch_add(1, Ordering::SeqCst);
+            advanced.advance_to(deadline.instant());
+            Box::pin(async { Ok(()) })
+        });
+        let owner = OutboundScopeOwner::response_body();
+        assert!(
+            block_on(wait_for_batch_native(
+                &owner.scope(),
+                &pair,
+                Deadline::at_instant(start + Duration::from_millis(534)),
+                &mut 0,
+                || Ok(buffered_a_complete(&buffered_a_snapshot(0)))
+            ))
+            .is_err()
+        );
+        assert_eq!(timers.load(Ordering::SeqCst), 128);
+        assert_eq!(pair.clock().now(), start + Duration::from_millis(162));
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn batch_native_barrier_requires_pending_witnesses_for_only_the_active_slots() {
+        use edgezero_core::outbound::test_support::{NativeBodyWaitOutcome, NativeOperationPoll};
+        let time = TestTime::default();
+        let at = time.clock().now();
+        let mut snapshots = [
+            buffered_a_snapshot(1),
+            NativeBodySnapshot::default(),
+            NativeBodySnapshot::default(),
+        ];
+        assert!(!batch_native_complete(&snapshots, true));
+        snapshots[1].first_operation_poll = Some(NativeOperationPoll {
+            pending: true,
+            started_at: at,
+            observed_at: at,
+        });
+        assert!(batch_native_complete(&snapshots, true));
+        assert!(!batch_native_complete(&snapshots, false));
+        snapshots[2].first_head_wait_timeout = Some(NativeBodyWait {
+            outcome: NativeBodyWaitOutcome::TimedOut,
+            started_at: at,
+            observed_at: at + Duration::from_millis(1),
+        });
+        assert!(batch_native_complete(&snapshots, false));
+        snapshots[0].source_releases = 0;
+        assert!(!batch_native_complete(&snapshots, true));
+        snapshots[0].source_releases = 1;
+        snapshots[1].invalid = true;
+        assert!(!batch_native_complete(&snapshots, true));
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn batch_native_barrier_phases_share_one_timer_turn_limit() {
+        let time = TestTime::default();
+        let start = time.clock().now();
+        let advanced = time.clone();
+        let timers = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&timers);
+        let pair = edgezero_core::OutboundTime::new(time.clock(), move |deadline, _| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            advanced.advance_to(deadline.instant());
+            Box::pin(async { Ok(()) })
+        });
+        let owner = OutboundScopeOwner::response_body();
+        let scope = owner.scope();
+        let cutoff = Deadline::at_instant(start + Duration::from_millis(534));
+        let mut turns = 127;
+        let mut observations = 0;
+        block_on(wait_for_batch_native(
+            &scope,
+            &pair,
+            cutoff,
+            &mut turns,
+            || {
+                observations += 1;
+                Ok(observations == 2)
+            },
+        ))
+        .unwrap();
+        assert_eq!(turns, 128);
+        assert!(
+            block_on(wait_for_batch_native(
+                &scope,
+                &pair,
+                cutoff,
+                &mut turns,
+                || Ok(false)
+            ))
+            .is_err()
+        );
+        assert_eq!(turns, 128);
+        assert_eq!(timers.load(Ordering::SeqCst), 1);
+        assert_eq!(pair.clock().now(), start + Duration::from_millis(1));
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn batch_native_barrier_rejects_backwards_time_during_observation() {
+        let time = TestTime::default();
+        let pair = time.pair();
+        let entered = time.clock().now();
+        let owner = OutboundScopeOwner::response_body();
+        time.advance_to(entered + Duration::from_millis(1));
+        assert!(
+            block_on(wait_for_batch_native(
+                &owner.scope(),
+                &pair,
+                Deadline::at_instant(entered + Duration::from_millis(534)),
+                &mut 0,
+                || {
+                    time.advance_to(entered);
+                    Ok(true)
+                },
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn cancel_barrier_rejects_closed_scope_missing_witness_and_cutoff_equality() {
+        let time = TestTime::default();
+        let pair = time.pair();
+        let cutoff = pair.clock().deadline_after(Duration::from_millis(534));
+        let owner = OutboundScopeOwner::response_body();
+        let scope = owner.scope();
+        assert!(
+            block_on(wait_for_batch_native(
+                &scope,
+                &pair,
+                cutoff,
+                &mut 0,
+                || Err(invalid())
+            ))
+            .is_err()
+        );
+        time.advance_to(cutoff.instant());
+        assert!(
+            block_on(wait_for_batch_native(&scope, &pair, cutoff, &mut 0, || Ok(
+                buffered_a_complete(&buffered_a_snapshot(1))
+            )))
+            .is_err()
+        );
+        let later = pair.clock().deadline_after(Duration::from_millis(1));
+        owner.close();
+        let error = block_on(wait_for_batch_native(&scope, &pair, later, &mut 0, || {
+            panic!("closed scope sampled witness")
+        }))
+        .unwrap_err();
+        assert!(matches!(error, EdgeError::Internal { .. }));
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn cancel_barrier_preserves_paired_timer_failure() {
+        let time = TestTime::default();
+        let pair = edgezero_core::OutboundTime::new(time.clock(), |_, _| {
+            Box::pin(async { Err(EdgeError::bad_gateway("timer failure")) })
+        });
+        let owner = OutboundScopeOwner::response_body();
+        let error = block_on(wait_for_batch_native(
+            &owner.scope(),
+            &pair,
+            pair.clock().deadline_after(Duration::from_millis(534)),
+            &mut 0,
+            || Ok(buffered_a_complete(&buffered_a_snapshot(0))),
+        ))
+        .unwrap_err();
+        assert!(matches!(error, EdgeError::BadGateway { .. }));
+        assert_eq!(error.message(), "timer failure");
+    }
+
+    #[test]
+    #[cfg(feature = "native-body-witness")]
+    fn shared_snapshot_preserves_sdk_operation_lifetime_samples() {
+        let time = TestTime::default();
+        let start = time.clock().now();
+        let timeline = Timeline::new(time.clock(), start);
+        let acquired = start + Duration::from_millis(34);
+        let polled = start + Duration::from_millis(35);
+        let released = start + Duration::from_millis(36);
+        let snapshot = NativeBodySnapshot {
+            operation_acquisitions: 1,
+            operation_polls: 3,
+            operation_releases: 1,
+            first_operation_acquisition: Some(acquired),
+            first_operation_release: Some(released),
+            first_operation_poll: Some(
+                edgezero_core::outbound::test_support::NativeOperationPoll {
+                    started_at: polled,
+                    observed_at: polled,
+                    pending: true,
+                },
+            ),
+            ..NativeBodySnapshot::default()
+        };
+        let report = native_body_report(snapshot, &timeline);
+        assert_eq!(report["operation_acquisitions"], 1);
+        assert_eq!(report["operation_polls"], 3);
+        assert_eq!(report["operation_releases"], 1);
+        assert_eq!(report["operation_acquired_at_us"], 34000);
+        assert_eq!(report["operation_released_at_us"], 36000);
+        assert_eq!(
+            report["first_operation_poll"],
+            json!({"started_at_us":35000,"observed_at_us":35000,"pending":true})
+        );
+    }
+
+    #[test]
+    fn runtime_batch_routes_preserve_delivered_and_unobserved_slots_through_body_work() {
+        for case in [
+            "batch-cancel",
+            "body-check",
+            "batch-write-deadline",
+            "begin-upload-rules",
+        ] {
+            runtime_batch_route(case);
+        }
+    }
+
+    fn runtime_batch_route(case: &str) {
+        use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
+        use edgezero_core::{
+            IngressDispatchOutcome, IngressFraming, IngressHeadAccounting, ResponseEgressOutcome,
+            app::App,
+        };
+        use futures::FutureExt as _;
+        use std::sync::{Mutex, atomic::AtomicUsize};
+        let time = TestTime::default();
+        let start = time.clock().now();
+        let client = HandoffClient {
+            time: time.clone(),
+            jobs: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            resources: Arc::new(AtomicUsize::new(0)),
+            cancelled: Arc::new(AtomicUsize::new(0)),
+            family: Arc::new(AtomicUsize::new(0)),
+            groups: Arc::new(AtomicUsize::new(0)),
+            calls: Arc::new(AtomicUsize::new(0)),
+            polls: Arc::new(AtomicUsize::new(0)),
+        };
+        let factories = Arc::new(AtomicUsize::new(0));
+        let mut app = App::new(super::super::progress::router(
+            Arc::new(HandoffRuntime(
+                time.clone(),
+                Some(client.clone()),
+                Arc::clone(&factories),
+            )),
+            Value::Null,
+            None,
+        ));
+        app.set_monotonic_clock(time.clock());
+        install_batch_admission(&mut app);
+        let reports = TerminalReports::default();
+        app.set_response_egress_observer(reports.clone());
+        let mut request = request_builder()
+            .uri(format!("/progress/lifetimes/{case}"))
+            .body(Body::empty())
+            .unwrap();
+        *request.headers_mut() = headers(case);
+        if case == "begin-upload-rules" {
+            request
+                .extensions_mut()
+                .insert(HttpClient::with_client(client.clone()));
+        }
+        let callback = OutboundScopeOwner::callback();
+        let outcome = block_on(callback.run(app.dispatch_ingress(
+            request,
+            start,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        )))
+        .unwrap();
+        let IngressDispatchOutcome::Response(envelope) = outcome else {
+            panic!("batch response")
+        };
+        let (prepared, policy, mut attempt, _) = envelope
+            .begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+            .unwrap_or_else(|_| panic!("batch envelope"));
+        assert!(attempt.begin_writing());
+        callback.close();
+        let response = prepared.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            factories.load(Ordering::SeqCst),
+            usize::from(case != "begin-upload-rules")
+        );
+        if case == "begin-upload-rules" {
+            let bytes = block_on(response.into_body().into_bytes_bounded(16384)).unwrap();
+            let report: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                report["begin_post"],
+                json!({"kind":"bad_request","status":400,"reason":null})
+            );
+            assert_eq!(report["begin_post_polls"], 0);
+            assert_eq!(report["begin_get"], json!({"status":201,"bytes":b"end"}));
+            assert_eq!(report["send_post"], json!({"status":201,"bytes":b"end"}));
+            assert_eq!(report["send_post_polls"], 1);
+            assert_eq!(client.calls.load(Ordering::SeqCst), 2);
+            assert_eq!(client.groups.load(Ordering::SeqCst), 0);
+            return;
+        }
+        if case == "batch-cancel" {
+            assert_eq!(
+                client.calls.load(Ordering::SeqCst),
+                2,
+                "A and B reach transport; delivered preflight C does not"
+            );
+            assert_eq!(client.groups.load(Ordering::SeqCst), 1);
+            let bytes = block_on(response.into_body().into_bytes_bounded(16384)).unwrap();
+            let report: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                report["batch_state"],
+                json!({"recorded_unobserved":0,"recorded_kind":"sdk-buffered-response","delivered":[2],"in_flight":[1],"cancelled":[0,1],"before_cancel":report["batch_state"]["before_cancel"]})
+            );
+            assert_eq!(report["items"].as_array().unwrap().len(), 1);
+            assert_eq!(report["items"][0]["index"], 2);
+            assert_eq!(report["events"][1]["op"], "check");
+            assert_eq!(report["events"][2]["op"], "barrier-ready");
+            assert_eq!(report["events"][3]["result"], json!([0, 1]));
+            assert_eq!(report["events"].as_array().unwrap().len(), 4);
+            #[cfg(feature = "native-body-witness")]
+            {
+                let recorded = &report["batch_state"]["before_cancel"];
+                assert_eq!(recorded[0]["heads"], 1);
+                assert_eq!(recorded[0]["acquisitions"], 1);
+                assert_eq!(recorded[0]["releases"], 1);
+                assert_eq!(recorded[0]["ready_polls"], 1);
+                assert_eq!(recorded[0]["body_acquisitions"], 1);
+                assert_eq!(recorded[0]["body_releases"], 1);
+                assert!(recorded[0]["ready_reads"].as_u64().unwrap() > 0);
+                assert_eq!(recorded[1]["operation_observation"]["kind"], "SdkPoll");
+                assert_eq!(recorded[1]["operation_observation"]["pending"], true);
+                assert_eq!(recorded[2]["operation_observation"], Value::Null);
+            }
+            return;
+        }
+        assert_eq!(
+            client.calls.load(Ordering::SeqCst),
+            if case == "batch-write-deadline" { 0 } else { 3 }
+        );
+        assert_eq!(client.groups.load(Ordering::SeqCst), 0);
+        // Canonical adapters extract the egress owner before consuming the source.
+        // Do not use Body::into_stream here: its manual-consumer cleanup is different.
+        let (payload, owner) = response.into_body().into_parts();
+        assert!(owner.is_none(), "attempt already owns response egress");
+        let edgezero_core::BodyPayload::Stream(mut source) = payload else {
+            panic!("streamed batch body")
+        };
+        let prefix = block_on(source.next()).unwrap().unwrap();
+        assert_eq!(client.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&prefix).unwrap()["phase"],
+            "batch-pending"
+        );
+        if case == "batch-write-deadline" {
+            assert_eq!(
+                policy.write_deadline.instant(),
+                start + Duration::from_secs(1)
+            );
+            assert!(source.next().now_or_never().is_none());
+            assert_eq!(client.groups.load(Ordering::SeqCst), 0);
+            time.advance_to(start + Duration::from_secs(1));
+            drop(source);
+            assert_eq!(
+                client.groups.load(Ordering::SeqCst),
+                1,
+                "canonical source release drops the live batch"
+            );
+            assert!(attempt.terminate(ResponseEgressOutcome::DeadlineExceeded, time.clock().now()));
+            assert_eq!(
+                *reports.0.lock().unwrap(),
+                [ResponseEgressOutcome::DeadlineExceeded]
+            );
+        } else {
+            for _ in 0..2 {
+                let bytes = block_on(source.next()).unwrap().unwrap();
+                let check: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(check["op"], "check");
+                assert_eq!(check["result"], "Pending");
+                assert!(check["duration_us"].as_u64().unwrap() < 5000);
+                assert_eq!(client.groups.load(Ordering::SeqCst), 0);
+            }
+            let bytes = block_on(source.next()).unwrap().unwrap();
+            let report: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                report["batch_state"],
+                json!({"delivered":[0],"in_flight":[1,2]})
+            );
+            assert_eq!(report["items"].as_array().unwrap().len(), 1);
+            assert_eq!(report["items"][0]["index"], 0);
+            assert_eq!(report["events"][0]["at_us"], 34000);
+            assert_eq!(report["events"][0]["result"]["cutoff_at_us"], 534000);
+            assert!(block_on(source.next()).is_none());
+            assert_eq!(client.groups.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[test]

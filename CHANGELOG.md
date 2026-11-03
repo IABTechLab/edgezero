@@ -13,6 +13,29 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Derive acceptance coverage from the reviewed inventory, separating required local and external
+  proofs, pending conditions and unpromoted follow-ups. Enforce local binding completeness in
+  the existing evidence CI owner; binding readiness never implies passing qualification or approval.
+- Complete all 217 required-local acceptance bindings and record the approved fixed-strict-TLS
+  baseline clarification, without promoting configurable TLS, hosted evidence or pending scope.
+  Distinguish actual SDK polls, native head-readiness waits, guest release and wire termination.
+  Bound cleanup captures and coordination by one absolute deadline, retain partial failed proof,
+  and require explicit controller abort intent instead of accepting prefix-validation failures.
+  Release held test origins on failed validation before collecting events, and replace signal
+  helper processes with typed, bounded Unix PID/group cleanup that preserves probe errors.
+- Prioritize already-registered Fastly backend configurations before cold registrations using
+  the complete canonical identity. Preserve input positions, original budgets, callback ownership
+  and the B31 policy; preparation neither polls bodies nor performs SDK I/O.
+- Extend native Send/Begin parity and response-owned cleanup acceptance across all four adapters.
+  Observe actual SDK operation ownership separately from body reads, keep callback work isolated,
+  and require release before retained handles are consumed. Guest ownership is not host teardown.
+- Execute Fastly fixture counter tests and Spin response-coordinator models in their existing CI
+  phases. Require independent same-candidate ownership companions and runtime proofs without
+  adding jobs, selectors, transports or executors. Add Linux-only silent-connect qualification
+  with bounded socket/process observations and unchanged phase/aggregate deadlines.
+- Extend the explicitly selected local Viceroy repair with distinct dynamic-backend timeout
+  readback in both guest ABIs. Verify the real SDK setters against the unchanged logical budget;
+  retain the prior failed control and leave network connect-timeout enforcement and hosted gates open.
 - Add request-owned, test-only native SDK head/read/release witnesses for Axum, Cloudflare and Spin.
   Require them in the existing pending-cutoff fixture instead of treating origin-written headers
   as SDK body-read evidence. Preserve strict timing and leave other-provider and hosted gates open.

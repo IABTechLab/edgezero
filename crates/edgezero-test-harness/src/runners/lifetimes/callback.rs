@@ -32,6 +32,108 @@ fn expected(wrapper: &str, mode: &str, token: &str) -> [Value; 3] {
     ["pending", "returning", "closed"].map(|stage| record(wrapper, mode, token, stage))
 }
 
+fn sdk_polls(row: &Value) -> Result<u64> {
+    row["operation_polls"]
+        .as_u64()
+        .ok_or_else(|| "invalid callback SDK poll counter".into())
+}
+
+fn validate_record(
+    wrapper: &str,
+    mode: &str,
+    token: &str,
+    index: usize,
+    value: &Value,
+    previous: &[Value],
+) -> Result<()> {
+    require(
+        index < 3 && previous.len() == index,
+        "invalid callback record order",
+    )?;
+    let closed = index == 2;
+    let count = if index > 0 && delivered(mode) { 5 } else { 4 };
+    let rows = value["evidence"]["sdk_operations"]
+        .as_array()
+        .filter(|rows| rows.len() == count)
+        .ok_or("missing callback SDK operation owners")?;
+    for (role, row) in ["origin", "a", "b", "c", "post"].iter().zip(rows) {
+        let polls = sdk_polls(row)?;
+        let kind = row["pending_kind"].as_str();
+        require(
+            matches!(kind, Some("SdkPoll") if polls > 0)
+                || matches!(kind, Some("HeadReadinessTimeout") if polls == 0),
+            "missing typed callback pending evidence",
+        )?;
+        require(
+            row == &json!({"role":role,"operation_acquisitions":1,
+                    "operation_polls":polls,"operation_releases":u64::from(closed),
+                    "ready_operation_polls":0,"pending_kind":kind,"heads":0,
+                    "source_acquisitions":0,"source_releases":0}),
+            "callback SDK operation not pending or not released exactly once",
+        )?;
+    }
+    if let Some(before) = previous.last() {
+        let before = before["evidence"]["sdk_operations"]
+            .as_array()
+            .ok_or("missing earlier callback SDK operations")?;
+        for (before, after) in before.iter().zip(rows) {
+            require(
+                sdk_polls(before)? <= sdk_polls(after)?,
+                "callback SDK operation poll count regressed",
+            )?;
+        }
+    }
+    let mut canonical = expected(wrapper, mode, token)[index].clone();
+    canonical["evidence"]["sdk_operations"] = json!(rows);
+    if closed {
+        for (field, counter) in [
+            ("sdk_polls_after_collect", "operation_polls"),
+            ("sdk_releases_after_collect", "operation_releases"),
+        ] {
+            let counters = rows
+                .iter()
+                .map(|row| row[counter].clone())
+                .collect::<Vec<_>>();
+            require(
+                value["evidence"][field] == json!(counters),
+                "callback SDK operation changed after retained handle consumption",
+            )?;
+            canonical["evidence"][field] = json!(counters);
+        }
+    }
+    require(
+        value == &canonical,
+        "invalid or reordered canonical callback cleanup record",
+    )
+}
+
+fn wait_records(
+    wrapper: &str,
+    mode: &str,
+    token: &str,
+    log: &Path,
+    cursor: &protocol::LogCursor,
+    count: usize,
+) -> Result<(Vec<Value>, u64)> {
+    let seen = std::cell::RefCell::new(Vec::<Value>::new());
+    protocol::wait_validated(
+        log,
+        cursor,
+        PREFIX,
+        3,
+        count,
+        Instant::now() + Duration::from_secs(2),
+        &|index, value| {
+            if index == 0 {
+                seen.borrow_mut().clear();
+            }
+            validate_record(wrapper, mode, token, index, value, &seen.borrow())?;
+            seen.borrow_mut().push(value.clone());
+            Ok(())
+        },
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WireEvidence {
     ApplicationCompleted,
@@ -189,13 +291,19 @@ fn check_case(
     let mut wire = None;
     let outcome = (|| -> Result<()> {
         wire = Some(validate_wire(wrapper, mode, &token, &reply)?);
-        let (all, end) = protocol::wait(log, cursor, PREFIX, &expected(wrapper, mode, &token), 3)?;
+        let (all, end) = wait_records(wrapper, mode, &token, log, cursor, 3)?;
         evidence = all;
         cursor.offset = end;
         validated = Some(Instant::now());
         origins.release_lifetime(&token, returned)?;
         Ok(())
     })();
+    let outcome = if validated.is_none() {
+        let released = origins.release_lifetime(&token, returned);
+        outcome.and(released)
+    } else {
+        outcome
+    };
     let source = origins.take_lifetime_events(&token);
     let source_error = source.as_ref().err().map(ToString::to_string);
     let mut origin = source.unwrap_or(Value::Null);
@@ -272,8 +380,368 @@ pub(super) fn run(run: &Path, records: &mut Records) -> Result<usize> {
 }
 
 #[cfg(test)]
+pub(super) fn assert_failure_releases_origin(
+    expected_error: &str,
+    body: impl FnOnce(&str) -> Vec<u8> + Send,
+    check: impl FnOnce(u16, &WireOrigins, &Path, &mut protocol::LogCursor, &mut Records) -> Result<()>,
+) {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::net::TcpListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let log = directory.path().join("runtime.log");
+    fs::write(&log, b"edgezero-life").unwrap();
+    let mut records = Records {
+        path: directory.path().join("events.jsonl"),
+        values: Vec::new(),
+    };
+    let origins = WireOrigins::start().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut cursor = protocol::LogCursor::default();
+    let result = thread::scope(|scope| {
+        let server = scope.spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            socket.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut request_token = None;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("x-request-token")
+                {
+                    request_token = Some(value.trim().to_owned());
+                }
+            }
+            let bytes = body(&request_token.unwrap());
+            let socket = reader.get_mut();
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+            socket.write_all(&bytes).unwrap();
+            socket.flush().unwrap();
+        });
+        let result = check(port, &origins, &log, &mut cursor, &mut records);
+        server.join().unwrap();
+        result
+    });
+    assert_eq!(result.unwrap_err().to_string(), expected_error);
+    assert_eq!(cursor.offset, 0);
+    let record = records.values.last().unwrap();
+    assert_eq!(record["status"], "fail");
+    assert_eq!(record["source_error"], Value::Null);
+    let events = record["origin"].as_array().unwrap();
+    // Collection drains the ledger, so the release must precede collection.
+    let releases = events
+        .iter()
+        .filter(|event| event["op"] == "release")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        releases.len(),
+        1,
+        "failed controller skipped origin release"
+    );
+    assert_eq!(releases[0]["token"], record["token"]);
+    assert_eq!(releases[0]["role"], "control");
+    assert_eq!(origins.finish_counted().unwrap(), 0);
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failure_releases_origin_before_collection_on_wire_validation_error() {
+        assert_failure_releases_origin(
+            "callback response was replaced or has invalid canonical pending witnesses",
+            |_| b"invalid\n".to_vec(),
+            |port, origins, log, cursor, records| {
+                check_case(
+                    "run_custom",
+                    "after-ok",
+                    port,
+                    origins,
+                    log,
+                    cursor,
+                    records,
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn failure_releases_origin_before_collection_on_protocol_timeout() {
+        assert_failure_releases_origin(
+            "cleanup terminal evidence timed out",
+            |token| {
+                let mut bytes = serde_json::to_vec(&body("run_custom", "after-ok", token)).unwrap();
+                bytes.push(b'\n');
+                bytes
+            },
+            |port, origins, log, cursor, records| {
+                check_case(
+                    "run_custom",
+                    "after-ok",
+                    port,
+                    origins,
+                    log,
+                    cursor,
+                    records,
+                )
+            },
+        );
+    }
+
+    fn sdk_records(wrapper: &str, mode: &str, token: &str) -> [Value; 3] {
+        let mut records = expected(wrapper, mode, token);
+        for (index, record) in records.iter_mut().enumerate() {
+            let count = if index > 0 && delivered(mode) { 5 } else { 4 };
+            let polls = 3 + index as u64 * 4;
+            record["evidence"]["sdk_operations"] = json!(
+                ["origin", "a", "b", "c", "post"][..count]
+                    .iter()
+                    .map(|role| json!({"role":role,"operation_acquisitions":1,
+                        "operation_polls":polls,"operation_releases":u64::from(index==2),
+                        "ready_operation_polls":0,"pending_kind":"SdkPoll","heads":0,
+                        "source_acquisitions":0,"source_releases":0}))
+                    .collect::<Vec<_>>()
+            );
+            if index == 2 {
+                record["evidence"]["sdk_polls_after_collect"] = json!(vec![polls; count]);
+                record["evidence"]["sdk_releases_after_collect"] = json!(vec![1; count]);
+            }
+        }
+        records
+    }
+
+    fn encode(records: &[Value]) -> Vec<u8> {
+        records
+            .iter()
+            .flat_map(|record| {
+                let mut line = PREFIX.to_vec();
+                line.extend(serde_json::to_vec(record).unwrap());
+                line.push(b'\n');
+                line
+            })
+            .collect()
+    }
+
+    fn parse_records(wrapper: &str, mode: &str, bytes: &[u8]) -> Result<Vec<Value>> {
+        let directory = tempfile::tempdir()?;
+        let log = directory.path().join("callback.log");
+        fs::write(&log, bytes)?;
+        wait_records(
+            wrapper,
+            mode,
+            "case",
+            &log,
+            &protocol::LogCursor::default(),
+            0,
+        )
+        .map(|(records, _)| records)
+    }
+
+    #[test]
+    fn callback_sdk_protocol_accepts_typed_head_timeouts_with_zero_polls() {
+        let mut records = sdk_records("run_custom", "after-ok", "case");
+        for record in &mut records {
+            let rows = record["evidence"]["sdk_operations"].as_array_mut().unwrap();
+            for row in rows.iter_mut() {
+                row.as_object_mut().unwrap().remove("first_pending");
+                row["pending_kind"] = json!("HeadReadinessTimeout");
+                row["operation_polls"] = json!(0);
+            }
+        }
+        records[2]["evidence"]["sdk_polls_after_collect"] = json!(vec![0; 5]);
+        parse_records("run_custom", "after-ok", &encode(&records))
+            .expect("typed native head timeouts");
+    }
+
+    #[test]
+    fn callback_sdk_protocol_accepts_actual_dynamic_counts_for_both_wrappers_and_all_modes() {
+        for wrapper in ["run_custom", "serve_custom"] {
+            for mode in CASES {
+                let records = sdk_records(wrapper, mode, "case");
+                assert_eq!(
+                    parse_records(wrapper, mode, &encode(&records)).unwrap(),
+                    records
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn callback_sdk_protocol_preserves_maximum_counters_and_incremental_log_cursor_guards() {
+        for wrapper in ["run_custom", "serve_custom"] {
+            for mode in CASES {
+                let token = "x".repeat(64);
+                let mut records = sdk_records(wrapper, mode, &token);
+                for record in &mut records {
+                    for row in record["evidence"]["sdk_operations"].as_array_mut().unwrap() {
+                        row["operation_polls"] = json!(u64::MAX);
+                    }
+                }
+                let count = if delivered(mode) { 5 } else { 4 };
+                records[2]["evidence"]["sdk_polls_after_collect"] = json!(vec![u64::MAX; count]);
+                let directory = tempfile::tempdir().unwrap();
+                let log = directory.path().join("callback.log");
+                let cursor = protocol::LogCursor::default();
+                fs::write(&log, encode(&records[..1])).unwrap();
+                assert_eq!(
+                    wait_records(wrapper, mode, &token, &log, &cursor, 0)
+                        .unwrap()
+                        .0,
+                    records[..1]
+                );
+                let bytes = encode(&records);
+                fs::write(&log, &bytes).unwrap();
+                let (actual, end) = wait_records(wrapper, mode, &token, &log, &cursor, 3).unwrap();
+                assert_eq!(actual, records);
+                assert_eq!(end, bytes.len() as u64);
+                fs::write(&log, encode(&records[..1])).unwrap();
+                assert!(wait_records(wrapper, mode, &token, &log, &cursor, 0).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn callback_sdk_protocol_rejects_scope_only_records_and_invalid_pending_or_released_owners() {
+        for wrapper in ["run_custom", "serve_custom"] {
+            for mode in CASES {
+                assert!(
+                    parse_records(wrapper, mode, &encode(&expected(wrapper, mode, "case")))
+                        .is_err()
+                );
+                let records = sdk_records(wrapper, mode, "case");
+                for stage in 0..3 {
+                    let rows = records[stage]["evidence"]["sdk_operations"]
+                        .as_array()
+                        .unwrap();
+                    for role in 0..rows.len() {
+                        for (field, value) in [
+                            ("role", json!("foreign")),
+                            ("operation_acquisitions", json!(0)),
+                            ("operation_polls", json!(0)),
+                            ("operation_polls", json!(1.5)),
+                            ("operation_polls", json!(-1)),
+                            ("operation_polls", json!("3")),
+                            ("operation_releases", json!(if stage == 2 { 0 } else { 1 })),
+                            ("operation_releases", json!(2)),
+                            ("ready_operation_polls", json!(1)),
+                            ("pending_kind", json!(false)),
+                            ("heads", json!(1)),
+                            ("source_acquisitions", json!(1)),
+                            ("source_releases", json!(1)),
+                            ("extra", json!(true)),
+                        ] {
+                            let mut bad = records.clone();
+                            bad[stage]["evidence"]["sdk_operations"][role][field] = value;
+                            assert!(
+                                parse_records(wrapper, mode, &encode(&bad)).is_err(),
+                                "{wrapper}/{mode} stage {stage} role {role}: {field}"
+                            );
+                        }
+                    }
+                    let mut missing = records.clone();
+                    missing[stage]["evidence"]["sdk_operations"]
+                        .as_array_mut()
+                        .unwrap()
+                        .pop();
+                    assert!(parse_records(wrapper, mode, &encode(&missing)).is_err());
+                    let mut duplicate = records.clone();
+                    duplicate[stage]["evidence"]["sdk_operations"][1] = rows[0].clone();
+                    assert!(parse_records(wrapper, mode, &encode(&duplicate)).is_err());
+                    let mut missing_counter = records.clone();
+                    missing_counter[stage]["evidence"]["sdk_operations"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("pending_kind");
+                    assert!(parse_records(wrapper, mode, &encode(&missing_counter)).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn callback_sdk_protocol_requires_monotonic_live_polls_and_stable_cleanup_before_consumption() {
+        for wrapper in ["run_custom", "serve_custom"] {
+            for mode in CASES {
+                let records = sdk_records(wrapper, mode, "case");
+                assert_eq!(
+                    parse_records(wrapper, mode, &encode(&records)).unwrap(),
+                    records
+                );
+                for stage in 1..3 {
+                    let mut bad = records.clone();
+                    bad[stage]["evidence"]["sdk_operations"][0]["operation_polls"] = json!(1);
+                    assert!(parse_records(wrapper, mode, &encode(&bad)).is_err());
+                }
+                for field in ["sdk_polls_after_collect", "sdk_releases_after_collect"] {
+                    let count = records[2]["evidence"][field].as_array().unwrap().len();
+                    for role in 0..count {
+                        let mut bad = records.clone();
+                        bad[2]["evidence"][field][role] = json!(12);
+                        assert!(parse_records(wrapper, mode, &encode(&bad)).is_err());
+                    }
+                    let mut missing = records.clone();
+                    missing[2]["evidence"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(field);
+                    assert!(parse_records(wrapper, mode, &encode(&missing)).is_err());
+                    let mut short = records.clone();
+                    short[2]["evidence"][field].as_array_mut().unwrap().pop();
+                    assert!(parse_records(wrapper, mode, &encode(&short)).is_err());
+                }
+                let mut bad = records.clone();
+                bad[2]["evidence"]["release_before_handle_consumption"] = json!(false);
+                assert!(parse_records(wrapper, mode, &encode(&bad)).is_err());
+                bad = records.clone();
+                bad[2]["evidence"]["release_stable"] = json!(false);
+                assert!(parse_records(wrapper, mode, &encode(&bad)).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn callback_sdk_protocol_preserves_canonical_record_log_order_and_tail_bounds() {
+        let wrapper = "run_custom";
+        let mode = "after-ok";
+        let records = sdk_records(wrapper, mode, "case");
+        let bytes = encode(&records);
+        assert_eq!(parse_records(wrapper, mode, &bytes).unwrap(), records);
+        for foreign in [
+            sdk_records("serve_custom", mode, "case"),
+            sdk_records(wrapper, "after-error", "case"),
+            sdk_records(wrapper, mode, "foreign"),
+        ] {
+            assert!(parse_records(wrapper, mode, &encode(&foreign)).is_err());
+        }
+        let mut reordered = records.clone();
+        reordered.swap(0, 1);
+        assert!(parse_records(wrapper, mode, &encode(&reordered)).is_err());
+        for tail in [
+            PREFIX.to_vec(),
+            b"edgezero-life".to_vec(),
+            encode(&records[..1]),
+        ] {
+            let mut extra = bytes.clone();
+            extra.extend(tail);
+            assert!(parse_records(wrapper, mode, &extra).is_err());
+        }
+        let mut oversized = records.clone();
+        oversized[0]["extra"] = json!("x".repeat(2048));
+        assert!(parse_records(wrapper, mode, &encode(&oversized)).is_err());
+        assert!(parse_records(wrapper, mode, &vec![b'x'; protocol::LOG_LIMIT + 1]).is_err());
+        let mut noncanonical = PREFIX.to_vec();
+        noncanonical.extend(serde_json::to_vec_pretty(&records[0]).unwrap());
+        noncanonical.push(b'\n');
+        assert!(parse_records(wrapper, mode, &noncanonical).is_err());
+    }
+
     fn reply(wrapper: &str, mode: &str, token: &str) -> Result<Value> {
         let mut bytes = serde_json::to_vec(&body(wrapper, mode, token)).unwrap();
         bytes.push(b'\n');

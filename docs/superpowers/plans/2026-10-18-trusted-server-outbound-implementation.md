@@ -12,6 +12,183 @@
 
 ## Status and Authority
 
+### Required Local Acceptance Closeout (2026-11-02)
+
+The requester approved completing required local acceptance coverage and inventory reconciliation
+without another checkpoint handoff. Hosted execution, candidate freeze and release qualification
+remain outside this authorization. Preserve all outbound contracts, reviewed identities and
+original tolerances; do not convert unknown scope or failed measurements into approved deferrals.
+
+Use `node scripts/check_outbound_cutover_evidence.mjs --coverage` for current binding counts and
+scope. Counts in earlier checkpoints below describe those historical checkpoints, not the current
+inventory. Ready bindings are implementation coverage; passing execution and frozen qualification
+are separate requirements. The first reviewed closeout update activates twelve additional local
+bindings without changing acceptance identities, approvals or any external/conditional leg.
+
+The latest inventory binds **all 217 required-local legs** (246 ready/265 planned overall).
+AG approved the [scoped TLS baseline clarification](../../audits/2026-10-18-outbound-api-approval.md#scoped-tls-baseline-clarification)
+on 2026-11-02: test every currently configurable identity dimension and fixed strict-TLS native
+readback; independently configurable verification remains the unpromoted EZ-12 follow-up. This
+changes only the approved wording and its affected digests, not the 255 criteria, 511 leg identities,
+applicability or qualification requirements. All 44 required-external, 50 conditional and 200
+unpromoted follow-up legs retain their original category. No other approval or deferral is inferred.
+The final 217-leg checker passes binding completeness, always reporting `qualified: false`.
+
+The current implementation adds actual Fastly known-first SDK dispatch, all-adapter native
+Send/Begin parity, response-owned operation cleanup, and both callback-wrapper runtime proofs.
+Unit callback evidence requires the five-test adapter ownership companion; its three fixture
+counter tests run in the existing Fastly fixture-check phase. Those counter/model tests are not
+runtime SDK-release or host-cancellation evidence. Spin's native phase now executes its existing
+response-coordinator models. No new job, selector, transport, executor or production public API is
+introduced; native instrumentation remains test-only.
+
+The reviewed private batch fixture now obtains one actual native client from the existing factory
+and wraps that same handle in the facade, retaining its paired time/progress under the response
+owner. No public batch-context accessor is added. It requires genuine pending SDK evidence and
+completed buffering before cancellation; those observations cannot substitute for one another.
+
+One isolated Linux Spin run with the immutable guest
+`20402794e0799eff2fd3f20f301b4cb91147c6a5d35b44e749f152fca93a8bdc` and official Spin 4.1.0
+returns `204 -> 504 ConnectTimeout -> 200 ok`: 202.600 ms with unchanged 200 ms/2 s settings.
+Owned PID/inode SYN_SENT observations are bounded by causal start/recovery requests, not a guessed
+clock alignment. The aggregate-timeout branch is not exercised. The container/process/socket
+cleanup record and raw samples are retained under
+`/private/tmp/ez4-syn-sidecar-20261102/final-three-step/`; this is characterization, not frozen
+candidate or hosted proof. The canonical Linux qualification owner is registered independently.
+
+Fresh root gates pass formatting, strict all-feature Clippy, both feature/Spin WASM checks and
+2,665 workspace tests across 33 binaries (zero failures, one existing ignored test). Existing Node
+workflow guards pass 34 tests; nonzero/legacy/egress guards pass 102. Passing complete local runtime
+qualification remains open; retain failed timing controls rather than retrying for credit.
+
+Final serialized harness verification passes 573 tests with zero failures and two existing ignored
+helpers; strict harness Clippy and all three workspace-format checks pass. Fixture-core passes 82,
+the selected Viceroy executes all 309 Fastly SDK tests and 13 fixture tests, and the Node evidence
+and workflow guards pass 131 and 34 tests respectively. Docs build/lint/format pass. Safe native
+Unix PID/group signalling replaces the helper subprocess; injected probe errors are retained until
+cleanup/reaping is attempted, and only ESRCH establishes absence. The original helper-timeout
+failures remain recorded; their exact startup-delay cause is unknown. Four additional fail-first
+controls prove failed Fastly wire/protocol validation releases held sources before event collection
+without advancing the protocol cursor or replacing the original error.
+
+The final frozen-source working-tree runs are retained under
+`crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/*-final-v4/`.
+All four commands exit 1; no failed window or missing observation was waived or rerun for credit.
+These are not frozen-candidate or hosted qualification:
+
+| Run                | Recorded Result                 | Remaining Observation                                                                                                                                                                                                                    |
+| ------------------ | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `axum-final-v4`    | 17 pass, 2 fail                 | Fast-origin head is 126.620 ms against 120 +/- 5 ms; the quiet-window interval also fails. All five response-cleanup cases and repaired batch cancellation pass.                                                                         |
+| `viceroy-final-v4` | 30 pass, 3 fail, 1 recorded row | Three original timing checks fail. All six budget cases, eight callback cases, response-cleanup cases and repaired batch cancellation pass; all log tails pass. The recorded batch-write row is not an additional passing runtime case.  |
+| `spin-final-v4`    | 16 pass, 3 fail, 1 unverified   | Cold Begin is 11.218 ms against 2 +/- 5 ms; pending-body cutoff returns at 207.865 ms against the 205 ms upper target. Pending-source client cancellation lacks terminal/source proof; Linux silent-connect remains unverified on macOS. |
+| `workerd-final-v4` | 14 pass, 5 fail                 | Four original timing checks fail. Pending-source client cancellation lacks terminal/source proof; complete, disconnect, deadline and source-error cleanup pass.                                                                          |
+
+No run records process/origin/state teardown failure. The actual worker/native-source records
+remain mandatory: missing pending-source cancellation evidence is not inferred from a client close,
+substituted with model coverage, or relabelled a pass. No provider impossibility is claimed.
+All 217 local bindings remain executable and `qualified: false`; neither these failures nor a
+passing counter/model test changes applicability or approves external/conditional scope.
+
+Independent review confirms Spin's original cutoff stays 200 ms and pending SDK bodies release
+once before the 207.865 ms return. This is not evidence of deadline renewal; the observation alone
+cannot distinguish timer, scheduling and cancellation overhead. The cancellation probes reach a
+validated prefix, actual post-prefix source Pending and intentional client socket close, with no
+further source writes. Spin then watches the response-result future and Workers the request abort
+signal. Neither run supplies the required combined terminal/cleanup/source-drop proof within the
+shared two-second window. Missing that combined record does not prove every callback was absent
+or that either provider cannot expose cancellation. Original 30-second cancel-case write budgets
+and the separate explicit-deadline cases remain unchanged.
+
+The earlier expanded runtime observations remain retained under
+`crates/edgezero-test-harness/fixtures/reusable-app/.runs/outbound/lifetimes/`. These are working-tree
+observations from before the final fixture/controller repairs, not frozen-candidate evidence:
+
+| Run                     | Recorded Result               | Remaining Observation                                                                                                                                                              |
+| ----------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `axum-after-ledger-fix` | 19/19 pass                    | Earlier source-scheduling failure remains retained in `axum`; no tolerance was changed.                                                                                            |
+| `workerd`               | 15/19 pass                    | Cold Begin misses its existing interval; deadline/source-error cleanup has a clean wire EOF; cancellation is obscured by the stale cleanup cursor.                                 |
+| `spin`                  | 17 pass, 2 fail, 1 unverified | Cancellation snapshots A before SDK EOF; pending-source client cancellation lacks a terminal report. Silent-connect proof requires Linux.                                          |
+| `viceroy`               | Failing expanded matrix       | Pending native head handles need readiness-wait evidence rather than fabricated SDK polls; cleanup failures cascade into bounded-origin saturation and callback identity failures. |
+
+Two SDK-only workerd controls retain the same clean HTTP ending for `writer.abort(undefined)`
+and an explicit fixed `Error`, including one direct-worker TCP socket control. The original
+`/private/tmp/edgezero-native-abort-control.LRzJqQ/` and
+`/private/tmp/edgezero-native-direct-abort.VyvsQd/` captures include the runtime hashes, compatibility
+settings, terminal chunk, curl exit and reaped-process evidence. They do not establish universal
+provider impossibility or justify accepting wire cancellation as proven. No speculative production
+abort change is made. Cleanup verdicts now collect SDK proof even if the wire verdict fails;
+only complete validated protocol advances its cursor. The final runs above execute that repair;
+the old failed observations remain unchanged.
+The cleanup acceptance criterion requires observable ownership release, not a TCP reset. Workers'
+exact prefix-only clean ending is therefore retained as its actual wire shape only for the
+deadline/source-error paths, while their error terminal and all cleanup/isolation checks remain
+mandatory. This supplies no cancellation proof or capability promotion. Prefix rejection cannot
+stand in for an intentional abort. Partial stages are retained, and a single two-second absolute
+coordination deadline bounds captures, channel waits and native protocol scans without changing
+guest deadlines, source limits or qualification intervals.
+
+Current fixture repairs retain the original 34/534 ms batch defaults and all source, protocol,
+resource and timing bounds. A completed server write is not an SDK-completed buffer. An actual
+native head-readiness timeout is not an SDK future poll or a body-readiness wait. Counter/model
+tests, native resource release, wire termination and host cancellation remain distinct evidence.
+
+**Earlier closeout checkpoints:**
+
+The subsequent reviewed binding update adds 39 existing lifetime legs and four native Fastly
+transport legs. Required-local coverage is now 179 ready and 38 planned; all 44 external,
+50 conditional and 200 unpromoted follow-up legs retain their scope. Runtime acceptance markers
+require every scenario named by a criterion, including both pending phases for cutoff and every
+observable response-cleanup path. Three fail-first marker controls and all 66 lifetime validator
+tests pass. The latter's first sandboxed run retains one denied TCP bind; the authorized local
+TCP run passes unchanged. Strict workspace and harness Clippy, formatting and frozen identity
+reproduction pass at this working-tree checkpoint. No hosted or release qualification is implied.
+
+The guarded Axum group passes 291 library and 28 contract tests; core passes 1,125 tests and
+the private buffered-send extraction passes all 304 Fastly WASI library tests. The native
+workerd and Spin wire runs retain their original 68/84 matrices and pass 19 native transport
+controls with 30 receipts each. These are working-tree observations, not frozen-candidate proof.
+The broader harness run retains four process-signal-helper failures (473 passing, two ignored);
+the isolated command-capture and five cancellation controls then pass without timing changes.
+The cause of the broad-run helper timeouts is not established. A subsequent workerd lifetime
+attempt correctly rejects build identity drift while source writers are active: its expected
+`2859b448...` identity is absent from the staged WASM, which embeds `9ce7092e...` instead.
+It supplies no acceptance credit. Final runtime runs require paused source/metadata writers.
+
+- [x] Partition the initial 511 legs: 217 blocking-local (124 ready, 93 planned), 44 required
+      external/provider/consumer legs, 50 unconfirmed conditional legs, and 200 unpromoted
+      follow-up legs (29 ready). No attributed applicability decision is newly inferred.
+- [x] Add an inventory-derived coverage report to the existing checker, with fail-closed local
+      binding completeness, explicit external/conditional/follow-up categories and qualification
+      always false. Add approval, identity, CLI and per-leg partition controls.
+- [x] Implement every missing blocking-local case using the existing unit/runtime owners, including
+      SDK-boundary timeout mapping, B31 registration/budgets, runtime optimizer rejection/targets,
+      Begin/Send parity and lifetime cancellation/cleanup. Preserve one transport and executor.
+      This records executable coverage, not passing timing, host cancellation or qualification.
+- [x] Bind all 217 blocking-local legs to actual commands, sentinels and retained artifact owners;
+      remove placeholder bindings and preserve reviewed identities/scope. Record only the explicitly
+      approved TLS baseline wording/digest clarification; execution and qualification remain separate.
+- [x] Run and review the shared gates and expanded four-adapter lifetime matrix, retaining every
+      failed control in the final working-tree observations above. Reconcile binding scope,
+      explicit TLS approval and historical versus current observations without claiming a pass.
+- [ ] Obtain complete passing local qualification and frozen same-candidate evidence, including
+      the remaining measured timing, pending-source cancellation and Linux-only proof requirements.
+      Source instrumentation, scheduled targets and SDK handle-release witnesses must not be
+      substituted for one another or presented as hosted cancellation/client-delivery evidence.
+
+Initial diagnostics are retained under `/private/tmp/pr275-closeout-*`: Axum passes 9/10 with
+a 40.142 ms batch-entry miss; Spin passes 8/10 with a 13.095 ms early Begin miss and source
+scheduling failure; configured native workerd passes 8/10 with cold Begin/handoff timing misses.
+Earlier Cloudflare attempts stop for explicit missing/mismatched local tool selections, not
+runtime acceptance. The matching installed tools are selected explicitly; no dependency pin or
+timing tolerance is changed. New readback helper/unit regressions pass all 136 Viceroy library
+tests. Actual SDK readback rejects the previous runtime's unsupported getter and passes on the
+explicit repaired runtime, including distinct native field controls and the unchanged logical
+budget. The [append-only record](../../audits/evidence/2026-11-02-viceroy-timeout-readback.json)
+discloses that the earlier failed control's binary identity was not independently captured;
+neither observation is frozen qualification. The reused
+asynchronous Spin component passes its connect-refusal and preexisting eager/normalization guards
+under pinned Wasmtime 48.0.2; the older PATH runtime's linker failure is retained separately.
+
 ### Fastly Post-Delivery Batch Coverage (2026-11-02)
 
 Continue approved D6 criterion 19 in the existing Fastly lifetime binary and suite. No second
@@ -793,12 +970,12 @@ or alternate scheduler. These instrumented runs receive no acceptance credit:
 All temporary adapter/guest tracing is removed before the final canonical runs. Those retained
 artifacts are `/private/tmp/pr275-phase-witness-final-{axum,cloudflare,fastly,spin}`:
 
-| Runtime | Passed | Result Boundary |
-| --- | --- | --- |
-| Axum | 10/10 | No miss in this run; root verification builds/tests overlapped part of this run, so it is not an isolated scheduling benchmark. |
-| workerd | 9/10 | Slow-origin A elapsed is 153 ms versus 146 +/-5 ms. Source-timeline and guest head/body diagnostics both pass; the separate elapsed assertion still fails. |
-| Repaired Viceroy | 20/20 | Twelve timeline/cleanup and eight callback cases; local repaired runtime only. |
-| Spin | 10/10 | Local runtime evidence only. |
+| Runtime          | Passed | Result Boundary                                                                                                                                            |
+| ---------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Axum             | 10/10  | No miss in this run; root verification builds/tests overlapped part of this run, so it is not an isolated scheduling benchmark.                            |
+| workerd          | 9/10   | Slow-origin A elapsed is 153 ms versus 146 +/-5 ms. Source-timeline and guest head/body diagnostics both pass; the separate elapsed assertion still fails. |
+| Repaired Viceroy | 20/20  | Twelve timeline/cleanup and eight callback cases; local repaired runtime only.                                                                             |
+| Spin             | 10/10  | Local runtime evidence only.                                                                                                                               |
 
 The last three runtimes run serially after the root gates finish. No unchanged failed run is
 retried for passing credit. Earlier Axum/workerd misses and failed experiments remain retained;
@@ -847,12 +1024,12 @@ the guard is restored and passes afterward.
 
 The serial scheduling comparison retains these results:
 
-| Runtime | Passed | Remaining Strict Failures |
-| --- | --- | --- |
-| Axum | 9/10 | Guest fast-origin head at 131.432 ms despite the source head completing within 0.268 ms of its target. Source write is not proof of guest receipt. |
-| Repaired Viceroy | 12/12 timeline/response-cleanup | Callback wrappers initially fail launch attestation, separately from timing. |
-| Spin | 10/10 | None in this local comparison; not hosted qualification. |
-| workerd | 8/10 | Slow-case source write at 916.416 ms versus 910.623 +/-5 ms; Timeout guest origin head at 706 ms. |
+| Runtime          | Passed                          | Remaining Strict Failures                                                                                                                          |
+| ---------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Axum             | 9/10                            | Guest fast-origin head at 131.432 ms despite the source head completing within 0.268 ms of its target. Source write is not proof of guest receipt. |
+| Repaired Viceroy | 12/12 timeline/response-cleanup | Callback wrappers initially fail launch attestation, separately from timing.                                                                       |
+| Spin             | 10/10                           | None in this local comparison; not hosted qualification.                                                                                           |
+| workerd          | 8/10                            | Slow-case source write at 916.416 ms versus 910.623 +/-5 ms; Timeout guest origin head at 706 ms.                                                  |
 
 Artifacts are `/private/tmp/pr275-lifetimes-quantum-{axum,fastly,spin,cloudflare}`. No failed run
 is retried unchanged for passing credit. The earlier baseline and removed precision experiment
@@ -1279,14 +1456,14 @@ neither outbound acceptance nor hosted-provider qualification.
 
 The six approved consolidation commitments are **not collectively complete**:
 
-| Commitment                                                            | Current Implementation                                                                                                                                                                                              | Remaining Work                                                                                                                                                                                               |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 1. Shared preparation, validation, normalization, decoding and limits | **Hard-cut implementation locally verified.** The facade captures invocation ownership/time and prepared contexts; all four adapters return raw heads to shared normalization, disposition, decoding and bounded collection. | Bind applicable exact-candidate acceptance legs (P1-P3, D1-D4). |
-| 2. One pipeline for send, begin, batches and redirects | **Send/Begin/Batch plus explicit Follow implemented.** The shared pipeline includes eager drivers, ownership, raw observations, observation-only checks, mixed collection, lossless identity-bound recovery and head-first redirect policy. | Complete all-target redirect runtime parity and acceptance/qualification (P5, D1-D6, Q3-Q5). |
-| 3. Remove superseded implementations and APIs without compatibility | **Hard cut locally verified.** Old implementer send/raw-vector batches, `from_futures`, `finish_batch_item`, public receipt construction, Fastly's separate lifetime registry, copied task/deadline policies and old Body enum API are removed; no aliases remain. Follow uses those same primitives. | Complete applicable acceptance bindings before closing all P1-P5 work. |
-| 4. Preserve direct native Image Optimizer | **Send/Follow share native dispatch.** The native SDK mapping hands its head to the common finalizer without another fetch or transformation pipeline; prepared redirects retain optimizer options. Local actual-client Send/Follow controls verify native unsupported boundaries. | Qualify successful optimizer-first-hop redirects and hosted transformation/performance. The synchronous blocking horizon remains UNKNOWN (D1d/Q4b). |
-| 5. Migrate demo, templates, clients and docs together | **Hard-cut callers migrated.** Supplied clients, demo, generator, fixtures, guides and guards use prepared contexts, shared ownership/progress, raw events and explicit collection states; demo/scaffold add explicit allowlisted Follow. | Complete remaining acceptance and qualification (P5/Q1-Q5). |
-| 6. Document the TS hard-cut ownership boundary                        | **Documented** in the [adoption guide](../../guide/proxying.md#hard-cut-adoption). Transport stays upstream; application policies stay in the consumer.                                                             | Implement the remaining EdgeZero prerequisites and obtain consumer composition/qualification evidence before cutover. Do not delegate body dropping, buffering or transport workarounds to TS (P1-P5/Q4/Q5). |
+| Commitment                                                            | Current Implementation                                                                                                                                                                                                                                                                                | Remaining Work                                                                                                                                                                                               |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1. Shared preparation, validation, normalization, decoding and limits | **Hard-cut implementation locally verified.** The facade captures invocation ownership/time and prepared contexts; all four adapters return raw heads to shared normalization, disposition, decoding and bounded collection.                                                                          | Bind applicable exact-candidate acceptance legs (P1-P3, D1-D4).                                                                                                                                              |
+| 2. One pipeline for send, begin, batches and redirects                | **Send/Begin/Batch plus explicit Follow implemented.** The shared pipeline includes eager drivers, ownership, raw observations, observation-only checks, mixed collection, lossless identity-bound recovery and head-first redirect policy.                                                           | Complete all-target redirect runtime parity and acceptance/qualification (P5, D1-D6, Q3-Q5).                                                                                                                 |
+| 3. Remove superseded implementations and APIs without compatibility   | **Hard cut locally verified.** Old implementer send/raw-vector batches, `from_futures`, `finish_batch_item`, public receipt construction, Fastly's separate lifetime registry, copied task/deadline policies and old Body enum API are removed; no aliases remain. Follow uses those same primitives. | Complete applicable acceptance bindings before closing all P1-P5 work.                                                                                                                                       |
+| 4. Preserve direct native Image Optimizer                             | **Send/Follow share native dispatch.** The native SDK mapping hands its head to the common finalizer without another fetch or transformation pipeline; prepared redirects retain optimizer options. Local actual-client Send/Follow controls verify native unsupported boundaries.                    | Qualify successful optimizer-first-hop redirects and hosted transformation/performance. The synchronous blocking horizon remains UNKNOWN (D1d/Q4b).                                                          |
+| 5. Migrate demo, templates, clients and docs together                 | **Hard-cut callers migrated.** Supplied clients, demo, generator, fixtures, guides and guards use prepared contexts, shared ownership/progress, raw events and explicit collection states; demo/scaffold add explicit allowlisted Follow.                                                             | Complete remaining acceptance and qualification (P5/Q1-Q5).                                                                                                                                                  |
+| 6. Document the TS hard-cut ownership boundary                        | **Documented** in the [adoption guide](../../guide/proxying.md#hard-cut-adoption). Transport stays upstream; application policies stay in the consumer.                                                                                                                                               | Implement the remaining EdgeZero prerequisites and obtain consumer composition/qualification evidence before cutover. Do not delegate body dropping, buffering or transport workarounds to TS (P1-P5/Q4/Q5). |
 
 Keep three different status questions separate:
 
@@ -1780,12 +1957,12 @@ and the original four case assertions remain unchanged.
 
 One local characterization per adapter records these guest return offsets from request start:
 
-| Local Runtime | Pending Head | Pending Body |
-| ------------- | ------------ | ------------ |
-| Axum | 202.668 ms | 201.179 ms |
-| Repaired Viceroy 0.21.0 | 201.182 ms | 201.194 ms |
-| Spin 4.1.0 / signed SDK revision | 202.133 ms | 202.983 ms |
-| workerd 2026-09-10 / Wrangler 4.131.0 | 202 ms | 204 ms |
+| Local Runtime                         | Pending Head | Pending Body |
+| ------------------------------------- | ------------ | ------------ |
+| Axum                                  | 202.668 ms   | 201.179 ms   |
+| Repaired Viceroy 0.21.0               | 201.182 ms   | 201.194 ms   |
+| Spin 4.1.0 / signed SDK revision      | 202.133 ms   | 202.983 ms   |
+| workerd 2026-09-10 / Wrangler 4.131.0 | 202 ms       | 204 ms       |
 
 Every run has four passing cases and two failing original slow/fast timeline cases; all four
 suite exits remain 1. These are not passing six-case inventories. Complete local artifacts are
@@ -1833,12 +2010,12 @@ legacy/docs/inventory guards pass; the 36 evidence-checker regressions also pass
 The first local CPU characterizations remain **failed/unqualified**. The source's initial
 cold-connection alignment is too wide/late to prove the required B write:
 
-| Local Runtime | Mapped B Write Interval | CPU Interval | B Outcome |
-| ------------- | ----------------------- | ------------ | --------- |
-| Axum | 533.322..542.720 ms | 523.207..560 ms | Unresolved |
-| Repaired Viceroy 0.21.0 | 532.918..542.897 ms | 520.164..560 ms | Unresolved |
-| Spin 4.1.0 | 529.763..537.807 ms | 521.943..560 ms | Unresolved |
-| workerd 2026-09-10 | 532.657..539.969 ms | 521..560 ms | Unresolved |
+| Local Runtime           | Mapped B Write Interval | CPU Interval    | B Outcome  |
+| ----------------------- | ----------------------- | --------------- | ---------- |
+| Axum                    | 533.322..542.720 ms     | 523.207..560 ms | Unresolved |
+| Repaired Viceroy 0.21.0 | 532.918..542.897 ms     | 520.164..560 ms | Unresolved |
+| Spin 4.1.0              | 529.763..537.807 ms     | 521.943..560 ms | Unresolved |
+| workerd 2026-09-10      | 532.657..539.969 ms     | 521..560 ms     | Unresolved |
 
 These failed preconditions do not establish a production batch defect. Fastly also records A
 only at the later observation after the fixture's unrelated wait; a CPU acceptance setup must
@@ -1899,12 +2076,12 @@ evidence-checker regressions pass. Independent guest, host and documentation rev
 
 Final local working-tree characterizations remain separate from qualification:
 
-| Local Runtime | B Write Interval In Guest Time | CPU Case |
-| ------------- | ------------------------------ | -------- |
-| Axum | 531.190..537.288 ms | Fail: source window not proved |
-| Repaired Viceroy 0.21.0 | 530.010..537.326 ms | Fail: source window not proved |
-| Spin 4.1.0 | 530.770..537.093 ms | Fail: source window not proved |
-| workerd 2026-09-10 | 528.539..532.639 ms | Pass, unqualified |
+| Local Runtime           | B Write Interval In Guest Time | CPU Case                       |
+| ----------------------- | ------------------------------ | ------------------------------ |
+| Axum                    | 531.190..537.288 ms            | Fail: source window not proved |
+| Repaired Viceroy 0.21.0 | 530.010..537.326 ms            | Fail: source window not proved |
+| Spin 4.1.0              | 530.770..537.093 ms            | Fail: source window not proved |
+| workerd 2026-09-10      | 528.539..532.639 ms            | Pass, unqualified              |
 
 Artifacts: `/private/tmp/edgezero-calibration-final-20261028/{axum,viceroy,spin,workerd}`.
 All four full seven-case suites exit 1. The four controls pass on each target; the previous
@@ -1957,12 +2134,12 @@ evidence, not hosted qualification.
 
 Final working-tree lifetime characterizations remain mixed and retain the strict targets:
 
-| Local Runtime | Fast Origin | CPU B Write Interval | CPU Case |
-| ------------- | ----------- | -------------------- | -------- |
-| Axum | Pass | 532.829..535.181 ms | Fail |
-| Repaired Viceroy 0.21.0 | Pass | 526.077..535.802 ms | Fail |
-| Spin 4.1.0 | Fail | 531.678..534.442 ms | Pass, unqualified |
-| workerd 2026-09-10 | Fail | 531.097..535.313 ms | Fail |
+| Local Runtime           | Fast Origin | CPU B Write Interval | CPU Case          |
+| ----------------------- | ----------- | -------------------- | ----------------- |
+| Axum                    | Pass        | 532.829..535.181 ms  | Fail              |
+| Repaired Viceroy 0.21.0 | Pass        | 526.077..535.802 ms  | Fail              |
+| Spin 4.1.0              | Fail        | 531.678..534.442 ms  | Pass, unqualified |
+| workerd 2026-09-10      | Fail        | 531.097..535.313 ms  | Fail              |
 
 All four controls pass on every target; slow-origin misses remain on every target. All four
 complete seven-case suites exit 1, and every B slot stays unresolved. Preserve the actual
@@ -2019,12 +2196,12 @@ binds; the unchanged loopback-enabled rerun passes.
 
 Final reviewed local runs preserve the entire eight-case suite and all strict timing checks:
 
-| Local Runtime | Timeout Contract Diagnostic | Complete Fourth-Slot Case | Complete Suite |
-| ------------- | --------------------------- | ------------------------- | -------------- |
-| Axum | Pass | Fail: origin EOF at 1305.325 ms | Exit 1 |
-| Repaired Viceroy 0.21.0 | Pass | Fail: B source write 5.033 ms late | Exit 1 |
-| Spin 4.1.0 | Pass | Pass, unqualified | Exit 1 |
-| workerd 2026-09-10 | Pass | Fail: origin EOF at 1306 ms | Exit 1 |
+| Local Runtime           | Timeout Contract Diagnostic | Complete Fourth-Slot Case          | Complete Suite |
+| ----------------------- | --------------------------- | ---------------------------------- | -------------- |
+| Axum                    | Pass                        | Fail: origin EOF at 1305.325 ms    | Exit 1         |
+| Repaired Viceroy 0.21.0 | Pass                        | Fail: B source write 5.033 ms late | Exit 1         |
+| Spin 4.1.0              | Pass                        | Pass, unqualified                  | Exit 1         |
+| workerd 2026-09-10      | Pass                        | Fail: origin EOF at 1306 ms        | Exit 1         |
 
 D's elapsed is exactly 300 ms on all four, with `PerCallTimeout`, indices 0/1/3 and the required
 lossless collection states. All four quiet/pending-cutoff controls pass on every target. Slow
@@ -2077,12 +2254,12 @@ shared dependency and decoder/map audits, and 36 evidence-checker regressions pa
 
 Final reviewed local runs retain the complete nine-case suite and unchanged strict timing:
 
-| Local Runtime | Cap Case | A Elapsed | Return After Body Start | Complete Suite |
-| ------------- | -------- | --------- | ----------------------- | -------------- |
-| Axum | Pass, unqualified | 177.576 ms | 173.272 ms | 8/9; exit 1 |
-| Repaired Viceroy 0.21.0 | Pass, unqualified | 177.294 ms | 172.835 ms | 7/9; exit 1 |
-| Spin 4.1.0 | Pass, unqualified | 177.719 ms | 174.463 ms | 7/9; exit 1 |
-| workerd 2026-09-10 | Fail: source write 5.055 ms late | 178 ms | 174.285 ms | 6/9; exit 1 |
+| Local Runtime           | Cap Case                         | A Elapsed  | Return After Body Start | Complete Suite |
+| ----------------------- | -------------------------------- | ---------- | ----------------------- | -------------- |
+| Axum                    | Pass, unqualified                | 177.576 ms | 173.272 ms              | 8/9; exit 1    |
+| Repaired Viceroy 0.21.0 | Pass, unqualified                | 177.294 ms | 172.835 ms              | 7/9; exit 1    |
+| Spin 4.1.0              | Pass, unqualified                | 177.719 ms | 174.463 ms              | 7/9; exit 1    |
+| workerd 2026-09-10      | Fail: source write 5.055 ms late | 178 ms     | 174.285 ms              | 6/9; exit 1    |
 
 All four return the original typed cap failure with both healthy siblings and peer-close only
 after a confirmed over-cap prefix. That does not waive workerd's failed source cadence. Axum
@@ -2322,12 +2499,12 @@ in typed premature EOF after the exact prefix and the post-shutdown log-tail che
 The asynchronous handoff case still passes on Axum, Spin 4.1.0 and workerd. All full suites remain
 exit 1, with every failure retained rather than waived:
 
-| Runtime | Cases Passed | Remaining Strict Failures |
-| --- | --- | --- |
-| Axum | 7/10 | Fourth-slot origin head 726.755 ms; fast origin head 126.828 ms; CPU B-write interval 533.363..535.854 ms. |
-| Repaired Viceroy | 11/12 | Slow-origin head 708.790 ms. |
-| Spin | 8/10 | Slow-origin head 712.909 ms; CPU B-write interval 533.715..536.344 ms. |
-| workerd | 7/10 | Slow-origin head 714 ms; bidder A head in the fourth-slot case at 187.157 ms against 182.119 +/- 5 ms; CPU batch start misses 34 ms. |
+| Runtime          | Cases Passed | Remaining Strict Failures                                                                                                            |
+| ---------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Axum             | 7/10         | Fourth-slot origin head 726.755 ms; fast origin head 126.828 ms; CPU B-write interval 533.363..535.854 ms.                           |
+| Repaired Viceroy | 11/12        | Slow-origin head 708.790 ms.                                                                                                         |
+| Spin             | 8/10         | Slow-origin head 712.909 ms; CPU B-write interval 533.715..536.344 ms.                                                               |
+| workerd          | 7/10         | Slow-origin head 714 ms; bidder A head in the fourth-slot case at 187.157 ms against 182.119 +/- 5 ms; CPU batch start misses 34 ms. |
 
 The initial `/private/tmp/edgezero-cleanup-faults-fastly-1` run also passed all three cleanup cases
 and failed slow-origin head at 706.043 ms. Preserve that earlier failure. Final runtime checks
@@ -4217,36 +4394,37 @@ This is the current implementation/next-gap view at the dashboard's snapshot, no
 qualified requirements. **All rows retain open acceptance/qualification work.** Local checkpoint
 links identify the implemented scope and its test/evidence record; they do not close another
 mode, adapter, conditional part or hosted leg. The inventory remains the criterion-level coverage
-map; completing its executable bindings is an explicit open task, not hidden by this table.
+map; all required-local executable bindings are complete. Passing execution and qualification
+remain explicit open tasks, not hidden by this table.
 
-| Requirement | Implementation Tasks | Production Applicability                                                  | Current Implementation / Checkpoint                                                                                                                                                                                                                                               | Next Unclosed Work                                                                                                                                         |
-| ----------- | -------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| EZ-1 | P2; D1-D4 | Blocking, including actual ingress forwarding | **Shared settlement and local functional ingress acceptance implemented.** The current checkpoint binds 22 serverless legs alongside existing Axum/core proofs. Spin preserves explicit CL=0 without constructing a read stream. | Strict Axum pending-body timing criterion 06, hosted and consumer acceptance. Fastly synchronous inbound reads remain BestEffort. |
-| EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **Partial implementation:** [B31 existing-path identity/timers](#existing-path-b31-implementation-checkpoint-2026-10-25); [current-operation multiplexer](#current-operation-multiplexer-checkpoint-2026-10-25). Historical mixed/full-buffer readiness failures remain retained. | Callback-wide ownership, remaining modes and registration observations. F1 retirement, hosted pooling and resource qualification remain separate.          |
-| EZ-3 | D1/D5 | Blocking; bounded waits and original budgets retained | **Approved retirement locally verified.** Remove the 25 ms rejection, exported constant and injection hook. A 26 ms settlement no longer rejects a live budget; dispatch/registration still reject actual expiry and backwards clocks. | Bind bounded-wait acceptance and run the M7 comparison. Preserve original deadlines and B31; hosted/runtime promotion remains separate. |
-| EZ-4 | P1; D1-D4 | Blocking; Native/BestEffort distinctions retained | **Configured mapping implemented locally.** Connect setting/readback/round-trip, zero rejection, Fastly stable backend mapping, Spin advisory setter/refusal and configured-vs-unconfigured timeout causes are covered. Axum preserves its shared pool and accepts BestEffort aggregate enforcement; Cloudflare does likewise. Follow retains those settings. | Bind the complete mode/adapter matrices, update capability rows only with evidence, and obtain controlled hosted connect-expiry proof. |
-| EZ-5 | P3; D1-D4 | Blocking; Spin conditional host result recorded | **Integrated through the shared head finalizer.** Send/Begin/Batch and final Follow heads retain original-coding policy, body disposition, provenance and independent limits; followed heads are discarded unread. | Complete remaining all-target normalization/limit/runtime acceptance bindings and separately adopted metadata legs. |
-| EZ-6 | P4; D1-D6 | Blocking except EZ-6.31 reuse-only | **Shared scope integration locally verified.** Eager drivers feed the arrival ledger, observation-only checks and lossless mixed collection. Core captures unpolled operations including Follow, revokes producer roots without dropping recorded results, and accepts exact provisional body owners before egress policy/framing. Provider family leases preserve early body progress without retaining callback roots. | Bind all applicable mode/lifetime runtime acceptance and qualify providers; local ownership proofs do not close parent qualification. |
-| EZ-7 | P3; D1-D4 | Blocking | **Integrated through shared preparation and head finalization.** The facade resolves marker policy before dispatch; original fields and the optional marker are charged once across Send/Begin/Batch/Follow. | Complete remaining all-target marker/normalization acceptance bindings. |
-| EZ-8 | P1; D1d/D5 | Blocking; Fastly single-request Send/Follow only | **Send/Follow use the shared pipeline.** Direct native optimizer mapping is preserved without another fetch, buffering or serialization; unsupported modes/adapters reject before settlement. Actual-client Send/initial-Follow/later-hop controls reach Viceroy's native unavailable boundary. | Obtain successful optimized-first-hop redirect and hosted transformation/performance evidence. Blocking horizon remains UNKNOWN. |
-| EZ-9 | P1/P5; D1-D5 | Blocking; supplied clients use the same dispatch boundary | **Explicit Follow implemented.** Core owns the decision table, per-hop policy, immutable initial chain deadline, replay and unread disposal. Supplied-client, real-TCP Axum, actual local Spin/Viceroy and Cloudflare guest-boundary controls pass. | Bind full criterion-level acceptance; complete workerd/origin, successful optimizer redirect and consumer/hosted evidence. No compatibility transport. |
-| EZ-10 | F2 | Follow-up unless approved as promoted/present | **Local implementation and executable overflow/reader/fallback acceptance:** [all-target overflow evidence](#local-overflow-acceptance-2026-10-31) and [reader/fallback proofs](#reader-and-fallback-acceptance-2026-10-31). Historical Wrangler proxy failures remain retained. | Provider response-handling unit bindings, hosted HTTP/2, consumer end-to-end and exact-candidate qualification. |
-| EZ-11       | F3a                  | Follow-up                                                                 | **Not implemented:** cache tags.                                                                                                                                                                                                                                                  | Tag validation/deduplication, provider mapping, mode/support matrix and actual cache probes.                                                               |
-| EZ-12       | F3b                  | Follow-up                                                                 | **Not implemented:** TLS name-check policy.                                                                                                                                                                                                                                       | Typed setting/readback, backend-key isolation and trusted-chain/wrong-name fixture; no global verification bypass.                                         |
-| EZ-13 | F3c | Follow-up; closes with Unsupported evidence | **Unsupported retained with the required synchronous support hook integrated.** Spin authority and unsupported optimizer checks precede ordinary validation, timers and body polling. | Bind the complete activity/SDK limitation and consumer configuration-rejection evidence; do not promote support. |
-| EZ-14       | F4                   | Follow-up; includes acceptance 10/11                                      | **Not implemented:** opted-in idle-body policy.                                                                                                                                                                                                                                   | New mode, encoded-progress resets, absolute-deadline precedence and actual adapter read races; existing total deadlines are not idle-mode support.         |
-| EZ-15       | F5                   | Follow-up; reuse legs separately conditional                              | **Not implemented:** explicit bounded fire-and-forget operation.                                                                                                                                                                                                                  | Separate capacity/ownership, 64 KiB response ceiling, cancellation/recovery and provider-lifetime proof.                                                   |
-| EZ-16       | F6a                  | Follow-up                                                                 | **Diagnostic checkpoints implemented:** [SDK/source details and capability publication](#f6a-capability-publication-checkpoint).                                                                                                                                                  | Full token-safe acceptance matrix, remaining integration cases and consumer/provider qualification. Capability publication itself has landed.              |
-| EZ-17       | F6b                  | Follow-up                                                                 | **Local implementation:** [owned delivery reports/safe replacement](#f6b-delivery-report-checkpoint); subsequent F9a assembly integration has landed.                                                                                                                             | Consumer canonical-lifecycle acceptance and full required qualification, not another assembly integration implementation.                                  |
-| EZ-18       | F7a                  | Follow-up                                                                 | **Local implementation:** [buffered framing](#f7a-buffered-framing-checkpoint); 80 production cases passed, nine SDK reference controls failed.                                                                                                                                   | Resolve/qualify parity and hosted compression while preserving strict suppression. The complete local suite remains nonzero.                               |
-| EZ-19       | F7b                  | Follow-up                                                                 | **Local implementation:** [bounded synthesized headers](#f7b-synthesized-header-checkpoint), wire and assembly-exclusion checkpoints.                                                                                                                                             | Consumer-owned header integration and hosted/frozen-candidate qualification; local assembly exclusion is not still missing.                                |
-| EZ-20       | F8                   | Follow-up                                                                 | **Local implementation:** [declared KV bindings and operation delivery](#f8-declared-kv-checkpoint) on all three adopted serverless adapters.                                                                                                                                     | Actual provider outage/restoration, consumer acceptance and qualification; the separate Spin retained-overlap uncertainty remains disclosed.               |
-| EZ-21       | F6c                  | Follow-up                                                                 | **Local implementation:** [six typed framing reasons](#f6c-framing-checkpoint), observer/log controls.                                                                                                                                                                            | Consumer Viceroy acceptance and separately required hosted evidence across applicable failure paths.                                                       |
-| EZ-22       | F9a                  | Follow-up; individual SHOULD decisions explicit                           | **Local implementation:** [unified fallible assembly/failure delivery](#f9a-assembly-foundation-checkpoint), including adopted macro/serverless parts.                                                                                                                            | Consumer acceptance and exact-candidate qualification; no compatibility assembly path to add.                                                              |
-| EZ-23       | F9b                  | Follow-up                                                                 | **Local implementation:** [assembled-App Axum/TCP helpers](#f9b-assembled-app-tcp-checkpoint), twelve upstream sentinels.                                                                                                                                                         | Criterion 12's conditional begun-request portion and criterion 13's consumer route/parity evidence.                                                        |
-| EZ-24       | P6; F10a/F10b/F10c   | Host/WASI publication and each optional extension need separate decisions | **Not implemented as the proposed published utility; adoption pending.** Existing private doubles are not P6.                                                                                                                                                                     | Attributed applicability decisions, P1-P5 semantics, then selected published-client/cancellation/demo/JS work. Pending is not approved deferral.           |
-| EZ-25 | Q1/Q2 | Documentation updates accompany each affected behavior | **Hard-cut caller migration locally verified.** Supplied clients, demo, generator and fixtures use prepared contexts, raw events, explicit states, shared progress and the Body payload/owner split. Guides, changelog and guards track the same implementation, including explicit Follow. | Complete applicable acceptance bindings, then qualify the frozen candidate. |
-| EZ-Q1       | G1; Q3-Q5            | Required blocking, approved promoted, and confirmed-present parts only    | **Preparation only:** inventory/checker, [evidence assembly](#q3-evidence-preparation-checkpoint), [runbook source](#q2-runbook-source-preparation-checkpoint).                                                                                                                   | Executable leg bindings and scope decisions, remaining sources, candidate freeze, accepted Q4a package, authorized Q4b runs and durable passing Q5 record. |
+| Requirement | Implementation Tasks | Production Applicability                                                  | Current Implementation / Checkpoint                                                                                                                                                                                                                                                             | Next Unclosed Work                                                                                                                                                                                        |
+| ----------- | -------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| EZ-1        | P2; D1-D4            | Blocking, including actual ingress forwarding                             | **Shared settlement and local functional coverage implemented and bound.** All four adapters retain byte/deadline precedence and zero-read unsupported-option checks; Spin preserves explicit CL=0 without constructing a read stream.                                                          | Exact-candidate timing, hosted and consumer acceptance. Retain failed measurements and Fastly's BestEffort synchronous reads.                                                                             |
+| EZ-2        | G2/G4; D1/D5; F1     | Blocking ranges exactly as spec; reuse-only ranges deferred               | **B31 identity/timers, cooperative progress and known-first dispatch implemented.** Warm classification compares the complete canonical identity without SDK I/O or body polling. Original deadlines, indices and callback ownership are preserved.                                             | Execute the approved fixed-strict-TLS baseline and native readback companion. Configurable TLS stays deferred under EZ-12; strict local execution, hosted pooling and resource qualification remain open. |
+| EZ-3        | D1/D5                | Blocking; bounded waits and original budgets retained                     | **Approved dispatch-slack retirement implemented and locally bound.** Expired later slots skip SDK registration/send; actual known-first SDK dispatch preserves positional results. Private planning retains original bodies and contexts.                                                      | Execute the registered strict budget probes and obtain M7 consumer comparison; preserve all failed observations, original deadlines and B31.                                                              |
+| EZ-4        | P1; D1-D4            | Blocking; Native/BestEffort distinctions retained                         | **All required local bindings implemented.** Includes zero/round-trip/SDK mapping, distinct Fastly getter readback and Linux Spin silent-connect ownership with healthy recovery. Axum/Cloudflare retain their documented aggregate fallback.                                                   | Exact-candidate Linux silent-connect and other runtime execution, plus controlled hosted connect-expiry proof. The isolated Spin characterization is not frozen qualification or aggregate-branch proof.  |
+| EZ-5        | P3; D1-D4            | Blocking; Spin conditional host result recorded                           | **Shared head finalization and required local bindings implemented.** Send/Begin/Batch/final Follow retain original coding, disposition, provenance and independent limits; followed heads are discarded unread. Native Send/Begin parity covers all four adapters.                             | Execute and qualify the exact candidate; separately adopted metadata legs and provider limitations remain explicit.                                                                                       |
+| EZ-6        | P4; D1-D6            | Blocking except EZ-6.31 reuse-only                                        | **Shared progress, ownership and required local bindings implemented.** Native operation/body/readiness witnesses remain distinct. Cleanup includes callback isolation, both Fastly wrappers and adapter-owned response models; counter tests require their same-candidate ownership companion. | Complete strict local lifetime execution and provider/consumer qualification. Unit models, guest ownership and runtime observations do not establish hosted cancellation or client delivery.              |
+| EZ-7        | P3; D1-D4            | Blocking                                                                  | **Shared marker policy and required local bindings implemented.** Charge pre-normalization fields and the optional marker once across Send/Begin/Batch/Follow.                                                                                                                                  | Exact-candidate wire execution and qualification; no additional compatibility or normalization path.                                                                                                      |
+| EZ-8        | P1; D1d/D5           | Blocking; Fastly single-request Send/Follow only                          | **Shared-pipeline optimizer Send/Follow and required local bindings implemented.** Preserve direct native mapping without extra fetch/buffering/serialization. Unsupported adapters/modes reject before settlement; native unavailable controls retain typed results.                           | Successful optimized-first-hop redirects and hosted transformation/performance evidence. Blocking horizon remains UNKNOWN.                                                                                |
+| EZ-9        | P1/P5; D1-D5         | Blocking; supplied clients share dispatch                                 | **Explicit Follow and required local bindings implemented.** Core owns the decision table, chain deadline, replay and unread disposal. Supplied clients and actual local ingress/wire suites use the same dispatch boundary.                                                                    | Exact-candidate execution, successful native optimizer redirect, consumer and hosted evidence. No compatibility transport.                                                                                |
+| EZ-10       | F2                   | Follow-up unless approved as promoted/present                             | **Local implementation and executable overflow/reader/fallback acceptance:** [all-target overflow evidence](#local-overflow-acceptance-2026-10-31) and [reader/fallback proofs](#reader-and-fallback-acceptance-2026-10-31). Historical Wrangler proxy failures remain retained.                | Provider response-handling unit bindings, hosted HTTP/2, consumer end-to-end and exact-candidate qualification.                                                                                           |
+| EZ-11       | F3a                  | Follow-up                                                                 | **Not implemented:** cache tags.                                                                                                                                                                                                                                                                | Tag validation/deduplication, provider mapping, mode/support matrix and actual cache probes.                                                                                                              |
+| EZ-12       | F3b                  | Follow-up                                                                 | **Not implemented:** TLS name-check policy.                                                                                                                                                                                                                                                     | Typed setting/readback, backend-key isolation and trusted-chain/wrong-name fixture; no global verification bypass.                                                                                        |
+| EZ-13       | F3c                  | Follow-up; closes with Unsupported evidence                               | **Unsupported retained with the required synchronous support hook integrated.** Spin authority and unsupported optimizer checks precede ordinary validation, timers and body polling.                                                                                                           | Bind the complete activity/SDK limitation and consumer configuration-rejection evidence; do not promote support.                                                                                          |
+| EZ-14       | F4                   | Follow-up; includes acceptance 10/11                                      | **Not implemented:** opted-in idle-body policy.                                                                                                                                                                                                                                                 | New mode, encoded-progress resets, absolute-deadline precedence and actual adapter read races; existing total deadlines are not idle-mode support.                                                        |
+| EZ-15       | F5                   | Follow-up; reuse legs separately conditional                              | **Not implemented:** explicit bounded fire-and-forget operation.                                                                                                                                                                                                                                | Separate capacity/ownership, 64 KiB response ceiling, cancellation/recovery and provider-lifetime proof.                                                                                                  |
+| EZ-16       | F6a                  | Follow-up                                                                 | **Diagnostic checkpoints implemented:** [SDK/source details and capability publication](#f6a-capability-publication-checkpoint).                                                                                                                                                                | Full token-safe acceptance matrix, remaining integration cases and consumer/provider qualification. Capability publication itself has landed.                                                             |
+| EZ-17       | F6b                  | Follow-up                                                                 | **Local implementation:** [owned delivery reports/safe replacement](#f6b-delivery-report-checkpoint); subsequent F9a assembly integration has landed.                                                                                                                                           | Consumer canonical-lifecycle acceptance and full required qualification, not another assembly integration implementation.                                                                                 |
+| EZ-18       | F7a                  | Follow-up                                                                 | **Local implementation:** [buffered framing](#f7a-buffered-framing-checkpoint); 80 production cases passed, nine SDK reference controls failed.                                                                                                                                                 | Resolve/qualify parity and hosted compression while preserving strict suppression. The complete local suite remains nonzero.                                                                              |
+| EZ-19       | F7b                  | Follow-up                                                                 | **Local implementation:** [bounded synthesized headers](#f7b-synthesized-header-checkpoint), wire and assembly-exclusion checkpoints.                                                                                                                                                           | Consumer-owned header integration and hosted/frozen-candidate qualification; local assembly exclusion is not still missing.                                                                               |
+| EZ-20       | F8                   | Follow-up                                                                 | **Local implementation:** [declared KV bindings and operation delivery](#f8-declared-kv-checkpoint) on all three adopted serverless adapters.                                                                                                                                                   | Actual provider outage/restoration, consumer acceptance and qualification; the separate Spin retained-overlap uncertainty remains disclosed.                                                              |
+| EZ-21       | F6c                  | Follow-up                                                                 | **Local implementation:** [six typed framing reasons](#f6c-framing-checkpoint), observer/log controls.                                                                                                                                                                                          | Consumer Viceroy acceptance and separately required hosted evidence across applicable failure paths.                                                                                                      |
+| EZ-22       | F9a                  | Follow-up; individual SHOULD decisions explicit                           | **Local implementation:** [unified fallible assembly/failure delivery](#f9a-assembly-foundation-checkpoint), including adopted macro/serverless parts.                                                                                                                                          | Consumer acceptance and exact-candidate qualification; no compatibility assembly path to add.                                                                                                             |
+| EZ-23       | F9b                  | Follow-up                                                                 | **Local implementation:** [assembled-App Axum/TCP helpers](#f9b-assembled-app-tcp-checkpoint), twelve upstream sentinels.                                                                                                                                                                       | Criterion 12's conditional begun-request portion and criterion 13's consumer route/parity evidence.                                                                                                       |
+| EZ-24       | P6; F10a/F10b/F10c   | Host/WASI publication and each optional extension need separate decisions | **Not implemented as the proposed published utility; adoption pending.** Existing private doubles are not P6.                                                                                                                                                                                   | Attributed applicability decisions, P1-P5 semantics, then selected published-client/cancellation/demo/JS work. Pending is not approved deferral.                                                          |
+| EZ-25       | Q1/Q2                | Documentation updates accompany each affected behavior                    | **Hard-cut caller migration locally verified.** Supplied clients, demo, generator and fixtures use prepared contexts, raw events, explicit states, shared progress and the Body payload/owner split. Guides, changelog and guards track the same implementation, including explicit Follow.     | Complete applicable acceptance bindings, then qualify the frozen candidate.                                                                                                                               |
+| EZ-Q1       | G1; Q3-Q5            | Required blocking, approved promoted, and confirmed-present parts only    | **Preparation only:** inventory/checker, [evidence assembly](#q3-evidence-preparation-checkpoint), [runbook source](#q2-runbook-source-preparation-checkpoint).                                                                                                                                 | Executable leg bindings and scope decisions, remaining sources, candidate freeze, accepted Q4a package, authorized Q4b runs and durable passing Q5 record.                                                |
 
 This summary inherits the normative-range-to-leaf ownership table in
 [plan 04](2026-10-18-trusted-server-outbound-04-followups.md#explicit-requirement-ownership).

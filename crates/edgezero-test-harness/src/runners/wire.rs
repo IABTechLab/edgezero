@@ -3,10 +3,25 @@ use crate::net::WireOrigins;
 use std::io::Read as _;
 
 mod batch_recovery;
+mod budgets;
 mod encoding;
 mod forwarding;
 mod marker;
 mod normalization;
+mod transport;
+
+pub(super) fn qualify_budgets(adapter: &str, port: u16, records: &mut Records) -> Result<usize> {
+    budgets::run(adapter, port, records)
+}
+
+pub(super) fn validate_transport_artifact(events: &[Value], adapter: &str) -> Result<()> {
+    transport::validate_artifact(events, adapter)
+}
+
+#[cfg(test)]
+pub(super) fn transport_artifact(adapter: &str) -> Vec<Value> {
+    transport::tests::artifact(adapter)
+}
 
 pub(super) fn validate_encoding_artifact(events: &[Value], adapter: &str) -> Result<()> {
     encoding::validate_artifact(events, adapter)
@@ -326,6 +341,7 @@ pub(super) fn validate_spin_artifact(events: &[Value]) -> Result<()> {
     batch_recovery::validate_artifact(events, "spin")?;
     marker::validate_artifact(events, "spin")?;
     forwarding::validate_artifact(events, "spin")?;
+    validate_transport_artifact(events, "spin")?;
     Ok(())
 }
 
@@ -478,73 +494,74 @@ trait MatrixContracts {
     fn run(&mut self) -> Result<()> {
         let [first, second] = self.ports();
         let base = format!("http://127.0.0.1:{first}");
-        for streamed in [false, true] {
-            for coding in ["identity", "gzip", "passthrough"] {
-                for size in [10, 11] {
-                    let path = format!("/p5/body/{coding}/{size}");
-                    let encoded = streamed && coding == "passthrough";
-                    let followed = self.parity(&path, streamed, encoded)?;
-                    require(
-                        followed["policies"] == 0 && followed["hop"] == 0,
-                        "unexpected no-redirect policy/hop",
-                    )?;
-                    if size == 10 {
-                        let outcome = &followed["outcome"];
-                        require(
-                            outcome["status"] == 200
-                                && outcome["bytes"] == json!(vec![b'a'; 10])
-                                && followed["streamed"] == streamed
-                                && followed["final_uri"] == format!("{base}{path}")
-                                && followed["redirects"] == 0
-                                && followed.get("stop") == Some(&Value::Null),
-                            "wrong no-redirect final response",
-                        )?;
-                        let fields = outcome["headers"]
-                            .as_array()
-                            .ok_or("missing wire headers")?;
-                        let field = |name: &str| {
-                            fields
-                                .iter()
-                                .find(|entry| entry[0] == name)
-                                .map(|entry| &entry[1])
-                        };
-                        require(
-                            field("x-p5-fixture") == Some(&json!(b"spin-wire".as_slice())),
-                            "missing wire fixture header",
-                        )?;
-                        if coding == "gzip" {
-                            require(
-                                field("content-encoding").is_none()
-                                    && field("content-length").is_none(),
-                                "decoded representation fields retained",
-                            )?;
-                        } else {
-                            let value: &[u8] = if coding == "identity" {
-                                b"identity"
-                            } else {
-                                b"x-p5-opaque"
-                            };
-                            require(
-                                field("content-encoding") == Some(&json!(value)),
-                                "coding field changed",
-                            )?;
-                        }
-                    } else {
-                        error_is(
-                            &followed,
-                            "response_too_large",
-                            if encoded {
-                                "EncodedBody"
-                            } else if streamed {
-                                "DecodedBody"
-                            } else {
-                                "BufferedBody"
-                            },
-                        )?;
-                    }
-                }
-                let followed = self.parity(&format!("/p5/declared/{coding}"), streamed, true)?;
+        for (streamed, coding, declared, size) in transport::policy_cases() {
+            let path = if declared {
+                format!("/p5/declared/{coding}")
+            } else {
+                format!("/p5/body/{coding}/{size}")
+            };
+            let encoded = declared || streamed && coding == "passthrough";
+            let followed = self.parity(&path, streamed, encoded)?;
+            require(
+                followed["policies"] == 0 && followed["hop"] == 0,
+                "unexpected no-redirect policy/hop",
+            )?;
+            if declared {
                 error_is(&followed, "response_too_large", "EncodedBody")?;
+                continue;
+            }
+            if size == 10 {
+                let outcome = &followed["outcome"];
+                require(
+                    outcome["status"] == 200
+                        && outcome["bytes"] == json!(vec![b'a'; 10])
+                        && followed["streamed"] == streamed
+                        && followed["final_uri"] == format!("{base}{path}")
+                        && followed["redirects"] == 0
+                        && followed.get("stop") == Some(&Value::Null),
+                    "wrong no-redirect final response",
+                )?;
+                let fields = outcome["headers"]
+                    .as_array()
+                    .ok_or("missing wire headers")?;
+                let field = |name: &str| {
+                    fields
+                        .iter()
+                        .find(|entry| entry[0] == name)
+                        .map(|entry| &entry[1])
+                };
+                require(
+                    field("x-p5-fixture") == Some(&json!(b"spin-wire".as_slice())),
+                    "missing wire fixture header",
+                )?;
+                if coding == "gzip" {
+                    require(
+                        field("content-encoding").is_none() && field("content-length").is_none(),
+                        "decoded representation fields retained",
+                    )?;
+                } else {
+                    let value: &[u8] = if coding == "identity" {
+                        b"identity"
+                    } else {
+                        b"x-p5-opaque"
+                    };
+                    require(
+                        field("content-encoding") == Some(&json!(value)),
+                        "coding field changed",
+                    )?;
+                }
+            } else {
+                error_is(
+                    &followed,
+                    "response_too_large",
+                    if encoded {
+                        "EncodedBody"
+                    } else if streamed {
+                        "DecodedBody"
+                    } else {
+                        "BufferedBody"
+                    },
+                )?;
             }
         }
         for kind in ["pending", "error", "emptybr", "oversized"] {
@@ -953,6 +970,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         batch_recovery::run("spin", port, matrix.records)?;
         marker::run("spin", port, matrix.records)?;
         forwarding::run("spin", port, matrix.records)?;
+        transport::run("spin", port, matrix.records)?;
         running.check_running()?;
         Ok((baseline, policy))
     })();
@@ -998,6 +1016,7 @@ fn progress_wire(name: &'static str, run: &Path, records: &mut Records) -> Resul
             if name != "axum" {
                 forwarding::run(name, port, matrix.records)?;
             }
+            transport::run(name, port, matrix.records)?;
             Ok((matrix.exchanges, matrix.dispatches))
         },
     )?;
@@ -1327,6 +1346,7 @@ mod tests {
         values.extend(batch_recovery::tests::artifact("spin"));
         values.extend(marker::tests::artifact("spin"));
         values.extend(forwarding::tests::artifact("spin"));
+        values.extend(transport_artifact("spin"));
         values
     }
 

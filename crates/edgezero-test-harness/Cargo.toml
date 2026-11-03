@@ -13,8 +13,12 @@ flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backe
 mio = { version = "=1.2.1", default-features = false, features = ["net", "os-poll"] }
 serde_json = "1"
 sha2 = "=0.10.9"
+socket2 = "=0.6.4"
 tempfile = "=3.27.0"
 toml = "=1.1.2"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["signal"] }
 
 [lints.rust]
 unsafe_code = "deny"

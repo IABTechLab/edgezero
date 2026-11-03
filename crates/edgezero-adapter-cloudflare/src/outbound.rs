@@ -108,7 +108,9 @@ mod worker_impl {
     use edgezero_core::http::header::{ACCEPT_ENCODING, HOST};
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
     #[cfg(feature = "test-utils")]
-    use edgezero_core::outbound::test_support::{native_body_recorder, observe_sdk_stream};
+    use edgezero_core::outbound::test_support::{
+        NativeBodyRecorder, native_body_recorder, observe_sdk_stream, own_sdk_operation,
+    };
     use edgezero_core::outbound::{
         OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundDispatchRequest,
         OutboundExchangeOwner, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
@@ -299,7 +301,14 @@ mod worker_impl {
                 request_body(body, max_request_body_bytes, budget, time.clone()).await?;
             let url = uri.to_string();
             let request = build_worker_request(&method, &url, &headers, worker_body, cache_policy)?;
-            let (response, abort_guard) = raw_fetch(request, budget, &time).await?;
+            let (response, abort_guard) = raw_fetch(
+                request,
+                budget,
+                &time,
+                #[cfg(feature = "test-utils")]
+                native_body_recorder(&context),
+            )
+            .await?;
             response_head(response, abort_guard, context)
         }
 
@@ -587,6 +596,7 @@ mod worker_impl {
         request: WorkerRequest,
         budget: DispatchBudget,
         time: &OutboundTime,
+        #[cfg(feature = "test-utils")] recorder: Option<NativeBodyRecorder>,
     ) -> Result<(WorkerResponse, AbortGuard), EdgeError> {
         let clock = time.clock();
         let mut previous = clock.now();
@@ -625,7 +635,11 @@ mod worker_impl {
         let (promise, _remaining) = begin_fetch(budget, clock, || {
             global.fetch_with_request_and_init(request.inner(), &fetch_init)
         })?;
-        let fetch = JsFuture::from(promise);
+        let native_fetch = JsFuture::from(promise);
+        #[cfg(feature = "test-utils")]
+        let fetch = own_sdk_operation(Box::pin(native_fetch), recorder);
+        #[cfg(not(feature = "test-utils"))]
+        let fetch = native_fetch;
         let result = race_with_timer(
             fetch,
             budget,
@@ -1344,6 +1358,60 @@ mod worker_impl {
                     .as_f64(),
                 Some(3.0_f64)
             );
+        }
+
+        #[cfg(feature = "test-utils")]
+        #[wasm_bindgen_test]
+        async fn native_pending_fetch_releases_before_retained_handle_is_collected() {
+            use edgezero_core::outbound::test_support::NativeBodyWitness;
+
+            let _timers = NumericTimeoutGuard::install();
+            let (_probe, _restore) = fetch_probe(true);
+            let witness = NativeBodyWitness::new();
+            let mut request =
+                OutboundRequest::get("https://fixture.invalid/begin").expect("request");
+            witness.attach(&mut request).expect("attach witness");
+            let callback = OutboundScopeOwner::callback();
+            let client = HttpClient::with_client(CloudflareOutboundClient::new());
+            let pending = callback
+                .run(async {
+                    let pending = client.begin(request).await.expect("begin");
+                    HostEventYield::after(Duration::from_millis(10))
+                        .await
+                        .expect("fetch enters");
+                    pending
+                })
+                .await;
+            let live = witness.snapshot();
+            assert!(!live.invalid);
+            assert_eq!(live.operation_acquisitions, 1);
+            assert!(live.operation_polls > 0);
+            assert!(
+                live.first_operation_poll
+                    .expect("native fetch poll")
+                    .pending
+            );
+            assert_eq!(live.operation_releases, 0);
+            assert_eq!(live.heads, 0);
+            assert_eq!(live.source_acquisitions, 0);
+            drop(callback);
+            let stopped = witness.snapshot();
+            assert_eq!(stopped.operation_releases, 1);
+            assert!(stopped.first_operation_release.is_some());
+            pending
+                .collect()
+                .now_or_never()
+                .expect("closed handle settles without SDK polls")
+                .expect_err("scope revoked begin");
+            HostEventYield::after(Duration::from_millis(10))
+                .await
+                .expect("cancelled task retires");
+            let after = witness.snapshot();
+            assert!(!after.invalid);
+            assert_eq!(after.operation_polls, stopped.operation_polls);
+            assert_eq!(after.operation_releases, 1);
+            assert_eq!(after.heads, 0);
+            assert_eq!(after.source_releases, 0);
         }
 
         #[wasm_bindgen_test]
@@ -2082,6 +2150,8 @@ mod worker_impl {
                         request,
                         budget,
                         &native_time(MonotonicClock::new(move || start)),
+                        #[cfg(feature = "test-utils")]
+                        None,
                     )
                     .await
                 };

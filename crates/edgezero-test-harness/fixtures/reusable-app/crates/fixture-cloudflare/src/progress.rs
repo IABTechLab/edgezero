@@ -56,6 +56,8 @@ pub async fn dispatch(
     env: worker::Env,
     ctx: worker::Context,
 ) -> worker::Result<worker::Response> {
+    fixture_core::init_fixture_logging(super::telemetry)
+        .map_err(|_| worker::Error::RustError("progress logging failed".into()))?;
     let probe = request
         .path()
         .strip_prefix("/progress/overflow/")

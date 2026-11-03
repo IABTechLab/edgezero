@@ -72,9 +72,11 @@ fn validate_markers(
                 "EZ-2/acceptance/01" | "EZ-3/acceptance/08" | "EZ-4/acceptance/01"
                 | "EZ-4/acceptance/02" | "EZ-8/acceptance/03",
             ) => sdk_log,
+            Some("EZ-4/acceptance/03") => async_log,
             Some("EZ-5/acceptance/09") => async_log,
             Some("EZ-5/acceptance/10") => wire_log,
             Some("EZ-5/acceptance/11") => wire_log,
+            Some("EZ-6/acceptance/21") => native_log,
             _ => return Err("ready Spin criterion has no implemented CI phase".into()),
         };
         let mut names = vec![case["sentinel"].as_str().ok_or("missing Spin sentinel")?];
@@ -94,6 +96,13 @@ fn validate_markers(
                 "ez_5_acceptance_11_native_spin",
             ].iter().all(|name| names.contains(name)), "normalization criterion must retain all owning-phase proofs")?;
         }
+        if case["case_id"] == "EZ-6/acceptance/21" {
+            require(names.len()==3 && [
+                "response::tests::handoff::attached_owner_survives_callback_return_and_eof_until_sdk_completion",
+                "response::tests::handoff::attached_owner_closes_on_source_deadline_write_and_finish_failures",
+                "response::tests::handoff::attached_owner_closes_on_coordinator_cancellation_at_every_await",
+            ].iter().all(|name|names.contains(name)),"response cleanup requires all three owning native library proofs")?;
+        }
         for name in names {
             require(
                 !name.is_empty() && !name.contains(char::is_whitespace),
@@ -103,7 +112,7 @@ fn validate_markers(
                 (
                     Some(
                         "EZ-2/acceptance/01" | "EZ-3/acceptance/08" | "EZ-4/acceptance/01"
-                        | "EZ-4/acceptance/02" | "EZ-8/acceptance/03",
+                        | "EZ-4/acceptance/02" | "EZ-8/acceptance/03" | "EZ-6/acceptance/21",
                     ),
                     _,
                 ) => (log, format!("test {name} ... ok")),
@@ -227,7 +236,7 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
         "native-tests",
         Command::new("bash").args([
             "scripts/run_test_nonzero.sh",
-            "batch_preflight_precedence_and_indices\noutbound::head::tests::adapter_visible_normalization_preserves_policy_precedence\noutbound::head::tests::adapter_visible_bodyless_and_reset_dispositions_precede_caps",
+            "batch_preflight_precedence_and_indices\noutbound::head::tests::adapter_visible_normalization_preserves_policy_precedence\noutbound::head::tests::adapter_visible_bodyless_and_reset_dispositions_precede_caps\nresponse::tests::handoff::attached_owner_survives_callback_return_and_eof_until_sdk_completion\nresponse::tests::handoff::attached_owner_closes_on_source_deadline_write_and_finish_failures\nresponse::tests::handoff::attached_owner_closes_on_coordinator_cancellation_at_every_await",
             "cargo",
             "test",
             "--offline",
@@ -236,7 +245,7 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
             "edgezero-adapter-spin",
             "--no-default-features",
             "--features",
-            "test-utils",
+            "spin,test-utils",
             "--all-targets",
         ]),
         &repo,
@@ -522,6 +531,66 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn refused_connect_options_require_the_original_async_proof() {
+        let inventory = json!({"cases":[{"case_id":"EZ-4/acceptance/03", "environment":"unit/spin",
+            "implementation":"ready", "sentinel":"ez_4_acceptance_03_unit_spin"}]});
+        let passed = "ez_4_acceptance_03_unit_spin: passed\n";
+        validate_markers(&inventory, "", "", passed, "").unwrap();
+        for (native, sdk, asynchronous, wire) in [
+            (passed, "", "", ""),
+            ("", passed, "", ""),
+            ("", "", "", passed),
+            ("", "", "ez_4_acceptance_03_unit_spin: failed\n", ""),
+        ] {
+            assert!(validate_markers(&inventory, native, sdk, asynchronous, wire).is_err());
+        }
+    }
+
+    #[test]
+    fn response_cleanup_models_require_every_native_library_proof() {
+        let names = [
+            "response::tests::handoff::attached_owner_survives_callback_return_and_eof_until_sdk_completion",
+            "response::tests::handoff::attached_owner_closes_on_source_deadline_write_and_finish_failures",
+            "response::tests::handoff::attached_owner_closes_on_coordinator_cancellation_at_every_await",
+        ];
+        let inventory = json!({"cases":[{"case_id":"EZ-6/acceptance/21","environment":"unit/spin","implementation":"ready",
+            "sentinel":names[0],"additional_sentinels":&names[1..]}]});
+        let log = names
+            .iter()
+            .map(|name| format!("test {name} ... ok\n"))
+            .collect::<String>();
+        validate_markers(&inventory, &log, "", "", "").unwrap();
+        for (native, sdk, asynchronous, wire) in [
+            ("", log.as_str(), "", ""),
+            ("", "", log.as_str(), ""),
+            ("", "", "", log.as_str()),
+        ] {
+            assert!(validate_markers(&inventory, native, sdk, asynchronous, wire).is_err());
+        }
+        for missing in names {
+            let partial = log.replace(&format!("test {missing} ... ok\n"), "");
+            assert!(validate_markers(&inventory, &partial, "", "", "").is_err());
+        }
+        for terminal in ["ignored", "FAILED"] {
+            assert!(
+                validate_markers(
+                    &inventory,
+                    &log.replace(" ... ok", &format!(" ... {terminal}")),
+                    "",
+                    "",
+                    ""
+                )
+                .is_err()
+            );
+        }
+        let mut changed = inventory.clone();
+        changed["cases"][0]["additional_sentinels"] = json!([names[1]]);
+        assert!(validate_markers(&changed, &log, "", "", "").is_err());
+        changed["cases"][0]["case_id"] = json!("EZ-unknown");
+        assert!(validate_markers(&changed, &log, "", "", "").is_err());
     }
 
     #[test]

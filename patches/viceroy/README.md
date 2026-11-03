@@ -1,4 +1,4 @@
-# Viceroy 0.21.0 Body Readiness Repair
+# Viceroy 0.21.0 Local Runtime Repairs
 
 This patch is part of PR #275. It repairs the local runtime, not the Fastly SDK or hosted
 service. The repository's SDK/runtime version pins are unchanged. Do not replace an installed
@@ -8,7 +8,8 @@ Base: official Fastly Viceroy commit `a69d982d1d95e13c0fc9f92683b9118639bb4b04`,
 The upstream Cargo.lock SHA-256 is
 `d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a`.
 Upstream source is licensed under Apache-2.0 WITH LLVM-exception; its license files remain
-authoritative. The patch changes only `src/body.rs` and includes co-located regression tests.
+authoritative. The patch repairs body readiness and dynamic-backend timeout readback, with
+co-located regression tests. Both repairs are local-runtime evidence, not hosted qualification.
 
 ## Repair
 
@@ -24,6 +25,13 @@ frames before data/pending/EOF, repeated error observation with original error i
 append, cancellation, ready siblings, decoder errors/no-output and between-byte timeout.
 The bounded-poll assertion rejects an infinite empty compressed source before its timer test
 can run; a broken implementation cannot hang that regression indefinitely.
+
+The timeout-readback repair retains the SDK's dynamic connect-timeout setting and implements
+the existing connect, first-byte and between-bytes getters in both guest ABIs. Distinct values
+remain distinct; absent settings remain unavailable and overflow is rejected. This permits an
+actual SDK setter/getter control rather than inferring registered settings from EdgeZero's
+helpers. It does **not** add connect-timeout enforcement to Viceroy's network stack, change
+backend policy, or establish hosted connect behavior.
 
 ## Apply and Build
 
@@ -48,13 +56,13 @@ export CARGO_TARGET_DIR="$VICEROY_SOURCE/target"
 export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_INCREMENTAL=0
 cargo fetch --locked --manifest-path "$VICEROY_SOURCE/Cargo.toml"
-cargo test --offline --locked --manifest-path "$VICEROY_SOURCE/Cargo.toml" -p viceroy-lib --lib body::tests::readiness_
-cargo test --offline --locked --manifest-path "$VICEROY_SOURCE/Cargo.toml" -p viceroy-lib --lib body::tests::
+cargo test --offline --locked --manifest-path "$VICEROY_SOURCE/Cargo.toml" -p viceroy-lib --lib
 cargo build --offline --locked --manifest-path "$VICEROY_SOURCE/Cargo.toml" -p viceroy
 ```
 
-Require ten passing new readiness tests and 24 passing body/collector tests, with zero failures.
-The second filter also matches `collecting_body::tests`; these counts are not hosted cases.
+Require all 136 library tests, including the ten readiness regressions and the timeout-readback
+boundary test, with zero failures. CI additionally checks that the named readiness and timeout
+guards actually executed; an empty selection cannot pass. These counts are not hosted cases.
 The development profile has no debug symbols/incremental state; record actual compiler,
 profile, source, lockfile, patch and binary hashes rather than inferring identity from version text.
 
@@ -92,8 +100,9 @@ CI keeps its stock Viceroy installation, clones the exact upstream revision, che
 and patch hashes, and builds/tests the repair in a separate cached target directory. Fastly
 runtime tests and the functional CI suite explicitly select that absolute executable through
 `CARGO_TARGET_WASM32_WASIP1_RUNNER` and `VICEROY_BIN`. Neither PATH nor the installed runtime pin
-is replaced. Callback-wide scheduling, hosted runtime promotion and resource qualification remain
-open; these local checks cannot establish hosted interruption or cleanup bounds.
+is replaced. Adapter scheduling and callback ownership have separate acceptance tests; hosted
+runtime promotion and resource qualification remain open. These local checks cannot establish
+hosted interruption or cleanup bounds.
 
 Keep the historical failed report and raw evidence unchanged. A separate repair record must
 include exact upstream/patch/host-binary/guest-binary identities, commands, counts and outcomes.
@@ -102,6 +111,11 @@ production dispatch changes, capability promotion, candidate freeze or hosted qu
 
 The [local repair record](../../docs/audits/evidence/2026-10-23-viceroy-readiness-repair.json)
 retains both stock and repaired probe events with distinct host executable hashes. All 135
-Viceroy library tests pass. Strict upstream clippy under Rust 1.98.1 reports the same diagnostics
+Viceroy library tests passed for that earlier body-only repair. The timeout-readback addition is
+recorded separately; the earlier report and its binary identities are not rewritten.
+The [timeout-readback record](../../docs/audits/evidence/2026-11-02-viceroy-timeout-readback.json)
+names the combined patch and actual SDK control, and discloses the prior failed control's missing
+binary identity rather than treating it as frozen evidence.
+Strict upstream clippy under Rust 1.98.1 reports the same diagnostics
 on the untouched base and repaired source (7 library / 25 test errors); this patch does not
 suppress or refactor those unrelated upstream warnings. EdgeZero's own strict clippy is separate.

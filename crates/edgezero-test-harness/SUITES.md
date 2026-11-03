@@ -45,7 +45,7 @@ contents stay out of process arguments. KV namespace IDs remain unchanged, with 
 `resourcePersistencePath` rooted at `persist/v3` to match Wrangler's seed layout. Existing
 startup attestation, sanitized diagnostics and memoized disposal remain required.
 
-Local verification uses Wrangler 4.131.0, Miniflare 5.20260910.0-alpha and workerd 2026-09-10,
+Earlier module-loading verification used Wrangler 4.131.0, Miniflare 5.20260910.0-alpha and workerd 2026-09-10,
 with compatibility date `2026-04-22` and `enable_request_signal`. Both smoke modes pass,
 including seeded config visibility and the declared-KV matrix. A separate diagnostic writes
 namespace `...02`, stops the runtime and reads it in a fresh process before another write;
@@ -1284,6 +1284,39 @@ The local workerd run is distinct from Node guest fixtures and from hosted cance
 ```
 
 The same suite accepts `fastly`, `cloudflare` or `spin` with the explicit local tooling above.
+
+The current suite also covers batch write expiry, cancellation of both recorded and in-flight
+slots, observation during body consumption, and Begin/upload rules. Native response-cleanup
+cases exercise normal completion, disconnect, write expiry, source error and cancellation.
+They retain four SDK operations under the victim response and one independent survivor, verify
+exactly-once release before retained-handle consumption, and require healthy survivor work.
+Source release and controller acknowledgements are mandatory causal events, not discarded
+diagnostics. SDK ownership is distinct from host cancellation and client delivery.
+
+Fastly's six-case budget/configuration group belongs to this opt-in suite, not automatic wire
+CI. Its five configuration vectors isolate scheme, port, authority and connect settings against
+two owned, non-listening loopback endpoints. This configuration-only case uses uniform 500 ms
+per-call budgets and a 250 ms connect setting; all other strict budget cases retain their original
+durations. A native refusal or an attributed governing timeout records what occurred without
+claiming phase enforcement. Zero response heads/sources, actual SDK operations and releases,
+and five registrations remain required. The [approved blocking baseline](../../docs/audits/2026-10-18-outbound-api-approval.md#scoped-tls-baseline-clarification)
+uses fixed strict TLS with mandatory native SDK readback; configurable TLS verification remains
+the unpromoted EZ-12 follow-up. Malformed/missing native evidence and later hard errors still fail.
+Historical independent-TLS-unverified records remain unchanged, not silently relabelled as passes.
+
+Response cleanup uses one absolute two-second host-coordination deadline for both TCP captures,
+survivor channels and protocol scans. Prefix consumption cannot reset it. Partial header-validated
+stages remain diagnostic evidence; only a complete validated native proof advances the cursor.
+Intentional disconnect/cancel requires a validated prefix and an explicitly issued controller abort.
+Workers deadline/source-error cases may retain the observed clean HTTP ending with exactly the
+prefix, but still require their error terminal, original budgets, exactly-once SDK/source release,
+stable polling and survivor isolation. Such a wire observation does not prove transport abort.
+Pending-source cancellation without a terminal report remains failed/unverified, not model-proven.
+
+Spin's additional silent-connect case requires the [Linux ownership prerequisites](README.md#run-integration-tests).
+Other operating systems cannot substitute an immediate refusal for that proof. Use the generated
+coverage report for current bindings; executable scenarios and passing execution are separate.
+
 It exercises EZ-6 scenarios 1, 2, 4 and 5 through the injected production client: slow origin,
 fast origin with a silent mediator, Begin followed by an unrelated 100 ms timer, and an
 unobserved batch during a separate 300 ms send. Two additional probes exercise a waiting
@@ -1394,8 +1427,9 @@ Fastly adds three cleanup cases for the local isolation part of EZ-6 criterion 2
 `response-cleanup`, `response-cleanup-source-error`, and `response-cleanup-write-deadline`.
 All use the existing cleanup route and helper; a required private `x-fixture-cleanup-mode`
 header selects exactly `complete`, `source-error`, or `write-deadline` without a compatibility
-default. Fastly runs sixteen timeline/response-cleanup cases plus the eight callback cases below;
-the other adapters retain ten including response handoff.
+default. The current inventory additionally includes native operation, response-isolation and
+batch-lifetime cases; obtain its case counts from the recorded per-adapter inventory rather than
+the earlier ten-case baseline.
 One real client starts a callback-owned begun request before a response-owned Begin and original
 three-slot batch. Public handles remain outside the streamed response while canonical egress
 completes. A sixth, bounded same-client `ready` Send returns only after the source has observed
@@ -1427,17 +1461,22 @@ the failure cases add the eighth ACK role and its separate acknowledgment for 29
 one additional native response/terminal-observation boundary, below the unchanged 32-event,
 eight-active and 128-cumulative connection limits. Native
 write-start timestamps prove the successful callback and post-delivery replies follow release.
-The four body-owned source sockets close by explicit fixture release; this is not observed host
-cancellation or a count of SDK resource drops.
+The four body-owned source sockets close by explicit fixture release, not observed host
+cancellation. Separately, request-bound native witnesses require actual SDK operation release
+before retained handles are consumed, with stable counters after consumption. A genuine native
+head-readiness timeout may establish pending ownership without fabricating an SDK future poll.
+On wire-validation or protocol failure, the controller still releases held sources before event
+collection; that cleanup does not validate partial protocol or advance the success cursor.
 
 A companion actual-route unit keeps four gated resource owners and the response attempt/body
 alive across injected terminal outcomes, proving immediate release, receiver cancellation,
 frozen producer polls and exactly one report before later wrapper drops. Attempt drop has its
 own `TransportError` row. These are core terminal-injection and mock-owner proofs, not evidence
 that an adapter detects disconnect or explicit cancellation, or that SDK/host teardown is certified.
-The local Fastly source/deadline cases add adapter evidence, not hosted qualification. Full
-criterion 21, criterion 23 and hosted qualification remain
-open. No production API, executor, transport or runtime pin changes.
+The local Fastly source/deadline cases add adapter evidence, not hosted qualification. Required-local
+criterion 21 and 23 bindings are ready; complete passing execution, frozen-candidate evidence and
+hosted qualification remain separate gates. No production API, executor, transport or runtime pin
+changes.
 
 The same `outbound-lifetimes` command also exercises Fastly callback exit through both existing
 `custom-single-request` and `custom-rebuild-per-request` entrypoints. Internal build selectors
@@ -1453,19 +1492,25 @@ it must not consume an expected error and accidentally return success.
 Before consuming any retained handle, require closed callback scope, one request-data release,
 zero unpolled-source polls and release of every registered fixture-wrapped native timer. Original
 Begin/Send and optional post-delivery handles return typed Internal; the original batch keeps
-three unresolved slots. Counters remain unchanged after those handles are consumed. These are
-request-data/timer witnesses, not counts of SDK handle drops or proof of frozen SDK polling.
+three unresolved slots. Counters remain unchanged after those handles are consumed. Request-bound
+native witnesses additionally require each original SDK operation to remain pending until scope
+closure, release exactly once before handle consumption, and retain stable poll/release counts
+afterward. Typed head-readiness timeouts and actual SDK polls remain distinct observations; neither
+proves provider-side cancellation or client delivery.
 The probe uses three canonical records (`pending`, `returning`, `closed`), the same shared bounded
 protocol reader, per-runtime total 1 MiB cursors, and post-shutdown tail checks. Original work is
-released only after complete wire evidence plus all three records validate. Early/after-delivery
-cases have 16/22 source events plus one native boundary, below the existing limits.
+released on the successful path only after complete wire evidence plus all three records validate.
+Failure paths also release sources before event collection without accepting failed protocol.
+Early/after-delivery cases have 16/22 source events plus one native boundary, below the existing
+limits.
 
 After delivery, require the unchanged complete canonical response. Before delivery, a typed
 peer close establishes absence of a response head, but an HTTP 500 alone cannot establish its
 origin. Such responses are labelled `UnverifiedHttp500` with
 `no_replacement_response_proven: false`, not accepted as proof that the wrapper sent no replacement.
-Reader timeouts and malformed replies fail. All eight cases are local guest-cleanup
-characterization; full criterion 23 remains planned for its missing SDK/poll/provenance evidence.
+Reader timeouts and malformed replies fail. All eight cases remain local guest-cleanup
+characterization, with SDK ownership evidence now required by their executable binding; this does
+not qualify hosted teardown or prove the provenance of an otherwise unverified HTTP 500.
 Parent diagnostics preserve simultaneous timeline, response-log and callback failures rather
 than hiding the later failures behind an earlier timing miss.
 

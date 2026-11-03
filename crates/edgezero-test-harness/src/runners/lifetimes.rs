@@ -1,9 +1,13 @@
 use super::*;
 use crate::net::WireOrigins;
+mod acceptance;
+mod batch_runtime;
 mod callback;
 mod cleanup;
+mod connect;
 mod post_delivery;
 mod protocol;
+mod response_cleanup;
 
 #[derive(Clone, Copy)]
 struct AdapterBoundary<'a> {
@@ -45,19 +49,26 @@ const CASES: [&str; 9] = [
     "caps-while-waiting",
 ];
 
+#[derive(Default)]
+struct LogCursors {
+    cleanup: protocol::LogCursor,
+    batch: protocol::LogCursor,
+    response: protocol::LogCursor,
+}
+
 pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     let log = run.join(format!("{name}-outbound-lifetimes.log"));
-    let mut cursor = protocol::LogCursor::default();
+    let mut cursors = LogCursors::default();
     let outcome = wire::progress_suite(
         name,
         "outbound-lifetimes",
         run,
         records,
-        |port, origins, records| checks(name, port, origins, &log, &mut cursor, records),
+        |port, origins, records| checks(name, port, origins, &log, &mut cursors, records),
     );
     // The shared runner has now stopped and joined the runtime, including on case failure.
     let tail = if name == "fastly" && log.exists() {
-        let result = cleanup::finish(&log, &cursor);
+        let result = cleanup::finish(&log, &cursors.cleanup);
         records.push(json!({"event":"cleanup-log-tail","adapter":name,"status":if result.is_ok(){"pass"}else{"fail"},
             "error":result.as_ref().err().map(ToString::to_string),"qualification":false}))?;
         result
@@ -68,6 +79,31 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         callback::run(run, records)
     } else {
         Ok(0)
+    };
+    if matches!(callbacks, Ok(count) if count > 0) {
+        acceptance::emit(name, 23, records)?;
+    }
+    let batch_tail = if log.exists() {
+        protocol::finish(&log, &cursors.batch, batch_runtime::PREFIX)
+    } else {
+        Ok(())
+    };
+    let response_tail = if name != "fastly" && log.exists() {
+        protocol::finish(&log, &cursors.response, response_cleanup::PREFIX)
+    } else {
+        Ok(())
+    };
+    let batch_tail = match (batch_tail, response_tail) {
+        (Ok(()), result) | (result, Ok(())) => result,
+        (Err(batch), Err(response)) => {
+            Err(format!("{batch}; response cleanup tail: {response}").into())
+        }
+    };
+    let tail = match (tail, batch_tail) {
+        (Ok(()), result) | (result, Ok(())) => result,
+        (Err(cleanup), Err(batch)) => {
+            Err(format!("{cleanup}; batch terminal tail: {batch}").into())
+        }
     };
     let count = combined_count(outcome, tail, callbacks)?;
     if let Some(count) = count {
@@ -109,10 +145,11 @@ fn checks(
     port: u16,
     origins: &WireOrigins,
     log: &Path,
-    cursor: &mut protocol::LogCursor,
+    cursors: &mut LogCursors,
     records: &mut Records,
 ) -> Result<usize> {
     let mut failures = Vec::new();
+    let mut passed = Vec::new();
     let handoff = matches!(adapter, "axum" | "cloudflare" | "spin");
     if !handoff {
         records.push(
@@ -152,7 +189,8 @@ fn checks(
             &format!("/progress/lifetimes/{case}"),
             &token,
             &[("x-fixture-backend", &backend)],
-            (case == "response-handoff").then_some(net::PrefixObserver {
+            (case == "response-handoff").then_some(net::ResponseCapturePolicy {
+                exchange_deadline: None,
                 bytes: prefix_bytes,
                 notify: &notify,
             }),
@@ -239,22 +277,68 @@ fn checks(
             } else { None },"client":reply.as_ref().ok().map(|reply| json!({
                 "status":reply["status"],"complete_ns":reply["complete_ns"],
                 "header_ns":reply["header_ns"],"headers":reply["headers"]})),"qualification":false}))?;
-        if let Err(error) = result {
-            failures.push(format!("{case}: {error}"));
+        match result {
+            Ok(()) => passed.push(case),
+            Err(error) => failures.push(format!("{case}: {error}")),
+        }
+    }
+    for case in batch_runtime::CASES {
+        executed += 1;
+        match batch_runtime::check(
+            adapter,
+            case,
+            port,
+            origins,
+            log,
+            &mut cursors.batch,
+            records,
+        ) {
+            Ok(()) => passed.push(case),
+            Err(error) => failures.push(format!("{case}: {error}")),
+        }
+    }
+    if adapter != "fastly" {
+        for case in response_cleanup::CASES {
+            executed += 1;
+            match response_cleanup::check(
+                case,
+                adapter,
+                port,
+                origins,
+                log,
+                &mut cursors.response,
+                records,
+            ) {
+                Ok(()) => passed.push(case),
+                Err(error) => failures.push(format!("{case}: {error}")),
+            }
         }
     }
     if adapter == "fastly" {
+        match wire::qualify_budgets(adapter, port, records) {
+            Ok(count) => executed += count,
+            Err(error) => failures.push(format!("budget-qualification: {error}")),
+        }
         for mode in cleanup::CASES {
             executed += 1;
-            if let Err(error) = cleanup::check(mode, port, origins, log, cursor, records) {
-                failures.push(format!("{}: {error}", mode.name()));
+            match cleanup::check(mode, port, origins, log, &mut cursors.cleanup, records) {
+                Ok(()) => passed.push(mode.name()),
+                Err(error) => failures.push(format!("{}: {error}", mode.name())),
             }
         }
         executed += 1;
-        if let Err(error) = post_delivery::check(port, origins, log, cursor, records) {
-            failures.push(format!("post-delivery-batch: {error}"));
+        match post_delivery::check(port, origins, log, &mut cursors.cleanup, records) {
+            Ok(()) => passed.push("post-delivery-batch"),
+            Err(error) => failures.push(format!("post-delivery-batch: {error}")),
         }
     }
+    if adapter == "spin" {
+        executed += 1;
+        if let Err(error) = connect::check(port, origins, records) {
+            failures.push(format!("connect-timeout: {error}"));
+        }
+    }
+    acceptance::record(adapter, &passed, records)?;
     require(failures.is_empty(), failures.join("; "))?;
     Ok(executed)
 }
@@ -450,8 +534,8 @@ fn validate(
             300_000
         };
         require(
-            end.saturating_sub(start) >= budget,
-            "unobserved quiet window was too short",
+            (budget..=budget + 5_000).contains(&end.saturating_sub(start)),
+            "unobserved quiet window changed its original duration",
         )?;
         let lower = clock_offset_lower(case, events, origin)?;
         for receipt in &receipts {
@@ -5193,6 +5277,32 @@ mod tests {
                 }
                 validate(AXUM, case, "sample", &report, &shifted).unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn quiet_window_cannot_be_extended_to_make_late_dispatch_appear_eager() {
+        for (case, budget) in [("begin-progress", 100_000), ("batch-progress", 300_000)] {
+            let (report, origin) = sample(case);
+            let mut changed = report.clone();
+            let events = changed["events"].as_array_mut().unwrap();
+            let start = number(event(events, "quiet-start").unwrap(), "at_us").unwrap();
+            let original = number(event(events, "quiet-end").unwrap(), "at_us").unwrap();
+            let extension = start + budget + 6_000 - original;
+            for entry in events.iter_mut() {
+                let at = number(entry, "at_us").unwrap();
+                if at >= original {
+                    entry["at_us"] = json!(at + extension);
+                }
+            }
+            assert_eq!(
+                number(event(events, "quiet-end").unwrap(), "at_us").unwrap(),
+                start + budget + 6_000
+            );
+            assert!(
+                validate(AXUM, case, "sample", &changed, &origin).is_err(),
+                "{case}"
+            );
         }
     }
 
