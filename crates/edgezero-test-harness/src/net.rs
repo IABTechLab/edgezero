@@ -106,6 +106,7 @@ pub enum ResponseInterruption {
     InvalidFraming,
     CaptureLimit,
     ObserverRejected,
+    ResetFailed(std::io::ErrorKind),
     MissingPrefix,
 }
 
@@ -738,8 +739,15 @@ pub fn binary_request(port: u16, path: &str, token: &str, backend: Option<&str>)
 
 type PrefixNotification<'a> = dyn Fn(u16, &[Value], &[u8]) -> Result<()> + 'a;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrefixRejection {
+    Close,
+    Reset,
+}
+
 #[derive(Clone, Copy)]
 pub struct ResponseCapturePolicy<'a> {
+    pub on_rejection: PrefixRejection,
     pub bytes: usize,
     /// Bounds the whole exchange, including after the prefix notification is consumed.
     pub exchange_deadline: Option<Instant>,
@@ -1138,12 +1146,31 @@ fn exchange(
         observation.finish()
     })();
     if let Err(error) = outcome {
+        let mut cause = interruption_cause(error.as_ref());
+        let mut reason = error.to_string();
+        if cause == ResponseInterruption::ObserverRejected
+            && matches!(
+                observer,
+                Some(BodyObserver::Prefix(ResponseCapturePolicy {
+                    on_rejection: PrefixRejection::Reset,
+                    ..
+                }))
+            )
+        {
+            // Arm only the rejected exchange's sole socket owner, before its ordinary drop.
+            if let Err(error) =
+                socket2::SockRef::from(&reader.get_ref().stream).set_linger(Some(Duration::ZERO))
+            {
+                cause = ResponseInterruption::ResetFailed(error.kind());
+                reason.push_str("; failed to configure TCP reset");
+            }
+        }
         return Err(Box::new(InterruptedResponse {
             status,
             headers,
             body: bytes,
-            reason: error.to_string(),
-            cause: interruption_cause(error.as_ref()),
+            reason,
+            cause,
         }));
     }
     require(
@@ -1251,9 +1278,21 @@ mod tests {
         request: impl FnOnce(u16) -> Result<Value>,
     ) -> Result<Value> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "fixture client did not connect");
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(2)))
                 .unwrap();
@@ -1375,6 +1414,7 @@ mod tests {
                     "prefix",
                     &[],
                     Some(ResponseCapturePolicy {
+                        on_rejection: PrefixRejection::Close,
                         exchange_deadline: None,
                         bytes: prelude.len(),
                         notify: &notify,
@@ -1444,6 +1484,7 @@ mod tests {
                         "gated-prefix",
                         &[],
                         Some(ResponseCapturePolicy {
+                            on_rejection: PrefixRejection::Close,
                             exchange_deadline: None,
                             bytes: prelude.len(),
                             notify: &notify,
@@ -1476,6 +1517,7 @@ mod tests {
                     "bound",
                     &[],
                     Some(ResponseCapturePolicy {
+                        on_rejection: PrefixRejection::Close,
                         exchange_deadline: None,
                         bytes,
                         notify: &notify
@@ -1501,6 +1543,7 @@ mod tests {
                     "short",
                     &[],
                     Some(ResponseCapturePolicy {
+                        on_rejection: PrefixRejection::Close,
                         exchange_deadline: None,
                         bytes: 2,
                         notify: &notify,
@@ -1524,6 +1567,7 @@ mod tests {
                     "exact",
                     &[],
                     Some(ResponseCapturePolicy {
+                        on_rejection: PrefixRejection::Close,
                         exchange_deadline: None,
                         bytes: 512,
                         notify: &notify,
@@ -1534,6 +1578,83 @@ mod tests {
         .unwrap();
         assert_eq!(result["body_bytes"].as_array().unwrap().len(), 512);
         assert_eq!(observed.get(), 1);
+    }
+
+    #[test]
+    fn prefix_rejection_reset_is_peer_visible_and_success_keeps_normal_close() {
+        for (on_rejection, reject, truncated) in [
+            (PrefixRejection::Close, true, false),
+            (PrefixRejection::Reset, true, false),
+            (PrefixRejection::Reset, false, false),
+            (PrefixRejection::Reset, false, true),
+        ] {
+            let observed = Arc::new(Mutex::new(None));
+            let peer_observed = observed.clone();
+            let notify = |status, _: &[Value], bytes: &[u8]| -> Result<()> {
+                assert_eq!(status, 200);
+                assert_eq!(bytes, b"abc");
+                if reject {
+                    Err("intentional prefix rejection".into())
+                } else {
+                    Ok(())
+                }
+            };
+            let result = served_reply(
+                move |socket| {
+                    // No unread tail or subsequent write may independently induce a reset.
+                    socket
+                        .set_write_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    write!(
+                        socket,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\nabc",
+                        if truncated { 4 } else { 3 }
+                    )
+                    .unwrap();
+                    if truncated {
+                        socket.shutdown(std::net::Shutdown::Write).unwrap();
+                    }
+                    *peer_observed.lock().unwrap() =
+                        Some(socket.read(&mut [0]).map_err(|error| error.kind()));
+                },
+                |port| {
+                    header_request(
+                        port,
+                        "/p5",
+                        "prefix-rejection",
+                        &[],
+                        Some(ResponseCapturePolicy {
+                            on_rejection,
+                            exchange_deadline: Some(Instant::now() + Duration::from_secs(2)),
+                            bytes: 3,
+                            notify: &notify,
+                        }),
+                    )
+                },
+            );
+            if reject || truncated {
+                let error = result.unwrap_err();
+                let partial = error.downcast_ref::<InterruptedResponse>().unwrap();
+                assert_eq!(partial.body, b"abc");
+                if reject {
+                    assert_eq!(partial.reason, "intentional prefix rejection");
+                    assert_eq!(partial.cause, ResponseInterruption::ObserverRejected);
+                } else {
+                    assert_eq!(partial.cause, ResponseInterruption::PrematureEof);
+                }
+            } else {
+                assert_eq!(result.unwrap()["body_bytes"], json!(b"abc"));
+            }
+            assert_eq!(
+                observed.lock().unwrap().take().unwrap(),
+                if reject && on_rejection == PrefixRejection::Reset {
+                    Err(std::io::ErrorKind::ConnectionReset)
+                } else {
+                    Ok(0)
+                },
+                "{on_rejection:?}, rejected={reject}, truncated={truncated}"
+            );
+        }
     }
 
     #[test]
@@ -1554,6 +1675,7 @@ mod tests {
                     "reject",
                     &[],
                     Some(ResponseCapturePolicy {
+                        on_rejection: PrefixRejection::Close,
                         exchange_deadline: None,
                         bytes: 3,
                         notify: &notify,
@@ -1594,6 +1716,7 @@ mod tests {
                     "ambiguous",
                     &[],
                     Some(ResponseCapturePolicy {
+                        on_rejection: PrefixRejection::Close,
                         exchange_deadline: None,
                         bytes: 1,
                         notify: &notify
@@ -1659,6 +1782,7 @@ mod tests {
             "bounded",
             &[],
             Some(ResponseCapturePolicy {
+                on_rejection: PrefixRejection::Close,
                 bytes: 1,
                 exchange_deadline: Some(deadline),
                 notify: &notify,
@@ -1690,6 +1814,7 @@ mod tests {
             "expired",
             &[],
             Some(ResponseCapturePolicy {
+                on_rejection: PrefixRejection::Close,
                 bytes: 1,
                 exchange_deadline: Some(Instant::now() - Duration::from_millis(1)),
                 notify: &notify,

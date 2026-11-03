@@ -12,9 +12,67 @@
 
 ## Status and Authority
 
+### Isolated Reset Diagnostic (2026-11-03)
+
+The scoped continuation adds one uncredited control, not an alternative cancellation contract.
+The existing Rust client now explicitly selects ordinary close or reset on prefix rejection.
+All original callers retain close. Only typed observer rejection in the reset control arms zero
+linger on the exchange's sole socket owner before drop; it performs no shutdown or additional I/O.
+Socket-option failure retains the original partial response and rejection reason with a distinct
+typed failure. A real TCP test first observes EOF where reset is expected, then passes with exact
+peer `ConnectionReset`. Ordinary close, successful notification and non-rejection premature EOF
+retain peer EOF. The test peer sends no unread tail or subsequent write that could itself cause
+a reset. Its accept and read waits are finite.
+
+After the original cancellation case fails, the existing runner finishes its runtime and strict
+tail before starting the same pending-source fixture in a fresh runtime. The existing complete
+empty-body control first attests that launch, before the case and its coordination deadline begin.
+An initial capture without that prerequisite is retained as failed: intentional interruption
+cannot attest its own first response, and the resulting startup rejection invalidates the survivor.
+No startup check is relaxed. Separate tokens, cursor,
+log and `<adapter>-reset-diagnostic/events.jsonl` prevent either run's late records from feeding
+the other's proof. The original result takes precedence over diagnostic-recording errors. The
+control keeps the original two-second coordination and all request/source budgets. It does not
+change the primary case count, acceptance sentinel or capability level. Passing runs do not start
+the extra runtime; no selector, CI job, transport or executor is added. The diagnostic's own log
+tail is checked after shutdown. Source tests and execution-owner mutation guards distinguish the
+diagnostic from every original gate and reject bypassed primary errors or reversed error precedence.
+
+Two read-only reviews compare policy selection with a separate helper and runtime isolation with
+same-runtime cursor partitioning. The selected path reuses the sole HTTP implementation and
+existing runner, avoiding additional entrypoints and cross-run log ambiguity. Review fixes bound
+test accept, make diagnostic directories adapter-specific and preserve primary-error precedence.
+No original close/cancel failure, strict timing miss, hosted gate or provider limitation is waived.
+
+Native Workers execution with that setup records all 19 ordered reset-control stages, a
+`RequestCancelled` victim terminal, exactly-once SDK/source release and healthy survivor work.
+Its diagnostic tail passes, but earns no acceptance credit. Ordinary close still fails: eight
+validated setup/Pending stages and eleven canonical diagnostic rows contain no victim terminal
+through the original two-second window. The primary suite remains 15 pass/four fail, exit 1:
+cold Begin is 8 ms against 2 +/- 5 ms, both pending-cutoff controls miss the original 205 ms
+bound, and ordinary cancellation remains unproved. The separate reset result does not alter those
+counts. Capture: `/private/tmp/pr275-reset-workers-lifetimes-v2/`; the invalid initial diagnostic
+remains in `/private/tmp/pr275-reset-workers-lifetimes-v1/`.
+
+Spin's ordinary-close and reset captures each retain eight validated setup/Pending stages and
+eleven canonical diagnostic rows without victim cleanup. Both remain failed, with no provider
+impossibility claim. The primary macOS run is 17 pass/two fail plus the Linux-only connect case
+unverified, exit 1: slow-origin slot elapsed is 153,575 us against 146,000 +/- 5,000 us, and ordinary
+cancellation lacks proof. Capture: `/private/tmp/pr275-reset-spin-lifetimes-v1/`. Neither target
+changes SDK/runtime pins, capabilities, accepted identities or budgets. Source inputs stay fixed
+across both executions; this is working-tree characterization, not frozen-candidate qualification.
+
+Final verification passes all five root gates (2,666 tests across 33 binaries, one existing ignored),
+585 serialized harness tests (two existing ignored), strict harness lint, 165 evidence/workflow
+guard tests, docs format/lint/build and the legacy-name guard. The initial concurrent harness run
+retains one existing process-cancellation test's three-second timing miss; its unchanged isolated
+and final serialized runs pass. No test timeout or acceptance tolerance is widened. Reviews of
+the socket ownership, diagnostic isolation, startup prerequisite and retained evidence have no
+remaining findings. These checks validate the diagnostic tooling, not the failing runtime gates.
+
 ### Runtime Boundary Investigation (2026-11-03)
 
-All 30 GitHub checks pass at `22c6386c`. The following changes and executions are subsequent
+All 30 GitHub checks pass at `f036425b`. The following changes and executions are earlier
 working-tree characterization, not frozen-candidate or hosted qualification. Outbound API,
 provider pins, deadlines, caps, accepted identities and capability classifications are unchanged.
 
@@ -125,12 +183,12 @@ or replacing the unrelated HTTP Send. The new local captures are retained under
 `/private/tmp/pr275-ci-repair-{adapter}-{wire,lifetimes}-final/`; Axum's full CI capture is
 `/private/tmp/pr275-ci-repair-axum-ci-final/`. Earlier failures remain retained unchanged.
 
-| Lifecycle Run | Result | Remaining Observation |
-| --- | --- | --- |
-| Axum | 19 pass, exit 0 | All cleanup and timing cases pass in this run. |
-| Repaired Viceroy | 33 pass, 1 recorded row, exit 0 | Budget, callback, cleanup and protocol-tail checks pass. The recorded batch-write row is not another passing runtime case. |
-| Spin | 18 pass, 1 fail, 1 unverified, exit 1 | Pending-source client cancellation lacks the required terminal/source proof; silent-connect qualification requires Linux. |
-| Workers | 14 pass, 5 fail, exit 1 | Cold Begin is 10 ms against 2 +/- 5 ms; cutoff returns are 206/228 ms against 205 ms; batch entry is 40 ms against 34-39 ms. Pending-source cancellation still lacks terminal/source proof. |
+| Lifecycle Run    | Result                                | Remaining Observation                                                                                                                                                                       |
+| ---------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Axum             | 19 pass, exit 0                       | All cleanup and timing cases pass in this run.                                                                                                                                              |
+| Repaired Viceroy | 33 pass, 1 recorded row, exit 0       | Budget, callback, cleanup and protocol-tail checks pass. The recorded batch-write row is not another passing runtime case.                                                                  |
+| Spin             | 18 pass, 1 fail, 1 unverified, exit 1 | Pending-source client cancellation lacks the required terminal/source proof; silent-connect qualification requires Linux.                                                                   |
+| Workers          | 14 pass, 5 fail, exit 1               | Cold Begin is 10 ms against 2 +/- 5 ms; cutoff returns are 206/228 ms against 205 ms; batch entry is 40 ms against 34-39 ms. Pending-source cancellation still lacks terminal/source proof. |
 
 The cached writer-closed repair closes the SDK-level observation gap, not the remaining HTTP
 propagation proof. Both pending-source cancellation runs still fail the original protocol and

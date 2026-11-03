@@ -573,7 +573,11 @@ fn validate_sdk_terminals(events: &[Value], expected: &[Value]) -> Result<()> {
     Ok(())
 }
 
-fn validate_empty_signal(name: &str, framing: net::Framing, probe: &Value) -> Result<()> {
+pub(super) fn validate_empty_signal(
+    name: &str,
+    framing: net::Framing,
+    probe: &Value,
+) -> Result<()> {
     let expected = if matches!(framing, net::Framing::FixedBody | net::Framing::ChunkedBody) {
         4
     } else {

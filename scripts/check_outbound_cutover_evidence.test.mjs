@@ -540,8 +540,9 @@ function registeredExecution(workflow, sources, adapter, suite) {
       has(
         "lifetimes",
         "run",
-        "let count = combined_count(outcome, tail, callbacks)?;",
+        "let count = combined_count(outcome, tail, callbacks);",
       ) &&
+      has("lifetimes", "run", "let count = count?; diagnostic?;") &&
       has("lifetimes", "run", "if let Some(count) = count {") &&
       has(
         "lifetimes",
@@ -721,8 +722,18 @@ test("execution ownership requires real selector, dispatch and guarded controlle
     ],
     [
       "lifetimes",
-      "let count = combined_count(outcome, tail, callbacks)?;",
+      "let count = combined_count(outcome, tail, callbacks);",
       "let count = Some(1);",
+    ],
+    [
+      "lifetimes",
+      "let count = count?;\n    diagnostic?;",
+      "diagnostic?;\n    let count = count?;",
+    ],
+    [
+      "lifetimes",
+      "let count = count?;\n    diagnostic?;",
+      "let count = Some(1);\n    diagnostic?;",
     ],
     [
       "lifetimes",

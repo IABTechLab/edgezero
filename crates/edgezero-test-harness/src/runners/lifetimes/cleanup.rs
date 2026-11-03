@@ -559,6 +559,7 @@ pub(super) fn check(
             ("x-fixture-cleanup-mode", mode.header()),
         ],
         Some(net::ResponseCapturePolicy {
+            on_rejection: net::PrefixRejection::Close,
             exchange_deadline: None,
             bytes: expected_bytes(mode, &token)?.len(),
             notify: &notify,

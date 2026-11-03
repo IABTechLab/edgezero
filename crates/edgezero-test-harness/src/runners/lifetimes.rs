@@ -54,6 +54,7 @@ struct LogCursors {
     cleanup: protocol::LogCursor,
     batch: protocol::LogCursor,
     response: protocol::LogCursor,
+    diagnose_reset: bool,
 }
 
 pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
@@ -105,7 +106,14 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
             Err(format!("{cleanup}; batch terminal tail: {batch}").into())
         }
     };
-    let count = combined_count(outcome, tail, callbacks)?;
+    let count = combined_count(outcome, tail, callbacks);
+    let diagnostic = if cursors.diagnose_reset {
+        response_cleanup::diagnose_reset(name, run, records)
+    } else {
+        Ok(())
+    };
+    let count = count?;
+    diagnostic?;
     if let Some(count) = count {
         records.push(json!({"event":"lifetime-inventory","adapter":name,
             "status":"pass","cases":count,"qualification":false}))?;
@@ -190,6 +198,7 @@ fn checks(
             &token,
             &[("x-fixture-backend", &backend)],
             (case == "response-handoff").then_some(net::ResponseCapturePolicy {
+                on_rejection: net::PrefixRejection::Close,
                 exchange_deadline: None,
                 bytes: prefix_bytes,
                 notify: &notify,
@@ -301,7 +310,7 @@ fn checks(
         for case in response_cleanup::CASES {
             executed += 1;
             match response_cleanup::check(
-                case,
+                response_cleanup::Attempt::Gate(case),
                 adapter,
                 port,
                 origins,
@@ -310,7 +319,10 @@ fn checks(
                 records,
             ) {
                 Ok(()) => passed.push(case),
-                Err(error) => failures.push(format!("{case}: {error}")),
+                Err(error) => {
+                    cursors.diagnose_reset |= case == "response-owned-cleanup-cancel";
+                    failures.push(format!("{case}: {error}"));
+                }
             }
         }
     }

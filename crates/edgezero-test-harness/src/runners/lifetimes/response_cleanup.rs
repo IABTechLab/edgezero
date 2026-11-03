@@ -9,6 +9,35 @@ pub(super) const CASES: [&str; 5] = [
     "response-owned-cleanup-cancel",
 ];
 
+#[derive(Clone, Copy)]
+pub(super) enum Attempt<'a> {
+    Gate(&'a str),
+    ResetDiagnostic,
+}
+
+impl<'a> Attempt<'a> {
+    fn case(self) -> &'a str {
+        match self {
+            Self::Gate(case) => case,
+            Self::ResetDiagnostic => CASES[4],
+        }
+    }
+
+    fn rejection(self) -> net::PrefixRejection {
+        match self {
+            Self::Gate(_) => net::PrefixRejection::Close,
+            Self::ResetDiagnostic => net::PrefixRejection::Reset,
+        }
+    }
+
+    fn event(self) -> &'static str {
+        match self {
+            Self::Gate(_) => "response-cleanup-case",
+            Self::ResetDiagnostic => "response-cleanup-reset-diagnostic",
+        }
+    }
+}
+
 fn validate_native(value: &Value, closed: bool) -> Result<()> {
     let observations = value
         .as_array()
@@ -594,7 +623,7 @@ fn validate_origin(value: &Value, token: &str, case: &str, isolation: bool) -> R
 }
 
 pub(super) fn check(
-    case: &str,
+    attempt: Attempt<'_>,
     adapter: &str,
     port: u16,
     origins: &WireOrigins,
@@ -603,6 +632,7 @@ pub(super) fn check(
     records: &mut Records,
 ) -> Result<()> {
     use std::sync::mpsc::sync_channel;
+    let case = attempt.case();
     require(
         CASES.contains(&case) && matches!(adapter, "axum" | "cloudflare" | "spin"),
         "invalid response cleanup runtime",
@@ -665,6 +695,7 @@ pub(super) fn check(
                     ("x-fixture-cleanup-isolation", "1"),
                 ],
                 Some(net::ResponseCapturePolicy {
+                    on_rejection: net::PrefixRejection::Close,
                     exchange_deadline: Some(coordination_deadline),
                     bytes: live_prefix.len(),
                     notify: &notify,
@@ -710,6 +741,7 @@ pub(super) fn check(
                 &victim,
                 &[("x-fixture-backend", &victim_backend)],
                 Some(net::ResponseCapturePolicy {
+                    on_rejection: attempt.rejection(),
                     exchange_deadline: Some(coordination_deadline),
                     bytes: victim_prefix.len(),
                     notify: &notify,
@@ -809,8 +841,9 @@ pub(super) fn check(
             true,
         )
     });
-    records.push(json!({"event":"response-cleanup-case","adapter":adapter,"case":case,"token":victim,
-        "survivor_token":survivor,"status":if result.is_ok(){"pass"}else{"fail"},"error":result.as_ref().err().map(ToString::to_string),
+    records.push(json!({"event":attempt.event(),"adapter":adapter,"case":case,"token":victim,
+        "survivor_token":survivor,"status":match attempt { Attempt::ResetDiagnostic => "diagnostic", _ if result.is_ok() => "pass", _ => "fail" },
+        "controller_rejection":format!("{:?}",attempt.rejection()),"error":result.as_ref().err().map(ToString::to_string),
         "protocol":captured.into_inner(),"native_proof_complete":native_proof_complete,
         "failure_diagnostics":failure_diagnostics,
         "origin":victim_source.as_ref().ok(),"survivor_origin":survivor_source.as_ref().ok(),
@@ -819,9 +852,79 @@ pub(super) fn check(
     result
 }
 
+pub(super) fn diagnose_reset(adapter: &str, run: &Path, records: &mut Records) -> Result<()> {
+    let directory = run.join(format!("{adapter}-reset-diagnostic"));
+    let mut cursor = protocol::LogCursor::default();
+    let log = directory.join(format!("{adapter}-outbound-lifetimes.log"));
+    let evidence = directory.join("events.jsonl");
+    // The primary runtime and strict tail are finished before this isolated control starts.
+    let outcome = (|| -> Result<Option<()>> {
+        fs::create_dir(&directory)?;
+        let mut diagnostic = Records {
+            path: evidence.clone(),
+            values: Vec::new(),
+        };
+        let result = wire::progress_suite(
+            adapter,
+            "outbound-lifetimes",
+            &directory,
+            &mut diagnostic,
+            |port, origins, records| {
+                // Complete the existing attested control before intentionally interrupting a response.
+                let startup = net::framed_request(port, net::Framing::Absent)?;
+                require(startup["status"] == 200, "reset control startup failed")?;
+                progress::validate_empty_signal(adapter, net::Framing::Absent, &guest(&startup)?)?;
+                check(
+                    Attempt::ResetDiagnostic,
+                    adapter,
+                    port,
+                    origins,
+                    &log,
+                    &mut cursor,
+                    records,
+                )
+            },
+        );
+        let tail = if log.exists() {
+            protocol::finish(&log, &cursor, PREFIX)
+        } else {
+            Ok(())
+        };
+        match (result, tail) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(tail)) => {
+                Err(format!("{error}; reset diagnostic tail: {tail}").into())
+            }
+        }
+    })();
+    records.push(
+        json!({"event":"response-cleanup-reset-control","adapter":adapter,
+        "status":"diagnostic","observed":matches!(outcome,Ok(Some(()))),
+        "error":outcome.as_ref().err().map(ToString::to_string),"evidence":evidence,
+        "original_gate_unchanged":true,"acceptance_credit":false,"qualification":false}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_diagnostic_is_distinct_from_every_original_gate() {
+        for case in CASES {
+            let gate = Attempt::Gate(case);
+            assert_eq!(gate.case(), case);
+            assert_eq!(gate.rejection(), net::PrefixRejection::Close);
+            assert_eq!(gate.event(), "response-cleanup-case");
+        }
+        let diagnostic = Attempt::ResetDiagnostic;
+        assert_eq!(diagnostic.case(), "response-owned-cleanup-cancel");
+        assert!(pending_source(diagnostic.case()));
+        assert_eq!(diagnostic.rejection(), net::PrefixRejection::Reset);
+        assert_eq!(diagnostic.event(), "response-cleanup-reset-diagnostic");
+        assert!(!CASES.contains(&diagnostic.event()));
+    }
 
     #[test]
     fn expired_coordination_cannot_accept_already_written_terminal_proof() {

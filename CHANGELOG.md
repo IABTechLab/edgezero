@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Distinguish ordinary client close from explicitly requested TCP reset in the Rust lifecycle
+  harness. Keep every original gate on close; run the reset control only after cancellation
+  fails, with isolated runtime evidence, unchanged budgets and no acceptance or qualification credit.
 - Direct the existing Workers test launcher to the native application socket with its real
   compatibility flags, bypassing Miniflare entry forwarding. Retain one bounded ephemeral SDK
   control listener, strict address verification and owned shutdown, with no fallback path.

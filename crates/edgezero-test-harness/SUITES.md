@@ -1339,6 +1339,24 @@ Malformed or oversized rows, incomplete tails, truncation, failed reads and read
 the deadline have explicit flags. Invalid evidence never becomes a pass or proof of absence.
 Successful cases and all source/request budgets are unchanged; no extra request or executor is used.
 
+If that original close/cancellation case fails, the existing runner starts one isolated reset
+diagnostic only after the primary runtime stops and its strict log tail is checked. It reuses
+the same fixture, pending-source case, origins, SDK client and original budgets in a fresh runtime;
+the existing complete empty-body control first establishes startup attestation, before the case
+and its coordination deadline begin. An interrupted first response cannot attest its own launch.
+Only the victim's intentional prefix rejection requests zero-linger TCP reset. The survivor and
+every original gate retain ordinary close. A raw TCP control distinguishes peer-observed reset
+from EOF and verifies that successful notification does not arm reset. Socket-option failure is
+typed and preserves the partial response instead of being counted as a configured reset.
+
+The diagnostic has its own tokens, cursor, runtime log and `<adapter>-reset-diagnostic/events.jsonl`, including
+its post-shutdown tail check. The primary file receives only a separately labelled diagnostic
+summary. Neither a successful reset nor its failure changes the original result, case count,
+acceptance sentinel or qualification credit. No new suite, CI job, transport or executor is added.
+The extra runtime is launched only after the original cancellation gate fails; passing runs incur
+no additional runtime startup. Reset configuration is not proof of guest notification or hosted
+cancellation, and does not replace the ordinary-close requirement.
+
 Spin's additional silent-connect case requires the [Linux ownership prerequisites](README.md#run-integration-tests).
 Other operating systems cannot substitute an immediate refusal for that proof. Use the generated
 coverage report for current bindings; executable scenarios and passing execution are separate.
