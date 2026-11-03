@@ -89,9 +89,13 @@ jobs:
       # provision-written secret-bearing env-line files (Spin's
       # `<crate>/.env`, Axum's `.edgezero/.env`) MUST NOT be tracked --
       # teammates regenerate them locally via `provision --local`.
+      # The three exact request-fidelity manifests are hand-written runtime
+      # test inputs, not provision output. No other fixture state is exempt.
       - name: Enforce adapter manifests and secret env files are not tracked
         run: |
-          if git ls-files | grep -E '(^|/)(axum|fastly|spin|wrangler|runtime-config)\.toml$|(^|/)\.dev\.vars$|(^|/)\.env$'; then
+          if git ls-files |
+            grep -E '(^|/)(axum|fastly|spin|wrangler|runtime-config)\.toml$|(^|/)\.dev\.vars$|(^|/)\.env$' |
+            grep -Ev '^tests/fixtures/request-fidelity/(fastly|spin|wrangler)\.toml$'; then
             echo "::error::These adapter manifests AND secret-bearing env files (.dev.vars / .env) must be gitignored (spec §'Adapter manifests are gitignored' + §'Migration for downstream projects'). They carry operator secret values and must NEVER be committed."
             exit 1
           fi

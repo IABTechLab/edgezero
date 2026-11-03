@@ -140,3 +140,13 @@ with five existing non-Linux skips. Docs lint, format, and build passed. The
 pinned-workerd Cloudflare ingress runtime probe remains intentionally ignored
 by the native ingress matrix; this repair does not claim that optional probe
 was executed locally. GitHub checks on the published head remain authoritative.
+
+A post-push CI check exposed a merge integration gap outside the Rust matrix:
+main's three hand-written request-fidelity manifests matched the PR's global
+tracked-generated-state prohibition. The CLI and build reviewers independently
+recommended an anchored exception for exactly those three files. Renaming would
+unnecessarily change runtime discovery. The corrected actual workflow block
+passes 16 real/synthetic Git-index policy cases: application manifests, secret
+env files, and adjacent/nested fixture paths remain forbidden. The separate
+ignored-file probes are unchanged. Actionlint validates the workflow; GitHub
+checks are rerun on the follow-up head.
