@@ -231,8 +231,8 @@ the blob never contains resolved secret bytes. It pushes per-adapter:
      runtime-config.toml — without it, the dispatcher refuses the
      push and tells you the exact stanza to add, since the file you'd
      write would be unreadable from a running `spin up`.
-  2. If the manifest's `[adapters.spin.commands].deploy` shells to
-     `spin deploy` / `spin cloud deploy`, push writes the single
+  2. If `[adapters.spin.adapter].cloud = true` and `--local` is absent,
+     push writes the single
      envelope entry via `spin cloud key-value set --app <APP>
 --label <LABEL> <KEY>=<envelope_json>`. `<APP>`
      comes from `[application].name` in spin.toml; `<LABEL>` is the
@@ -277,7 +277,7 @@ edit. You do **not** hand-edit `spin.toml` for typed secrets.
 
 `config push` still never writes secret **values** — the blob stores each
 `#[secret]` field's key NAME, not its resolved value. Set the value at run time
-via `SPIN_VARIABLE_<NAME>=<value>` (or `spin up --env <NAME>=<value>`).
+via `SPIN_VARIABLE_<NAME>=<value>` (or `spin up --variable api_token=<value>`).
 
 The one case the CLI cannot infer is a `#[secret(store_ref)]` field whose runtime
 key is code-local (e.g. `ctx.secret_store(&cfg.vault)?.require_str("active")`):
@@ -330,7 +330,9 @@ myapp-cli build --adapter cloudflare
 myapp-cli deploy --adapter cloudflare
 ```
 
-For Spin:
+For Spin, set `cloud = true` in the existing `[adapters.spin.adapter]` table
+in `edgezero.toml` before pushing cloud config. The deploy command does not
+select the config backend; `--local` still explicitly selects SQLite.
 
 ```bash
 edgezero new myapp && cd myapp

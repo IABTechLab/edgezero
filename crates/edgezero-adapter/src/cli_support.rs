@@ -143,8 +143,8 @@ pub enum CargoTargetDir {
 
 /// Resolve cargo's effective target directory for locating a build
 /// artifact, mirroring cargo's own precedence: an explicit `--target-dir`
-/// build argument, then a `--config build.target-dir=…` build argument,
-/// then `CARGO_TARGET_DIR` / `CARGO_BUILD_TARGET_DIR` (the ctx-applied env
+/// build argument, then `CARGO_TARGET_DIR`, a `--config build.target-dir=…`
+/// build argument, and `CARGO_BUILD_TARGET_DIR` (the ctx-applied env
 /// the build used, then the process env), then a `.cargo/config.toml`
 /// `[build] target-dir` walking from the crate root up to the workspace
 /// root. Relative values follow cargo: `--target-dir` /
@@ -162,22 +162,19 @@ pub fn resolve_cargo_target_dir(
     build_args: &[String],
     ctx: &AdapterExecContext<'_>,
 ) -> CargoTargetDir {
-    // 1. `--target-dir <v>` / `--target-dir=<v>`, then a
-    //    `--config build.target-dir="…"` / `--config <file>` override, in
-    //    the build args. Cargo lets the LAST occurrence win.
+    // Cargo lets the LAST occurrence of an argument override win.
     if let Some(dir) = target_dir_from_args(build_args) {
+        return CargoTargetDir::Explicit(resolve_dir_against(crate_dir, &dir));
+    }
+    if let Some(dir) = env_value(ctx, "CARGO_TARGET_DIR").map(PathBuf::from) {
         return CargoTargetDir::Explicit(resolve_dir_against(crate_dir, &dir));
     }
     if let Some(dir) = config_target_dir_from_args(crate_dir, build_args) {
         return CargoTargetDir::Explicit(resolve_dir_against(crate_dir, &dir));
     }
-    // 2. `CARGO_TARGET_DIR`, then its `[build] target-dir` env alias
-    //    `CARGO_BUILD_TARGET_DIR`. The ctx-applied env the build ran with
-    //    takes precedence over the process env, mirroring `command.env`.
-    for key in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"] {
-        if let Some(dir) = env_value(ctx, key).map(PathBuf::from) {
-            return CargoTargetDir::Explicit(resolve_dir_against(crate_dir, &dir));
-        }
+    // The build.* alias has lower precedence than explicit --config values.
+    if let Some(dir) = env_value(ctx, "CARGO_BUILD_TARGET_DIR").map(PathBuf::from) {
+        return CargoTargetDir::Explicit(resolve_dir_against(crate_dir, &dir));
     }
     // 3. `.cargo/config` (or `.cargo/config.toml`) `[build] target-dir`,
     //    walking EVERY ancestor from the crate dir to the filesystem root
@@ -188,21 +185,27 @@ pub fn resolve_cargo_target_dir(
     //    `config` first.
     let mut dir = Some(crate_dir);
     while let Some(current) = dir {
-        for name in ["config", "config.toml"] {
-            if let Some(target) = config_build_target_dir(&current.join(".cargo").join(name)) {
-                return CargoTargetDir::Explicit(resolve_dir_against(current, &target));
-            }
+        if let Some(target) = selected_config_target_dir(&current.join(".cargo")) {
+            return CargoTargetDir::Explicit(resolve_dir_against(current, &target));
         }
         dir = current.parent();
     }
-    if let Some(home) = cargo_home(ctx) {
-        for name in ["config", "config.toml"] {
-            if let Some(target) = config_build_target_dir(&home.join(name)) {
-                return CargoTargetDir::Explicit(resolve_dir_against(&home, &target));
-            }
-        }
+    if let Some(home) = cargo_home(ctx)
+        && let Some(target) = selected_config_target_dir(&home)
+    {
+        return CargoTargetDir::Explicit(resolve_dir_against(&home, &target));
     }
     CargoTargetDir::Conventional
+}
+
+fn selected_config_target_dir(directory: &Path) -> Option<PathBuf> {
+    let extensionless = directory.join("config");
+    let selected = if extensionless.exists() {
+        extensionless
+    } else {
+        directory.join("config.toml")
+    };
+    config_build_target_dir(&selected)
 }
 
 /// Read an env var the build actually ran with: the ctx-applied overlay
@@ -628,6 +631,65 @@ mod tests {
     use super::*;
     use crate::registry::AdapterExecContext;
     use tempfile::tempdir;
+
+    #[test]
+    fn target_dir_environment_and_argument_precedence_matches_cargo() {
+        let dir = tempdir().unwrap();
+        let args = [
+            "--config".to_owned(),
+            "build.target-dir='arg-dir'".to_owned(),
+        ];
+        for (key, expected) in [
+            ("CARGO_TARGET_DIR", "env-dir"),
+            ("CARGO_BUILD_TARGET_DIR", "arg-dir"),
+        ] {
+            let environment = [(key.to_owned(), "env-dir".to_owned())];
+            let context = AdapterExecContext::new().with_env(&environment);
+            match resolve_cargo_target_dir(dir.path(), &args, &context) {
+                CargoTargetDir::Explicit(path) => assert_eq!(path, dir.path().join(expected)),
+                CargoTargetDir::Conventional => panic!("expected explicit override"),
+            }
+        }
+    }
+
+    #[test]
+    fn extensionless_config_suppresses_its_sibling_without_a_target_dir() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let project = root.join("project");
+        let home = root.join("cargo-home");
+        fs::create_dir_all(project.join(".cargo")).unwrap();
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::write(project.join(".cargo/config"), "[build]\njobs=1\n").unwrap();
+        fs::write(
+            project.join(".cargo/config.toml"),
+            "[build]\ntarget-dir='wrong-sibling'\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join(".cargo/config"),
+            "[build]\ntarget-dir='ancestor'\n",
+        )
+        .unwrap();
+        let environment = [("CARGO_HOME".to_owned(), home.to_str().unwrap().to_owned())];
+        let context = AdapterExecContext::new().with_env(&environment);
+        match resolve_cargo_target_dir(&project, &[], &context) {
+            CargoTargetDir::Explicit(path) => assert_eq!(path, root.join("ancestor")),
+            CargoTargetDir::Conventional => panic!("expected ancestor target-dir"),
+        }
+        fs::remove_file(root.join(".cargo/config")).unwrap();
+        fs::write(home.join("config"), "[build]\njobs=1\n").unwrap();
+        fs::write(
+            home.join("config.toml"),
+            "[build]\ntarget-dir='wrong-global-sibling'\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            resolve_cargo_target_dir(&project, &[], &context),
+            CargoTargetDir::Conventional
+        ));
+    }
 
     #[test]
     fn resolve_target_dir_prefers_build_arg_over_env_and_config() {

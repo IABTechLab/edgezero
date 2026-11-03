@@ -1,5 +1,29 @@
 # Adapter-owned CLI behavior and local-state correctness
 
+## October 30 review repairs (November 2026)
+
+Preserve adapter ownership while repairing guarded-path use, temporary-manifest
+privacy, namespace selection, and runtime identifier validation. Spin source
+copies operate on the normalized path that passed the component guard. Fastly
+creates its private startup directory with owner-only access before copying
+secret-bearing bytes. Cloudflare selects the local preview namespace when
+configured and explicitly selects primary for remote binding reads. Axum
+validates derived secret names rather than rejecting a raw reserved prefix.
+
+Shared execution distinguishes authentication from runtime prerequisites:
+authentication retains resolved child environments and cwd without requiring
+application runtime secrets or complete adapter paths. Cargo artifact discovery
+uses Cargo's actual environment/config precedence and selects one config filename
+per directory. Payload output errors propagate through config diff and push;
+informational logging remains best-effort. Audit-only builds remain supported.
+
+Smoke teardown captures the owned descendant tree before signaling ancestors,
+waits for captured writers to stop, and gates restoration on successful shutdown.
+Cloud smoke manifests and generated artifacts are isolated and explicitly select
+the cloud backend. Native TOML previews parse complete documents before redacting
+values and dropping comments, preserving structural changes without exposing
+credentials.
+
 ## Follow-up review requirements (2026-10-20)
 
 The second independent review reproduced six remaining defects and one

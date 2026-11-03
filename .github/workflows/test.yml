@@ -126,6 +126,14 @@ jobs:
         if: matrix.suite == 'cli'
         run: cargo test -p edgezero-cli --features nested-app-config-check --bin check_no_nested_app_config
 
+      - name: Check standalone CLI feature combinations
+        if: matrix.suite == 'cli'
+        run: |
+          cargo check -p edgezero-cli --bin check_no_nested_app_config --no-default-features --features nested-app-config-check
+          cargo clippy -p edgezero-cli --lib --no-default-features -- -D warnings
+          cargo clippy -p edgezero-cli --bin check_no_nested_app_config --no-default-features --features nested-app-config-check -- -D warnings
+          cargo clippy -p edgezero-cli --all-targets --no-default-features --features cli -- -D warnings
+
       # Lint the smoke/helper shell scripts. `-x` follows `source`d libs;
       # `--severity=warning` gates on warnings and errors (SC1091/SC2086-style
       # info notes stay advisory). ubuntu-latest ships shellcheck.

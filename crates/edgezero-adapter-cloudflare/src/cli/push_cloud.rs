@@ -8,7 +8,7 @@ use edgezero_adapter::registry::{ReadConfigEntry, ResolvedStoreId};
 
 use super::WRANGLER_INSTALL_HINT;
 use super::provision_cloud::{find_namespace_id, is_real_namespace_id};
-use super::provision_local::read_namespace_id;
+use super::provision_local::{read_namespace_id, read_preview_namespace_id};
 
 /// Absolute `--config` argument for wrangler. The commands run with
 /// `current_dir(project_dir)` (the manifest's parent), so a
@@ -149,12 +149,8 @@ pub(super) fn write_entries(
 /// Push `entries` to Miniflare's local KV storage via `wrangler kv
 /// bulk put <file> --binding <BINDING> --local`.
 ///
-/// Local mode does NOT resolve a namespace id — the scaffold ships
-/// with `local-dev-placeholder` ids, so operators who haven't run
-/// `edgezero provision` yet can still seed `.wrangler/state` from the
-/// manifest. Wrangler stores local entries keyed by binding, not
-/// namespace id, so `wrangler dev --local` / `edgezero serve --adapter
-/// cloudflare` reads them back through the same binding name.
+/// Select the preview namespace when configured, matching `wrangler dev`;
+/// otherwise select the primary namespace. Local placeholder IDs remain valid.
 pub(super) fn write_entries_local(
     manifest_root: &Path,
     adapter_manifest_path: Option<&str>,
@@ -162,17 +158,7 @@ pub(super) fn write_entries_local(
     entries: &[(String, String)],
     dry_run: bool,
 ) -> Result<Vec<String>, String> {
-    // Local push: address the binding directly via
-    // `wrangler kv bulk put <file> --binding <BINDING> --local`.
-    // Crucially we do NOT resolve a namespace id here — the
-    // scaffold ships with `local-dev-placeholder` ids, so an
-    // operator that hasn't run `edgezero provision` yet should
-    // still be able to seed `.wrangler/state` from the manifest
-    // (matching wrangler's own local KV docs). Wrangler stores
-    // local entries keyed by binding, not namespace id, so the
-    // follow-up `wrangler dev --local` / `edgezero serve
-    // --adapter cloudflare` reads them back through the same
-    // binding name.
+    // Keep the same namespace selection for local bulk writes and reads.
     let Some(rel) = adapter_manifest_path else {
         return Err(
             "[adapters.cloudflare.adapter].manifest must point at wrangler.toml for config push --local"
@@ -182,10 +168,11 @@ pub(super) fn write_entries_local(
     let wrangler_path = manifest_root.join(rel);
     let project_dir = wrangler_path.parent().unwrap_or(manifest_root);
     let binding = store.platform.as_str();
+    let preview = namespace_preview_arg(&wrangler_path, binding, true)?;
     let logical = store.logical.as_str();
     if dry_run {
         let mut out = vec![format!(
-            "would run `wrangler kv bulk put <tempfile.json> --binding {binding} --local` with {} entries for binding `{binding}` (logical id `{logical}`)",
+            "would run `wrangler kv bulk put <tempfile.json> --binding {binding} --local {preview}` with {} entries for binding `{binding}` (logical id `{logical}`)",
             entries.len()
         )];
         for (key, _) in entries {
@@ -232,6 +219,7 @@ pub(super) fn write_entries_local(
         ])
         // Anchor at the DECLARED manifest so a non-default filename beside
         // a plain `wrangler.toml` seeds the right local namespace.
+        .arg(preview)
         .arg("--config")
         .arg(wrangler_config_arg(&wrangler_path))
         .output()
@@ -304,6 +292,11 @@ pub(super) fn read_wrangler_kv_key(
     }
     let output = Command::new("wrangler")
         .args(["kv", "key", "get", "--binding", binding, key, locality])
+        .arg(namespace_preview_arg(
+            &wrangler_path,
+            binding,
+            locality == "--local",
+        )?)
         // Anchor at the DECLARED manifest so diff/read resolves the same
         // account / namespace a push would target, not a sibling default
         // `wrangler.toml`.
@@ -378,6 +371,14 @@ pub(super) fn read_wrangler_kv_key(
     ))
 }
 
+fn namespace_preview_arg(path: &Path, binding: &str, local: bool) -> Result<&'static str, String> {
+    if local && read_preview_namespace_id(path, binding)?.is_some_and(|id| !id.is_empty()) {
+        Ok("--preview=true")
+    } else {
+        Ok("--preview=false")
+    }
+}
+
 /// Detect an AUTHENTICATION / CONFIGURATION failure in a (lowercased)
 /// wrangler error, so a message like "API token not found" is NOT misread
 /// as an absent key (which would let a diff report everything as added).
@@ -408,6 +409,104 @@ mod tests {
     use tempfile::tempdir;
 
     const TEST_CONFIG_ID: &str = "app_config";
+
+    #[cfg(unix)]
+    #[test]
+    fn provisioned_namespaces_select_preview_for_local_operations() {
+        use edgezero_adapter::registry::{AdapterDeployedState, ProvisionMode, ProvisionStores};
+        let _lock = path_mutation_guard().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("argv.log");
+        let fake = fake_wrangler_argv_log(&log);
+        let _path = PathPrepend::new(fake.path());
+        let config = [ResolvedStoreId::new(TEST_CONFIG_ID, "settings")];
+        let stores = ProvisionStores {
+            config: &config,
+            kv: &[],
+            secrets: &[],
+        };
+        for preview in [true, false] {
+            write_wrangler(dir.path(), "name='demo'\n");
+            let mut state = AdapterDeployedState::default();
+            state
+                .sub_tables
+                .entry("kv_namespaces".to_owned())
+                .or_default()
+                .insert(
+                    TEST_CONFIG_ID.to_owned(),
+                    "00112233445566778899aabbccddeeff".to_owned(),
+                );
+            if preview {
+                state
+                    .sub_tables
+                    .entry("preview_kv_namespaces".to_owned())
+                    .or_default()
+                    .insert(
+                        TEST_CONFIG_ID.to_owned(),
+                        "ffeeddccbbaa99887766554433221100".to_owned(),
+                    );
+            }
+            CloudflareCliAdapter
+                .provision(
+                    dir.path(),
+                    Some("wrangler.toml"),
+                    None,
+                    &stores,
+                    Some(&state),
+                    ProvisionMode::Local,
+                    false,
+                )
+                .unwrap();
+            let expected = if preview {
+                "--preview=true"
+            } else {
+                "--preview=false"
+            };
+            fs::write(&log, "").unwrap();
+            CloudflareCliAdapter
+                .push_config_entries_local(
+                    dir.path(),
+                    Some("wrangler.toml"),
+                    None,
+                    &config[0],
+                    &[("key".to_owned(), "value".to_owned())],
+                    &AdapterPushContext::new().with_local(true),
+                    false,
+                )
+                .unwrap();
+            assert_preview_arg(&log, expected);
+            fs::write(&log, "").unwrap();
+            CloudflareCliAdapter
+                .read_config_entry_local(
+                    dir.path(),
+                    Some("wrangler.toml"),
+                    None,
+                    &config[0],
+                    "key",
+                    &AdapterPushContext::new().with_local(true),
+                )
+                .unwrap();
+            assert_preview_arg(&log, expected);
+            fs::write(&log, "").unwrap();
+            CloudflareCliAdapter
+                .read_config_entry(
+                    dir.path(),
+                    Some("wrangler.toml"),
+                    None,
+                    &config[0],
+                    "key",
+                    &AdapterPushContext::new(),
+                )
+                .unwrap();
+            assert_preview_arg(&log, "--preview=false");
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_preview_arg(log: &Path, expected: &str) {
+        let args = fs::read_to_string(log).unwrap();
+        assert!(args.lines().any(|arg| arg == expected), "{args}");
+    }
 
     #[cfg(unix)]
     fn fake_wrangler_returning(

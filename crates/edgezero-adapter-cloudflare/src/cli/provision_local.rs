@@ -42,6 +42,17 @@ pub(super) fn existing_real_namespace_id(
 /// surfaces downstream as "did you run provision?" -- misleading,
 /// because the actual problem is a malformed manifest.
 pub(super) fn read_namespace_id(path: &Path, binding: &str) -> Result<Option<String>, String> {
+    read_namespace_field(path, binding, "id")
+}
+
+pub(super) fn read_preview_namespace_id(
+    path: &Path,
+    binding: &str,
+) -> Result<Option<String>, String> {
+    read_namespace_field(path, binding, "preview_id")
+}
+
+fn read_namespace_field(path: &Path, binding: &str, field: &str) -> Result<Option<String>, String> {
     use toml_edit::{DocumentMut, Item, Value};
 
     let raw = match fs::read_to_string(path) {
@@ -58,7 +69,7 @@ pub(super) fn read_namespace_id(path: &Path, binding: &str) -> Result<Option<Str
     let id = match doc.get("kv_namespaces") {
         Some(Item::ArrayOfTables(arr)) => arr.iter().find_map(|table| {
             if table.get("binding").and_then(Item::as_str) == Some(binding) {
-                table.get("id").and_then(Item::as_str).map(str::to_owned)
+                table.get(field).and_then(Item::as_str).map(str::to_owned)
             } else {
                 None
             }
@@ -66,7 +77,7 @@ pub(super) fn read_namespace_id(path: &Path, binding: &str) -> Result<Option<Str
         Some(Item::Value(Value::Array(arr))) => arr.iter().find_map(|item| {
             let table = item.as_inline_table()?;
             if table.get("binding").and_then(Value::as_str) == Some(binding) {
-                table.get("id").and_then(Value::as_str).map(str::to_owned)
+                table.get(field).and_then(Value::as_str).map(str::to_owned)
             } else {
                 None
             }

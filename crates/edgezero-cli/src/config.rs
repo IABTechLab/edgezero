@@ -42,7 +42,7 @@ use serde::de::DeserializeOwned;
 use similar::TextDiff;
 use std::collections::BTreeMap;
 use std::env;
-use std::io::{Error as IoError, IsTerminal as _, Write, stdin};
+use std::io::{self, Error as IoError, IsTerminal as _, Write, stdin};
 use std::iter;
 use std::path::{Path, PathBuf};
 use toml::Value;
@@ -887,7 +887,8 @@ fn render_diff_for_remote_entry(
                         &remote_envelope.sha256,
                         local_sha,
                         &args.format,
-                    );
+                    )
+                    .map_err(|error| format!("write config output: {error}"))?;
                     DiffOutcome::DiffPresent
                 }
             }
@@ -915,7 +916,8 @@ fn render_diff_for_remote_entry(
                 "(none)",
                 local_sha,
                 &args.format,
-            );
+            )
+            .map_err(|error| format!("write config output: {error}"))?;
             DiffOutcome::RemoteAbsent
         }
         ReadConfigEntry::MissingStore => {
@@ -935,7 +937,8 @@ fn render_diff_for_remote_entry(
                 "(none)",
                 local_sha,
                 &args.format,
-            );
+            )
+            .map_err(|error| format!("write config output: {error}"))?;
             DiffOutcome::RemoteAbsent
         }
         ReadConfigEntry::Corrupt(reason) => {
@@ -971,17 +974,13 @@ fn dispatch_diff_format(
     remote_sha: &str,
     local_sha: &str,
     format: &DiffFormat,
-) {
+) -> io::Result<()> {
     match format {
         DiffFormat::Unified => {
-            print_unified_diff_inline(remote_data, local_data, remote_sha, local_sha);
+            print_unified_diff_inline(remote_data, local_data, remote_sha, local_sha)
         }
-        DiffFormat::Structured => {
-            render_structured(remote_data, local_data, remote_sha, local_sha);
-        }
-        DiffFormat::Json => {
-            render_json(remote_data, local_data, remote_sha, local_sha);
-        }
+        DiffFormat::Structured => render_structured(remote_data, local_data, remote_sha, local_sha),
+        DiffFormat::Json => render_json(remote_data, local_data, remote_sha, local_sha),
     }
 }
 
@@ -1235,7 +1234,8 @@ fn render_first_read_diff(
                         &local_envelope.data,
                         &remote_envelope.sha256,
                         local_sha,
-                    );
+                    )
+                    .map_err(|error| format!("write config output: {error}"))?;
                 }
                 Ok(FirstReadOutcome::ProceedFromPresent {
                     approved_remote_sha: remote_envelope.sha256.clone(),
@@ -1258,7 +1258,8 @@ fn render_first_read_diff(
                 &local_envelope.data,
                 "(none)",
                 local_sha,
-            );
+            )
+            .map_err(|error| format!("write config output: {error}"))?;
             Ok(FirstReadOutcome::ProceedFromMissingOrUnsupported)
         }
         ReadConfigEntry::MissingStore if !no_diff => {
@@ -1272,7 +1273,8 @@ fn render_first_read_diff(
                 &local_envelope.data,
                 "(none)",
                 local_sha,
-            );
+            )
+            .map_err(|error| format!("write config output: {error}"))?;
             Ok(FirstReadOutcome::ProceedFromMissingOrUnsupported)
         }
         ReadConfigEntry::Corrupt(reason) => {
@@ -1497,19 +1499,10 @@ pub(crate) fn print_unified_diff_inline(
     local_data: &serde_json::Value,
     remote_sha: &str,
     local_sha: &str,
-) {
+) -> io::Result<()> {
     use std::io::stdout;
     let mut stdout = stdout().lock();
-    // Silently ignore write errors — stdout may be a closed pipe (e.g.
-    // `edgezero config push | head`). The operator already saw the diff
-    // header on stderr; a broken pipe is not a push failure.
-    drop(print_unified_diff_to_writer(
-        remote_data,
-        local_data,
-        remote_sha,
-        local_sha,
-        &mut stdout,
-    ));
+    print_unified_diff_to_writer(remote_data, local_data, remote_sha, local_sha, &mut stdout)
 }
 
 // -------------------------------------------------------------------
@@ -4618,6 +4611,100 @@ ids = ["default"]
             !oplog.exists(),
             "the body-aware preflight must reject BEFORE any `fastly` invocation; log: {:?}",
             fs::read_to_string(&oplog).unwrap_or_default()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn payload_write_errors_reach_command_results() {
+        use std::env;
+        use std::process::{Command, Stdio};
+        use std::thread;
+        use std::time::{Duration, Instant};
+        const CHILD: &str = "EDGEZERO_OUTPUT_ERROR_CHILD";
+        if let Some(child_root) = env::var_os(CHILD) {
+            let root = Path::new(&child_root);
+            fs::write(root.join("ready"), "").unwrap();
+            while !root.join("release").exists() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            let local = BlobEnvelope::new(
+                serde_json::json!({"key":"value"}),
+                "2026-01-01T00:00:00Z".to_owned(),
+            );
+            let format = env::var("EDGEZERO_OUTPUT_ERROR_FORMAT").unwrap();
+            let failed = if format == "push" {
+                render_first_read_diff(
+                    &ReadConfigEntry::MissingKey,
+                    "settings",
+                    &local,
+                    &local.sha256,
+                    false,
+                )
+                .is_err()
+            } else {
+                let args = ConfigDiffArgs {
+                    format: match format.as_str() {
+                        "json" => DiffFormat::Json,
+                        "structured" => DiffFormat::Structured,
+                        _ => DiffFormat::Unified,
+                    },
+                    ..ConfigDiffArgs::default()
+                };
+                render_diff_for_remote_entry(
+                    &ReadConfigEntry::MissingKey,
+                    &local,
+                    &local.sha256,
+                    "settings",
+                    &args,
+                )
+                .is_err()
+            };
+            fs::write(
+                root.join("outcome"),
+                if failed { "error" } else { "success" },
+            )
+            .unwrap();
+            return;
+        }
+        let _lock = manifest_guard().lock().unwrap();
+        let mut results = Vec::new();
+        for format in ["json", "structured", "unified", "push"] {
+            let dir = TempDir::new().unwrap();
+            let mut child = Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tests::payload_write_errors_reach_command_results",
+                ])
+                .env(CHILD, dir.path())
+                .env("EDGEZERO_OUTPUT_ERROR_FORMAT", format)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            while !dir.path().join("ready").exists() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "output child did not start"
+                );
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "output child exited before ready"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            drop(child.stdout.take());
+            fs::write(dir.path().join("release"), "").unwrap();
+            let _status = child.wait().unwrap();
+            results.push((
+                format,
+                fs::read_to_string(dir.path().join("outcome")).unwrap(),
+            ));
+        }
+        assert!(
+            results.iter().all(|(_, outcome)| outcome == "error"),
+            "output errors must propagate: {results:?}"
         );
     }
 

@@ -1374,7 +1374,7 @@ fn render_artifact_body(body: &str, kind: LocalArtifactKind) -> String {
         LocalArtifactKind::Text => body.to_owned(),
         LocalArtifactKind::Env => redact_env_body_for_diff(body),
         LocalArtifactKind::SensitiveToml => {
-            let Ok(mut value) = body.parse::<toml::Value>() else {
+            let Ok(mut value) = toml::from_str::<toml::Value>(body) else {
                 return "# <redacted TOML contents>\n".to_owned();
             };
             redact_toml_values(&mut value);
@@ -3466,7 +3466,7 @@ ids = ["default"]
                     None,
                 );
                 assert!(!report.contains("SENTINEL"), "{adapter}: {report}");
-                if original.parse::<toml::Value>().is_ok() {
+                if toml::from_str::<toml::Value>(original).is_ok() {
                     assert!(
                         report.contains("added"),
                         "structural changes must remain visible: {report}"
@@ -4175,12 +4175,18 @@ manifest = "crates/cf/wrangler.toml"
 name = "demo"
 
 [adapters.cloudflare]
+deployed = { kv_namespaces = { sessions = "old-id" } }
 [adapters.cloudflare.adapter]
 crate = "crates/cf"
 manifest = "crates/cf/wrangler.toml"
-deployed = { kv_namespaces = { sessions = "old-id" } }
 "#;
         fs::write(&manifest_path, source).unwrap();
+        let before: toml_edit::DocumentMut = source.parse().unwrap();
+        assert!(before["adapters"]["cloudflare"]["deployed"].is_inline_table());
+        assert_eq!(
+            before["adapters"]["cloudflare"]["deployed"]["kv_namespaces"]["sessions"].as_str(),
+            Some("old-id")
+        );
 
         let mut state = AdapterDeployedState::default();
         let mut kv = BTreeMap::new();
@@ -4221,8 +4227,11 @@ deployed = { kv_namespaces = { sessions = "old-id" } }
         // with "adapters is not a table" and strand a created resource.
         let temp = TempDir::new().unwrap();
         let manifest_path = temp.path().join("edgezero.toml");
-        let source = "[app]\nname = \"demo\"\n\nadapters = { cloudflare = { adapter = { crate = \"crates/cf\", manifest = \"crates/cf/wrangler.toml\" } } }\n";
+        let source = "adapters = { cloudflare = { adapter = { crate = \"crates/cf\", manifest = \"crates/cf/wrangler.toml\" } } }\n[app]\nname = \"demo\"\n\n";
         fs::write(&manifest_path, source).unwrap();
+        let before: toml_edit::DocumentMut = source.parse().unwrap();
+        assert!(before["adapters"].is_inline_table());
+        assert!(before["adapters"]["cloudflare"].is_inline_table());
 
         let mut state = AdapterDeployedState::default();
         let mut kv = BTreeMap::new();

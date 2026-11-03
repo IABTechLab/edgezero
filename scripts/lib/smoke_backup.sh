@@ -41,54 +41,63 @@ smoke_pid_is_descendant() {
   [ "$cur" = "$ancestor" ]
 }
 
-# Stop the smoke's server and its DESCENDANTS, then wait until the port is
-# actually free -- BEFORE restoration. The wrapper PID's direct children
-# aren't enough: `wrangler` spawns `workerd`, `spin` forks, etc., and a
-# surviving descendant can flush state AFTER the backup was restored,
-# re-corrupting the developer's tree. Args: <wrapper-pid> [port].
+# List captured owned processes that can still execute. Zombies cannot write
+# restored files and may await reaping by init after their parent exits.
+smoke_live_owned_pids() {
+  local snapshot captured
+  snapshot=$(ps -eo pid=,stat=) || return 1
+  captured=$(printf '%s\n' "$1" | tr '\n' ' ')
+  printf '%s\n' "$snapshot" | awk -v owned="$captured" '
+    BEGIN { count = split(owned, ids); for (i = 1; i <= count; i++) wanted[ids[i]] = 1 }
+    ($1 in wanted) && $2 !~ /^[ZX]/ { print $1 }
+  '
+}
+
+# Capture the complete owned tree BEFORE killing ancestors; descendants may
+# be reparented after that. Stop all captured writers before restoring state.
+# Args: <wrapper-pid> [port]. An empty pid remains a pre-launch no-op.
 smoke_stop_server() {
-  local pid="$1"
-  local port="${2:-}"
-  # CRUCIAL: only touch the port when WE actually started a server (a
-  # non-empty wrapper pid). A pre-launch failure calls cleanup with an
-  # empty pid; port-killing then would SIGKILL whatever unrelated service
-  # already holds the port -- data loss in someone else's process.
-  if [ -z "$pid" ]; then
-    return 0
-  fi
-  # Capture the port holders that are OUR DESCENDANTS *before* tearing the
-  # tree down. Afterwards a re-parented grand-child (adopted by init) can no
-  # longer be attributed to us -- and if our server died before binding and
-  # an UNRELATED process then grabbed the port, that process is not our
-  # descendant and must never be killed. We only ever kill what we can prove
-  # is ours.
-  local owned_holders=""
-  if [ -n "$port" ] && command -v lsof >/dev/null 2>&1; then
-    local holder
-    for holder in $(lsof -ti ":${port}" 2>/dev/null || true); do
-      if smoke_pid_is_descendant "$holder" "$pid"; then
-        owned_holders="$owned_holders $holder"
-      fi
-    done
-  fi
-  pkill -TERM -P "$pid" 2>/dev/null || true
-  kill -TERM "$pid" 2>/dev/null || true
-  local waited=0
-  while [ "$waited" -lt 5 ] && kill -0 "$pid" 2>/dev/null; do
-    sleep 1
-    waited=$((waited + 1))
+  local pid="$1" port="${2:-}"
+  [ -n "$pid" ] || return 0
+  case "$pid" in *[!0-9]*|0|1) return 1 ;; esac
+  local snapshot owned target live waited
+  snapshot=$(ps -eo pid=,ppid=) || {
+    printf 'FATAL: cannot inspect owned server descendants; backups will not be restored.\n' >&2
+    return 1
+  }
+  # Emit deepest descendants first and the wrapper last. Ownership comes
+  # from the captured parent chain, never from whoever currently has a port.
+  owned=$(printf '%s\n' "$snapshot" | awk -v root="$pid" '
+    { parent[$1] = $2 }
+    END {
+      for (candidate in parent) {
+        current = candidate; depth = 0
+        while (current != root && (current in parent) && depth < 1024) {
+          current = parent[current]; depth++
+        }
+        if (current == root) print depth, candidate
+      }
+      print 0, root
+    }
+  ' | sort -rn | awk '!seen[$2]++ { print $2 }') || return 1
+  for target in $owned; do kill -TERM "$target" 2>/dev/null || true; done
+  for ((waited=0; waited<50; waited++)); do
+    live=$(smoke_live_owned_pids "$owned") || return 1
+    [ -n "$live" ] || break
+    sleep 0.1
   done
-  pkill -KILL -P "$pid" 2>/dev/null || true
-  kill -KILL "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  # KILL the OWNED port holders captured above (workerd/spin grand-children
-  # that `pkill -P` didn't cover) -- never an unrelated holder.
-  if [ -n "$owned_holders" ]; then
-    # shellcheck disable=SC2086
-    kill -KILL $owned_holders 2>/dev/null || true
+  for target in $live; do kill -KILL "$target" 2>/dev/null || true; done
+  for ((waited=0; waited<20; waited++)); do
+    live=$(smoke_live_owned_pids "$owned") || return 1
+    [ -n "$live" ] || break
+    sleep 0.1
+  done
+  if [ -n "$live" ]; then
+    printf 'FATAL: owned server processes remain alive (%s); backups will not be restored.\n' "$live" >&2
+    return 1
   fi
-  # Wait for the port to clear as a courtesy; do NOT kill whoever holds it
-  # now (it may be an unrelated process that grabbed the freed port).
+  wait "$pid" 2>/dev/null || true
+  # Only wait for a port as a courtesy. Never signal an unrelated holder.
   if [ -n "$port" ] && command -v lsof >/dev/null 2>&1; then
     waited=0
     while [ "$waited" -lt 5 ] && lsof -ti ":${port}" >/dev/null 2>&1; do

@@ -13,7 +13,7 @@
 //! then catches accidental `eprint!` / `eprintln!` in ANY other call
 //! site as a real bug (the mistaken use of stderr for a payload).
 
-use std::io::{Write as _, stderr};
+use std::io::{self, Write as _, stderr};
 
 /// Write `msg` + newline to stderr. Best-effort: write errors on a
 /// closed stderr are swallowed because the caller has no useful
@@ -40,10 +40,13 @@ pub fn prompt(msg: &str) {
 /// `println!` elsewhere as a real bug: stdout is reserved for
 /// machine-readable CLI payloads (diff bodies, JSON envelopes,
 /// pipe-friendly output).
+///
+/// # Errors
+/// Returns a write error when the payload cannot reach stdout.
 #[inline]
-pub fn stdout_line(msg: &str) {
+pub fn stdout_line(msg: &str) -> io::Result<()> {
     use std::io::stdout;
     let handle = stdout();
     let mut locked = handle.lock();
-    drop(writeln!(locked, "{msg}"));
+    writeln!(locked, "{msg}")
 }

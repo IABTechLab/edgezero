@@ -36,7 +36,7 @@ SERVER_PID=""
 cleanup() {
   # Kill the server AND its descendants (workerd/spin) and free the port
   # BEFORE restoring, or a survivor could flush state over the restore.
-  smoke_stop_server "$SERVER_PID" "${PORT:-}"
+  smoke_stop_server "$SERVER_PID" "${PORT:-}" || return 1
   SERVER_PID=""
   restore_backups
 }

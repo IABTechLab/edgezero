@@ -195,7 +195,7 @@ fn refresh_declared_source(
         if !is_target {
             continue;
         }
-        let src_path = manifest_dir.join(source);
+        let src_path = lexically_normalize(&absolute_path(&manifest_dir.join(source)));
         // Self-copy guard: the default source IS the artifact -- copying it
         // onto itself truncates it to 0 bytes.
         if is_same_existing_file(&src_path, artifact) {
@@ -204,12 +204,11 @@ fn refresh_declared_source(
         // Containment: never write through `..` / an absolute source to a
         // location outside the build tree (a lexical check on the same
         // absolute + normalised form as `root`).
-        let normalized = lexically_normalize(&absolute_path(&src_path));
-        if !normalized.starts_with(&root) {
+        if !src_path.starts_with(&root) {
             return Err(format!(
                 "spin component source `{source}` resolves to {} -- outside the project tree {}; \
                  refusing to write there",
-                normalized.display(),
+                src_path.display(),
                 root.display()
             ));
         }
@@ -217,7 +216,7 @@ fn refresh_declared_source(
         // workspace root to the destination, not just the final one. A source
         // like `escaped/app.wasm` where `escaped` is a symlink passes the
         // lexical check above yet `fs::copy` would follow it OUTSIDE the tree.
-        reject_symlink_components(&root, &normalized)
+        reject_symlink_components(&root, &src_path)
             .map_err(|err| format!("spin component source `{source}` is unsafe to write: {err}"))?;
         if let Some(parent) = src_path.parent() {
             fs::create_dir_all(parent)
@@ -577,7 +576,8 @@ pub(crate) fn synthesise_spin_toml(
 ) -> String {
     use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 
-    let component_id: &str = component.unwrap_or(crate_name);
+    let inferred_component = crate_name.replace('_', "-").to_ascii_lowercase();
+    let component_id = component.unwrap_or(&inferred_component);
     // Wasm source path underscores the CARGO CRATE name — NOT the
     // component id. Spin's component id is an operator selector;
     // the actual artifact Cargo builds is always
@@ -705,6 +705,37 @@ mod tests {
             b"sibling",
             "a sibling sharing the crate basename must NOT be clobbered"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_declared_source_never_follows_symlinks_before_parent_components() {
+        use std::os::unix::fs::symlink;
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("project");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(outside.join("child")).unwrap();
+        symlink(outside.join("child"), root.join("escaped")).unwrap();
+        let victim = outside.join("victim.wasm");
+        fs::write(&victim, "operator bytes").unwrap();
+        let artifact = root.join("fresh.wasm");
+        fs::write(&artifact, "fresh module").unwrap();
+        let manifest = root.join("spin.toml");
+        fs::write(
+            &manifest,
+            "[component.worker]\nsource='escaped/../victim.wasm'\n",
+        )
+        .unwrap();
+        let result =
+            refresh_declared_source(&manifest, &root, Some("worker"), "fresh.wasm", &artifact);
+        assert_eq!(fs::read_to_string(victim).unwrap(), "operator bytes");
+        if result.is_ok() {
+            assert_eq!(
+                fs::read_to_string(root.join("victim.wasm")).unwrap(),
+                "fresh module"
+            );
+        }
     }
 
     #[cfg(unix)]

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **Fallible CLI payload writes.** `edgezero_cli::stream::stdout_line` now
+  returns `io::Result<()>`; propagate or handle its write errors. Config diff
+  and push previews fail when output cannot be written.
 - **Adapter CLI execution and lifecycle contexts.** `Adapter::execute` takes
   `&AdapterExecContext`, and `deploy` takes both `&AdapterDeployContext` and
   `&AdapterExecContext`. `preflight_deploy` and `finalize_deploy` now also receive
@@ -72,6 +75,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep Fastly's temporary startup manifests private and use Spin's guarded
+  normalized destination for component copies. Infer Spin-compatible component
+  IDs independently of Cargo artifact names and validate explicit selectors.
+- Match Cargo target-directory precedence and configuration-file selection,
+  preserve standalone CLI audit builds, and let authentication run before
+  application secrets and runtime paths are ready.
+- Select Wrangler preview namespaces consistently for local KV writes/reads
+  and primary namespaces for remote reads. Accept Axum secret keys whose
+  derived environment names do not collide with runtime configuration.
+- Stop all captured smoke-test descendants before restoring files, isolate
+  explicitly selected Spin cloud smoke state, and correct Axum/Spin secret
+  setup instructions. Preserve valid TOML structure in redacted previews.
 - Redact native TOML values and comments in local provisioning previews and
   omit source excerpts from native provision parse errors. Serialize Fastly
   local provision with deploy writeback under the same manifest lock.

@@ -302,6 +302,7 @@ fn resolve_component_id(
         .and_then(toml_edit::Item::as_table)
         .map(|tbl| tbl.iter().map(|(key, _)| key.to_owned()).collect())
         .unwrap_or_default();
+    super::validate_component_selection(&component_ids, selector, true)?;
 
     if component_ids.is_empty() {
         return Err(format!(

@@ -447,7 +447,7 @@ impl Adapter for SpinCliAdapter {
         //
         // 1. `push_ctx.local` → delegate to `read_config_entry_local`
         //    (SQLite-direct, same as the `--local` write path).
-        // 2. Deploy command targets Fermyon Cloud → `Unsupported`.
+        // 2. Explicit cloud target → `Unsupported`.
         //    Fermyon Cloud's `spin cloud key-value list` enumerates
         //    STORES, not keys; there is no stable per-key get CLI in
         //    v1 (8.3 / 9.4 of the spec). NO shell-out.
@@ -489,7 +489,7 @@ impl Adapter for SpinCliAdapter {
         let runtime_config_dir = runtime_config_path.parent().unwrap_or(spin_manifest_dir);
         let platform = store.platform.as_str();
 
-        // Branch 2: Fermyon Cloud auto-detect.
+        // Branch 2: explicitly selected Fermyon Cloud.
         if push_cloud::push_targets_fermyon_cloud(push_ctx) {
             return Ok(ReadConfigEntry::Unsupported(
                 "Spin Cloud key-value CLI exposes no `get`; remote read-back unsupported in v1",
@@ -683,9 +683,12 @@ impl Adapter for SpinCliAdapter {
         // `crates/<crate>/spin.toml` layout (2-deep). Nested paths
         // like `crates/spin-server/config/spin.toml` (3-deep) need
         // `../../../target/...`.
+        let inferred_component = derived_crate_name.replace('_', "-").to_ascii_lowercase();
+        let selected_component = component_selector.unwrap_or(&inferred_component);
+        validate_component_id(selected_component)?;
         let spin_toml_body = run::synthesise_spin_toml(
             &derived_crate_name,
-            component_selector,
+            Some(selected_component),
             &spin_rel,
             allowed_outbound_hosts,
         );
@@ -730,6 +733,7 @@ impl Adapter for SpinCliAdapter {
             .map_err(|err| format!("failed to parse {} as TOML: {err}", spin_path.display()))?;
         provision_local::reject_inline_component_tables(&edit_doc, &spin_path)?;
         let component_ids = collect_spin_component_ids(&parsed);
+        validate_component_selection(&component_ids, component_selector, allow_component_refresh)?;
 
         if component_ids.is_empty() {
             return Err(format!(
@@ -872,6 +876,38 @@ fn spin_key_rule_violation(key: &str) -> &'static str {
     "Spin variable names must match `^[a-z][a-z0-9_]*$`"
 }
 
+fn validate_component_id(id: &str) -> Result<(), String> {
+    let valid = id.split('-').all(|word| {
+        word.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            && word.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            && (word == word.to_ascii_lowercase() || word == word.to_ascii_uppercase())
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid Spin component ID {id:?}: use hyphen-separated ASCII words, each starting with a letter and using uniform letter case; set a valid [adapters.spin.adapter].component explicitly"
+        ))
+    }
+}
+
+fn validate_component_selection(
+    ids: &[String],
+    selector: Option<&str>,
+    refresh: bool,
+) -> Result<(), String> {
+    if let Some(selected) = selector {
+        validate_component_id(selected)?;
+        if refresh && ids.len() == 1 {
+            return Ok(());
+        }
+    }
+    for id in ids {
+        validate_component_id(id)?;
+    }
+    Ok(())
+}
+
 fn collect_spin_component_ids(parsed: &toml::Value) -> Vec<String> {
     parsed
         .as_table()
@@ -900,6 +936,7 @@ fn resolve_spin_component(
     let parsed: toml::Value = toml::from_str(&raw)
         .map_err(|err| format!("failed to parse {} as TOML: {err}", spin_path.display()))?;
     let component_ids = collect_spin_component_ids(&parsed);
+    validate_component_selection(&component_ids, component_selector, false)?;
 
     if component_ids.is_empty() {
         return Err(format!(
@@ -1076,6 +1113,129 @@ mod tests {
     // not arbitrary strings.
     const TEST_KV_ID: &str = "sessions";
     const TEST_COMPONENT_ID: &str = "demo";
+
+    #[test]
+    fn synthesized_component_id_is_independent_of_cargo_artifact_name() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='spin_server'\n",
+        )
+        .unwrap();
+        let files = SpinCliAdapter
+            .synthesise_baseline_manifest(
+                dir.path(),
+                Some("spin.toml"),
+                Some("."),
+                None,
+                "demo",
+                None,
+                &[],
+            )
+            .unwrap();
+        let (_, body) = files
+            .iter()
+            .find(|(path, _)| path == Path::new("spin.toml"))
+            .unwrap();
+        let doc: toml::Value = toml::from_str(body).unwrap();
+        assert!(doc["component"].get("spin-server").is_some(), "{body}");
+        assert!(
+            doc["component"]["spin-server"]["source"]
+                .as_str()
+                .unwrap()
+                .ends_with("spin_server.wasm")
+        );
+        assert_eq!(
+            doc["trigger"]["http"][0]["component"].as_str(),
+            Some("spin-server")
+        );
+    }
+
+    #[test]
+    fn synthesis_and_validation_reject_invalid_spin_component_ids() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Cargo.toml"), "[package]\nname='server'\n").unwrap();
+        for id in [
+            "spin_server",
+            "Spin-Server",
+            "server--worker",
+            "server-7",
+            "7server",
+            "",
+        ] {
+            SpinCliAdapter
+                .synthesise_baseline_manifest(
+                    dir.path(),
+                    Some("spin.toml"),
+                    Some("."),
+                    Some(id),
+                    "demo",
+                    None,
+                    &[],
+                )
+                .expect_err("invalid explicit Spin ID must fail synthesis");
+            let mut doc = toml_edit::DocumentMut::new();
+            doc["component"][id]["source"] = toml_edit::value("server.wasm");
+            fs::write(dir.path().join("spin.toml"), doc.to_string()).unwrap();
+            SpinCliAdapter
+                .validate_adapter_manifest(dir.path(), Some("spin.toml"), Some(id), false)
+                .expect_err("TOML alone cannot validate a Spin identifier");
+        }
+    }
+
+    #[test]
+    fn valid_spin_selector_can_refresh_an_old_invalid_component() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("Cargo.toml"), "[package]\nname='server'\n").unwrap();
+        for id in ["FOO-BAR", "FOO-bar", "URL-parser", "foo1-BAR2"] {
+            let files = SpinCliAdapter
+                .synthesise_baseline_manifest(
+                    dir.path(),
+                    Some("spin.toml"),
+                    Some("."),
+                    Some(id),
+                    "demo",
+                    None,
+                    &[],
+                )
+                .unwrap();
+            let (_, body) = files
+                .iter()
+                .find(|(path, _)| path == Path::new("spin.toml"))
+                .unwrap();
+            let doc: toml::Value = toml::from_str(body).unwrap();
+            assert!(doc["component"].get(id).is_some());
+        }
+        fs::write(
+            dir.path().join("spin.toml"),
+            "[component.old_name]\nsource='server.wasm'\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("runtime-config.toml"), "").unwrap();
+        SpinCliAdapter
+            .validate_adapter_manifest(dir.path(), Some("spin.toml"), Some("worker"), true)
+            .unwrap();
+        let config = [ResolvedStoreId::from_logical("settings")];
+        let stores = ProvisionStores {
+            config: &config,
+            kv: &[],
+            secrets: &[],
+        };
+        SpinCliAdapter
+            .provision(
+                dir.path(),
+                Some("spin.toml"),
+                Some("worker"),
+                &stores,
+                None,
+                ProvisionMode::Local,
+                false,
+            )
+            .unwrap();
+        SpinCliAdapter
+            .validate_adapter_manifest(dir.path(), Some("spin.toml"), Some("worker"), false)
+            .unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

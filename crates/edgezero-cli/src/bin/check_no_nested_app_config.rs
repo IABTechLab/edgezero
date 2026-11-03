@@ -24,7 +24,7 @@
 //! Exit codes:
 //! - 0 — no violations found.
 //! - 1 — one or more violations; violation lines written to stdout.
-//! - 2 — one or more files could not be parsed; errors on stderr.
+//! - 2 — a read, parse, or output operation failed; errors on stderr.
 //!
 //! Enabled only behind the `nested-app-config-check` feature so that the
 //! normal workspace build does not pull in `syn` / `walkdir` / `proc-macro2`.
@@ -47,6 +47,7 @@
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::result::Result;
@@ -124,6 +125,12 @@ fn struct_derives_app_config(item: &syn::ItemStruct) -> bool {
     false
 }
 
+fn audit_output(message: &str) -> io::Result<()> {
+    stdout_line(message).inspect_err(|error| {
+        info_line(&format!("failed to write audit output: {error}"));
+    })
+}
+
 impl<'src, 'set> NestedAppConfigVisitor<'src, 'set> {
     fn new(source_path: &'src Path, app_config_structs: &'set HashSet<String>) -> Self {
         Self {
@@ -136,13 +143,17 @@ impl<'src, 'set> NestedAppConfigVisitor<'src, 'set> {
 
     fn report(&mut self, span: Span, outer: &str, field_name: &str, inner: &str) {
         let lc = span.start();
-        stdout_line(&format!(
+        if audit_output(&format!(
             "{}:{}:{}: nested AppConfig: struct `{outer}` field `{field_name}` \
              references AppConfig-derived struct `{inner}`",
             self.source_path.display(),
             lc.line,
             lc.column.saturating_add(1),
-        ));
+        ))
+        .is_err()
+        {
+            self.parse_errors = self.parse_errors.saturating_add(1);
+        }
         self.violations = self.violations.saturating_add(1);
     }
 }
@@ -367,6 +378,9 @@ fn main() {
         }
     }
 
+    if parse_errors > 0 {
+        process::exit(2);
+    }
     if violations > 0 {
         info_line(&format!(
             "\n{violations} nested-AppConfig violation(s). \
@@ -378,11 +392,9 @@ fn main() {
         ));
         process::exit(1);
     }
-    if parse_errors > 0 {
+    if audit_output("check_no_nested_app_config: OK").is_err() {
         process::exit(2);
     }
-
-    stdout_line("check_no_nested_app_config: OK");
 }
 
 #[cfg(test)]

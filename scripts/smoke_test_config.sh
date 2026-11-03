@@ -45,7 +45,7 @@ DEMO_SECRET_VALUE="resolved-token"
 cleanup() {
   # Kill the server AND its descendants (workerd/spin) and free the port
   # BEFORE restoring, or a survivor could flush state over the restore.
-  smoke_stop_server "$SERVER_PID" "${PORT:-}"
+  smoke_stop_server "$SERVER_PID" "${PORT:-}" || return 1
   SERVER_PID=""
   restore_backups
 }
@@ -91,9 +91,8 @@ case "$ADAPTER" in
       config push --adapter axum --local --no-env --yes 2>&1)
     echo "==> Starting Axum adapter on port $PORT..."
     smoke_require_port_free "$PORT"
-    # `EnvSecretStore` resolves the `demo_api_token` key verbatim from the
-    # process env, so /config/typed's secret walk needs it exported.
-    (cd "$DEMO_DIR" && demo_api_token="$DEMO_SECRET_VALUE" \
+    # `EnvSecretStore` prefixes and uppercases the `demo_api_token` key.
+    (cd "$DEMO_DIR" && EDGEZERO__SECRETS__DEMO_API_TOKEN="$DEMO_SECRET_VALUE" \
       cargo run -p app-demo-adapter-axum 2>&1) &
     SERVER_PID=$!
     ;;

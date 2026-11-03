@@ -79,7 +79,7 @@ stop_server() {
   # hits, and without the shared guard it would SIGKILL whatever unrelated
   # service already holds $PORT.
   local had_server="$SERVER_PID"
-  smoke_stop_server "$SERVER_PID" "$PORT"
+  smoke_stop_server "$SERVER_PID" "$PORT" || return 1
   SERVER_PID=""
   # Nothing was launched => nothing to verify or fail on.
   [ -n "$had_server" ] || return 0
@@ -104,12 +104,9 @@ stop_server() {
 }
 
 cleanup() {
-  # `stop_server` can legitimately return non-zero (it sets FAIL and
-  # returns 1 when a port won't free). Under `set -e` that would abort
-  # this handler BEFORE `restore_backups`, leaving the operator's backed-
-  # up files (notably `.dev.vars`) unrestored. Never let it short-circuit
-  # the restore.
-  stop_server || true
+  # Preserve backups if shutdown cannot be established: a surviving writer
+  # could otherwise overwrite the restored operator state.
+  stop_server || return 1
   restore_backups
 }
 trap cleanup EXIT
@@ -627,25 +624,49 @@ if [ "${SKIP_SPIN_CLOUD_SMOKE:-0}" = "1" ]; then
   printf '\n=== 8.3 Spin Cloud Unsupported smoke: SKIPPED (SKIP_SPIN_CLOUD_SMOKE=1) ===\n'
 else
   printf '\n=== 8.3 Spin Cloud Unsupported smoke ===\n'
-  # `config diff` against a Cloud-flagged manifest MUST error.
-  if (cd "$DEMO_DIR" && cargo run --quiet -p app-demo-cli -- \
-        config diff --adapter spin --format unified >/dev/null 2>&1); then
-    check "spin cloud diff exits non-zero" "non-zero" "exit-0"
-  else
-    check "spin cloud diff exits non-zero" "non-zero" "non-zero"
-  fi
+  # Use an isolated, explicitly selected cloud project. The preceding rows
+  # have restored the demo's operator-owned manifests and local state.
+  cloud_fixture=$(mktemp -d)
+  trap 'cleanup; rm -rf "$cloud_fixture"' EXIT
+  trap 'cleanup; rm -rf "$cloud_fixture"; exit 130' INT TERM
+  mkdir -p "$cloud_fixture/adapter"
+  cp "$DEMO_DIR/crates/app-demo-adapter-spin/Cargo.toml" "$cloud_fixture/adapter/Cargo.toml"
+  cat > "$cloud_fixture/edgezero.toml" <<'TOML'
+[app]
+name = "app-demo"
+[adapters.spin.adapter]
+crate = "adapter"
+manifest = "adapter/spin.toml"
+cloud = true
+[stores.config]
+ids = ["app_config"]
+[stores.secrets]
+ids = ["default"]
+TOML
+  write_default_blob "$cloud_fixture"
+  (cd "$DEMO_DIR" && cargo run --quiet -p app-demo-cli -- \
+    provision --adapter spin --local --manifest "$cloud_fixture/edgezero.toml")
 
-  # `config push --yes` against Spin Cloud SHOULD succeed (write-only).
-  tmp=$(mktemp -d)
-  write_default_blob "$tmp"
+  diff_status=0
+  (cd "$DEMO_DIR" && cargo run --quiet -p app-demo-cli -- \
+    config diff --adapter spin --format unified \
+    --manifest "$cloud_fixture/edgezero.toml" \
+    --app-config "$cloud_fixture/app-demo.toml") > "$cloud_fixture/diff.log" 2>&1 || diff_status=$?
+  check "spin cloud diff reports unsupported" "2" "$diff_status"
+  check_contains "spin cloud diff names unsupported read" \
+    'Spin Cloud key-value CLI exposes no `get`' "$(cat "$cloud_fixture/diff.log")"
+
+  # Cloud supports writes despite the unsupported read-back operation.
   if (cd "$DEMO_DIR" && cargo run --quiet -p app-demo-cli -- \
         config push --adapter spin --key app_config_staging --yes \
-        --app-config "$tmp/app-demo.toml" >/dev/null 2>&1); then
+        --manifest "$cloud_fixture/edgezero.toml" \
+        --app-config "$cloud_fixture/app-demo.toml" >/dev/null 2>&1); then
     check "spin cloud --yes push succeeds (write-only)" "ok" "ok"
   else
     check "spin cloud --yes push succeeds (write-only)" "ok" "failed"
   fi
-  rm -rf "$tmp"
+  rm -rf "$cloud_fixture"
+
 fi
 
 # -- Summary --------------------------------------------------------------

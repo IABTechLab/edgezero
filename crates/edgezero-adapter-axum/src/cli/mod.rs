@@ -250,14 +250,6 @@ impl Adapter for AxumCliAdapter {
     /// than writing an unrepresentable file.
     #[inline]
     fn validate_typed_secrets(&self, entries: &[TypedSecretEntry<'_>]) -> Result<(), String> {
-        // The ENTIRE `EDGEZERO__` namespace is reserved for runtime config:
-        // provision writes generated `EDGEZERO__STORES__...` store overlays
-        // into the same `.edgezero/.env` typed secrets are appended to, and
-        // the runtime also reads `EDGEZERO__ADAPTER__*` / `EDGEZERO__LOGGING__*`
-        // / etc. from that env. A secret key anywhere under `EDGEZERO__` would
-        // collide with (or be shadowed by) runtime configuration and resolve
-        // to config data instead of the credential. Reject in preflight.
-        const RESERVED_PREFIX: &str = "EDGEZERO__";
         for entry in entries {
             let key = entry.key_value;
             let reason = if key.is_empty() {
@@ -270,13 +262,6 @@ impl Adapter for AxumCliAdapter {
                 Some("has leading or trailing whitespace")
             } else if key.starts_with('#') {
                 Some("starts with `#`, which `.env` readers treat as a comment")
-            } else if key.to_ascii_uppercase().starts_with(RESERVED_PREFIX) {
-                Some(
-                    "is in the reserved `EDGEZERO__` namespace used for runtime configuration \
-                     (store overlays, `EDGEZERO__ADAPTER__*`, `EDGEZERO__LOGGING__*`, ...) in \
-                     `.edgezero/.env`; a secret there would collide with config and resolve to \
-                     configuration data instead of the credential",
-                )
             } else {
                 None
             };
@@ -930,25 +915,67 @@ mod tests {
     }
 
     #[test]
-    fn validate_typed_secrets_rejects_reserved_store_overlay_namespace() {
-        // A secret key in the `EDGEZERO__STORES__` namespace would collide
-        // (and be silently deduped away) against the generated store-overlay
-        // lines base provision writes into the SAME `.edgezero/.env`.
-        for reserved in [
+    fn typed_secrets_with_runtime_looking_keys_use_the_secret_namespace() {
+        for key in [
             "EDGEZERO__STORES__CONFIG__APP__KEY",
             "EDGEZERO__ADAPTER__HOST",
             "EDGEZERO__LOGGING__LEVEL",
-            "edgezero__adapter__port", // case-insensitive
+            "edgezero__adapter__port",
         ] {
-            let entries = vec![TypedSecretEntry::new("default", "field", reserved)];
-            let Err(err) = AXUM_ADAPTER.validate_typed_secrets(&entries) else {
-                panic!("a reserved-namespace secret key must be rejected: {reserved}");
-            };
+            let entries = [TypedSecretEntry::new("default", "field", key)];
+            AXUM_ADAPTER.validate_typed_secrets(&entries).unwrap();
+            let dir = tempdir().unwrap();
+            AXUM_ADAPTER
+                .provision_typed(
+                    dir.path(),
+                    None,
+                    None,
+                    &entries,
+                    ProvisionMode::Local,
+                    false,
+                )
+                .unwrap();
+            let expected = secret_env_var(key).unwrap();
+            let body = fs::read_to_string(dir.path().join(".edgezero/.env")).unwrap();
             assert!(
-                err.contains("reserved") && err.contains("EDGEZERO__"),
-                "error explains the reserved-namespace collision for {reserved}: {err}"
+                body.lines().any(|line| line == format!("{expected}=")),
+                "{body}"
+            );
+            assert!(
+                !body
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{key}=")))
             );
         }
+    }
+
+    #[cfg(feature = "axum")]
+    #[test]
+    fn runtime_looking_secret_round_trips_without_changing_adapter_host() {
+        use crate::secret_store::EnvSecretStore;
+        use crate::test_utils::env_guard;
+        use edgezero_core::secret_store::SecretStore as _;
+        use edgezero_core::test_env::EnvOverride;
+        use futures::executor::block_on;
+        use std::env;
+        let _lock = block_on(env_guard().lock());
+        let _host = EnvOverride::set("EDGEZERO__ADAPTER__HOST", "original-host");
+        let _secret = EnvOverride::set("EDGEZERO__SECRETS__EDGEZERO__ADAPTER__HOST", "credential");
+        AXUM_ADAPTER
+            .validate_typed_secrets(&[TypedSecretEntry::new(
+                "default",
+                "field",
+                "EDGEZERO__ADAPTER__HOST",
+            )])
+            .unwrap();
+        let value = block_on(EnvSecretStore::new().get_bytes("default", "EDGEZERO__ADAPTER__HOST"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.as_ref(), b"credential");
+        assert_eq!(
+            env::var("EDGEZERO__ADAPTER__HOST").unwrap(),
+            "original-host"
+        );
     }
 
     #[test]

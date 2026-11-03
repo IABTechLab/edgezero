@@ -32,6 +32,12 @@ pub enum Action {
     Serve,
 }
 
+impl Action {
+    fn requires_runtime_configuration(self) -> bool {
+        !matches!(self, Self::AuthLogin | Self::AuthLogout | Self::AuthStatus)
+    }
+}
+
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let label = match self {
@@ -92,6 +98,7 @@ impl From<Action> for AdapterAction {
 /// Pushed low-to-high with last-wins so the ordering above reads
 /// directly off the call order below.
 fn build_child_env(
+    action: Action,
     adapter_name: &str,
     environment: Option<&ResolvedEnvironment>,
     adapter_bind: (Option<String>, Option<u16>),
@@ -127,7 +134,9 @@ fn build_child_env(
         push(key, value.clone());
     }
 
-    if let Some(env) = environment {
+    if action.requires_runtime_configuration()
+        && let Some(env) = environment
+    {
         assert_required_secrets_present(adapter_name, env, &out)?;
     }
     // Preserve the selected file when an adapter or shell changes cwd. This
@@ -218,7 +227,9 @@ pub(crate) fn execute_with_env_overlay(
     // silently accepted by build/deploy/serve via the shell path. A
     // fully commands-only adapter (neither field) stays valid: it manages
     // its own build and never touches discovery.
-    assert_adapter_declaration_consistent(manifest_loader, adapter_name)?;
+    if action.requires_runtime_configuration() {
+        assert_adapter_declaration_consistent(manifest_loader, adapter_name)?;
+    }
 
     if let Some(loader) = manifest_loader
         && let Some(command) = manifest_command(loader.manifest(), adapter_name, action)
@@ -264,12 +275,13 @@ pub(crate) fn execute_with_env_overlay(
     // env the shell path above would have applied, otherwise a `serve`
     // here starts with none of the `.env` secrets and resolves its
     // manifest from the process cwd.
-    with_exec_context(adapter_name, manifest_loader, env_overlay, |ctx| {
+    with_exec_context(action, adapter_name, manifest_loader, env_overlay, |ctx| {
         adapter.execute(AdapterAction::from(action), adapter_args, ctx)
     })
 }
 
 fn with_exec_context<T, F>(
+    action: Action,
     adapter_name: &str,
     manifest_loader: Option<&ManifestLoader>,
     env_overlay: &[(String, String)],
@@ -283,7 +295,8 @@ where
             let root = loader.manifest().root();
             let env = loader.manifest().environment_for(adapter_name);
             let adapter_bind = adapter_bind_from_manifest(loader.manifest(), adapter_name);
-            let resolved = build_child_env(adapter_name, Some(&env), adapter_bind, env_overlay)?;
+            let resolved =
+                build_child_env(action, adapter_name, Some(&env), adapter_bind, env_overlay)?;
             (root, resolved)
         }
         // No manifest at all: still forward any overlay the caller
@@ -291,7 +304,7 @@ where
         // this is empty in practice, but the plumbing stays honest).
         None => (
             None,
-            build_child_env(adapter_name, None, (None, None), env_overlay)?,
+            build_child_env(action, adapter_name, None, (None, None), env_overlay)?,
         ),
     };
     // The manifest-declared, root-resolved
@@ -301,8 +314,11 @@ where
     // rediscovering (and possibly mis-selecting, or symlink-escaping) its
     // manifest by scanning the workspace, and tells it where `Cargo.toml`
     // actually lives.
-    let (adapter_manifest_abs, adapter_crate_abs) =
-        resolve_declared_adapter_paths(manifest_loader, adapter_name)?;
+    let (adapter_manifest_abs, adapter_crate_abs) = if action.requires_runtime_configuration() {
+        resolve_declared_adapter_paths(manifest_loader, adapter_name)?
+    } else {
+        (None, None)
+    };
     let mut ctx = AdapterExecContext::new().with_env(&child_env);
     if let Some(root) = cwd {
         ctx = ctx.with_cwd(root);
@@ -466,6 +482,7 @@ pub fn deploy(
         adapter_bind_from_manifest(loader.manifest(), adapter_name)
     });
     let child_env = build_child_env(
+        Action::Deploy,
         adapter_name,
         environment.as_ref(),
         lifecycle_bind,
@@ -493,9 +510,13 @@ pub fn deploy(
                 "adapter `{adapter_name}` selected managed deployment without being registered"
             ));
         };
-        return with_exec_context(adapter_name, manifest_loader, env_overlay, |exec| {
-            managed_adapter.deploy(context, adapter_args, exec)
-        });
+        return with_exec_context(
+            Action::Deploy,
+            adapter_name,
+            manifest_loader,
+            env_overlay,
+            |exec| managed_adapter.deploy(context, adapter_args, exec),
+        );
     }
 
     if !context.staging
@@ -536,9 +557,13 @@ pub fn deploy(
         return Err(err.to_owned());
     }
     let fallback_adapter = require_adapter(adapter_name, manifest_loader.is_some())?;
-    with_exec_context(adapter_name, manifest_loader, env_overlay, |exec| {
-        fallback_adapter.deploy(context, adapter_args, exec)
-    })?;
+    with_exec_context(
+        Action::Deploy,
+        adapter_name,
+        manifest_loader,
+        env_overlay,
+        |exec| fallback_adapter.deploy(context, adapter_args, exec),
+    )?;
     fallback_adapter.finalize_deploy(context, None, &lifecycle_exec)
 }
 
@@ -583,18 +608,15 @@ fn adapter_bind_from_manifest(
 /// Build the `sh -c <command>` child for a manifest-declared adapter
 /// command, with the manifest environment / bind hints applied. Shared
 /// by [`run_shell`] (inherited stdio) and [`run_shell_tee`] (piped +
-/// echoed stdio) so both dispatch paths apply identical env precedence,
-/// the provision-lock advertisement passthrough, and the required-secrets
-/// assertion -- all centralised in [`build_child_env`].
+/// echoed stdio). Callers resolve the action-aware environment through
+/// [`build_child_env`] before constructing the command.
 fn build_shell_command(
     command: &str,
     cwd: &Path,
     adapter_name: &str,
-    environment: Option<&ResolvedEnvironment>,
-    adapter_bind: (Option<String>, Option<u16>),
     adapter_args: &[String],
-    env_overlay: &[(String, String)],
-) -> Result<Command, String> {
+    child_env: &[(String, String)],
+) -> Command {
     let full_command = if adapter_args.is_empty() {
         command.to_owned()
     } else {
@@ -614,13 +636,9 @@ fn build_shell_command(
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(&full_command).current_dir(cwd);
 
-    // Precedence + the required-secrets assertion both live in
-    // `build_child_env` so this path and the registry fallback in
-    // `execute_with_env_overlay` cannot drift apart.
-    let child_env = build_child_env(adapter_name, environment, adapter_bind, env_overlay)?;
-    cmd.envs(child_env);
+    cmd.envs(child_env.iter().map(|(key, value)| (key, value)));
 
-    Ok(cmd)
+    cmd
 }
 
 #[expect(
@@ -641,15 +659,8 @@ fn run_shell(
     adapter_args: &[String],
     env_overlay: &[(String, String)],
 ) -> Result<(), String> {
-    let mut cmd = build_shell_command(
-        command,
-        cwd,
-        adapter_name,
-        environment,
-        adapter_bind,
-        adapter_args,
-        env_overlay,
-    )?;
+    let child_env = build_child_env(action, adapter_name, environment, adapter_bind, env_overlay)?;
+    let mut cmd = build_shell_command(command, cwd, adapter_name, adapter_args, &child_env);
 
     let status = cmd
         .status()
@@ -720,15 +731,8 @@ fn run_shell_tee(
     adapter_args: &[String],
     env_overlay: &[(String, String)],
 ) -> Result<String, String> {
-    let mut cmd = build_shell_command(
-        command,
-        cwd,
-        adapter_name,
-        environment,
-        adapter_bind,
-        adapter_args,
-        env_overlay,
-    )?;
+    let child_env = build_child_env(action, adapter_name, environment, adapter_bind, env_overlay)?;
+    let mut cmd = build_shell_command(command, cwd, adapter_name, adapter_args, &child_env);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd
@@ -785,7 +789,7 @@ fn shell_join(args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AdapterDeployContext, ResolvedEnvironment, assert_adapter_declaration_consistent,
+        Action, AdapterDeployContext, ResolvedEnvironment, assert_adapter_declaration_consistent,
         build_child_env, deploy, resolve_declared_adapter_paths,
     };
     use crate::test_support::manifest_guard;
@@ -945,12 +949,52 @@ mod tests {
             .map(|(_, value)| value.as_str())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn authentication_works_before_runtime_secrets_and_paths_are_ready() {
+        use crate::test_support::LAYOUT_TEST_ADAPTER;
+        let _lock = manifest_guard().lock().unwrap();
+        let _missing = EnvOverride::remove("EDGEZERO_AUTH_TEST_SECRET");
+        let _default = EnvOverride::remove("EDGEZERO_AUTH_TEST_DEFAULT");
+        super::adapter_registry::register_adapter(&LAYOUT_TEST_ADAPTER);
+        for declaration in [
+            "manifest='missing.toml'",
+            "manifest='missing.toml'\ncrate='missing'",
+            "",
+        ] {
+            for shell in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let command = if shell {
+                    "[adapters.__layout_test__.commands]\nauth-status='test \"$EDGEZERO_AUTH_TEST_DEFAULT\" = forwarded'\n"
+                } else {
+                    ""
+                };
+                let source = format!(
+                    "[app]\nname='demo'\n[adapters.__layout_test__.adapter]\n{declaration}\n{command}\n[[environment.variables]]\nname='default'\nenv='EDGEZERO_AUTH_TEST_DEFAULT'\nvalue='forwarded'\n[[environment.secrets]]\nname='required'\nenv='EDGEZERO_AUTH_TEST_SECRET'\n"
+                );
+                let path = dir.path().join("edgezero.toml");
+                fs::write(&path, source).unwrap();
+                let loader = ManifestLoader::from_path(&path).unwrap();
+                super::execute(
+                    "__layout_test__",
+                    super::Action::AuthStatus,
+                    Some(&loader),
+                    &[],
+                )
+                .expect("auth must not require runtime files or secrets");
+                super::execute("__layout_test__", super::Action::Serve, Some(&loader), &[])
+                    .expect_err("runtime prerequisites must remain enforced");
+                assert!(env::var_os("EDGEZERO_AUTH_TEST_DEFAULT").is_none());
+            }
+        }
+    }
+
     #[test]
     fn child_manifest_selector_is_absolute_before_changing_directory() {
         let _lock = manifest_guard().lock().expect("env lock");
         let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", "config/project.local.toml");
         let overlay = [("EDGEZERO_MANIFEST".to_owned(), "ignored.toml".to_owned())];
-        let resolved = build_child_env("test-adapter", None, (None, None), &overlay)
+        let resolved = build_child_env(Action::Serve, "test-adapter", None, (None, None), &overlay)
             .expect("child environment");
         let expected = absolute("config/project.local.toml").unwrap();
         assert_eq!(
@@ -972,7 +1016,8 @@ mod tests {
             "EDGEZERO_MANIFEST".to_owned(),
             "config/from-overlay.toml".to_owned(),
         )];
-        let resolved = build_child_env("test-adapter", None, (None, None), &overlay).unwrap();
+        let resolved =
+            build_child_env(Action::Serve, "test-adapter", None, (None, None), &overlay).unwrap();
         assert_eq!(
             value_for(&resolved, "EDGEZERO_MANIFEST"),
             absolute("config/from-overlay.toml").unwrap().to_str()
@@ -995,21 +1040,15 @@ mod tests {
         let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", selector);
         let loader = ManifestLoader::from_path(&path).unwrap();
         let command = "cat \"$EDGEZERO_MANIFEST\"";
-        let shell_output = super::build_shell_command(
-            command,
-            &root,
-            "test-adapter",
-            None,
-            (None, None),
-            &[],
-            &[],
-        )
-        .unwrap()
-        .output()
-        .unwrap();
+        let child_env =
+            build_child_env(Action::Serve, "test-adapter", None, (None, None), &[]).unwrap();
+        let shell_output =
+            super::build_shell_command(command, &root, "test-adapter", &[], &child_env)
+                .output()
+                .unwrap();
         assert!(shell_output.status.success());
         assert_eq!(shell_output.stdout, body.as_bytes());
-        super::with_exec_context("test-adapter", Some(&loader), &[], |exec| {
+        super::with_exec_context(Action::Serve, "test-adapter", Some(&loader), &[], |exec| {
             let output = Command::new("sh")
                 .args(["-c", command])
                 .current_dir(exec.cwd().unwrap())
@@ -1048,12 +1087,12 @@ mod tests {
         let adapter_name = "test-adapter";
 
         // Neither parent env nor overlay supplies the secret -> error.
-        build_child_env(adapter_name, Some(&env), (None, None), &[])
+        build_child_env(Action::Serve, adapter_name, Some(&env), (None, None), &[])
             .expect_err("a required secret with no source must error");
 
         let _secret = EnvOverride::set("EDGEZERO_TEST_SECRET", "set");
-        let resolved =
-            build_child_env(adapter_name, Some(&env), (None, None), &[]).expect("env resolved");
+        let resolved = build_child_env(Action::Serve, adapter_name, Some(&env), (None, None), &[])
+            .expect("env resolved");
         assert_eq!(
             value_for(&resolved, "EDGEZERO_TEST_BASE"),
             Some("https://demo")
@@ -1082,8 +1121,14 @@ mod tests {
         };
         let overlay = vec![(SECRET.to_owned(), "from_dotenv".to_owned())];
 
-        let resolved = build_child_env("test-adapter", Some(&env), (None, None), &overlay)
-            .expect("overlay must satisfy the required secret");
+        let resolved = build_child_env(
+            Action::Serve,
+            "test-adapter",
+            Some(&env),
+            (None, None),
+            &overlay,
+        )
+        .expect("overlay must satisfy the required secret");
         assert_eq!(value_for(&resolved, SECRET), Some("from_dotenv"));
     }
 
@@ -1110,7 +1155,8 @@ mod tests {
         };
 
         let resolved =
-            build_child_env("test-adapter", Some(&env), (None, None), &[]).expect("env resolved");
+            build_child_env(Action::Serve, "test-adapter", Some(&env), (None, None), &[])
+                .expect("env resolved");
         assert!(
             value_for(&resolved, KEY).is_none(),
             "manifest default must NOT be injected when parent env is already set; \
@@ -1137,7 +1183,8 @@ mod tests {
         };
 
         let resolved =
-            build_child_env("test-adapter", Some(&env), (None, None), &[]).expect("env resolved");
+            build_child_env(Action::Serve, "test-adapter", Some(&env), (None, None), &[])
+                .expect("env resolved");
         assert_eq!(
             value_for(&resolved, KEY),
             Some("from_manifest_default"),

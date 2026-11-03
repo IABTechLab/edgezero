@@ -2,6 +2,8 @@
 use super::{ManifestLock, atomically_replace_file};
 use std::fs;
 use std::io::Write as _;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::{NamedTempFile, TempDir};
@@ -23,7 +25,11 @@ impl PrivateManifest {
             (lock.target().to_path_buf(), snapshot)
         };
         let snapshot_id = manifest_id(&snapshot)?;
-        let startup = tempfile::tempdir().map_err(|err| err.to_string())?;
+        let mut startup_options = tempfile::Builder::new();
+        startup_options.prefix("edgezero-fastly-startup-");
+        #[cfg(unix)]
+        startup_options.permissions(fs::Permissions::from_mode(0o700));
+        let startup = startup_options.tempdir().map_err(|err| err.to_string())?;
         // Fastly reads this before parsing --dir/--env and may upgrade it.
         fs::write(startup.path().join("fastly.toml"), &snapshot).map_err(|err| err.to_string())?;
         let directory = source.parent().ok_or("Fastly manifest has no parent")?;
@@ -130,6 +136,57 @@ mod tests {
     use std::time::{Duration, Instant};
     #[cfg(unix)]
     use std::{env, thread};
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_manifest_is_private_under_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt as _;
+        const CHILD: &str = "EDGEZERO_PRIVATE_MANIFEST_MODE_CHILD";
+        if env::var_os(CHILD).is_none() {
+            let status = Command::new("sh")
+                .args(["-c", "umask 022; exec \"$@\"", "sh"])
+                .arg(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::local_vendor::tests::startup_manifest_is_private_under_permissive_umask",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "private manifest permissions failed in child"
+            );
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("private.toml");
+        let body = "name='demo'\nsecret='PRIVATE_MODE_SENTINEL'\n";
+        fs::write(&source, body).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+        let private = PrivateManifest::new(&source).unwrap();
+        assert_eq!(
+            fs::metadata(private.startup.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(private.selected.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::read_to_string(private.startup.path().join("fastly.toml")).unwrap(),
+            body
+        );
+        assert_eq!(fs::read_to_string(source).unwrap(), body);
+    }
 
     #[cfg(unix)]
     fn write_vendor_shim(directory: &Path) {

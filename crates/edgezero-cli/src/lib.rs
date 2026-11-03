@@ -14,9 +14,12 @@
 // root. The lint is module-scoped (cannot be `#[expect]`-ed per-item);
 // downstream CLIs already call `edgezero_cli::run_build` / `run_serve`
 // at the crate root, so the new validators follow the same convention.
-#![expect(
-    clippy::pub_use,
-    reason = "config-validate entry points re-export at the crate root to match the existing run_* surface downstream CLIs already use"
+#![cfg_attr(
+    feature = "cli",
+    expect(
+        clippy::pub_use,
+        reason = "config-validate entry points re-export at the crate root to match the existing run_* surface downstream CLIs already use"
+    )
 )]
 
 #[cfg(feature = "cli")]
@@ -51,7 +54,7 @@ mod shared_test_guards;
 /// crate) MUST go through these so the workspace
 /// `clippy::print_stderr` / `clippy::print_stdout` restrictions
 /// still catch accidental prints elsewhere as real bugs.
-#[cfg(feature = "cli")]
+#[cfg(any(feature = "cli", feature = "nested-app-config-check"))]
 pub mod stream;
 #[cfg(all(test, feature = "cli"))]
 mod test_support;
@@ -76,6 +79,7 @@ pub use provision::{run_provision, run_provision_typed};
 use args::{
     ActiveVersionArgs, BuildArgs, DeployArgs, HealthcheckArgs, NewArgs, RollbackArgs, ServeArgs,
 };
+#[cfg(feature = "cli")]
 use edgezero_adapter::registry::{AdapterDeployContext, DeployStoreIds, get_adapter};
 #[cfg(feature = "cli")]
 use edgezero_core::manifest::{Manifest, ManifestLoader, StoreDeclaration};
@@ -126,7 +130,7 @@ impl log::Log for CliLogger {
                 info_line(&format!("{}", record.args()));
             }
             log::Level::Info => {
-                stdout_line(&format!("{}", record.args()));
+                drop(stdout_line(&format!("{}", record.args())));
             }
             log::Level::Debug | log::Level::Trace => {}
         }

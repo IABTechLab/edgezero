@@ -201,6 +201,91 @@ check "provset-spin-env"        "$(has "$SP/.env")"            "yes"
 check "provset-spin-spindir"    "$(has "$SP/.spin")"           "yes"
 reset_backups
 
+# Non-listening grandchildren must stop before restoration, even when TERM
+# is ignored. No port is supplied: this contract cannot depend on lsof.
+tree="$work/owned-tree"
+mkdir -p "$tree"
+cat > "$tree/leaf.sh" <<'SH'
+trap '' TERM
+printf '%s\n' "$$" > "$1/leaf.pid"
+while [ ! -e "$1/release" ]; do sleep 0.02; done
+printf 'survivor-flush\n' > "$1/state"
+printf done > "$1/done"
+SH
+cat > "$tree/middle.sh" <<'SH'
+bash "$1/leaf.sh" "$1" &
+wait
+SH
+cat > "$tree/wrapper.sh" <<'SH'
+bash "$1/middle.sh" "$1" &
+wait
+SH
+printf original > "$tree/state"
+backup_in_tree "$tree/state"
+printf mutated > "$tree/state"
+bash "$tree/wrapper.sh" "$tree" &
+wrapper=$!
+sleep 30 &
+sibling=$!
+for ((attempt=0; attempt<250; attempt++)); do
+  [ -f "$tree/leaf.pid" ] && break
+  sleep 0.02
+done
+if [ -f "$tree/leaf.pid" ]; then
+  leaf=$(cat "$tree/leaf.pid")
+  smoke_stop_server "$wrapper"
+  stopped=$?
+  check "complete-tree-stop-succeeds" "$stopped" "0"
+  leaf_state=$(ps -o stat= -p "$leaf" 2>/dev/null | tr -d ' ' || true)
+  case "$leaf_state" in ""|Z*|X*) leaf_stopped=yes ;; *) leaf_stopped=no ;; esac
+  check "term-ignoring-grandchild-stopped" "$leaf_stopped" "yes"
+  if [ "$stopped" -eq 0 ]; then restore_backups; fi
+  : > "$tree/release"
+  for ((attempt=0; attempt<50; attempt++)); do
+    [ -f "$tree/done" ] && break
+    sleep 0.02
+  done
+  check "grandchild-cannot-overwrite-restored-state" "$(cat "$tree/state")" "original"
+  kill -KILL "$leaf" 2>/dev/null || true
+else
+  check "grandchild-started" "no" "yes"
+  kill -KILL "$wrapper" 2>/dev/null || true
+fi
+check "unrelated-sibling-survives" "$(kill -0 "$sibling" 2>/dev/null && echo yes || echo no)" "yes"
+kill -KILL "$sibling" 2>/dev/null || true
+wait "$sibling" 2>/dev/null || true
+wait "$wrapper" 2>/dev/null || true
+reset_backups
+
+# A failed process snapshot must not permit a restore.
+sleep 30 &
+uninspected=$!
+(
+  ps() { return 1; }
+  smoke_stop_server "$uninspected"
+) 2>/dev/null
+check "process-snapshot-failure-is-not-success" "$?" "1"
+kill -KILL "$uninspected" 2>/dev/null || true
+wait "$uninspected" 2>/dev/null || true
+
+# Exercise the real cleanup functions even without errexit: none may restore
+# state after its teardown helper reports failure.
+for script in smoke_test_config.sh smoke_test_kv.sh smoke_test_secrets.sh smoke_test_config_key_override.sh; do
+  marker="$work/$script.restored"
+  sed -n '/^cleanup() {$/,/^}$/p' "$DIR/../$script" > "$work/cleanup-under-test.sh"
+  (
+    # shellcheck disable=SC1090
+    . "$work/cleanup-under-test.sh"
+    smoke_stop_server() { return 1; }
+    stop_server() { return 1; }
+    restore_backups() { : > "$marker"; }
+    export SERVER_PID=unused PORT=unused
+    cleanup
+  )
+  check "$script-failed-stop-propagates" "$?" "1"
+  check "$script-failed-stop-preserves-backup" "$([ -e "$marker" ] && echo no || echo yes)" "yes"
+done
+
 rm -rf "$work"
 
 printf 'smoke_backup_test: %d passed, %d failed\n' "$pass" "$fail"
