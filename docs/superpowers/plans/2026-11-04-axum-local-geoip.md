@@ -5,7 +5,7 @@
 - Issue: [#438](https://github.com/IABTechLab/edgezero/issues/438).
 - Contract: [approved local GeoIP spec](../specs/2026-11-04-axum-local-geoip-design.md). User-approved requirements remain authoritative; unresolved gaps below are not approved scope changes.
 - Base: `72ceed7e`, `feature/pluggable-geo-providers`, already published as draft [PR #439](https://github.com/IABTechLab/edgezero/pull/439).
-- Delivery branch: `feature/axum-local-geoip`. Open a separate draft PR against `feature/pluggable-geo-providers`; do not fold local GeoIP into #439 or rebase unrelated work.
+- Delivery branch: `feature/axum-local-geoip`, published as draft [PR #453](https://github.com/IABTechLab/edgezero/pull/453) against `feature/pluggable-geo-providers`. Local GeoIP remains separate from #439.
 
 ## 1. Decisions and implementation gates
 
@@ -124,8 +124,8 @@ Run explicit feature-disabled and feature-enabled hosting sentinels as well. Whe
 
 - [x] Inspect the combined diff against the approved spec and obtain independent correctness/architecture review. The capability issue is fixed; metadata rejection remains an explicit blocker in section 5.
 - [x] Validate no unrelated work or credentials enter commits. Include the reviewed spec and this implementation/evidence record.
-- [ ] Commit only after relevant tests have run, push `feature/axum-local-geoip`, and create a draft PR against `feature/pluggable-geo-providers` using the repository PR template.
-- [ ] Describe #439 stacking, #438 scope, public migration, exact check outcomes, pre-runtime preparation exception and any unverified production-size/downstream behavior. Do not claim consent compliance or production acceptance from local fixtures.
+- [x] Commit after relevant tests, push `feature/axum-local-geoip`, and create draft #453 against `feature/pluggable-geo-providers` using the repository PR template.
+- [x] Describe #439 stacking, #438 scope, public migration, exact check outcomes, pre-runtime preparation exception and unverified production-size/downstream behavior. The PR explicitly retains draft status and makes no consent or production-acceptance claim.
 
 ## 5. Evidence and decisions during implementation
 
@@ -170,7 +170,7 @@ Synthetic fixtures | Original Apache-2.0 generator and 26 fixtures | Syntax/repr
 Formatting/static checks | Final source, workflows and internal documents | Rustfmt, whitespace, internal links/fences and actionlint passed; actionlint ShellCheck disabled | Not timed | Coordinator checks
 Known metadata defect | Explicit ignored regression and real process | Reproduced as expected failure; malformed metadata reaches readiness | Not timed | `/tmp/geoip-known-metadata-{blocker,hosting}.log`
 
-Final Rust, crate-test, script, workflow and guide input aggregate SHA-256 is `4b653eac93e471ee48a1e1c65538b14219efa330c0a73e0201818d738dc9b6a9`, computed with `git ls-files -cm --others --exclude-standard -z -- crates Cargo.toml Cargo.lock scripts .github docs/guide | sort -zu | xargs -0 sha256sum | sha256sum`. Plan/spec evidence edits and the changelog are outside this aggregate. Toolchain: Rust/Cargo 1.95.0, Linux native; Node 24.12.0. Logs are local temporary evidence, not durable CI artifacts. The official Viceroy 0.21.0 archive SHA-256 is `52ed3c3ed59d926c81015d637509942c3195443c02c2eebbded9125484336a9e`; the installed 0.17.0 binary was not used for runtime proof.
+The implementation is committed as `9dd7b83b`; subsequent publication edits change only this plan/evidence document. Final Rust, crate-test, script, workflow and guide input aggregate SHA-256 is `4b653eac93e471ee48a1e1c65538b14219efa330c0a73e0201818d738dc9b6a9`, computed with `git ls-files -cm --others --exclude-standard -z -- crates Cargo.toml Cargo.lock scripts .github docs/guide | sort -zu | xargs -0 sha256sum | sha256sum`. Plan/spec evidence edits and the changelog are outside this aggregate. Toolchain: Rust/Cargo 1.95.0, Linux native; Node 24.12.0. Logs are local temporary evidence, not durable CI artifacts. The official Viceroy 0.21.0 archive SHA-256 is `52ed3c3ed59d926c81015d637509942c3195443c02c2eebbded9125484336a9e`; the installed 0.17.0 binary was not used for runtime proof.
 
 The coordinator inspected returned changes and ran repository-native integration. Bounded implementation workers owned the reader/fixtures, hosting fixtures/tests, and guide/CI respectively; no files overlapped. Their scratch/static results were not substituted for native tests. The independent review's known metadata blocker was reproduced both as an intentionally failing ignored regression and through a real runner. Its non-Unix capability finding was fixed; non-Unix runtime support remains unavailable.
 
