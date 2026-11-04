@@ -11,7 +11,7 @@ workflow="$ACTION_DIR/../../workflows/deploy-action.yml"
 reject_mutation() {
   local name="$1" expression="$2" diagnostic="$3" status=0
   yq "$expression" "$workflow" >"$WORK_DIR/workflow.yml"
-  CACHE_WORKFLOW_FILE="$WORK_DIR/workflow.yml" bash "$ACTION_DIR/tests/fixture.sh" >"$WORK_DIR/log" 2>&1 || status=$?
+  bash "$ACTION_DIR/tests/workflow.sh" "$WORK_DIR/workflow.yml" >"$WORK_DIR/log" 2>&1 || status=$?
   [[ "$status" == 1 ]] || fail "workflow guard accepted mutation: $name (exit $status)"
   grep -Fq "$diagnostic" "$WORK_DIR/log" || {
     cat "$WORK_DIR/log" >&2
@@ -59,4 +59,7 @@ for kind in source target; do
     fi
   done
 done
+reject_mutation 'seed skips action save path' \
+  '(.jobs."cache-restore-seed".steps[] | select(.id == "cache") | .with."save-target") = false' \
+  'seed no longer exercises the action save path'
 printf 'source and target publication workflow mutation contracts passed\n'

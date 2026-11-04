@@ -10,6 +10,8 @@ expected="$(realpath "${RUNNER_TEMP:?}")/edgezero-rust-cache/cache-restore-smoke
   printf '::error::compiler probe must use its confined fixture target directory\n' >&2
   exit 1
 }
+# shellcheck source=compiler-stats.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/compiler-stats.sh"
 cd "$fixture"
 host=$(rustc -vV | sed -n 's/^host: //p')
 [[ -n "$host" ]] || exit 1
@@ -22,7 +24,7 @@ for target in "$host" wasm32-wasip1; do
   cargo build --locked --lib --target "$target"
   stats=$(sccache --show-stats --stats-format json)
   printf 'Compiler reuse for %s: %s\n' "$target" "$stats"
-  jq -e '(.stats.cache_hits.counts.Rust // 0) > 0 and (.stats.cache_errors.counts.Rust // 0) == 0 and (.stats.cache_read_errors // 0) == 0 and (.stats.cache_write_errors // 0) == 0' <<<"$stats" >/dev/null || {
+  compiler_hit "$stats" || {
     printf '::error::expected error-free Rust compiler-cache reuse on the first build for %s\n' "$target" >&2
     exit 1
   }

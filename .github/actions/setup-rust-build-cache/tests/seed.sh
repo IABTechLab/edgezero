@@ -54,6 +54,10 @@ elif [[ "$PROBE_MODE" == malformed ]]; then
   printf 'not-json\n'
 elif [[ "$PROBE_MODE" == empty ]]; then
   printf '{"stats":{}}\n'
+elif [[ "$PROBE_MODE" == partial && ! -f "$PROBE_STATE/$target.published" ]]; then
+  # Earlier units hit while the run-unique unit misses and writes.
+  touch "$PROBE_STATE/$target.published"
+  printf '{"stats":{"cache_hits":{"counts":{"Rust":3}},"cache_misses":{"counts":{"Rust":1}},"cache_writes":1}}\n'
 elif [[ "$PROBE_MODE" == hit || -f "$PROBE_STATE/$target.published" ]]; then
   printf '{"stats":{"cache_hits":{"counts":{"Rust":1}}}}\n'
 else
@@ -95,6 +99,13 @@ if run_seed finalize-wasm-permanent; then fail 'accepted unpublished WASM writes
 run_seed cold || fail 'cold compiler seed is not read back'
 [[ "$(grep -c '^build ' "$PROBE_LOG")" == 4 ]] || fail 'cold seed does not read back both targets'
 [[ "$(grep -c '^sleep ' "$PROBE_LOG")" == 0 ]] || fail 'cold seed unnecessarily backs off'
+[[ "$(grep -c '(attempt 1, read-back)' "$WORK_DIR/log")" == 2 ]] || fail 'read-back builds are not labelled'
+run_seed partial || fail 'partial compiler hit is not read back'
+[[ "$(grep -c '^build ' "$PROBE_LOG")" == 4 ]] || fail 'partial compiler hit skips read-back'
+if run_seed malformed; then fail 'accepted unreadable compiler stats'; fi
+[[ "$(grep -c '^build ' "$PROBE_LOG")" == 1 ]] || fail 'unreadable compiler stats are retried'
+[[ "$(grep -c '^sleep ' "$PROBE_LOG")" == 0 ]] || fail 'unreadable compiler stats back off'
+grep -Fq 'sccache returned unreadable stats for test-host' "$WORK_DIR/log" || fail 'unreadable stats are reported as publication failure'
 if run_seed readback-compile-failure; then fail 'accepted read-back compilation failure'; fi
 [[ "$(grep -c '^build ' "$PROBE_LOG")" == 2 ]] || fail 'read-back compilation failure was retried'
 [[ "$(grep -c '^sleep ' "$PROBE_LOG")" == 0 ]] || fail 'read-back compilation failure backs off'
@@ -113,7 +124,7 @@ for mode in wasm-transient both-transient; do
   [[ "$(grep -c '^build ' "$PROBE_LOG")" == "$expected" ]] || fail "$mode does not rebuild every attempt"
   [[ "$(grep -c '^zero$' "$PROBE_LOG")" == "$expected" ]] || fail "$mode does not reset every attempt"
 done
-for mode in permanent empty compile-failure compile-wasm-failure wasm-permanent read-error compile-cache-error malformed; do
+for mode in permanent empty compile-failure compile-wasm-failure wasm-permanent read-error compile-cache-error; do
   if run_seed "$mode"; then fail "accepted unsuccessful compiler seeding: $mode"; fi
   case "$mode" in
     compile-failure) expected=1 ;;
@@ -123,6 +134,19 @@ for mode in permanent empty compile-failure compile-wasm-failure wasm-permanent 
   esac
   [[ "$(grep -c '^build ' "$PROBE_LOG")" == "$expected" ]] || fail "$mode violates per-target retry limits"
   [[ "$(grep -c '^zero$' "$PROBE_LOG")" == "$expected" ]] || fail "$mode uses stale stats"
+done
+# The downstream reuse probe must reject partial hits as well.
+for mode in hit partial; do
+  rm -rf -- "$CARGO_TARGET_DIR" "$PROBE_STATE"
+  mkdir -p "$CARGO_TARGET_DIR" "$PROBE_STATE"
+  status=0
+  PROBE_MODE="$mode" bash "$ACTION_DIR/tests/assert-compiler-reuse.sh" >"$WORK_DIR/log" 2>&1 || status=$?
+  if [[ "$mode" == hit ]]; then
+    [[ "$status" == 0 ]] || fail 'reuse probe rejects a full compiler hit'
+  else
+    [[ "$status" != 0 ]] || fail 'reuse probe accepts a partial compiler hit'
+    grep -Fq 'expected error-free Rust compiler-cache reuse' "$WORK_DIR/log" || fail 'partial reuse failed for an unrelated reason'
+  fi
 done
 # Cleanup must never follow restored symlinks outside the fixture root.
 for target in test-host wasm32-wasip1; do

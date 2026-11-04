@@ -116,6 +116,8 @@ jobs:
   # The tiny per-run target archive lets downstream jobs verify exact restores.
   cache-restore-seed:
     runs-on: ubuntu-latest
+    # Publication retries are bounded; bound hung builds and cache calls too.
+    timeout-minutes: 20
     outputs:
       fixture-id: ${{ steps.fixture.outputs.fixture-id }}
       source-cache-key: ${{ steps.cache.outputs.source-cache-key }}
@@ -132,13 +134,15 @@ jobs:
       - name: Install native and WASM compiler targets
         run: bash .github/actions/setup-rust-build-cache/tests/setup-toolchain.sh
 
+      # Keep the action's public save path under hosted test. The explicit
+      # save below publishes first; its post-job save then only warns.
       - name: Seed the provider-neutral Rust target cache
         id: cache
         uses: ./.github/actions/setup-rust-build-cache
         with:
           app-name: cache-restore-smoke-v2
           cache-target: true
-          save-target: false
+          save-target: true
           target-cache-revision: ${{ steps.fixture.outputs.revision }}
           working-directory: cache-restore-fixture
 
