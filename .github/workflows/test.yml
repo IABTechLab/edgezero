@@ -270,12 +270,16 @@ jobs:
       matrix:
         include:
           - features: axum
+            cache_key: axum
             builtin_sentinel: geo_unavailable_selection_fails_before_runner_resources
           - features: geo-cloudfront
+            cache_key: cloudfront
             builtin_sentinel: geo_cloudfront_parsing_matches_spec
           - features: geo-maxmind
+            cache_key: maxmind
             builtin_sentinel: geo_maxmind_structural_pass_closes_upstream_data_gaps
           - features: geo-cloudfront,geo-maxmind
+            cache_key: cloudfront-maxmind
             builtin_sentinel: geo_maxmind_structural_pass_closes_upstream_data_gaps
     steps:
       - uses: actions/checkout@v6
@@ -288,7 +292,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-geo-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-geo-${{ matrix.cache_key }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Retrieve Rust version
         id: rust-version
