@@ -191,7 +191,8 @@ fn sdk_response_control(
     case: String,
 ) -> anyhow::Result<edgezero_adapter_spin::SpinResponse> {
     use spin_sdk::wasip3::{http::types::Fields, http_compat::BodyWriter};
-    use std::future::IntoFuture as _;
+    use std::future::{Future as _, IntoFuture as _};
+    use std::task::Poll;
 
     let token = request
         .headers()
@@ -215,22 +216,43 @@ fn sdk_response_control(
             result_writer,
             ..
         } = writer;
+        let mut native_result_poll = serde_json::Value::Null;
         let result = async {
             if !stream_writer.write_all(b" ".to_vec()).await.is_empty() {return Err(());}
+            let transmission = transmission.into_future();
+            futures::pin_mut!(transmission);
+            // Bounded diagnostic samples at existing control boundaries, never after Ready.
+            let mut observed = futures::future::poll_fn(|context| {
+                Poll::Ready(transmission.as_mut().poll(context))
+            }).await;
+            let mut states = vec![match &observed { Poll::Pending => "pending", Poll::Ready(Ok(())) => "ready-ok", Poll::Ready(Err(_)) => "ready-error" }];
             let started = edgezero_core::time::MonotonicInstant::now();
             if case.ends_with("timer-only") {spin_sdk::time::sleep(Duration::from_millis(100)).await;}
             let pause_ns = started.elapsed().as_nanos() as u64;
+            if case.ends_with("timer-only") && observed.is_pending() {
+                observed = futures::future::poll_fn(|context| {
+                    Poll::Ready(transmission.as_mut().poll(context))
+                }).await;
+                states.push(match &observed { Poll::Pending => "pending", Poll::Ready(Ok(())) => "ready-ok", Poll::Ready(Err(_)) => "ready-error" });
+            }
+            native_result_poll = json!({"phase":"before-response-eof","polls":states.len(),"states":states,
+                "stream_writer_owned":true,"body_result_sent":false});
             let report = json!({"adapter":"spin","case":case,"token":token,"sdk_native":true,"pause_ns":pause_ns,
+                "native_result_poll":native_result_poll,
                 "revision":option_env!("EDGEZERO_QUALIFICATION_REVISION").unwrap_or("unrecorded"),"qualification":false});
             if !stream_writer.write_all(report.to_string().into_bytes()).await.is_empty() {return Err(());}
             drop(stream_writer);
             result_writer.write(Ok(None)).await.map_err(|_|())?;
-            transmission.into_future().await.map_err(|_|())?;
+            match observed {
+                Poll::Ready(result) => result,
+                Poll::Pending => transmission.await,
+            }.map_err(|_|())?;
             Ok(())
         }.await;
         eprintln!(
             "{}",
-            json!({"event":"sdk-stream-coordinator-terminal","case":case,"token":token,"coordinator_ok":result.is_ok(),"qualification":false})
+            json!({"event":"sdk-stream-coordinator-terminal","case":case,"token":token,"coordinator_ok":result.is_ok(),
+                "native_result_poll":native_result_poll,"qualification":false})
         );
     });
     Ok(response)

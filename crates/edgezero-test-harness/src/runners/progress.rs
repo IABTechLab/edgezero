@@ -41,7 +41,8 @@ pub(super) fn run(name: &str, parent: &Path, records: &mut Records) -> Result<()
         if name!="spin" {return checked;}
         let expected:Vec<_> = records.values.iter().filter(|e|e["event"]=="response-stream-control" && e["status"]=="pass"
             && e["case"].as_str().is_some_and(|case|case.starts_with("sdk-stream-")))
-            .map(|e|json!({"case":e["case"],"token":e["observation"]["probe"]["token"]})).collect();
+            .map(|e|json!({"case":e["case"],"token":e["observation"]["probe"]["token"],
+                "native_result_poll":e["observation"]["probe"]["native_result_poll"]})).collect();
         let stderr = run.join(".spin/logs/fixture_stderr.txt");
         let diagnostics = await_evidence(||validate_sdk_terminals(&logs(&stderr),&expected));
         thread::sleep(Duration::from_millis(100));
@@ -546,6 +547,34 @@ fn validate_identity(
     )
 }
 
+fn validate_native_result_poll(case: &str, value: &Value) -> Result<()> {
+    let states = value["states"]
+        .as_array()
+        .ok_or("missing native poll transcript")?;
+    let valid = match (case, states.as_slice()) {
+        ("sdk-stream-ready", [state]) => {
+            matches!(state.as_str(), Some("pending" | "ready-ok" | "ready-error"))
+        }
+        ("sdk-stream-timer-only", [state]) => {
+            matches!(state.as_str(), Some("ready-ok" | "ready-error"))
+        }
+        ("sdk-stream-timer-only", [first, last]) => {
+            first == "pending"
+                && matches!(last.as_str(), Some("pending" | "ready-ok" | "ready-error"))
+        }
+        _ => false,
+    };
+    require(
+        value.as_object().is_some_and(|fields| fields.len() == 5)
+            && value["phase"] == "before-response-eof"
+            && valid
+            && value["polls"] == states.len()
+            && value["stream_writer_owned"] == true
+            && value["body_result_sent"] == false,
+        "missing or invalid native result observation before response EOF",
+    )
+}
+
 fn validate_sdk_terminals(events: &[Value], expected: &[Value]) -> Result<()> {
     require(expected.len() == 2, "missing SDK comparison controls")?;
     require(
@@ -561,12 +590,19 @@ fn validate_sdk_terminals(events: &[Value], expected: &[Value]) -> Result<()> {
         "missing or duplicate SDK terminal observations",
     )?;
     for control in expected {
+        let case = control["case"].as_str().ok_or("missing SDK control case")?;
+        validate_native_result_poll(case, &control["native_result_poll"])?;
         let matching: Vec<_> = terminals
             .iter()
             .filter(|e| e["case"] == control["case"] && e["token"] == control["token"])
             .collect();
         require(
-            matching.len() == 1 && matching[0]["coordinator_ok"] == true,
+            matching.len() == 1
+                && matching[0]["coordinator_ok"] == true
+                && control["native_result_poll"]["states"]
+                    .as_array()
+                    .is_some_and(|states| !states.iter().any(|state| state == "ready-error"))
+                && matching[0]["native_result_poll"] == control["native_result_poll"],
             "SDK terminal missing, failed or uncorrelated",
         )?;
     }
@@ -822,6 +858,7 @@ fn response_controls(
                     probe["sdk_native"] == true,
                     "SDK control did not use the SDK response writer",
                 )?;
+                validate_native_result_poll(case, &probe["native_result_poll"])?;
             }
             if case.ends_with("timer-only") {
                 require(
@@ -1112,12 +1149,115 @@ mod tests {
     }
 
     #[test]
+    fn sdk_native_result_requires_bounded_pre_eof_polls_and_matching_terminal_evidence() {
+        let observation = |states: &[&str]| {
+            json!({"phase":"before-response-eof","states":states,
+            "polls":states.len(),"stream_writer_owned":true,"body_result_sent":false})
+        };
+        for (case, states) in [
+            ("sdk-stream-ready", vec!["pending"]),
+            ("sdk-stream-ready", vec!["ready-ok"]),
+            ("sdk-stream-ready", vec!["ready-error"]),
+            ("sdk-stream-timer-only", vec!["ready-ok"]),
+            ("sdk-stream-timer-only", vec!["ready-error"]),
+            ("sdk-stream-timer-only", vec!["pending", "pending"]),
+            ("sdk-stream-timer-only", vec!["pending", "ready-ok"]),
+            ("sdk-stream-timer-only", vec!["pending", "ready-error"]),
+        ] {
+            let native = observation(&states);
+            let mut expected = vec![
+                json!({"case":"sdk-stream-ready","token":"one","native_result_poll":observation(&["pending"])}),
+                json!({"case":"sdk-stream-timer-only","token":"two","native_result_poll":observation(&["pending","pending"])}),
+            ];
+            let index = usize::from(case.ends_with("timer-only"));
+            expected[index]["native_result_poll"] = native.clone();
+            let events: Vec<_> = expected.iter().map(|control| {
+                json!({"event":"sdk-stream-coordinator-terminal","case":control["case"],
+                    "token":control["token"],"coordinator_ok":true,"native_result_poll":control["native_result_poll"]})
+            }).collect();
+            validate_native_result_poll(case, &native).unwrap();
+            if states.last() == Some(&"ready-error") {
+                assert!(validate_sdk_terminals(&events, &expected).is_err());
+                continue;
+            }
+            validate_sdk_terminals(&events, &expected).unwrap();
+            for change in [
+                "missing", "state", "phase", "polls", "writer", "sent", "extra", "mismatch",
+            ] {
+                let mut mutated = events.clone();
+                match change {
+                    "missing" => {
+                        mutated[index]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("native_result_poll");
+                    }
+                    "state" => {
+                        mutated[index]["native_result_poll"]["states"] = json!(["completed"])
+                    }
+                    "phase" => {
+                        mutated[index]["native_result_poll"]["phase"] = json!("after-response-eof")
+                    }
+                    "polls" => mutated[index]["native_result_poll"]["polls"] = json!(0),
+                    "writer" => {
+                        mutated[index]["native_result_poll"]["stream_writer_owned"] = json!(false)
+                    }
+                    "sent" => {
+                        mutated[index]["native_result_poll"]["body_result_sent"] = json!(true)
+                    }
+                    "extra" => {
+                        mutated[index]["native_result_poll"]["delivery_proven"] = json!(true)
+                    }
+                    "mismatch" => {
+                        let mut other = states.clone();
+                        *other.last_mut().unwrap() = if states.last() == Some(&"pending") {
+                            "ready-ok"
+                        } else {
+                            "pending"
+                        };
+                        if case.ends_with("timer-only") && other.len() == 1 {
+                            other = vec!["ready-error"];
+                        }
+                        mutated[index]["native_result_poll"]["states"] = json!(other);
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(
+                    validate_sdk_terminals(&mutated, &expected).is_err(),
+                    "{case}, {states:?}: {change}"
+                );
+            }
+            let mut missing = expected.clone();
+            missing[index]
+                .as_object_mut()
+                .unwrap()
+                .remove("native_result_poll");
+            assert!(validate_sdk_terminals(&events, &missing).is_err());
+        }
+        for (case, states) in [
+            ("sdk-stream-ready", vec![]),
+            ("sdk-stream-ready", vec!["pending", "ready-ok"]),
+            ("sdk-stream-timer-only", vec!["pending"]),
+            ("sdk-stream-timer-only", vec!["ready-ok", "ready-ok"]),
+            ("sdk-stream-timer-only", vec!["ready-error", "pending"]),
+            (
+                "sdk-stream-timer-only",
+                vec!["pending", "pending", "ready-ok"],
+            ),
+        ] {
+            assert!(validate_native_result_poll(case, &observation(&states)).is_err());
+        }
+    }
+
+    #[test]
     fn sdk_terminal_evidence_rejects_missing_failed_duplicate_and_foreign_completion() {
+        let native = json!({"phase":"before-response-eof","states":["ready-ok"],"polls":1,
+            "stream_writer_owned":true,"body_result_sent":false});
         let expected = vec![
-            json!({"case":"sdk-stream-ready","token":"one"}),
-            json!({"case":"sdk-stream-timer-only","token":"two"}),
+            json!({"case":"sdk-stream-ready","token":"one","native_result_poll":native}),
+            json!({"case":"sdk-stream-timer-only","token":"two","native_result_poll":native}),
         ];
-        let events:Vec<_> = expected.iter().map(|e|json!({"event":"sdk-stream-coordinator-terminal","case":e["case"],"token":e["token"],"coordinator_ok":true})).collect();
+        let events:Vec<_> = expected.iter().map(|e|json!({"event":"sdk-stream-coordinator-terminal","case":e["case"],"token":e["token"],"coordinator_ok":true,"native_result_poll":native})).collect();
         validate_sdk_terminals(&events, &expected).unwrap();
         for change in ["missing", "failed", "duplicate", "foreign", "panic"] {
             let mut mutated = events.clone();

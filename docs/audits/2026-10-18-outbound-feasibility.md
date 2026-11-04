@@ -9,6 +9,65 @@ qualification. The dated gate checkpoints below retain their original decisions 
 observations, not blanket implementation stops after later scoped approvals. Frozen-candidate,
 consumer and hosted evidence remain separate, and no capability is promoted by local coverage.
 
+### Native Spin Result Before EOF (2026-11-03)
+
+The [retained native record](evidence/2026-11-03-spin-response-result-local.json) uses the existing
+Spin progress suite, not another application transport. Spin 4.1.0 reports revision `c0b3726` on
+macOS/aarch64; SDK 7.0.0 remains pinned to `6c59ed5b`, with WASIp3 0.10.0 and wit-bindgen 0.63.0.
+The record preserves the working-tree build identity, component/runtime SHA-256 hashes, four
+response controls and exactly two correlated terminals from canonical component stderr.
+
+The ready SDK control samples Pending once. The timer-only control samples Pending, performs
+its unchanged 100 ms wait (measured 102,121,500 ns), then samples `Ready(Ok(()))`. Both samples
+precede response EOF, with the same stream writer still owned and the body result unsent. The
+actual native readiness instant is not measured. There are at most two pre-EOF samples, no new
+timer or body-write callsite, and no polling loop. Completed results are cached, never repolled;
+only still-Pending work resumes the original post-EOF await. Response metadata must match its
+case/token terminal. Unknown, repeated-after-Ready, extra, mismatched or post-EOF evidence fails
+validation. Native errors cannot become successful coordinator terminals.
+
+This is an explicit diagnostic change in polling order, not passive instrumentation. The initial
+single-sample run retained Pending in both controls and is inconclusive; it remains under
+`/private/tmp/pr275-spin-result-before-eof-green/`. The two-boundary capture is under
+`/private/tmp/pr275-spin-result-two-boundaries-native/`. Its complete progress suite exits 0,
+including all four existing response controls. No worker panic is observed before controlled
+shutdown; the recorded panic text after controlled shutdown remains a separate negative observation,
+not evidence of safe host teardown.
+
+The result establishes that this unbounded raw SDK response's one-shot future can finish before
+its body. It cannot then notify a later disconnect. It does not establish that every host or
+response shape has this behavior, that cancellation is impossible, or that another native API
+could not improve observation. EdgeZero's existing early-Ok retirement preserves healthy body
+work and its deadline; treating that success as cancellation would restore the earlier defect.
+The ordinary-close and reset cleanup gates remain unchanged and unqualified.
+
+Pinned source context distinguishes this observation from a completion guarantee:
+
+- [Wasmtime's handler](https://github.com/bytecodealliance/wasmtime/blob/v48.0.0/crates/wasi-http/src/handler.rs#L1000)
+  constructs a request-I/O future and passes it to response conversion.
+- [Response conversion](https://github.com/bytecodealliance/wasmtime/blob/v48.0.0/crates/wasi-http/src/p3/response.rs#L44)
+  forwards the supplied processing future; the [unbounded-body branch](https://github.com/bytecodealliance/wasmtime/blob/v48.0.0/crates/wasi-http/src/p3/body.rs#L366)
+  forwards it without a response-length error wrapper.
+- The pinned `wasip3` crate's `wit/deps/http.wit:400` describes a response-transmission result.
+  The observed timing warrants upstream contract clarification; source wiring alone is not an
+  executed host-disconnect proof or a blanket upstream-bug finding.
+- The [pinned writer API](https://github.com/bytecodealliance/wit-bindgen/blob/29e03934154913417189a9bfb8e2fa6682d1d795/crates/guest-rust/src/rt/async_support/stream_support.rs#L199)
+  exposes peer loss through write results, not a passive writer-close watcher. This investigation
+  adds no empty or heartbeat writes to manufacture that observation.
+
+Workers ordinary-close attribution also remains open. The [pinned KJ HTTP boundary](https://github.com/capnproto/capnproto/blob/e866bdbaa3078a4bda9e4287d2d4a773c0986902/c%2B%2B/src/kj/compat/http.c%2B%2B#L8746)
+waits for write-side disconnection, distinct from read EOF in its
+[Darwin event handling](https://github.com/capnproto/capnproto/blob/e866bdbaa3078a4bda9e4287d2d4a773c0986902/c%2B%2B/src/kj/async-unix.c%2B%2B#L904).
+That is consistent with the close/reset difference, not proof of the actual packets or signal
+state in the original case. Passive capture could not start: `/dev/bpf0` is root-only and
+passwordless sudo is unavailable. No traffic was captured, permission bypass attempted, or
+extra application traffic sent. Administrative capture access is a separate prerequisite.
+
+No production adapter, public API, SDK/runtime pin, deadline, acceptance identity or capability
+classification changes. Remaining timing, ordinary cancellation, exact-candidate and hosted
+qualification requirements are not waived. This checkpoint prepares a bounded upstream
+reproduction; it does not publish an upstream issue or authorize deployment.
+
 ### Native Workers Abort Negative Control (2026-11-02)
 
 One bounded localhost-only SDK control used Wrangler 4.151.1, Miniflare 5.20261012.1-beta and

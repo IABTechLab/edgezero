@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Bound and cross-check native Spin response-result observations before stream EOF using the
+  existing SDK controls and timer. Preserve early-success retirement, original cancellation gates
+  and separate teardown failures; add no production polling or transport workaround.
 - Distinguish ordinary client close from explicitly requested TCP reset in the Rust lifecycle
   harness. Keep every original gate on close; run the reset control only after cancellation
   fails, with isolated runtime evidence, unchanged budgets and no acceptance or qualification credit.

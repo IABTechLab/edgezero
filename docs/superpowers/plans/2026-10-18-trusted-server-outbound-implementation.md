@@ -70,6 +70,42 @@ and final serialized runs pass. No test timeout or acceptance tolerance is widen
 the socket ownership, diagnostic isolation, startup prerequisite and retained evidence have no
 remaining findings. These checks validate the diagnostic tooling, not the failing runtime gates.
 
+#### Native Spin Signal Follow-Up
+
+The [retained native record](../../audits/evidence/2026-11-03-spin-response-result-local.json)
+and [source analysis](../../audits/2026-10-18-outbound-feasibility.md#native-spin-result-before-eof-2026-11-03)
+narrow the remaining signal question without a production repair. The existing raw SDK controls
+retain their original ready/timer-only cases and 100 ms wait. One sample starts the native read;
+the timer control samples again only if initially Pending, after its existing wait. No third
+pre-EOF poll, new timer/write callsite, route, transport, executor or CI job is added. Completed
+values are cached permanently; the original post-EOF await remains only for still-Pending work.
+Bounded case-specific transcripts, ownership premises and matching component terminals are
+validated with fail-first and mutation controls. No compatibility schema is retained.
+
+The ready control observes Pending, which is inconclusive. The timer-only control observes
+Pending then `Ready(Ok(()))` across 102.1215 ms, while its writer is still owned and its body result
+unsent, before stream EOF. The precise native completion time is unknown. Its one-shot result
+cannot thereafter signal another error; it is not an ongoing disconnect watcher or delivery proof.
+All four comparison controls and the complete progress suite pass. The canonical component log
+has two successful correlated native terminals. Runtime panic text after controlled shutdown is
+retained separately, not hidden by that success. Neither this raw unbounded-response behavior nor
+the pinned host's request-I/O wiring proves universal provider impossibility or a remaining
+EdgeZero defect. The existing coordinator must preserve body work after early host success.
+
+Source review finds a write-side/read-side distinction in Workers' pinned native HTTP boundary,
+consistent with the close/reset asymmetry. Actual packet attribution remains unproved because
+local BPF capture needs administrator access; no traffic was captured or permission bypass tried.
+Original cancellation/timing gates, scope, pins and capabilities remain unchanged. No upstream
+issue is posted, candidate frozen or hosted deployment authorized by this investigation.
+
+Verification: all five workspace gates pass, including 2,666 tests across 33 binaries with one
+existing ignored test. The harness passes 586 tests with two existing ignored tests; fixture core
+passes 84 tests. Three feature-enabled Spin response-race model tests pass under the nonzero-test
+guard; those model results are not native cancellation evidence. Harness and Spin fixture WASM
+strict Clippy, all three workspace format checks, 165 tooling guards, legacy-API checks and docs
+format/lint/build pass. Independent fixture, validator and artifact reviews find no remaining
+issues in this checkpoint; no hosted or original failing lifecycle gate is credited by these checks.
+
 ### Runtime Boundary Investigation (2026-11-03)
 
 All 30 GitHub checks pass at `f036425b`. The following changes and executions are earlier

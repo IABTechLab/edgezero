@@ -822,6 +822,20 @@ group; any failed group still fails the run. Compilation is not runtime proof. S
 [feasibility report](../../docs/audits/2026-10-18-outbound-feasibility.md) for exact versions,
 source identities, retained evidence and remaining hosted/relay limitations.
 
+The two existing Spin SDK controls explicitly sample the same pinned response-result future
+before response EOF, while the stream writer remains owned and the body result is unsent.
+This diagnostic changes polling order; it is not passive instrumentation. It adds no write,
+timer, route, suite or executor, and retains the original ready/timer-only pause measurement.
+The ready control samples once. The timer control samples before its existing 100 ms wait and,
+only if initially Pending, once after that wait. It adds no third pre-EOF poll. `polls` counts
+only these bounded samples, not all lifetime polls. A Ready value is cached without repolling;
+Pending retains the original future for its existing post-EOF await. Native
+errors cannot become successful coordinator terminals. Response metadata and the correlated
+component terminal must agree; missing, mismatched, repolled or post-EOF evidence is rejected.
+All three sampled states are representable: Pending is inconclusive, and early Ok establishes
+neither client delivery nor cancellation. This SDK-level observation does not replace the
+ordinary-close/reset lifecycle cases or earn additional acceptance credit.
+
 Cloudflare builds require explicit absolute `WASM_BINDGEN_BIN`, `ESBUILD_BIN` and `WASM_OPT_BIN`
 executable overrides. The wasm-bindgen version must match the locked crate. Preflight refuses
 implicit tool downloads or dependency repins; missing tools produce unverified exit 2, not pass.
