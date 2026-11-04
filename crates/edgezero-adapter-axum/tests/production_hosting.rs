@@ -1612,6 +1612,8 @@ mod tests {
         }
     }
 
+    include!("fixtures/geo_hosting.rs");
+
     fn geo_command(mode: &str, cwd: &TempDir, addr: SocketAddr) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_edgezero-hosting-fixture"));
         command

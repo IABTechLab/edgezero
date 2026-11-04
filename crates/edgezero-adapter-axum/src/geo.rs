@@ -1,6 +1,47 @@
-//! Explicit native Geo composition for an operator-protected CloudFront/ALB path.
+//! Explicit native Geo composition for local `GeoLite` databases and protected assertions.
 //!
-//! This policy declares external infrastructure protection. A matching socket peer
+//! Local database selection works without `CloudFront`, AWS stores or credentials.
+//! Select `geo-maxmind` to load an operator-supplied read-only snapshot before the
+//! runner initializes. Request lookup uses only checked ingress and memory.
+//! Database preparation is synchronous, before signal registration/stop polling.
+//!
+//! Direct-reader configuration, with no file I/O during capability inspection:
+//! ```no_run
+//! use edgezero_adapter_axum::dev_server::AxumRunOptions;
+//! use edgezero_adapter_axum::geo::{MaxMindGeoConfig, NativeGeoSelection, ReaderIpExpectation};
+//!
+//! let options = AxumRunOptions::new("0.0.0.0:8787".parse()?)?
+//!     .with_geo(NativeGeoSelection::MaxMind {
+//!         config: MaxMindGeoConfig::new(
+//!             "/var/lib/edgezero/geo/GeoLite2-City.mmdb",
+//!             ReaderIpExpectation::PeerAllowed,
+//!         ),
+//!     });
+//! let _configured = options.geo_capability()?;
+//! # Ok::<(), anyhow::Error>(())
+//! ```
+//!
+//! A reverse proxy must resolve the reader through the existing trusted policy:
+//! ```no_run
+//! use edgezero_adapter_axum::dev_server::AxumRunOptions;
+//! use edgezero_adapter_axum::geo::{MaxMindGeoConfig, NativeGeoSelection, ReaderIpExpectation};
+//! use edgezero_adapter_axum::proxy::{ForwardingHeaderFamily, TrustedProxyPolicy};
+//!
+//! let proxy = TrustedProxyPolicy::new(
+//!     ForwardingHeaderFamily::Forwarded, ["10.20.0.8/32"],
+//! )?;
+//! let options = AxumRunOptions::new("0.0.0.0:8787".parse()?)?
+//!     .with_trusted_proxy_policy(proxy)
+//!     .with_geo(NativeGeoSelection::MaxMind {
+//!         config: MaxMindGeoConfig::new(
+//!             "/var/lib/edgezero/geo/GeoLite2-City.mmdb",
+//!             ReaderIpExpectation::ForwardedRequired,
+//!         ),
+//!     });
+//! # Ok::<(), anyhow::Error>(())
+//! ```
+//!
+//! The `CloudFront` policy declares external infrastructure protection. A matching socket peer
 //! is not proof of an ALB credential rule or a particular `CloudFront` distribution.
 //! See the native Geo guide for the required network, header and cache controls.
 //!
@@ -47,12 +88,15 @@
 //! use std::sync::Arc;
 //! use edgezero_adapter_axum::dev_server::AxumRunOptions;
 //! use edgezero_adapter_axum::geo::{NativeGeoSelection, ProtectedCloudFrontAlb};
-//! use edgezero_core::geo::{GeoInput, GeoProvider, GeoProviderId, GeoResolution};
+//! use edgezero_core::geo::{GeoError, GeoInput, GeoProvider, GeoProviderId, GeoResolution};
 //!
 //! struct ExampleProvider;
 //! impl GeoProvider for ExampleProvider {
-//!     fn resolve(&self, _input: &GeoInput) -> GeoResolution {
-//!         GeoResolution::MissingMetadata
+//!     fn resolve(&self, input: &GeoInput) -> GeoResolution {
+//!         match input {
+//!             GeoInput::Assertions { .. } => GeoResolution::MissingMetadata,
+//!             GeoInput::ReaderIp { .. } => GeoResolution::Error(GeoError::ProviderFailure),
+//!         }
 //!     }
 //! }
 //! let policy = ProtectedCloudFrontAlb::new(
@@ -78,6 +122,8 @@
 //!         GeoOutcome::Selected { status, .. } => match status {
 //!             GeoStatus::Unavailable(GeoUnavailableReason::UntrustedIngress) => "source not admitted",
 //!             GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata) => "metadata missing",
+//!             GeoStatus::Unavailable(GeoUnavailableReason::MissingReaderIp) => "reader unavailable",
+//!             GeoStatus::Unavailable(GeoUnavailableReason::NoMatch) => "no geographic match",
 //!             GeoStatus::Error(GeoError::InvalidAssertion) => "assertion rejected",
 //!             GeoStatus::Error(GeoError::ProviderFailure) => "provider failed",
 //!             GeoStatus::Located { location, .. } if location.subdivision().is_none() => "country only",
@@ -92,7 +138,7 @@
     reason = "public composition types precede private request-bound resolution and tests"
 )]
 #![cfg_attr(
-    feature = "geo-cloudfront",
+    any(feature = "geo-cloudfront", feature = "geo-maxmind"),
     expect(
         clippy::self_named_module_files,
         reason = "repo convention uses geo.rs with submodules under geo/, not mod.rs"
@@ -101,18 +147,26 @@
 
 #[cfg(feature = "geo-cloudfront")]
 mod cloudfront;
+#[cfg(feature = "geo-maxmind")]
+mod maxmind;
+#[cfg(test)]
+#[path = "geo/reader_tests.rs"]
+mod reader_tests;
 
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use edgezero_core::geo::{
-    GeoAssertion, GeoInput, GeoOutcome, GeoProvider, GeoProviderId, GeoResolution, GeoSource,
-    GeoStatus, GeoTrustBasis, GeoUnavailableReason,
+    GeoAssertion, GeoInput, GeoIpSource, GeoOutcome, GeoProvider, GeoProviderId, GeoResolution,
+    GeoSource, GeoStatus, GeoTrustBasis, GeoUnavailableReason,
 };
 use edgezero_core::http::{HeaderMap, HeaderName};
+use edgezero_core::ingress::CheckedHostSource;
 
 use crate::peer_networks::PeerNetworks;
+use crate::proxy::CheckedProxyMetadata;
 
 /// Bounded startup configuration categories. No policy inputs are retained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -125,6 +179,87 @@ pub enum NativeGeoConfigError {
     UnavailableCloudFront,
     #[error("native_geo: reserved supplied provider identity")]
     ReservedProviderId,
+    #[error("native_geo: maxmind implementation unavailable")]
+    UnavailableMaxMind,
+    #[error("native_geo: invalid database preparation limits")]
+    InvalidPreparationLimits,
+    #[error("native_geo: database unavailable")]
+    UnavailableDatabase,
+    #[error("native_geo: invalid database")]
+    InvalidDatabase,
+    #[error("native_geo: database preparation limit exceeded")]
+    DatabaseLimit,
+    #[error("native_geo: unsupported database")]
+    UnsupportedDatabase,
+    #[error("native_geo: incompatible database schema")]
+    InvalidDatabaseSchema,
+}
+
+/// Whether checked ingress must explicitly resolve a reader through a proxy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReaderIpExpectation {
+    PeerAllowed,
+    ForwardedRequired,
+}
+
+/// Configurable startup bounds. They do not impose an I/O deadline or RSS quota.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaxMindPreparationLimits {
+    pub max_database_bytes: usize,
+    pub max_validation_networks: usize,
+}
+
+impl Default for MaxMindPreparationLimits {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            max_database_bytes: 128 * 1024 * 1024,
+            max_validation_networks: 32_000_000,
+        }
+    }
+}
+
+impl MaxMindPreparationLimits {
+    fn validate(self) -> Result<(), NativeGeoConfigError> {
+        if self.max_database_bytes == 0
+            || self.max_database_bytes.checked_add(1).is_none()
+            || self.max_validation_networks == 0
+        {
+            return Err(NativeGeoConfigError::InvalidPreparationLimits);
+        }
+        Ok(())
+    }
+}
+
+/// Operator-owned database location and explicit reader expectation. No I/O on construction.
+#[derive(Clone)]
+pub struct MaxMindGeoConfig {
+    pub path: PathBuf,
+    pub limits: MaxMindPreparationLimits,
+    pub expectation: ReaderIpExpectation,
+}
+
+impl MaxMindGeoConfig {
+    #[inline]
+    #[must_use]
+    pub fn new<P: Into<PathBuf>>(path: P, expectation: ReaderIpExpectation) -> Self {
+        Self {
+            path: path.into(),
+            limits: MaxMindPreparationLimits::default(),
+            expectation,
+        }
+    }
+}
+
+impl fmt::Debug for MaxMindGeoConfig {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MaxMindGeoConfig")
+            .field("path", &"[redacted]")
+            .field("limits", &self.limits)
+            .field("expectation", &self.expectation)
+            .finish()
+    }
 }
 
 /// An operator declaration of a credential-gated, isolated CloudFront/ALB path.
@@ -204,6 +339,14 @@ pub enum NativeGeoSelection {
     CloudFront {
         policy: ProtectedCloudFrontAlb,
     },
+    MaxMind {
+        config: MaxMindGeoConfig,
+    },
+    SuppliedReaderIp {
+        expectation: ReaderIpExpectation,
+        id: GeoProviderId,
+        provider: Arc<dyn GeoProvider + Send + Sync>,
+    },
     Supplied {
         policy: ProtectedCloudFrontAlb,
         id: GeoProviderId,
@@ -220,6 +363,14 @@ impl fmt::Debug for NativeGeoSelection {
                 .debug_struct("CloudFront")
                 .field("policy", policy)
                 .finish(),
+            Self::MaxMind { config } => f.debug_struct("MaxMind").field("config", config).finish(),
+            Self::SuppliedReaderIp {
+                expectation, id, ..
+            } => f
+                .debug_struct("SuppliedReaderIp")
+                .field("expectation", expectation)
+                .field("id", id)
+                .finish_non_exhaustive(),
             Self::Supplied { policy, id, .. } => f
                 .debug_struct("Supplied")
                 .field("policy", policy)
@@ -229,97 +380,258 @@ impl fmt::Debug for NativeGeoSelection {
     }
 }
 
-/// Owned startup capability, not proof of per-request coverage or infrastructure.
+/// Configured input contract, without eventual request provenance or database readiness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeGeoInputContract {
+    ProtectedCloudFrontAlb,
+    ReaderIp { expectation: ReaderIpExpectation },
+}
+
+/// Owned startup configuration capability. Inspection performs no database I/O.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeGeoCapability {
     Off,
     Selected {
         provider: GeoProviderId,
-        source: GeoSource,
-        trust_basis: GeoTrustBasis,
+        input: NativeGeoInputContract,
     },
 }
 
-/// Validated runner-owned composition, never installed in public extensions.
+impl NativeGeoSelection {
+    pub(crate) fn capability(&self) -> Result<NativeGeoCapability, NativeGeoConfigError> {
+        let (provider, input) = match self {
+            Self::Off => return Ok(NativeGeoCapability::Off),
+            Self::CloudFront { .. } => {
+                if !cfg!(feature = "geo-cloudfront") {
+                    return Err(NativeGeoConfigError::UnavailableCloudFront);
+                }
+                (
+                    GeoProviderId::cloudfront(),
+                    NativeGeoInputContract::ProtectedCloudFrontAlb,
+                )
+            }
+            Self::MaxMind { config } => {
+                config.limits.validate()?;
+                if !cfg!(all(feature = "geo-maxmind", unix)) {
+                    return Err(NativeGeoConfigError::UnavailableMaxMind);
+                }
+                (
+                    GeoProviderId::maxmind(),
+                    NativeGeoInputContract::ReaderIp {
+                        expectation: config.expectation,
+                    },
+                )
+            }
+            Self::Supplied { id, .. } | Self::SuppliedReaderIp { id, .. } => {
+                if id == &GeoProviderId::cloudfront() || id == &GeoProviderId::maxmind() {
+                    return Err(NativeGeoConfigError::ReservedProviderId);
+                }
+                let input = if let Self::SuppliedReaderIp { expectation, .. } = self {
+                    NativeGeoInputContract::ReaderIp {
+                        expectation: *expectation,
+                    }
+                } else {
+                    NativeGeoInputContract::ProtectedCloudFrontAlb
+                };
+                (id.clone(), input)
+            }
+        };
+        Ok(NativeGeoCapability::Selected { provider, input })
+    }
+}
+
+/// Source admission remains framework-owned and independent of provider identity.
+#[derive(Clone)]
+pub(crate) enum NativeGeoAdmission {
+    Assertions(ProtectedCloudFrontAlb),
+    ReaderIp {
+        expectation: ReaderIpExpectation,
+        source: GeoSource,
+    },
+}
+
+/// Prepared runner-owned composition, never installed in public extensions.
 #[derive(Clone, Default)]
 pub(crate) enum NativeGeo {
     #[default]
     Off,
     Selected {
-        policy: ProtectedCloudFrontAlb,
+        admission: NativeGeoAdmission,
         id: GeoProviderId,
         provider: Arc<dyn GeoProvider + Send + Sync>,
+        #[cfg(feature = "geo-maxmind")]
+        snapshot: Option<maxmind::MaxMindSnapshot>,
     },
 }
 
 impl NativeGeo {
-    pub(crate) fn validate(selection: &NativeGeoSelection) -> Result<Self, NativeGeoConfigError> {
-        match selection {
-            NativeGeoSelection::Off => Ok(Self::Off),
+    pub(crate) fn prepare(selection: &NativeGeoSelection) -> Result<Self, NativeGeoConfigError> {
+        let _capability = selection.capability()?;
+        let (admission, id, provider): (_, _, Arc<dyn GeoProvider + Send + Sync>) = match selection
+        {
+            NativeGeoSelection::Off => return Ok(Self::Off),
             #[cfg(feature = "geo-cloudfront")]
-            NativeGeoSelection::CloudFront { policy } => Ok(Self::Selected {
-                policy: policy.clone(),
-                id: GeoProviderId::cloudfront(),
-                provider: Arc::new(cloudfront::CloudFrontProvider),
-            }),
+            NativeGeoSelection::CloudFront { policy } => (
+                NativeGeoAdmission::Assertions(policy.clone()),
+                GeoProviderId::cloudfront(),
+                Arc::new(cloudfront::CloudFrontProvider),
+            ),
             #[cfg(not(feature = "geo-cloudfront"))]
             NativeGeoSelection::CloudFront { .. } => {
-                Err(NativeGeoConfigError::UnavailableCloudFront)
+                return Err(NativeGeoConfigError::UnavailableCloudFront);
+            }
+            #[cfg(feature = "geo-maxmind")]
+            NativeGeoSelection::MaxMind { config } => {
+                let provider = maxmind::MaxMindProvider::prepare(config)?;
+                let snapshot = Some(provider.metadata.clone());
+                return Ok(Self::Selected {
+                    admission: NativeGeoAdmission::ReaderIp {
+                        expectation: config.expectation,
+                        source: GeoSource::LocalDatabase,
+                    },
+                    id: GeoProviderId::maxmind(),
+                    provider: Arc::new(provider),
+                    snapshot,
+                });
+            }
+            #[cfg(not(feature = "geo-maxmind"))]
+            NativeGeoSelection::MaxMind { .. } => {
+                return Err(NativeGeoConfigError::UnavailableMaxMind);
             }
             NativeGeoSelection::Supplied {
                 policy,
                 id,
                 provider,
-            } => {
-                if id == &GeoProviderId::cloudfront() {
-                    return Err(NativeGeoConfigError::ReservedProviderId);
-                }
-                Ok(Self::Selected {
-                    policy: policy.clone(),
-                    id: id.clone(),
-                    provider: Arc::clone(provider),
-                })
-            }
-        }
+            } => (
+                NativeGeoAdmission::Assertions(policy.clone()),
+                id.clone(),
+                Arc::clone(provider),
+            ),
+            NativeGeoSelection::SuppliedReaderIp {
+                expectation,
+                id,
+                provider,
+            } => (
+                NativeGeoAdmission::ReaderIp {
+                    expectation: *expectation,
+                    source: GeoSource::CheckedReaderIp,
+                },
+                id.clone(),
+                Arc::clone(provider),
+            ),
+        };
+        Ok(Self::Selected {
+            admission,
+            id,
+            provider,
+            #[cfg(feature = "geo-maxmind")]
+            snapshot: None,
+        })
     }
 
-    pub(crate) fn capability(&self) -> NativeGeoCapability {
-        match self {
-            Self::Off => NativeGeoCapability::Off,
-            Self::Selected { id, .. } => NativeGeoCapability::Selected {
-                provider: id.clone(),
-                source: GeoSource::CloudFront,
-                trust_basis: GeoTrustBasis::DeclaredProtectedAlb,
-            },
+    #[cfg_attr(
+        not(feature = "geo-maxmind"),
+        expect(
+            clippy::unused_self,
+            reason = "the stable runner hook has no snapshot when the built-in reader is absent"
+        )
+    )]
+    pub(crate) fn log_snapshot(&self) {
+        #[cfg(feature = "geo-maxmind")]
+        if let Self::Selected {
+            snapshot: Some(snapshot),
+            ..
+        } = self
+        {
+            log::info!(target: "edgezero::native", "event=geo_database provider=maxmind database_type={} build_epoch={} sha256={}", snapshot.database_type, snapshot.build_epoch, snapshot.sha256);
         }
     }
 
     pub(crate) fn strip_credential(&self, headers: &mut HeaderMap) {
-        if let Self::Selected { policy, .. } = self {
+        if let Self::Selected {
+            admission: NativeGeoAdmission::Assertions(policy),
+            ..
+        } = self
+        {
             let _removed = headers.remove(&policy.credential_header);
         }
     }
 
-    pub(crate) fn resolve(&self, peer: Option<SocketAddr>, headers: &HeaderMap) -> GeoOutcome {
+    pub(crate) fn reader_input(&self, checked: &CheckedProxyMetadata) -> Option<GeoInput> {
         let Self::Selected {
-            policy,
+            admission: NativeGeoAdmission::ReaderIp { expectation, .. },
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let _peer = checked.direct_peer()?;
+        let source = match checked.client_source() {
+            CheckedHostSource::Direct if *expectation == ReaderIpExpectation::PeerAllowed => {
+                GeoIpSource::DirectPeer
+            }
+            CheckedHostSource::TrustedForwarded => GeoIpSource::TrustedForwarded,
+            CheckedHostSource::TrustedXForwarded => GeoIpSource::TrustedXForwarded,
+            CheckedHostSource::Direct | CheckedHostSource::Unavailable | _ => return None,
+        };
+        Some(GeoInput::ReaderIp {
+            address: checked.effective_client()?,
+            source,
+        })
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        peer: Option<SocketAddr>,
+        headers: &HeaderMap,
+        reader: Option<&GeoInput>,
+    ) -> GeoOutcome {
+        let Self::Selected {
+            admission,
             id,
             provider,
+            ..
         } = self
         else {
             return GeoOutcome::NoSelection;
         };
-        let status = match policy.admit(peer, headers) {
-            None => GeoStatus::Unavailable(GeoUnavailableReason::UntrustedIngress),
-            Some(admitted) => match provider.resolve(&admitted.input()) {
+        let admitted = match admission {
+            NativeGeoAdmission::Assertions(policy) => policy
+                .admit(peer, headers)
+                .map(|admitted| {
+                    (
+                        admitted.input(),
+                        GeoSource::CloudFront,
+                        GeoTrustBasis::DeclaredProtectedAlb,
+                    )
+                })
+                .ok_or(GeoUnavailableReason::UntrustedIngress),
+            NativeGeoAdmission::ReaderIp { source, .. } => match reader {
+                Some(
+                    input @ GeoInput::ReaderIp {
+                        source: reader_source,
+                        ..
+                    },
+                ) => Ok((
+                    input.clone(),
+                    *source,
+                    GeoTrustBasis::CheckedReaderIp(*reader_source),
+                )),
+                _ => Err(GeoUnavailableReason::MissingReaderIp),
+            },
+        };
+        let status = match admitted {
+            Err(reason) => GeoStatus::Unavailable(reason),
+            Ok((input, source, trust_basis)) => match provider.resolve(&input) {
                 GeoResolution::MissingMetadata => {
                     GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata)
                 }
+                GeoResolution::NoMatch => GeoStatus::Unavailable(GeoUnavailableReason::NoMatch),
                 GeoResolution::Error(error) => GeoStatus::Error(error),
                 GeoResolution::Located(location) => GeoStatus::Located {
                     location,
-                    source: GeoSource::CloudFront,
-                    trust_basis: GeoTrustBasis::DeclaredProtectedAlb,
+                    source,
+                    trust_basis,
                 },
             },
         };
@@ -337,7 +649,7 @@ struct ProtectedAssertions<'request> {
 
 impl ProtectedAssertions<'_> {
     fn input(&self) -> GeoInput {
-        GeoInput {
+        GeoInput::Assertions {
             country: assertion(self.headers, "cloudfront-viewer-country"),
             subdivision: assertion(self.headers, "cloudfront-viewer-country-region"),
         }
@@ -480,7 +792,7 @@ mod tests {
     #[test]
     fn source_admission_precedes_header_inspection_and_provider_calls() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let selected = NativeGeo::validate(&NativeGeoSelection::Supplied {
+        let selected = NativeGeo::prepare(&NativeGeoSelection::Supplied {
             policy: policy(),
             id: GeoProviderId::new("counting").unwrap(),
             provider: Arc::new(CountingProvider {
@@ -494,7 +806,7 @@ mod tests {
         headers.append("cloudfront-viewer-country", HeaderValue::from_static("CA"));
         for peer in [None, Some("192.0.2.1:80".parse().unwrap())] {
             assert_eq!(
-                selected.resolve(peer, &headers),
+                selected.resolve(peer, &headers, None),
                 GeoOutcome::Selected {
                     provider: GeoProviderId::new("counting").unwrap(),
                     status: GeoStatus::Unavailable(GeoUnavailableReason::UntrustedIngress)
@@ -502,13 +814,13 @@ mod tests {
             );
         }
         assert_eq!(
-            NativeGeo::Off.resolve(Some("127.0.0.1:80".parse().unwrap()), &headers),
+            NativeGeo::Off.resolve(Some("127.0.0.1:80".parse().unwrap()), &headers, None),
             GeoOutcome::NoSelection
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         for values in [&headers, &HeaderMap::new()] {
             assert_eq!(
-                selected.resolve(Some("127.0.0.1:80".parse().unwrap()), values),
+                selected.resolve(Some("127.0.0.1:80".parse().unwrap()), values, None),
                 GeoOutcome::Selected {
                     provider: GeoProviderId::new("counting").unwrap(),
                     status: GeoStatus::Error(GeoError::ProviderFailure)
@@ -545,7 +857,7 @@ mod tests {
 
     #[test]
     fn credential_removal_strips_all_instances_and_preserves_geography() {
-        let selected = NativeGeo::validate(&NativeGeoSelection::Supplied {
+        let selected = NativeGeo::prepare(&NativeGeoSelection::Supplied {
             policy: policy(),
             id: GeoProviderId::new("custom").unwrap(),
             provider: Arc::new(CountingProvider {
@@ -570,7 +882,7 @@ mod tests {
     fn supplied_identity_cannot_claim_builtin_and_options_keep_thread_bounds() {
         fn assert_bounds<T: Clone + Send + Sync>() {}
         assert_bounds::<AxumRunOptions>();
-        let error = NativeGeo::validate(&NativeGeoSelection::Supplied {
+        let error = NativeGeo::prepare(&NativeGeoSelection::Supplied {
             policy: policy(),
             id: GeoProviderId::cloudfront(),
             provider: Arc::new(CountingProvider {
@@ -612,7 +924,7 @@ mod tests {
     fn compiled_out_builtin_is_an_error_not_off() {
         let selected = NativeGeoSelection::CloudFront { policy: policy() };
         assert_eq!(
-            NativeGeo::validate(&selected).err(),
+            NativeGeo::prepare(&selected).err(),
             Some(NativeGeoConfigError::UnavailableCloudFront)
         );
     }

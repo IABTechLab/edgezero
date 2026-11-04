@@ -1093,6 +1093,7 @@ where
             let metadata = A::stores();
             let sources = NativeSourcePlan::validate(metadata, &options, overrides)?;
             init_logging::<A>(options.logging_level())?;
+            native.geo.log_snapshot();
             let mut app = build_app_for_dispatch::<A>()?;
             let stores = build_production_stores(metadata, &options, sources).await?;
             let transport = AxumOutboundClient::try_transport()
@@ -3479,6 +3480,56 @@ mod native_store_tests {
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
         let listener = StdTcpListener::bind(address).expect("runner never bound listener");
         drop(listener);
+    }
+
+    #[cfg(feature = "geo-maxmind")]
+    #[test]
+    fn geo_maxmind_prepared_before_ready_stop_skips_initializer_and_bind() {
+        use crate::geo::{MaxMindGeoConfig, NativeGeoSelection, ReaderIpExpectation};
+        let options = options().with_geo(NativeGeoSelection::MaxMind {
+            config: MaxMindGeoConfig::new(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/geoip/city.mmdb"),
+                ReaderIpExpectation::PeerAllowed,
+            ),
+        });
+        let address = options.addr();
+        let initialized = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&initialized);
+        run_app_with_options_and_initializer::<CustomApp, _, _>(
+            options,
+            future::ready(()),
+            move |_app, _stores| {
+                Box::pin(async move {
+                    observed.set(true);
+                    Ok(())
+                })
+            },
+        )
+        .unwrap();
+        assert!(!initialized.get());
+        drop(StdTcpListener::bind(address).expect("ready stop never binds"));
+    }
+
+    #[cfg(feature = "geo-maxmind")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn geo_maxmind_invalid_database_fails_before_runner_resources() {
+        use crate::geo::{MaxMindGeoConfig, NativeGeoSelection, ReaderIpExpectation};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("PRIVATE_DATABASE_PATH");
+        fs::write(&path, b"not an MMDB").unwrap();
+        let options = options().with_geo(NativeGeoSelection::MaxMind {
+            config: MaxMindGeoConfig::new(path, ReaderIpExpectation::PeerAllowed),
+        });
+        let address = options.addr();
+        let error = run_app_with_options_and_initializer::<CustomApp, _, _>(
+            options,
+            future::pending::<()>(),
+            |_app, _stores| Box::pin(async { panic!("initializer must not run") }),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "native_geo: invalid database");
+        assert!(!format!("{error:?}").contains("PRIVATE_DATABASE_PATH"));
+        drop(StdTcpListener::bind(address).expect("invalid database never binds"));
     }
 
     #[test]
