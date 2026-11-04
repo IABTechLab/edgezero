@@ -12,6 +12,44 @@
 
 ## Status and Authority
 
+### Cold Entry Phase Observation (2026-11-03)
+
+All 30 GitHub checks pass at `f82e4025`. Continuing the remaining timing investigation adds
+bounded diagnostic samples to the existing fixture, not production behavior or acceptance.
+
+- [x] Fail first on an actual-route late-entry test, then capture three original-clock instants:
+      fixture-handler-body entry and the original 2 ms wait's entry/return. Reuse the existing
+      Begin entry instant. Keep fixed typed storage and format only after operation timestamps.
+- [x] Share the two existing origin wait/request preparation sequences privately, preserving
+      `?` propagation, request policies and handoff's original `owner.with` dispatch boundary.
+- [x] Prove on-time and 9 ms late handler entry keep the original epoch; the late Begin still
+      fails unchanged validation even with forged diagnostic metadata. Preserve null for unreachable
+      or pre-epoch samples, raw ordering before truncation, and reporting without clock reads.
+- [x] Execute the existing complete local Workers suite without a warmup or changed timing bound.
+
+Capture: `/private/tmp/pr275-entry-phase-workers-v1/`, working-tree build identity
+`2eef23c779117db5a410d3930daf082a12deb992158cf7300d171f32471ef45c`. The cold case records
+handler/wait-entry/wait-return **8/8/8 ms**, followed by Begin **9 ms** with **1 ms** duration.
+The original 2 ms target is already expired, so the wait is skipped. Comparison **0/0/3 ms**
+precedes Begin at **3 ms**. This places the observed cold delay before fixture-handler entry;
+it does not attribute it to URL parsing, conversion, routing, JIT or scheduling. Equal/coarse
+samples do not prove zero work or CPU duration; local behavior must not be inferred from deployed
+clock freezing. See the [audit and primary clock references](../../audits/2026-10-18-outbound-feasibility.md#cold-entry-phase-observation-2026-11-03).
+
+The full suite remains **16 pass/three fail, exit 1**, plus a final-log-tail failure. Cold Begin,
+pending-body cutoff at 207 ms and ordinary cancellation remain failed; historical negatives are
+not retried for credit or erased. The diagnostics do not measure actual timer delivery or abort
+duration. Both independent designs favor the minimal three new samples over six boundaries or
+a new diagnostic API. Production APIs/adapters, SDK/runtime pins, deadlines, caps, acceptance
+identities, capabilities, demo and templates are unchanged. Candidate freeze and hosted proof
+remain separately gated. No new script, runtime, suite, invocation list or CI job is introduced.
+
+Verification passes all five root gates (2,666 tests/33 binaries, one existing ignored), 87 fixture
+tests with native witnesses and 71 without, 151 owning lifecycle-harness tests, strict fixture and
+harness Clippy, all three fixture WASM checks, all three workspace format checks, 284 tooling
+tests, docs format/lint/build and docs/legacy contracts. Independent code and evidence reviews
+have no remaining findings. These results do not qualify the retained failed runtime cases.
+
 ### CI Completed-Result Diagnostic Suffix (2026-11-03)
 
 At `158b0c0e`, 29 GitHub checks pass and the [Fastly job](https://github.com/IABTechLab/edgezero/actions/runs/41777623478/job/126401545527)

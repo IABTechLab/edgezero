@@ -4176,6 +4176,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn entry_diagnostics_cannot_reanchor_a_late_begin_or_change_timing_acceptance() {
+        let (mut report, origin) = sample("slow-origin");
+        validate(AXUM, "slow-origin", "sample", &report, &origin).unwrap();
+        report["events"][0]["at_us"] = json!(9000);
+        for timing in [
+            Value::Null,
+            json!({"basis":"request-start-guest-clock","ordered":true,
+                "probe_entered_us":0,"origin_wait_entered_us":0,"origin_wait_returned_us":2000}),
+            json!({"basis":"request-start-guest-clock","ordered":false,
+                "probe_entered_us":9000,"origin_wait_entered_us":9000,"origin_wait_returned_us":9000}),
+        ] {
+            report["entry_timing"] = timing;
+            let error = validate(AXUM, "slow-origin", "sample", &report, &origin).unwrap_err();
+            assert!(error.to_string().contains("origin begin missed 2 ms"));
+        }
+    }
+
     fn sample(case: &str) -> (Value, Value) {
         let mut report = json!({"schema":1,"case":case,"token":"sample","qualification":false,
             "events":[],"items":[],"slots":[],"termination":null,"error":null,

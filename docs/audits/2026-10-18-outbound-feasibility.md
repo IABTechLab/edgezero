@@ -9,6 +9,37 @@ qualification. The dated gate checkpoints below retain their original decisions 
 observations, not blanket implementation stops after later scoped approvals. Frozen-candidate,
 consumer and hosted evidence remain separate, and no capability is promoted by local coverage.
 
+### Cold Entry Phase Observation (2026-11-03)
+
+The existing complete Workers lifecycle run at `/private/tmp/pr275-entry-phase-workers-v1/`
+retains working-tree build identity `2eef23c779117db5a410d3930daf082a12deb992158cf7300d171f32471ef45c`.
+It adds only three fixed guest-clock samples to the fixture: handler-body entry and the original
+origin-wait entry/return. Existing Begin timestamps and ordered events remain unchanged. The
+duplicated wait/request preparation is shared privately; ownership and SDK dispatch stay in their
+original callers. No new transport, timer, poll, warmup, listener or CI job is introduced.
+
+The cold slow-origin case samples handler entry, wait entry and wait return at **8 ms**, then
+Begin entry at **9 ms** with **1 ms** call duration. The original 2 ms target is already expired,
+so its existing wait is skipped. The observed lateness therefore precedes the fixture handler;
+it is not caused by renewing that wait. An on-time comparison samples **0/0/3 ms**, then Begin
+at **3 ms**. This localizes an observation window, not a production conversion or scheduler defect.
+
+Storage is fixed at four raw instants, including the reused Begin entry. Reporting samples no
+clock and checks order before truncation; pre-epoch/unreached values remain null. Actual-route
+tests retain Begin at 9 ms for late handler entry. Validator mutations prove metadata cannot
+waive that timing failure. No observer-cost subtraction or alternate epoch is used.
+
+The [pinned workerd implementation](https://github.com/cloudflare/workerd/blob/v1.20261012.1/src/workerd/api/performance.c%2B%2B)
+maps its performance clock to `Date.now()`. Equal observations do not establish zero work or CPU
+duration. [Cloudflare's clock documentation](https://developers.cloudflare.com/workers/runtime-apis/performance/)
+distinguishes deployed I/O-dependent clock advancement from local development; deployed freezing
+does not explain this saved local 8 ms window. No native callback timestamp is measured.
+
+The complete suite remains **16 pass/three fail, exit 1**, plus a final-log-tail failure. Cold
+Begin, pending-body cutoff at **207 ms**, and ordinary-close cancellation still fail. All historical
+failures and remaining provider, exact-candidate and hosted qualification requirements remain
+unchanged. A finer conversion/dispatch-boundary measurement is needed before production edits.
+
 ### Deferred Body Dispatch Timer (2026-11-03)
 
 The lifecycle fixture previously sampled a remaining duration before returning a response,

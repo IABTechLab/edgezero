@@ -1328,6 +1328,14 @@ exactly-once release before retained-handle consumption, and require healthy sur
 Source release and controller acknowledgements are mandatory causal events, not discarded
 diagnostics. SDK ownership is distinct from host cancellation and client delivery.
 
+The optional fixed `entry_timing` report records fixture-handler-body entry and the original
+origin-wait entry/return, relative to the same request start. Existing Begin timestamps remain
+authoritative for call entry/duration. Captured instants are formatted only at report time;
+unreached/pre-epoch samples remain null, and raw ordering is checked before microsecond truncation.
+These are broad guest-clock observations, not HTTP conversion, CPU-time or native timer-callback
+measurements. Equal samples do not prove zero work. Diagnostic metadata cannot reanchor a late
+call or turn a failing timing assertion into a pass. No new request, timer or probe case is added.
+
 The deferred batch-write fixture waits on the existing native time pair's absolute
 request-start-plus-34-ms target. First body polling cannot renew that wait. Deterministic route
 tests delay the first poll to 7 ms and 40 ms: the former waits until 34 ms, while the latter

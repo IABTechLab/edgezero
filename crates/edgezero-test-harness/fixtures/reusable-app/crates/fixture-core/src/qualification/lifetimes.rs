@@ -33,8 +33,16 @@ struct Probe {
 
 struct Timeline {
     clock: MonotonicClock,
+    entry_timing: Option<EntryTiming>,
     start: MonotonicInstant,
     events: Vec<Value>,
+}
+
+struct EntryTiming {
+    probe_entered: MonotonicInstant,
+    origin_wait_entered: Option<MonotonicInstant>,
+    origin_wait_returned: Option<MonotonicInstant>,
+    begin_entered: Option<MonotonicInstant>,
 }
 
 #[derive(Default)]
@@ -169,6 +177,7 @@ impl Timeline {
     fn new(clock: MonotonicClock, start: MonotonicInstant) -> Self {
         Self {
             clock,
+            entry_timing: None,
             start,
             events: Vec::new(),
         }
@@ -206,6 +215,35 @@ impl Timeline {
     }
 }
 
+impl EntryTiming {
+    fn json(&self, start: MonotonicInstant) -> Value {
+        let relative = |at: MonotonicInstant| {
+            at.checked_duration_since(start)
+                .and_then(|duration| u64::try_from(duration.as_micros()).ok())
+        };
+        let ordered = self
+            .origin_wait_returned
+            .is_none_or(|_| self.origin_wait_entered.is_some())
+            && self
+                .begin_entered
+                .is_none_or(|_| self.origin_wait_returned.is_some())
+            && [
+                Some(self.probe_entered),
+                self.origin_wait_entered,
+                self.origin_wait_returned,
+                self.begin_entered,
+            ]
+            .into_iter()
+            .flatten()
+            .try_fold(start, |previous, at| (at >= previous).then_some(at))
+            .is_some();
+        json!({"basis":"request-start-guest-clock","ordered":ordered,
+            "probe_entered_us":relative(self.probe_entered),
+            "origin_wait_entered_us":self.origin_wait_entered.and_then(relative),
+            "origin_wait_returned_us":self.origin_wait_returned.and_then(relative)})
+    }
+}
+
 fn micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
@@ -214,6 +252,7 @@ impl Report {
     fn json(&self, probe: &Probe, timeline: &Timeline) -> Value {
         json!({"schema":1,"case":probe.case,"token":probe.token,"qualification":false,
             "events":timeline.events,"items":self.items,"slots":self.slots,
+            "entry_timing":timeline.entry_timing.as_ref().map(|timing| timing.json(timeline.start)),
             "termination":self.termination,"error":self.error,"origin":self.origin,"mediator":self.mediator,"handoff":self.handoff,
             "native_body":self.native_body,"batch_state":self.batch_state})
     }
@@ -465,6 +504,26 @@ fn busy_until(
     )))
 }
 
+async fn prepare_origin_request(
+    ctx: &RequestContext,
+    probe: &Probe,
+    timeline: &mut Timeline,
+) -> Result<(OutboundRequest, MonotonicInstant), EdgeError> {
+    if let Some(timing) = &mut timeline.entry_timing {
+        timing.origin_wait_entered = Some(timeline.clock.now());
+    }
+    timeline.wait_until(ctx, 2).await?;
+    if let Some(timing) = &mut timeline.entry_timing {
+        timing.origin_wait_returned = Some(timeline.clock.now());
+    }
+    let request = probe.request("origin", timeline)?;
+    let at = timeline.clock.now();
+    if let Some(timing) = &mut timeline.entry_timing {
+        timing.begin_entered = Some(at);
+    }
+    Ok((request, at))
+}
+
 async fn run(
     ctx: &RequestContext,
     probe: &Probe,
@@ -485,9 +544,7 @@ async fn run(
     ) {
         None
     } else {
-        timeline.wait_until(ctx, 2).await?;
-        let request = probe.request("origin", timeline)?;
-        let at = timeline.clock.now();
+        let (request, at) = prepare_origin_request(ctx, probe, timeline).await?;
         let result = client.begin(request).await;
         let ended = timeline.clock.now();
         timeline.event(
@@ -877,9 +934,7 @@ async fn response_handoff(
     let owner = OutboundScopeOwner::response_body();
     let body_scope = owner.scope();
     let dispatched = super::progress::dispatch_returned(ctx);
-    timeline.wait_until(ctx, 2).await?;
-    let request = probe.request("origin", &timeline)?;
-    let at = timeline.clock.now();
+    let (request, at) = prepare_origin_request(ctx, &probe, &mut timeline).await?;
     let mut origin = owner.with(|| client.begin(request)).await?;
     timeline.event("begin", at, timeline.clock.now(), json!("scheduled"));
     timeline.wait_until(ctx, 34).await?;
@@ -1432,13 +1487,21 @@ async fn batch_runtime(
 
 #[action]
 pub(super) async fn probe(ctx: RequestContext) -> Result<Response, EdgeError> {
+    let clock = ctx.monotonic_clock();
+    let probe_entered = clock.now();
     let case = ctx.path_params().get("case").ok_or_else(invalid)?;
     #[cfg(feature = "native-body-witness")]
     if response_cleanup::CASES.contains(&case) {
         return response_cleanup::handle(ctx).await;
     }
     let probe = Probe::parse(case, ctx.headers())?;
-    let mut timeline = Timeline::new(ctx.monotonic_clock(), ctx.request_start());
+    let mut timeline = Timeline::new(clock, ctx.request_start());
+    timeline.entry_timing = Some(EntryTiming {
+        probe_entered,
+        origin_wait_entered: None,
+        origin_wait_returned: None,
+        begin_entered: None,
+    });
     if matches!(
         probe.case.as_str(),
         "batch-write-deadline" | "batch-cancel" | "body-check"
@@ -1904,6 +1967,55 @@ mod tests {
     }
 
     #[test]
+    fn entry_timing_preserves_the_request_epoch_when_the_handler_is_late() {
+        handoff_route_until(true, HandoffEnd::Collect, 9);
+    }
+
+    #[test]
+    fn entry_timing_preserves_unreached_and_backward_samples_without_clock_reads() {
+        let start = MonotonicInstant::now();
+        let returned = start + Duration::from_millis(2);
+        let mut timeline = Timeline::new(
+            MonotonicClock::new(|| panic!("reporting must not sample the clock")),
+            start,
+        );
+        timeline.entry_timing = Some(EntryTiming {
+            probe_entered: start,
+            origin_wait_entered: Some(start),
+            origin_wait_returned: Some(returned),
+            begin_entered: Some(returned),
+        });
+        let probe = Probe::parse("slow-origin", &headers("slow-origin")).unwrap();
+        let report = Report::default().json(&probe, &timeline);
+        assert_eq!(report["entry_timing"]["ordered"], true);
+        assert_eq!(report["entry_timing"]["origin_wait_returned_us"], 2000);
+        let timing = timeline.entry_timing.as_mut().unwrap();
+        timing.origin_wait_entered = None;
+        timing.origin_wait_returned = None;
+        timing.begin_entered = None;
+        let pending = timing.json(start);
+        assert_eq!(pending["ordered"], true);
+        assert_eq!(pending["origin_wait_entered_us"], Value::Null);
+        assert_eq!(pending["origin_wait_returned_us"], Value::Null);
+        timing.probe_entered = start - Duration::from_nanos(1);
+        let early = timing.json(start);
+        assert_eq!(early["ordered"], false);
+        assert_eq!(early["probe_entered_us"], Value::Null);
+        timing.probe_entered = start;
+        timing.origin_wait_entered = Some(returned + Duration::from_nanos(1));
+        timing.origin_wait_returned = Some(returned);
+        timing.begin_entered = Some(returned);
+        let backwards = timing.json(start);
+        assert_eq!(backwards["origin_wait_entered_us"], 2000);
+        assert_eq!(backwards["origin_wait_returned_us"], 2000);
+        assert_eq!(backwards["ordered"], false);
+        timing.origin_wait_entered = Some(start);
+        timing.origin_wait_returned = Some(start);
+        timing.begin_entered = Some(start);
+        assert_eq!(timing.json(start)["ordered"], true);
+    }
+
+    #[test]
     fn terminal_cleanup_revokes_pending_jobs_before_retained_body_drop() {
         use edgezero_core::ResponseEgressOutcome;
         for outcome in [
@@ -1919,14 +2031,18 @@ mod tests {
     }
 
     fn pending_terminal_cleanup(outcome: Option<edgezero_core::ResponseEgressOutcome>) {
-        handoff_route_until(true, outcome.map_or(HandoffEnd::Drop, HandoffEnd::Terminal));
+        handoff_route_until(
+            true,
+            outcome.map_or(HandoffEnd::Drop, HandoffEnd::Terminal),
+            0,
+        );
     }
 
     fn handoff_route(has_return_signal: bool) {
-        handoff_route_until(has_return_signal, HandoffEnd::Collect);
+        handoff_route_until(has_return_signal, HandoffEnd::Collect, 0);
     }
 
-    fn handoff_route_until(has_return_signal: bool, end: HandoffEnd) {
+    fn handoff_route_until(has_return_signal: bool, end: HandoffEnd, entry_delay_ms: u64) {
         use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
         use edgezero_core::{
             IngressDispatchOutcome, IngressFraming, IngressHeadAccounting, ResponseEgressOutcome,
@@ -1969,6 +2085,7 @@ mod tests {
             .extensions_mut()
             .insert(HttpClient::with_client(client.clone()));
         let callback = OutboundScopeOwner::callback();
+        time.advance_to(start + Duration::from_millis(entry_delay_ms));
         let outcome = block_on(callback.run(app.dispatch_ingress(
             request,
             start,
@@ -2087,6 +2204,15 @@ mod tests {
         }
         let bytes = block_on(body.next()).unwrap().unwrap();
         let report: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            report["entry_timing"],
+            json!({"basis":"request-start-guest-clock","ordered":true,
+                "probe_entered_us":entry_delay_ms * 1000,
+                "origin_wait_entered_us":entry_delay_ms * 1000,
+                "origin_wait_returned_us":entry_delay_ms.max(2) * 1000})
+        );
+        assert_eq!(report["events"][0]["op"], "begin");
+        assert_eq!(report["events"][0]["at_us"], entry_delay_ms.max(2) * 1000);
         assert_eq!(report["origin"], json!({"status":200,"bytes":[79]}));
         assert_eq!(report["termination"], "Completed");
         assert_eq!(report["slots"], json!(["Resolved", "Resolved", "Resolved"]));
