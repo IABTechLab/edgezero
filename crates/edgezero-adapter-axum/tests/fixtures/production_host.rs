@@ -7,7 +7,7 @@ mod fixture;
 use std::cell::Cell;
 use std::env;
 use std::future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::panic::set_hook;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -25,7 +25,11 @@ use edgezero_adapter_axum::diagnostics::{
     IngressDisposition, NativeDiagnosticsHandle, NativeDiagnosticsSnapshot, NativeIngressMetadata,
     NativeRequestFailure, NativeRequestObserver, NativeRequestOutcome, NativeRequestRecord,
 };
-use edgezero_adapter_axum::geo::{NativeGeoCapability, NativeGeoSelection, ProtectedCloudFrontAlb};
+use edgezero_adapter_axum::geo::{
+    MaxMindGeoConfig, NativeGeoCapability, NativeGeoInputContract, NativeGeoSelection,
+    ProtectedCloudFrontAlb, ReaderIpExpectation,
+};
+use edgezero_adapter_axum::proxy::TrustedProxyPolicy;
 use edgezero_core::app::{App, Hooks, StoreMetadata, StoresMetadata};
 use edgezero_core::context::RequestContext;
 use edgezero_core::extractor::{AppConfig, ForwardedHost, FromRequest as _, Json, State};
@@ -158,6 +162,8 @@ struct GeoMutationMiddleware(bool);
 
 struct FixtureGeoProvider(bool);
 
+struct FixtureReaderIpProvider;
+
 #[async_trait(?Send)]
 impl Middleware for NativeFactsMiddleware {
     #[inline]
@@ -196,8 +202,22 @@ impl Hooks for FixtureApp {
                     !head.headers().contains_key("x-origin-verify-fixture"),
                     "origin credential must be removed before admission"
                 );
+                if head.target().path() == "/native-abort" {
+                    return AdmissionDecision::Abort;
+                }
+                let completion = ResponseEgressCompletion::new(|_report| {
+                    println!("GEO_COMPLETED {}", GEO_RESOLUTIONS.load(Ordering::SeqCst));
+                });
+                if head.target().path() == "/native-refuse" {
+                    let mut response = Response::new(Body::text("fixture admission refused"));
+                    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                    return AdmissionDecision::Refuse {
+                        completion,
+                        response,
+                    };
+                }
                 AdmissionDecision::Admit {
-                    completion: ResponseEgressCompletion::empty(),
+                    completion,
                     grant: IngressGrant::empty(),
                     read_deadline: head.read_deadline_after(Duration::from_secs(30)),
                 }
@@ -364,6 +384,37 @@ impl GeoProvider for FixtureGeoProvider {
                 CountryCode::new("US").expect("fixture country"),
                 Some(SubdivisionCode::new("CA").expect("fixture subdivision")),
             ))
+        }
+    }
+}
+
+#[expect(
+    clippy::expect_used,
+    clippy::use_debug,
+    reason = "reader fixture returns fixed geographic codes and observes input Debug redaction"
+)]
+impl GeoProvider for FixtureReaderIpProvider {
+    fn resolve(&self, input: &GeoInput) -> GeoResolution {
+        let count = GEO_RESOLUTIONS
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        println!("GEO_CALL {count} {input:?}");
+        let GeoInput::ReaderIp { address, .. } = input else {
+            return GeoResolution::Error(GeoError::ProviderFailure);
+        };
+        let located = match address {
+            IpAddr::V4(v4) => v4.is_loopback() || v4.octets() == [192, 0, 2, 1],
+            IpAddr::V6(v6) => {
+                v6.is_loopback() || v6.segments() == [0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]
+            }
+        };
+        if located {
+            GeoResolution::Located(GeoLocation::new(
+                CountryCode::new("US").expect("fixture country"),
+                Some(SubdivisionCode::new("CA").expect("fixture subdivision")),
+            ))
+        } else {
+            GeoResolution::NoMatch
         }
     }
 }
@@ -730,6 +781,8 @@ fn geo_json(outcome: &GeoOutcome) -> Value {
             GeoStatus::Unavailable(reason) => {
                 json!({"provider": provider.as_str(), "status": match reason {
                     GeoUnavailableReason::MissingMetadata => "missing_metadata",
+                    GeoUnavailableReason::MissingReaderIp => "missing_reader_ip",
+                    GeoUnavailableReason::NoMatch => "no_match",
                     GeoUnavailableReason::UntrustedIngress => "untrusted_ingress",
                 }})
             }
@@ -792,41 +845,88 @@ async fn geo_observation(mut ctx: RequestContext) -> Result<Response, EdgeError>
     }))
 }
 
-#[expect(
-    clippy::panic_in_result_fn,
-    clippy::expect_used,
-    reason = "test-only initializer asserts root-free startup, capability capture and known-valid forged state"
-)]
-fn run_geo_fixture(selected: &str) -> anyhow::Result<()> {
-    let address: SocketAddr = env::var("FIXTURE_BIND")?.parse()?;
+fn fixture_geo_selection(
+    selected: &str,
+    expectation: ReaderIpExpectation,
+) -> anyhow::Result<NativeGeoSelection> {
     let peer_network = if selected.ends_with("untrusted") {
         "192.0.2.1/32"
     } else {
         "127.0.0.1/32"
     };
-    let policy = ProtectedCloudFrontAlb::new(
-        if selected == "geo-invalid-policy" {
-            Vec::new()
-        } else {
-            vec![peer_network]
-        },
-        "x-origin-verify-fixture",
-    )?;
-    let selection = if selected == "geo-off" {
+    let policy = || {
+        ProtectedCloudFrontAlb::new(
+            if selected == "geo-invalid-policy" {
+                Vec::new()
+            } else {
+                vec![peer_network]
+            },
+            "x-origin-verify-fixture",
+        )
+    };
+    Ok(if selected == "geo-off" {
         NativeGeoSelection::Off
+    } else if selected == "geo-maxmind" {
+        let mut config = MaxMindGeoConfig::new(
+            env::var_os("FIXTURE_GEO_DB").unwrap_or_default(),
+            expectation,
+        );
+        if let Ok(value) = env::var("FIXTURE_GEO_MAX_BYTES") {
+            config.limits.max_database_bytes = value.parse()?;
+        }
+        if let Ok(value) = env::var("FIXTURE_GEO_MAX_NETWORKS") {
+            config.limits.max_validation_networks = value.parse()?;
+        }
+        NativeGeoSelection::MaxMind { config }
+    } else if selected == "geo-supplied-reader" {
+        NativeGeoSelection::SuppliedReaderIp {
+            expectation,
+            id: GeoProviderId::new("fixture-reader")?,
+            provider: Arc::new(FixtureReaderIpProvider),
+        }
     } else if selected.starts_with("geo-supplied") || selected == "geo-provider-failure" {
         NativeGeoSelection::Supplied {
-            policy,
+            policy: policy()?,
             id: GeoProviderId::new("fixture-local")?,
             provider: Arc::new(FixtureGeoProvider(selected == "geo-provider-failure")),
         }
     } else {
-        NativeGeoSelection::CloudFront { policy }
+        NativeGeoSelection::CloudFront { policy: policy()? }
+    })
+}
+
+#[expect(
+    clippy::panic_in_result_fn,
+    clippy::expect_used,
+    clippy::use_debug,
+    reason = "test-only initializer asserts root-free startup, safe Debug output, capability capture and known-valid forged state"
+)]
+fn run_geo_fixture(selected: &str) -> anyhow::Result<()> {
+    log::set_logger(&NATIVE_LOGGER)?;
+    log::set_max_level(LevelFilter::Trace);
+    let address: SocketAddr = env::var("FIXTURE_BIND")?.parse()?;
+    let expectation = match env::var("FIXTURE_GEO_EXPECTATION").as_deref() {
+        Ok("forwarded-required") => ReaderIpExpectation::ForwardedRequired,
+        Ok("peer-allowed") | Err(_) => ReaderIpExpectation::PeerAllowed,
+        Ok(_) => anyhow::bail!("invalid fixture reader expectation"),
     };
-    let options = AxumRunOptions::new(address)?.with_geo(selection);
+    let selection = fixture_geo_selection(selected, expectation)?;
+    println!("GEO_SELECTION {selection:?}");
+    let mut options = AxumRunOptions::new(address)?.with_geo(selection);
+    let family = env::var("FIXTURE_GEO_PROXY_FAMILY").ok();
+    let networks = env::var("FIXTURE_GEO_PROXY_NETWORKS")
+        .unwrap_or_else(|_| "127.0.0.1/32,::1/128".to_owned());
+    if let Some(selected_family) = family {
+        options = options.with_trusted_proxy_policy(TrustedProxyPolicy::from_values(
+            Some(&networks),
+            Some(&selected_family),
+        )?);
+    }
     // Capture from the same finalized options, without bypassing the runner's validation.
     let capability = options.geo_capability();
+    println!("GEO_CAPABILITY {capability:?}");
     let is_off = selected == "geo-off";
+    let is_reader = matches!(selected, "geo-maxmind" | "geo-supplied-reader");
     let (sender, receiver) = oneshot::channel();
     run_app_with_options_and_initializer::<FixtureApp, _, _>(
         options,
@@ -850,6 +950,18 @@ fn run_geo_fixture(selected: &str) -> anyhow::Result<()> {
                     is_off,
                     "initializer sees the finalized selection capability"
                 );
+                if is_reader {
+                    assert!(
+                        matches!(
+                            captured_capability,
+                            NativeGeoCapability::Selected {
+                                input: NativeGeoInputContract::ReaderIp { expectation: configured },
+                                ..
+                            } if configured == expectation
+                        ),
+                        "initializer sees the selected reader input expectation"
+                    );
+                }
                 app.insert_state(GeoOutcome::Selected {
                     provider: GeoProviderId::new("forged-app-state").expect("fixture provider ID"),
                     status: GeoStatus::Error(GeoError::ProviderFailure),

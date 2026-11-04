@@ -11,8 +11,14 @@ pub(super) struct CloudFrontProvider;
 impl GeoProvider for CloudFrontProvider {
     #[inline]
     fn resolve(&self, input: &GeoInput) -> GeoResolution {
-        let (Ok(country_slot), Ok(subdivision_slot)) =
-            (input.country.as_bytes(), input.subdivision.as_bytes())
+        let GeoInput::Assertions {
+            country,
+            subdivision,
+        } = input
+        else {
+            return GeoResolution::Error(GeoError::ProviderFailure);
+        };
+        let (Ok(country_slot), Ok(subdivision_slot)) = (country.as_bytes(), subdivision.as_bytes())
         else {
             return GeoResolution::Error(GeoError::InvalidAssertion);
         };
@@ -48,10 +54,10 @@ impl GeoProvider for CloudFrontProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use edgezero_core::geo::GeoAssertion;
+    use edgezero_core::geo::{GeoAssertion, GeoIpSource};
 
     fn input(country: Option<&[u8]>, subdivision: Option<&[u8]>) -> GeoInput {
-        GeoInput {
+        GeoInput::Assertions {
             country: country.map_or_else(GeoAssertion::absent, GeoAssertion::from_bytes),
             subdivision: subdivision.map_or_else(GeoAssertion::absent, GeoAssertion::from_bytes),
         }
@@ -68,6 +74,13 @@ mod tests {
     fn geo_cloudfront_parsing_matches_spec() {
         let invalid = GeoResolution::Error(GeoError::InvalidAssertion);
         let cases = [
+            (
+                GeoInput::ReaderIp {
+                    address: "192.0.2.1".parse().unwrap(),
+                    source: GeoIpSource::DirectPeer,
+                },
+                GeoResolution::Error(GeoError::ProviderFailure),
+            ),
             (input(None, None), GeoResolution::MissingMetadata),
             (input(Some(b"us"), Some(b"ca")), located("US", Some("CA"))),
             (input(Some(b"US"), None), located("US", None)),
@@ -111,21 +124,21 @@ mod tests {
             (input(Some(b"US"), Some(b"A_B")), invalid.clone()),
             (input(Some(b"US"), Some(b"%41")), invalid.clone()),
             (
-                GeoInput {
+                GeoInput::Assertions {
                     country: GeoAssertion::invalid(),
                     subdivision: GeoAssertion::absent(),
                 },
                 invalid.clone(),
             ),
             (
-                GeoInput {
+                GeoInput::Assertions {
                     country: GeoAssertion::from_bytes(b"US"),
                     subdivision: GeoAssertion::invalid(),
                 },
                 invalid.clone(),
             ),
             (
-                GeoInput {
+                GeoInput::Assertions {
                     country: GeoAssertion::absent(),
                     subdivision: GeoAssertion::invalid(),
                 },

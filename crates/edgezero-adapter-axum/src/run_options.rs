@@ -338,11 +338,11 @@ impl AxumRunOptions {
     /// Rejects unavailable implementations and invalid protected-source policies.
     #[inline]
     pub fn geo_capability(&self) -> Result<NativeGeoCapability, NativeGeoConfigError> {
-        self.native_geo().map(|geo| geo.capability())
+        self.geo.capability()
     }
 
     pub(crate) fn native_geo(&self) -> Result<NativeGeo, NativeGeoConfigError> {
-        NativeGeo::validate(&self.geo)
+        NativeGeo::prepare(&self.geo)
     }
 
     /// Shares native counters and the optional request observer.

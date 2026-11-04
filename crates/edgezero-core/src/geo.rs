@@ -26,6 +26,7 @@
 mod country_codes;
 
 use std::fmt;
+use std::net::IpAddr;
 
 /// A bounded validation category. Rejected source values are never retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -61,10 +62,17 @@ impl GeoProviderId {
         Self("cloudfront".to_owned())
     }
 
+    /// Identity reserved for the built-in local `MaxMind` database provider.
+    #[inline]
+    #[must_use]
+    pub fn maxmind() -> Self {
+        Self("maxmind".to_owned())
+    }
+
     /// Validate an application provider label matching `[a-z][a-z0-9._-]{0,63}`.
     ///
     /// # Errors
-    /// Returns a bounded category for invalid labels or the reserved `cloudfront` ID.
+    /// Returns a bounded category for invalid labels or a reserved built-in ID.
     #[inline]
     pub fn new(value: &str) -> Result<Self, GeoValueError> {
         if value.is_empty()
@@ -76,7 +84,7 @@ impl GeoProviderId {
         {
             return Err(GeoValueError::InvalidProviderId);
         }
-        if value == "cloudfront" {
+        if matches!(value, "cloudfront" | "maxmind") {
             return Err(GeoValueError::ReservedProviderId);
         }
         Ok(Self(value.to_owned()))
@@ -273,13 +281,46 @@ impl<const N: usize> fmt::Debug for GeoAssertion<N> {
     }
 }
 
-/// The complete v1 provider input, admitted by the adapter's protected source.
-///
-/// No request, reader IP, service handle or arbitrary headers are available.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GeoInput {
-    pub country: GeoAssertion<2>,
-    pub subdivision: GeoAssertion<3>,
+/// Checked ingress provenance for an admitted reader address, not identity proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeoIpSource {
+    DirectPeer,
+    TrustedForwarded,
+    TrustedXForwarded,
+}
+
+/// Source-admitted provider input. Reader addresses are redacted in diagnostics.
+#[derive(Clone, PartialEq, Eq)]
+pub enum GeoInput {
+    Assertions {
+        country: GeoAssertion<2>,
+        subdivision: GeoAssertion<3>,
+    },
+    ReaderIp {
+        address: IpAddr,
+        source: GeoIpSource,
+    },
+}
+
+impl fmt::Debug for GeoInput {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Assertions {
+                country,
+                subdivision,
+            } => f
+                .debug_struct("Assertions")
+                .field("country", country)
+                .field("subdivision", subdivision)
+                .finish(),
+            Self::ReaderIp { source, .. } => f
+                .debug_struct("ReaderIp")
+                .field("address", &"[redacted]")
+                .field("source", source)
+                .finish(),
+        }
+    }
 }
 
 /// Provider-owned resolution, without framework selection or provenance choices.
@@ -288,6 +329,7 @@ pub enum GeoResolution {
     Error(GeoError),
     Located(GeoLocation),
     MissingMetadata,
+    NoMatch,
 }
 
 /// A synchronous provider performing only bounded local computation.
@@ -300,7 +342,7 @@ pub enum GeoResolution {
 /// Application Rust is trusted code. This narrow input prevents accidental
 /// coupling, but does not sandbox a malicious implementation.
 pub trait GeoProvider {
-    /// Resolve source-admitted assertions, including absent or rejected slots.
+    /// Resolve admitted input. Unsupported input cases return `ProviderFailure`.
     fn resolve(&self, input: &GeoInput) -> GeoResolution;
 }
 
@@ -308,18 +350,24 @@ pub trait GeoProvider {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeoUnavailableReason {
     MissingMetadata,
+    MissingReaderIp,
+    NoMatch,
     UntrustedIngress,
 }
 
 /// The source of a located assertion, not a distribution identity attestation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeoSource {
+    CheckedReaderIp,
     CloudFront,
+    LocalDatabase,
 }
 
 /// The declared infrastructure protection used for source admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeoTrustBasis {
+    /// An address admitted through the native checked ingress boundary.
+    CheckedReaderIp(GeoIpSource),
     /// Operator-declared credential-gated, network-isolated ALB path.
     /// This does not prove the external listener or network configuration.
     DeclaredProtectedAlb,
@@ -499,7 +547,7 @@ mod tests {
         let assertion = GeoAssertion::<2>::from_bytes(&source);
         source.fill(b'X');
         assert_eq!(assertion.as_bytes(), Ok(Some(b"us".as_slice())));
-        let input = GeoInput {
+        let input = GeoInput::Assertions {
             country: assertion,
             subdivision: GeoAssertion::from_bytes(b"ca"),
         };
@@ -561,6 +609,36 @@ mod tests {
     }
 
     #[test]
+    fn geo_reader_input_redacts_addresses_and_reserves_maxmind() {
+        assert_eq!(
+            GeoProviderId::new("maxmind"),
+            Err(GeoValueError::ReservedProviderId)
+        );
+        assert_eq!(GeoProviderId::maxmind().as_str(), "maxmind");
+        for source in [
+            GeoIpSource::DirectPeer,
+            GeoIpSource::TrustedForwarded,
+            GeoIpSource::TrustedXForwarded,
+        ] {
+            for address in ["192.0.2.7", "2001:db8::7"] {
+                let input = GeoInput::ReaderIp {
+                    address: address.parse().unwrap(),
+                    source,
+                };
+                assert_eq!(input, input.clone());
+                let debug = format!("{input:?}");
+                assert!(debug.contains("[redacted]"));
+                assert!(!debug.contains(address));
+            }
+        }
+        assert_ne!(GeoResolution::NoMatch, GeoResolution::MissingMetadata);
+        assert_ne!(
+            GeoUnavailableReason::NoMatch,
+            GeoUnavailableReason::MissingReaderIp
+        );
+    }
+
+    #[test]
     fn portable_provider_is_synchronous_and_need_not_be_send_or_sync() {
         struct LocalProvider(Rc<Cell<usize>>);
         impl GeoProvider for LocalProvider {
@@ -571,7 +649,7 @@ mod tests {
         }
         let calls = Rc::new(Cell::new(0));
         let provider: Box<dyn GeoProvider> = Box::new(LocalProvider(Rc::clone(&calls)));
-        let input = GeoInput {
+        let input = GeoInput::Assertions {
             country: GeoAssertion::absent(),
             subdivision: GeoAssertion::absent(),
         };

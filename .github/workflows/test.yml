@@ -5,7 +5,13 @@ on:
     branches: [main]
   pull_request:
     # Keep checks active for native-store and Geo stacked PRs.
-    branches: [main, docs/outbound-http-spec, feat/native-celld-stores]
+    branches:
+      [
+        main,
+        docs/outbound-http-spec,
+        feat/native-celld-stores,
+        feature/pluggable-geo-providers,
+      ]
 
 permissions:
   contents: read
@@ -121,6 +127,11 @@ jobs:
       - name: Geo dependency isolation
         run: bash scripts/check_geo_dependency_contract.sh
 
+      - name: Synthetic GeoIP fixture reproducibility
+        run: |
+          node --check scripts/generate_geoip_fixtures.mjs
+          node scripts/generate_geoip_fixtures.mjs --check
+
       - name: Immutable core Geo outcome
         run: scripts/run_test_nonzero.sh geo_owned_outcome_survives_public_request_mutation cargo test --offline --locked -p edgezero-core --lib geo_
 
@@ -146,9 +157,6 @@ jobs:
 
       - name: Native Geo real-peer hosting (loopback only)
         run: scripts/run_test_nonzero.sh geo_hosting_proves_real_peer_and_shared_outcome cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features geo-cloudfront,test-utils --test production_hosting geo_hosting_proves_real_peer_and_shared_outcome
-
-      - name: Native Geo public examples
-        run: cargo test --offline --locked -p edgezero-adapter-axum --features geo-cloudfront --doc
 
       - name: Native AWS provider and startup contracts (loopback only)
         run: |
@@ -253,6 +261,81 @@ jobs:
           cargo check --locked -p app-demo-adapter-cloudflare --target wasm32-unknown-unknown --no-default-features --features cloudflare
           cargo check --locked -p app-demo-adapter-fastly --target wasm32-wasip1 --no-default-features --features fastly
           cargo check --locked -p app-demo-adapter-spin --target wasm32-wasip2 --no-default-features --features spin
+
+  geo-features:
+    name: Geo isolated features [${{ matrix.features }}]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: axum
+            cache_key: axum
+            builtin_sentinel: geo_unavailable_selection_fails_before_runner_resources
+          - features: geo-cloudfront
+            cache_key: cloudfront
+            builtin_sentinel: geo_cloudfront_parsing_matches_spec
+          - features: geo-maxmind
+            cache_key: maxmind
+            builtin_sentinel: geo_maxmind_structural_pass_closes_upstream_data_gaps
+          - features: geo-cloudfront,geo-maxmind
+            cache_key: cloudfront-maxmind
+            builtin_sentinel: geo_maxmind_structural_pass_closes_upstream_data_gaps
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-geo-${{ matrix.cache_key }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Retrieve Rust version
+        id: rust-version
+        run: echo "rust-version=$(grep '^rust ' .tool-versions | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+        shell: bash
+
+      - name: Set up Rust tool chain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.rust-version.outputs.rust-version }}
+
+      - name: Fetch dependencies (locked)
+        run: cargo fetch --locked
+
+      - name: Isolated Geo unit contracts
+        env:
+          FEATURES: ${{ matrix.features }}
+          SENTINEL: ${{ matrix.builtin_sentinel }}
+        run: |
+          scripts/run_test_nonzero.sh "$SENTINEL" cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features "$FEATURES" --lib geo_
+          scripts/run_test_nonzero.sh geo_reader_admission_uses_private_checked_provenance cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features "$FEATURES" --lib geo_reader_admission_uses_private_checked_provenance
+
+      - name: Supplied reader hosting without required built-ins
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: scripts/run_test_nonzero.sh geo_hosting_supplied_reader_without_builtin cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features "$FEATURES,test-utils" --test production_hosting geo_hosting_supplied_reader_without_builtin
+
+      - name: Disabled MaxMind fails before hosting
+        if: "!contains(matrix.features, 'geo-maxmind')"
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: scripts/run_test_nonzero.sh geo_hosting_rejects_unavailable_maxmind cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features "$FEATURES,test-utils" --test production_hosting geo_hosting_rejects_unavailable_maxmind
+
+      - name: MaxMind snapshot and restart hosting
+        if: contains(matrix.features, 'geo-maxmind')
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: scripts/run_test_nonzero.sh geo_hosting_maxmind_snapshot_and_restart cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features "$FEATURES,test-utils" --test production_hosting geo_hosting_
+
+      - name: Public examples with isolated features
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features "$FEATURES" --doc
 
   adapter-wasm-tests:
     name: ${{ matrix.adapter }} wasm tests
