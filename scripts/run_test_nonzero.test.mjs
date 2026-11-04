@@ -23,6 +23,9 @@ const splitViceroyPass = (name) =>
 // A completed pass and a following host diagnostic share a line in run 41777623478.
 const suffixedViceroyPass = (name) =>
   `test ${name} ... ok${viceroyDiagnostic}\n`;
+// Both interruptions occur together in run 41802050941, job 126479930228.
+const splitSuffixedViceroyPass = (name) =>
+  `test ${name} ... ${viceroyDiagnostic}\n${viceroyDiagnostic}\nok${viceroyDiagnostic}\n`;
 
 function inventoryCommand(environment) {
   return inventory.cases.find(
@@ -245,6 +248,17 @@ for (const [name, output] of [
     suffixedViceroyPass(fastlyBodylessSentinel) + summary(1),
   ],
   [
+    "a split pass whose completion also has a Viceroy diagnostic suffix",
+    splitSuffixedViceroyPass(fastlyBodylessSentinel) + summary(1),
+  ],
+  [
+    "a colored split should-panic completion with a Viceroy diagnostic suffix",
+    splitSuffixedViceroyPass(fastlyBodylessSentinel)
+      .replace(" ... ", " - should panic ... ")
+      .replace("\nok", "\n\u001b[32mok\u001b[0m")
+      .replaceAll("\n", "\r\n") + summary(1),
+  ],
+  [
     "a colored should-panic pass followed by a Viceroy diagnostic and CRLF",
     `test ${fastlyBodylessSentinel} - should panic ... \u001b[32mok\u001b[0m${viceroyDiagnostic}\r\n` +
       summary(1),
@@ -307,9 +321,23 @@ for (const [name, output] of [
     ],
     ["a failed status", `FAILED${viceroyDiagnostic}`],
     ["an ignored status", `ignored${viceroyDiagnostic}`],
-  ].map(([name, detail]) => [
-    `a diagnostic-suffixed pass with ${name}`,
-    `test tests::sentinel ... ${detail}\n${summary(1)}`,
+  ].flatMap(([name, detail]) => [
+    [
+      `a diagnostic-suffixed pass with ${name}`,
+      `test tests::sentinel ... ${detail}\n${summary(1)}`,
+    ],
+    [
+      `a split diagnostic-suffixed pass with ${name}`,
+      `${interruptedSentinel}${detail}\n${summary(1)}`,
+    ],
+  ]),
+  ...[
+    ["no summary", ""],
+    ["a zero-test summary", summary(0)],
+    ["a failed summary", "test result: FAILED. 1 passed; 1 failed;\n"],
+  ].map(([name, ending]) => [
+    `a split diagnostic-suffixed pass with ${name}`,
+    splitSuffixedViceroyPass("tests::sentinel") + ending,
   ]),
   [
     "a diagnostic-suffixed pass without a summary",
@@ -407,10 +435,32 @@ for (const [name, output] of [
 }
 
 test("a diagnostic-suffixed pass preserves command failure", () => {
-  const result = run(null, ["tests::sentinel"], 42, ["sentinel"], {
-    output: suffixedViceroyPass("tests::sentinel") + summary(1),
-  });
-  assert.equal(result.status, 42, result.stderr);
+  for (const pass of [suffixedViceroyPass, splitSuffixedViceroyPass]) {
+    const result = run(null, ["tests::sentinel"], 42, ["sentinel"], {
+      output: pass("tests::sentinel") + summary(1),
+    });
+    assert.equal(result.status, 42, result.stderr);
+  }
+});
+
+test("a split suffixed completion requires an uninterrupted pending test association", () => {
+  for (const prefix of [
+    `${viceroyDiagnostic}\n`,
+    "test tests::sentinel ... \n",
+    interruptedSentinel + "FAILED\n",
+    interruptedSentinel + "ignored\n",
+    interruptedSentinel + "\n",
+    interruptedSentinel + "unrecognized log\n",
+    interruptedSentinel + "test tests::unrelated ... \n",
+    interruptedSentinel + "test tests::unrelated ... ok\n",
+    interruptedSentinel + summary(1),
+    `test tests::sentinel ... unrelated log\n${viceroyDiagnostic}\n`,
+  ]) {
+    const result = run(null, ["tests::sentinel"], 0, ["sentinel"], {
+      output: prefix + `ok${viceroyDiagnostic}\n` + summary(1),
+    });
+    assert.equal(result.status, 1, `${prefix}: ${result.stderr}`);
+  }
 });
 
 test("split passes preserve literal suffix boundaries and require every sentinel", () => {
@@ -603,6 +653,7 @@ for (const [environment, mode] of [
   for (const [shape, pass] of [
     ["split", splitViceroyPass],
     ["suffix", suffixedViceroyPass],
+    ["split with suffix", splitSuffixedViceroyPass],
   ]) {
     test(`${environment} inventory guard requires exact ${shape} sentinel names`, () => {
       const name = required.at(-1);

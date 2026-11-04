@@ -9,6 +9,26 @@ qualification. The dated gate checkpoints below retain their original decisions 
 observations, not blanket implementation stops after later scoped approvals. Frozen-candidate,
 consumer and hosted evidence remain separate, and no capability is promoted by local coverage.
 
+### Split Completion CI Guard (2026-11-04)
+
+At `55e07f69`, 29 checks pass and the [Fastly job](https://github.com/IABTechLab/edgezero/actions/runs/41802050941/job/126479930228)
+fails after all 309 library tests pass. The downloaded `fastly-lifecycle-evidence` artifact is
+retained under `/private/tmp/pr275-55e-fastly-ci-artifact/`. Its raw runtime-unit log contains
+the exact named warm-priority test, two recognized backend diagnostics and an `ok` immediately
+followed by another recognized diagnostic. The guard accepts either interruption individually,
+but previously fails their composition. Replaying that artifact reproduces exit 1.
+
+One shared completion predicate now handles both named and split results. Split results still
+require a pending exact test and a recognized interruption; unrelated lines, other tests and
+summaries still clear association. No generic `ok` prefix or new diagnostic shape is accepted.
+Malformed suffixes, failed/ignored records, missing/zero/failed summaries, wrong or missing
+sentinels and command/stream failures remain rejected. The same raw artifact then passes replay;
+its original guard-error text is retained. This does not turn the old failed job into a pass.
+
+No workflow, command, inventory identity, production behavior, SDK/runtime pin, budget or capability
+changes. Cold-entry timing, ordinary-close cancellation, exact-candidate and hosted qualification
+remain open. No new application traffic, observer sample, listener, suite or CI invocation.
+
 ### Admission Boundary Observation (2026-11-04)
 
 The complete Workers lifecycle capture at `/private/tmp/pr275-admission-phase-workers-v1/`

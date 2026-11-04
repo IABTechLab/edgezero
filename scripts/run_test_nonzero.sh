@@ -102,6 +102,9 @@ REQUIRED_TEST_SENTINELS="$sentinels" awk -v exact="$exact" '
     function host_diagnostic(line) {
         return line ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z[[:space:]]+ERROR[[:space:]]+Backend connection error for [^[:space:]]/
     }
+    function completed(line) {
+        return line == "ok" || (substr(line, 1, 2) == "ok" && host_diagnostic(substr(line, 3)))
+    }
     BEGIN { required = split(ENVIRON["REQUIRED_TEST_SENTINELS"], names, "\n") }
     {
         gsub(/\033\[[0-9;]*m/, "")
@@ -125,16 +128,16 @@ REQUIRED_TEST_SENTINELS="$sentinels" awk -v exact="$exact" '
         detail = $0
         sub(/^test [^[:space:]]+( - should panic)? \.\.\. /, "", detail)
         interrupted = host_diagnostic(detail)
-        if (detail == "ok" || (substr(detail, 1, 2) == "ok" && host_diagnostic(substr(detail, 3)))) {
+        if (completed(detail)) {
             name = pending
         } else {
             if (detail != "" && !interrupted) pending = ""
             next
         }
     }
-    # A split pass needs a known host interruption and its own standalone ok.
+    # A split pass needs a known host interruption and its own recognized completion.
     pending != "" && host_diagnostic($0) { interrupted = 1; next }
-    pending != "" && interrupted && /^ok$/ { name = pending }
+    pending != "" && interrupted && completed($0) { name = pending }
     {
         if (name != "") {
             for (i = 1; i <= required; i++) {

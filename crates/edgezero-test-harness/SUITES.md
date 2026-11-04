@@ -452,7 +452,9 @@ The checker rejects helper-only substitution, omitted controls, another command 
 artifact. These tests already run in the existing CI owner; there is no additional invocation.
 
 The shared nonzero-test guard handles a known timestamped Viceroy backend diagnostic either
-interrupting a named result or immediately following its completed `ok`. It does not accept
+interrupting a named result, immediately following its completed `ok`, or both together. A split
+completion still requires the pending exact name and a recognized interruption; another test,
+unknown output or a summary clears that association. It does not accept
 arbitrary `ok...` suffixes. Exact inventory names, every required sentinel, a positive zero-failure
 summary, and command/stream exit checks remain mandatory; log interleaving cannot waive a failure.
 

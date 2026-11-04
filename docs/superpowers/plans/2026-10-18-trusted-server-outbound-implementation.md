@@ -12,6 +12,34 @@
 
 ## Status and Authority
 
+### Split Completion CI Guard (2026-11-04)
+
+At `55e07f69`, 29 checks pass and Fastly's WASM job fails after reporting 309 passed/zero failed.
+The exact raw artifact reproduces the guard failure: a named test is interrupted by recognized
+diagnostics, then its split `ok` is immediately followed by another diagnostic. Existing code
+accepts the prefix and suffix forms separately, but not their composition.
+
+- [x] Retain the failed job and downloaded raw artifact; reproduce failure by parser replay.
+- [x] Add failing combined-output regressions, then share the existing exact completion predicate
+      between named and split result handling. Retain pending-name/interruption requirements.
+- [x] Cover ANSI/CRLF and should-panic forms, malformed suffixes, missing/failed/zero summaries,
+      invalidated associations, all four exact-name inventory groups and nonzero command exits.
+      Preserve the existing stream-exit negative control.
+- [x] Replay the same raw artifact successfully with no altered test output or positive summary.
+
+Artifact: `/private/tmp/pr275-55e-fastly-ci-artifact/`; red/green replay logs are under
+`/private/tmp/pr275-split-suffix-artifact-*.log`. Replay does not certify the failed CI job or
+replace fresh execution. Both independent proposals favor sharing the completion predicate over
+unproven stream separation; results written to stderr remain supported. No workflow, inventory,
+production API/adapter, provider pin, deadline, capability or acceptance change. The remaining
+timing, ordinary-close cancellation, candidate freeze and hosted requirements stay open.
+
+All five root gates pass: 2,666 tests across 33 binaries with one existing ignored, formatting,
+strict Clippy and both feature/Spin target checks. All 301 tooling regressions pass, including
+combined-output and failure-association controls. Bash/Node syntax, script formatting, docs
+format/lint/build and docs/legacy contracts pass. Independent code/evidence reviews find no
+remaining repair issues. The old failed job remains failed; new-head CI must execute separately.
+
 ### Admission Boundary Observation (2026-11-04)
 
 All 30 GitHub checks pass at `9f0a3984`. Continuing the existing timing investigation adds one
