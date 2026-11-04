@@ -12,6 +12,47 @@
 
 ## Status and Authority
 
+### Deferred Body Dispatch Timer (2026-11-03)
+
+All 30 GitHub checks pass at `8fbc4f83`. Continuing the unchanged timing investigation identifies
+one deterministic fixture defect, not a new production transport defect: batch-write computes
+a relative delay before returning its response, while the provider starts that delay only when
+the deferred body is first polled. A 7 ms first poll therefore dispatches at 41 ms instead of
+waiting for the original 34 ms target.
+
+- [x] Reproduce the defect in the existing actual-route test before changing implementation.
+      Preserve the request epoch and one-second egress policy; require no transport calls before
+      body polling or through 33.999 ms.
+- [x] Use the existing native time pair's absolute 34 ms wait inside the same deferred body.
+      Initial polling at 0/7 ms dispatches at 34 ms. Already-late polling at 40 ms dispatches at
+      actual 40 ms, without backdating or renewed sleep; existing strict validation remains unchanged.
+- [x] Execute the same complete local Workers suite. The batch-write case passes with dispatch
+      at 34 ms, original per-call deadlines at 1,034 ms and `DeadlineExceeded` at 1,001 ms.
+      The original egress owner is installed before batch dispatch and remains exactly once.
+
+Capture: `/private/tmp/pr275-deferred-batch-absolute-native-v2/`, working-tree build identity
+`9b8eda9506db81eab84027a2e2b456a9aba2324fef3f0375b4604d16e9a50b47`. The first capture
+without the required explicit workerd executable stops at preflight with unverified exit 2.
+The full native suite remains 16 pass/three fail, exit 1, plus a final-log-tail failure after the
+failed cancellation case. Cold Begin enters at 9 ms, pending-body cutoff returns at 206 ms and
+ordinary cancellation lacks proof. Pending-head cutoff returns at 204 ms in this run; historical
+failed observations remain failures. No retry-for-credit or tolerance change is made.
+
+Two read-only investigations and minimal-fix reviews agree on the absolute paired wait rather
+than another timer mechanism or added diagnostic API. Saved cold Begin/handoff timestamps place
+their lateness before API entry; call durations are 0-1 ms at recorded resolution. That does not
+attribute the pre-entry delay. The cutoff traces still lack actual timer-wake and abort-call
+brackets; SDK head-operation release precedes the outer abort guard, so it cannot establish abort
+completion. Production APIs/adapters, pins, deadlines, caps, acceptance identities, capabilities,
+demo and templates are unchanged. Candidate freeze, hosted proof and remaining timing/cancellation
+requirements stay open. See the [audit](../../audits/2026-10-18-outbound-feasibility.md#deferred-body-dispatch-timer-2026-11-03).
+
+Verification passes all five root gates (2,666 tests/33 binaries, one existing ignored test),
+85 fixture tests with native witnesses and 69 without, 150 owning lifecycle-harness tests,
+strict fixture Clippy, all three fixture WASM checks, formatting, 267 tooling guards, docs
+format/lint/build and the docs/legacy contracts. These checks validate the fixture correction,
+not the remaining failed runtime or hosted requirements. No additional suite or CI job is added.
+
 ### Isolated Reset Diagnostic (2026-11-03)
 
 The scoped continuation adds one uncredited control, not an alternative cancellation contract.

@@ -1382,10 +1382,10 @@ async fn batch_runtime(
     let body = if deadline {
         // Egress owns the one-second clock before the 34 ms batch dispatch. The
         // unchanged per-call timers therefore expire after the response deadline.
-        let delay = super::progress::pause(ctx, timeline.remaining(34))?;
+        let delay = time.wait_until(timeline.deadline_at(34));
         Body::from_stream(
             futures::stream::once(async move {
-                delay.await;
+                delay.await?;
                 let (batch, report) =
                     prepare_runtime_batch(&scope, &probe, &client, &mut timeline, &witness, &time)
                         .await?;
@@ -2752,11 +2752,18 @@ mod tests {
             "batch-write-deadline",
             "begin-upload-rules",
         ] {
-            runtime_batch_route(case);
+            runtime_batch_route(case, 0);
         }
     }
 
-    fn runtime_batch_route(case: &str) {
+    #[test]
+    fn deferred_batch_dispatch_keeps_its_absolute_target_after_delayed_body_poll() {
+        for first_body_poll_ms in [7, 40] {
+            runtime_batch_route("batch-write-deadline", first_body_poll_ms);
+        }
+    }
+
+    fn runtime_batch_route(case: &str, first_body_poll_ms: u64) {
         use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
         use edgezero_core::{
             IngressDispatchOutcome, IngressFraming, IngressHeadAccounting, ResponseEgressOutcome,
@@ -2885,6 +2892,17 @@ mod tests {
         let edgezero_core::BodyPayload::Stream(mut source) = payload else {
             panic!("streamed batch body")
         };
+        if case == "batch-write-deadline" {
+            time.advance_to(start + Duration::from_millis(first_body_poll_ms));
+            if first_body_poll_ms < 34 {
+                assert!(source.next().now_or_never().is_none());
+                assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+                time.advance_to(start + Duration::from_micros(33_999));
+                assert!(source.next().now_or_never().is_none());
+                assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+                time.advance_to(start + Duration::from_millis(34));
+            }
+        }
         let prefix = block_on(source.next()).unwrap().unwrap();
         assert_eq!(client.calls.load(Ordering::SeqCst), 3);
         assert_eq!(
@@ -2892,6 +2910,11 @@ mod tests {
             "batch-pending"
         );
         if case == "batch-write-deadline" {
+            assert_eq!(
+                time.clock().now(),
+                start + Duration::from_millis(first_body_poll_ms.max(34)),
+                "a deferred first poll must not rebase the absolute dispatch target"
+            );
             assert_eq!(
                 policy.write_deadline.instant(),
                 start + Duration::from_secs(1)

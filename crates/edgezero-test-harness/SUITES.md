@@ -1323,6 +1323,13 @@ exactly-once release before retained-handle consumption, and require healthy sur
 Source release and controller acknowledgements are mandatory causal events, not discarded
 diagnostics. SDK ownership is distinct from host cancellation and client delivery.
 
+The deferred batch-write fixture waits on the existing native time pair's absolute
+request-start-plus-34-ms target. First body polling cannot renew that wait. Deterministic route
+tests delay the first poll to 7 ms and 40 ms: the former waits until 34 ms, while the latter
+dispatches at the actual 40 ms without backdating or another sleep. That late entry still fails
+the unchanged strict timing validator. Egress retains its original one-second deadline before
+the batch is dispatched; per-call timers and observation cutoffs are unchanged.
+
 Fastly's six-case budget/configuration group belongs to this opt-in suite, not automatic wire
 CI. Its five configuration vectors isolate scheme, port, authority and connect settings against
 two owned, non-listening loopback endpoints. This configuration-only case uses uniform 500 ms

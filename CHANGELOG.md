@@ -13,6 +13,8 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Keep deferred lifecycle-fixture batch dispatch on its original absolute target using the
+  existing paired timer, without adding body-poll delay to the budget or changing validation.
 - Bound and cross-check native Spin response-result observations before stream EOF using the
   existing SDK controls and timer. Preserve early-success retirement, original cancellation gates
   and separate teardown failures; add no production polling or transport workaround.

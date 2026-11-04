@@ -9,6 +9,34 @@ qualification. The dated gate checkpoints below retain their original decisions 
 observations, not blanket implementation stops after later scoped approvals. Frozen-candidate,
 consumer and hosted evidence remain separate, and no capability is promoted by local coverage.
 
+### Deferred Body Dispatch Timer (2026-11-03)
+
+The lifecycle fixture previously sampled a remaining duration before returning a response,
+then first polled that relative delay inside deferred body production. The pinned Workers SDK
+starts its timeout on first poll, so response conversion could shift the original 34 ms batch
+target. A deterministic actual-route regression first dispatches at 41 ms after a 7 ms first
+body poll, instead of remaining Pending until 34 ms.
+
+The fixture now uses its existing native `OutboundTime::wait_until` with the unchanged absolute
+target. The same route tests cover initial polling at 0/7 ms, no dispatch through 33.999 ms,
+dispatch at 34 ms, and an already-late first poll at 40 ms without another sleep. The latter
+remains late under the existing strict validator. Response ownership, its original one-second
+deadline, per-call timeouts and cutoffs are unchanged; no production adapter or public API changes.
+
+Local workerd execution in `/private/tmp/pr275-deferred-batch-absolute-native-v2/` records batch
+dispatch at 34 ms and `DeadlineExceeded` at 1,001 ms, before the original per-call deadlines at
+1,034 ms. The complete suite remains **16 pass/three fail, exit 1**, with an additional final-log-tail
+failure. Cold Begin enters at 9 ms, pending-body cutoff returns at 206 ms, and ordinary-close
+cancellation still lacks its required proof. Pending-head cutoff returns at 204 ms in this run;
+that does not erase its earlier failures. The initial capture without an explicit workerd path
+remains unverified exit 2, not native evidence.
+
+The saved historical cold Begin and handoff misses precede API entry; their dispatch calls take
+0-1 ms at the recorded resolution. Their pre-entry delays are not yet attributed. Likewise,
+SDK operation-release witnesses precede the outer fetch-abort guard and cannot establish actual
+abort-call duration. Timer delivery, executor resumption and cleanup cost remain separate unknowns.
+No timing threshold, acceptance identity, capability, runtime pin or qualification gate changes.
+
 ### Native Spin Result Before EOF (2026-11-03)
 
 The [retained native record](evidence/2026-11-03-spin-response-result-local.json) uses the existing
