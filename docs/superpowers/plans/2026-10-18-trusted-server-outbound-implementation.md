@@ -12,6 +12,34 @@
 
 ## Status and Authority
 
+### CI Completed-Result Diagnostic Suffix (2026-11-03)
+
+At `158b0c0e`, 29 GitHub checks pass and the [Fastly job](https://github.com/IABTechLab/edgezero/actions/runs/41777623478/job/126401545527)
+fails after its library reports 309 passed/zero failed. One complete named `ok` is immediately
+followed by a timestamped Viceroy backend diagnostic without a newline. The guard recognizes
+that diagnostic before a split completion, but previously rejected it after a completed result.
+
+The downloaded `fastly-lifecycle-evidence` artifact is retained under
+`/private/tmp/pr275-158b-fastly-ci-artifact/`. Replaying its exact `runtime-unit-tests.log` reproduces
+the missing-sentinel error. The co-located guard tests first fail six expected positive cases:
+two result formats and exact inventory names in four environments. All negative controls pass.
+
+The minimal repair extends only the exact completion condition: `ok` may be immediately followed
+by the existing anchored host-diagnostic predicate. No generic success-prefix match is added.
+The same artifact then passes the repaired guard; it still contains the original guard-error text,
+so this is parser replay, not fresh runtime execution or a claim that the old CI job succeeded.
+Malformed/missing timestamps, unrelated suffixes, failed/ignored statuses, wrong names, missing
+sentinels, failed/zero summaries and nonzero command/stream exits remain rejected. Two read-only
+reviews favor this path over separating log streams, which would change stderr-result support
+without necessarily repairing upstream interleaving. No workflow, command, inventory identity,
+production API, provider pin, deadline, capability or remaining qualification gate changes.
+
+All five root gates pass again: 2,666 tests across 33 binaries with one existing ignored test,
+formatting, strict Clippy and both feature/Spin target checks. All 284 tooling regressions pass,
+including the 109 guard tests; Bash syntax, script formatting, docs format/lint/build and
+docs/legacy contracts also pass. Independent parser and scope reviews have no remaining findings.
+The failed hosted job remains failed; new-head CI must run separately after this repair is pushed.
+
 ### Deferred Body Dispatch Timer (2026-11-03)
 
 All 30 GitHub checks pass at `8fbc4f83`. Continuing the unchanged timing investigation identifies

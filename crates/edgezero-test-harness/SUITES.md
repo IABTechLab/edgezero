@@ -451,6 +451,11 @@ Live-budget/equality-expiry and backwards-clock controls are mandatory additiona
 The checker rejects helper-only substitution, omitted controls, another command or another raw
 artifact. These tests already run in the existing CI owner; there is no additional invocation.
 
+The shared nonzero-test guard handles a known timestamped Viceroy backend diagnostic either
+interrupting a named result or immediately following its completed `ok`. It does not accept
+arbitrary `ok...` suffixes. Exact inventory names, every required sentinel, a positive zero-failure
+summary, and command/stream exit checks remain mandatory; log interleaving cannot waive a failure.
+
 The raw path is `outbound/unit/fastly/raw.log`. Current inventory is 153 ready/358 planned,
 still unqualified. SDK dispatch is not proof of origin receipt, a successful completed response,
 host cancellation, batch-registration behavior or hosted latency. Keep those separate acceptance

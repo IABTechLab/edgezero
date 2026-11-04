@@ -125,7 +125,7 @@ REQUIRED_TEST_SENTINELS="$sentinels" awk -v exact="$exact" '
         detail = $0
         sub(/^test [^[:space:]]+( - should panic)? \.\.\. /, "", detail)
         interrupted = host_diagnostic(detail)
-        if (detail == "ok") {
+        if (detail == "ok" || (substr(detail, 1, 2) == "ok" && host_diagnostic(substr(detail, 3)))) {
             name = pending
         } else {
             if (detail != "" && !interrupted) pending = ""

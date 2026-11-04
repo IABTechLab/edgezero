@@ -20,6 +20,9 @@ const viceroyDiagnostic =
   "2026-10-30T04:54:37.540446Z ERROR Backend connection error for 'ez_b31v1_b9a7c76e3ec6916758e259f8dc3e932c30f858c644a3c8cef480baa258e2606b' (http://127.0.0.1:9/): error trying to connect: tcp connect error: Connection refused (os error 111)";
 const splitViceroyPass = (name) =>
   `test ${name} ... ${viceroyDiagnostic}\nok\n`;
+// A completed pass and a following host diagnostic share a line in run 41777623478.
+const suffixedViceroyPass = (name) =>
+  `test ${name} ... ok${viceroyDiagnostic}\n`;
 
 function inventoryCommand(environment) {
   return inventory.cases.find(
@@ -238,6 +241,15 @@ test("guard accepts named results and summaries written to stderr", () => {
 
 for (const [name, output] of [
   [
+    "a completed pass immediately followed by a Viceroy diagnostic",
+    suffixedViceroyPass(fastlyBodylessSentinel) + summary(1),
+  ],
+  [
+    "a colored should-panic pass followed by a Viceroy diagnostic and CRLF",
+    `test ${fastlyBodylessSentinel} - should panic ... \u001b[32mok\u001b[0m${viceroyDiagnostic}\r\n` +
+      summary(1),
+  ],
+  [
     "the actual split Viceroy CI record",
     splitViceroyPass(fastlyBodylessSentinel) +
       "test result: ok. 280 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.58s\n",
@@ -284,6 +296,34 @@ for (const [name, output] of [
 
 const interruptedSentinel = `test tests::sentinel ... ${viceroyDiagnostic}\n`;
 for (const [name, output] of [
+  ...[
+    ["okay instead of ok", `okay${viceroyDiagnostic}`],
+    ["extra text after ok", `ok extra${viceroyDiagnostic}`],
+    ["a missing timestamp", `ok${viceroyDiagnostic.split("Z ")[1]}`],
+    ["a malformed timestamp", `ok${viceroyDiagnostic.replace("2026-", "26-")}`],
+    [
+      "an unrelated diagnostic",
+      `ok${viceroyDiagnostic.replace("Backend connection error for", "unrelated log for")}`,
+    ],
+    ["a failed status", `FAILED${viceroyDiagnostic}`],
+    ["an ignored status", `ignored${viceroyDiagnostic}`],
+  ].map(([name, detail]) => [
+    `a diagnostic-suffixed pass with ${name}`,
+    `test tests::sentinel ... ${detail}\n${summary(1)}`,
+  ]),
+  [
+    "a diagnostic-suffixed pass without a summary",
+    suffixedViceroyPass("tests::sentinel"),
+  ],
+  [
+    "a diagnostic-suffixed pass with zero passed tests",
+    suffixedViceroyPass("tests::sentinel") + summary(0),
+  ],
+  [
+    "a diagnostic-suffixed pass with a failed summary",
+    suffixedViceroyPass("tests::sentinel") +
+      "test result: FAILED. 1 passed; 1 failed;\n",
+  ],
   [
     "a wrong split test name",
     splitViceroyPass("tests::unrelated") + summary(1),
@@ -365,6 +405,13 @@ for (const [name, output] of [
     assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
   });
 }
+
+test("a diagnostic-suffixed pass preserves command failure", () => {
+  const result = run(null, ["tests::sentinel"], 42, ["sentinel"], {
+    output: suffixedViceroyPass("tests::sentinel") + summary(1),
+  });
+  assert.equal(result.status, 42, result.stderr);
+});
 
 test("split passes preserve literal suffix boundaries and require every sentinel", () => {
   const listed = ["tests::sentinel[0]", "tests::second"];
@@ -553,22 +600,31 @@ for (const [environment, mode] of [
     }
   });
 
-  test(`${environment} inventory guard requires exact split sentinel names`, () => {
-    const name = required.at(-1);
-    for (const replacement of [name, `other::${name}`, `${name}_suffix`]) {
-      const output =
-        required
-          .filter((sentinel) => sentinel !== name)
-          .map((sentinel) => `test ${sentinel} ... ok\n`)
-          .join("") +
-        splitViceroyPass(replacement) +
-        summary(required.length);
-      const result = run(mode, required, 0, ["--inventory", environment], {
-        output,
-      });
-      assert.equal(result.status, replacement === name ? 0 : 1, result.stderr);
-    }
-  });
+  for (const [shape, pass] of [
+    ["split", splitViceroyPass],
+    ["suffix", suffixedViceroyPass],
+  ]) {
+    test(`${environment} inventory guard requires exact ${shape} sentinel names`, () => {
+      const name = required.at(-1);
+      for (const replacement of [name, `other::${name}`, `${name}_suffix`]) {
+        const output =
+          required
+            .filter((sentinel) => sentinel !== name)
+            .map((sentinel) => `test ${sentinel} ... ok\n`)
+            .join("") +
+          pass(replacement) +
+          summary(required.length);
+        const result = run(mode, required, 0, ["--inventory", environment], {
+          output,
+        });
+        assert.equal(
+          result.status,
+          replacement === name ? 0 : 1,
+          result.stderr,
+        );
+      }
+    });
+  }
 
   test(`${environment} inventory guard rejects nonexact listed sentinel names`, () => {
     const listed = required.map((name) => `other::${name}`);
