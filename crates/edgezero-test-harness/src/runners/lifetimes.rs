@@ -4184,9 +4184,9 @@ mod tests {
         for timing in [
             Value::Null,
             json!({"basis":"request-start-guest-clock","ordered":true,
-                "probe_entered_us":0,"origin_wait_entered_us":0,"origin_wait_returned_us":2000}),
+                "admission_entered_us":0,"probe_entered_us":0,"origin_wait_entered_us":0,"origin_wait_returned_us":2000}),
             json!({"basis":"request-start-guest-clock","ordered":false,
-                "probe_entered_us":9000,"origin_wait_entered_us":9000,"origin_wait_returned_us":9000}),
+                "admission_entered_us":9001,"probe_entered_us":9000,"origin_wait_entered_us":9000,"origin_wait_returned_us":9000}),
         ] {
             report["entry_timing"] = timing;
             let error = validate(AXUM, "slow-origin", "sample", &report, &origin).unwrap_err();

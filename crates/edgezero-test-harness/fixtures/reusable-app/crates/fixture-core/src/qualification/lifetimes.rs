@@ -39,10 +39,47 @@ struct Timeline {
 }
 
 struct EntryTiming {
+    admission_entered: Option<MonotonicInstant>,
     probe_entered: MonotonicInstant,
     origin_wait_entered: Option<MonotonicInstant>,
     origin_wait_returned: Option<MonotonicInstant>,
     begin_entered: Option<MonotonicInstant>,
+}
+
+struct AdmissionTiming {
+    request_start: MonotonicInstant,
+    entered: MonotonicInstant,
+}
+
+fn observes_admission(path: &str) -> bool {
+    matches!(
+        path,
+        "/progress/lifetimes/slow-origin"
+            | "/progress/lifetimes/timeout-before-cutoff"
+            | "/progress/lifetimes/response-handoff"
+    )
+}
+
+impl AdmissionTiming {
+    fn from_grant(
+        grant: Option<edgezero_core::IngressGrant>,
+        request_start: MonotonicInstant,
+    ) -> Result<Self, EdgeError> {
+        let unavailable = || {
+            EdgeError::internal(std::io::Error::other(
+                "lifetime admission timing unavailable",
+            ))
+        };
+        let timing = grant
+            .ok_or_else(unavailable)?
+            .downcast::<Self>()
+            // A foreign lease ends this fixture request; never continue with fabricated timing.
+            .map_err(|_grant| unavailable())?;
+        if timing.request_start != request_start {
+            return Err(unavailable());
+        }
+        Ok(timing)
+    }
 }
 
 #[derive(Default)]
@@ -228,6 +265,7 @@ impl EntryTiming {
                 .begin_entered
                 .is_none_or(|_| self.origin_wait_returned.is_some())
             && [
+                self.admission_entered,
                 Some(self.probe_entered),
                 self.origin_wait_entered,
                 self.origin_wait_returned,
@@ -238,6 +276,7 @@ impl EntryTiming {
             .try_fold(start, |previous, at| (at >= previous).then_some(at))
             .is_some();
         json!({"basis":"request-start-guest-clock","ordered":ordered,
+            "admission_entered_us":self.admission_entered.and_then(relative),
             "probe_entered_us":relative(self.probe_entered),
             "origin_wait_entered_us":self.origin_wait_entered.and_then(relative),
             "origin_wait_returned_us":self.origin_wait_returned.and_then(relative)})
@@ -1211,7 +1250,19 @@ pub(super) fn configure_admission(app: &mut edgezero_core::app::App) {
 fn install_batch_admission(app: &mut edgezero_core::app::App) {
     use edgezero_core::{AdmissionDecision, IngressGrant, ResponseEgressCompletion};
     use std::sync::atomic::Ordering;
-    app.set_ingress_admission_policy(|head| {
+    let clock = app.monotonic_clock();
+    app.set_ingress_admission_policy(move |head| {
+        if observes_admission(head.target().path()) {
+            let timing = AdmissionTiming {
+                request_start: head.request_start(),
+                entered: clock.now(),
+            };
+            return AdmissionDecision::Admit {
+                completion: ResponseEgressCompletion::empty(),
+                grant: IngressGrant::new(timing),
+                read_deadline: head.read_deadline_after(edgezero_core::DEFAULT_INBOUND_READ_BUDGET),
+            };
+        }
         #[cfg(feature = "native-body-witness")]
         if let Some((completion,grant)) = response_cleanup::admission(head.target().path(),head.headers()) {
             return AdmissionDecision::Admit {completion,grant,
@@ -1497,6 +1548,11 @@ pub(super) async fn probe(ctx: RequestContext) -> Result<Response, EdgeError> {
     let probe = Probe::parse(case, ctx.headers())?;
     let mut timeline = Timeline::new(clock, ctx.request_start());
     timeline.entry_timing = Some(EntryTiming {
+        admission_entered: if observes_admission(ctx.uri().path()) {
+            Some(AdmissionTiming::from_grant(ctx.take_ingress_grant(), timeline.start)?.entered)
+        } else {
+            None
+        },
         probe_entered,
         origin_wait_entered: None,
         origin_wait_returned: None,
@@ -1968,7 +2024,46 @@ mod tests {
 
     #[test]
     fn entry_timing_preserves_the_request_epoch_when_the_handler_is_late() {
-        handoff_route_until(true, HandoffEnd::Collect, 9);
+        handoff_route_until(true, HandoffEnd::Collect, 3, 9);
+    }
+
+    #[test]
+    fn admission_timing_requires_its_own_grant_and_original_epoch() {
+        use edgezero_core::IngressGrant;
+        let start = TestTime::default().clock().now();
+        let entered = start + Duration::from_millis(3);
+        let timing = || {
+            IngressGrant::new(AdmissionTiming {
+                request_start: start,
+                entered,
+            })
+        };
+        assert_eq!(
+            AdmissionTiming::from_grant(Some(timing()), start)
+                .unwrap()
+                .entered,
+            entered
+        );
+        for grant in [None, Some(IngressGrant::empty())] {
+            assert!(matches!(
+                AdmissionTiming::from_grant(grant, start),
+                Err(EdgeError::Internal { .. })
+            ));
+        }
+        assert!(
+            AdmissionTiming::from_grant(Some(timing()), start + Duration::from_nanos(1)).is_err()
+        );
+        let drops = Arc::default();
+        let foreign = IngressGrant::new(FamilyDrop(Arc::clone(&drops)));
+        assert!(AdmissionTiming::from_grant(Some(foreign), start).is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        for path in [
+            "/progress/lifetimes/batch-write-deadline",
+            "/progress/lifetimes/response-owned-cleanup-complete",
+            "/progress/lifetimes/fast-origin",
+        ] {
+            assert!(!observes_admission(path));
+        }
     }
 
     #[test]
@@ -1980,6 +2075,7 @@ mod tests {
             start,
         );
         timeline.entry_timing = Some(EntryTiming {
+            admission_entered: Some(start),
             probe_entered: start,
             origin_wait_entered: Some(start),
             origin_wait_returned: Some(returned),
@@ -2013,6 +2109,16 @@ mod tests {
         timing.origin_wait_returned = Some(start);
         timing.begin_entered = Some(start);
         assert_eq!(timing.json(start)["ordered"], true);
+        timing.admission_entered = Some(start + Duration::from_nanos(1));
+        let backwards = timing.json(start);
+        assert_eq!(backwards["admission_entered_us"], 0);
+        assert_eq!(backwards["ordered"], false);
+        timing.admission_entered = Some(start - Duration::from_nanos(1));
+        let early = timing.json(start);
+        assert_eq!(early["admission_entered_us"], Value::Null);
+        assert_eq!(early["ordered"], false);
+        timing.admission_entered = None;
+        assert_eq!(timing.json(start)["ordered"], true);
     }
 
     #[test]
@@ -2035,18 +2141,24 @@ mod tests {
             true,
             outcome.map_or(HandoffEnd::Drop, HandoffEnd::Terminal),
             0,
+            0,
         );
     }
 
     fn handoff_route(has_return_signal: bool) {
-        handoff_route_until(has_return_signal, HandoffEnd::Collect, 0);
+        handoff_route_until(has_return_signal, HandoffEnd::Collect, 0, 0);
     }
 
-    fn handoff_route_until(has_return_signal: bool, end: HandoffEnd, entry_delay_ms: u64) {
+    fn handoff_route_until(
+        has_return_signal: bool,
+        end: HandoffEnd,
+        admission_delay_ms: u64,
+        entry_delay_ms: u64,
+    ) {
         use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
         use edgezero_core::{
-            IngressDispatchOutcome, IngressFraming, IngressHeadAccounting, ResponseEgressOutcome,
-            app::App,
+            IngressBeginOutcome, IngressFraming, IngressHeadAccounting, IngressHeadParts,
+            ResponseEgressOutcome, app::App,
         };
         use futures::FutureExt as _;
         use std::{
@@ -2074,6 +2186,7 @@ mod tests {
         );
         let mut app = App::new(router);
         app.set_monotonic_clock(time.clock());
+        install_batch_admission(&mut app);
         let reports = TerminalReports::default();
         app.set_response_egress_observer(reports.clone());
         let mut request = request_builder()
@@ -2085,17 +2198,18 @@ mod tests {
             .extensions_mut()
             .insert(HttpClient::with_client(client.clone()));
         let callback = OutboundScopeOwner::callback();
-        time.advance_to(start + Duration::from_millis(entry_delay_ms));
-        let outcome = block_on(callback.run(app.dispatch_ingress(
-            request,
-            start,
+        time.advance_to(start + Duration::from_millis(admission_delay_ms));
+        let head = IngressHeadParts::from_request(
+            &request,
             IngressHeadAccounting::HostManaged,
             IngressFraming::HostManaged,
-        )))
-        .unwrap();
-        let IngressDispatchOutcome::Response(envelope) = outcome else {
-            panic!("handoff response")
+        );
+        let IngressBeginOutcome::Admitted(prepared) = app.begin_ingress(head, start).unwrap()
+        else {
+            panic!("handoff admission")
         };
+        time.advance_to(start + Duration::from_millis(entry_delay_ms));
+        let envelope = block_on(callback.run(app.dispatch_admitted(prepared, request)));
         assert_eq!(
             client
                 .jobs
@@ -2207,6 +2321,7 @@ mod tests {
         assert_eq!(
             report["entry_timing"],
             json!({"basis":"request-start-guest-clock","ordered":true,
+                "admission_entered_us":admission_delay_ms * 1000,
                 "probe_entered_us":entry_delay_ms * 1000,
                 "origin_wait_entered_us":entry_delay_ms * 1000,
                 "origin_wait_returned_us":entry_delay_ms.max(2) * 1000})
@@ -3519,10 +3634,10 @@ mod tests {
             .get("/progress/lifetimes/{case}", probe)
             .build();
         let mut request = request_builder()
-            .uri("/progress/lifetimes/slow-origin")
+            .uri("/progress/lifetimes/fast-origin")
             .body(Body::empty())
             .unwrap();
-        *request.headers_mut() = headers("slow-origin");
+        *request.headers_mut() = headers("fast-origin");
         assert_eq!(
             block_on(router.oneshot(request)).unwrap().status(),
             StatusCode::INTERNAL_SERVER_ERROR

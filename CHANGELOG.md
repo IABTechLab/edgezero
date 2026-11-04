@@ -13,8 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
-- Add bounded lifecycle-fixture entry timing to distinguish pre-handler, setup and wait/resumption
-  intervals without resetting request epochs, reinterpreting Begin results or relaxing acceptance.
+- Add bounded lifecycle-fixture entry timing, including request-owned admission samples on three
+  existing routes, to distinguish pre-admission, pre-handler and wait/resumption intervals without
+  resetting request epochs, reinterpreting Begin results or relaxing acceptance.
 - Recognize completed test results immediately followed by known Viceroy host diagnostics,
   retaining exact sentinels, positive zero-failure summaries and command/stream failure checks.
 - Keep deferred lifecycle-fixture batch dispatch on its original absolute target using the

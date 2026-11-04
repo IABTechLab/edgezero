@@ -1332,6 +1332,13 @@ The optional fixed `entry_timing` report records fixture-handler-body entry and 
 origin-wait entry/return, relative to the same request start. Existing Begin timestamps remain
 authoritative for call entry/duration. Captured instants are formatted only at report time;
 unreached/pre-epoch samples remain null, and raw ordering is checked before microsecond truncation.
+The existing admission policy also records `admission_entered_us` on slow-origin,
+timeout-before-cutoff and response-handoff, after selecting their fixed paths. A private grant
+binds that sample to the original request epoch; missing, foreign or wrong-epoch grants fail
+before outbound work. The policy captures the app clock after clock configuration. Batch-write
+and response-cleanup grants/completions are unchanged; other paths report a null admission sample.
+Request-start-to-admission includes normalization and route resolution; admission-to-handler
+includes the remaining policy and dispatch work. Neither interval isolates conversion or scheduling.
 These are broad guest-clock observations, not HTTP conversion, CPU-time or native timer-callback
 measurements. Equal samples do not prove zero work. Diagnostic metadata cannot reanchor a late
 call or turn a failing timing assertion into a pass. No new request, timer or probe case is added.

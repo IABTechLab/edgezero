@@ -12,6 +12,42 @@
 
 ## Status and Authority
 
+### Admission Boundary Observation (2026-11-04)
+
+All 30 GitHub checks pass at `9f0a3984`. Continuing the existing timing investigation adds one
+request-owned fixture sample, not a public API, production timing hook or alternate transport.
+
+- [x] Extend the actual-route regression first: admit at 3 ms, dispatch at 9 ms and require the
+      original request epoch and Begin at 9 ms. Observe failure for the missing admission sample.
+- [x] Capture the app clock after clock configuration; record one sample after the fixed admission
+      path predicate for slow-origin, timeout-before-cutoff and response-handoff. Carry the sample
+      and epoch through a private grant, preserving batch-write/cleanup grants and completions.
+- [x] Reject missing, empty, foreign and wrong-epoch grants before outbound work; verify foreign
+      resource release exactly once. Check raw ordering before truncation, equal samples, null
+      unknown/pre-epoch values and reporting without clock reads. Forged metadata cannot rescue
+      the original late-Begin failure.
+- [x] Run the existing complete Workers lifecycle suite with unchanged budgets and acceptance.
+
+Capture: `/private/tmp/pr275-admission-phase-workers-v1/`, working-tree build identity
+`31d3269bb94ac37958658aa8e767d823535082edc7324eaf8979d6aab95a6bcc`. Cold slow-origin records
+admission **4 ms**, handler **8 ms**, wait **8/9 ms** and Begin **9 ms** with **2 ms** call duration.
+Comparison admission/handler/wait-return is **0/0/4 ms**; handoff records **0/0/3 ms**. These split
+observations do not isolate conversion, routing, JIT or scheduling. The sample is after selecting
+its path, not literally policy entry. No default-clock fallback or observer-cost subtraction.
+
+The complete suite reports **17 pass/two fail, exit 1**, plus a final-log-tail failure. Cold Begin
+and ordinary-close cancellation still fail. Pending-body cutoff returns at 205 ms here; its
+historical misses remain recorded. No requirement, API, adapter, capability, provider pin, demo,
+template, suite, invocation list or CI job changes. Exact-candidate and hosted proof remain gated.
+Both read-only design proposals favor the existing grant over a new public hook or shared map.
+
+Verification passes all five root gates (2,666 tests/33 binaries, one existing ignored), 88 fixture
+tests with native witnesses and 72 without, 151 owning lifecycle-harness tests, strict fixture and
+harness Clippy, all three fixture WASM checks, all three workspace format checks, 284 tooling
+tests, docs format/lint/build and docs/legacy contracts. Initial sandboxed workspace/harness runs
+fail at denied TCP binds; reruns with owned-loopback access pass. Independent code and evidence
+reviews have no findings. These results do not qualify the retained failed runtime cases.
+
 ### Cold Entry Phase Observation (2026-11-03)
 
 All 30 GitHub checks pass at `f82e4025`. Continuing the remaining timing investigation adds

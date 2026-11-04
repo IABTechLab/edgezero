@@ -9,6 +9,28 @@ qualification. The dated gate checkpoints below retain their original decisions 
 observations, not blanket implementation stops after later scoped approvals. Frozen-candidate,
 consumer and hosted evidence remain separate, and no capability is promoted by local coverage.
 
+### Admission Boundary Observation (2026-11-04)
+
+The complete Workers lifecycle capture at `/private/tmp/pr275-admission-phase-workers-v1/`
+retains working-tree build identity `31d3269bb94ac37958658aa8e767d823535082edc7324eaf8979d6aab95a6bcc`.
+One additional app-clock sample is carried through the existing private admission grant on three
+existing routes. Sampling follows their fixed path predicate, not raw parser entry. The original
+request epoch is checked; missing/foreign grants fail before outbound work. Other grants and
+completion resources remain unchanged. No production API, adapter or runtime pin changes.
+
+Cold slow-origin records admission at **4 ms**, handler at **8 ms**, wait entry/return **8/9 ms**
+and Begin at **9 ms**, with **2 ms** call duration. The original 2 ms target remains expired.
+This splits the pre-handler interval but does not identify its cause: the first interval includes
+normalized conversion/validation and route resolution; the second includes remaining policy and
+dispatch work. Comparison admission/handler/wait-return is **0/0/4 ms**; response-handoff records
+**0/0/3 ms**. These coarse guest-clock samples are not CPU or native callback measurements.
+
+All **19 cases** run: **17 pass/two fail, exit 1**, plus a final-log-tail failure. Cold Begin and
+ordinary-close cancellation remain failed. Pending-body cutoff returns at **205 ms** in this run;
+earlier misses remain failures, not erased by this observation. The original reset diagnostic
+remains separate and uncredited. No retry, warmup, reanchoring, cost subtraction, widened timing
+bound, new suite or CI job is introduced. Exact-candidate and hosted qualification remain open.
+
 ### Cold Entry Phase Observation (2026-11-03)
 
 The existing complete Workers lifecycle run at `/private/tmp/pr275-entry-phase-workers-v1/`
