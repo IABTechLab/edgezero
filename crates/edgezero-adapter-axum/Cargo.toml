@@ -36,6 +36,7 @@ aws-dynamodb = ["axum", "edgezero-store-aws/dynamodb-kv"]
 celld-config = ["axum", "edgezero-store-celld/config"]
 celld-kv = ["axum", "edgezero-store-celld/kv"]
 geo-cloudfront = ["axum"]
+geo-maxmind = ["axum", "dep:maxminddb", "dep:sha2", "dep:base16ct"]
 cli = [
     "native-bindings",
     "dep:edgezero-adapter",
@@ -80,6 +81,9 @@ tracing = { workspace = true }
 walkdir = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+base16ct = { workspace = true, optional = true }
+maxminddb = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 edgezero-store-aws = { workspace = true, optional = true }
 edgezero-store-celld = { workspace = true, optional = true }
 

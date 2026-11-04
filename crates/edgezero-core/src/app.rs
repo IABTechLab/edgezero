@@ -2242,10 +2242,11 @@ mod tests {
         for resolution in [
             GeoResolution::Located(GeoLocation::new(CountryCode::new("US").unwrap(), None)),
             GeoResolution::MissingMetadata,
+            GeoResolution::NoMatch,
         ] {
             let provider_calls = Arc::new(AtomicUsize::new(0));
             let provider = CountingGeoProvider(resolution, Arc::clone(&provider_calls));
-            let status = match provider.resolve(&GeoInput {
+            let status = match provider.resolve(&GeoInput::Assertions {
                 country: GeoAssertion::absent(),
                 subdivision: GeoAssertion::absent(),
             }) {
@@ -2257,6 +2258,7 @@ mod tests {
                 GeoResolution::MissingMetadata => {
                     GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata)
                 }
+                GeoResolution::NoMatch => GeoStatus::Unavailable(GeoUnavailableReason::NoMatch),
                 GeoResolution::Error(_) => panic!("unexpected provider error"),
             };
             let geo = GeoOutcome::Selected {

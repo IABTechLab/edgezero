@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Axum local GeoIP and breaking Geo input migration
+
+Draft implementation, not accepted for release. Full metadata-corruption rejection remains blocked
+by the pinned reader API, with an explicit ignored regression. File acquisition is Unix-only;
+non-Unix selection reports implementation unavailability. Production-size measurements remain open.
+
+- Add default-off `geo-maxmind` for an operator-supplied GeoLite2 City or Country MMDB.
+  Prepare and validate a bounded, read-only in-memory snapshot before initialization and binding.
+  Updates require restart; active processes retain their snapshot after source replacement/deletion.
+  Preparation precedes runtime signal/stop polling and has no filesystem I/O deadline.
+- Add explicit `PeerAllowed`/`ForwardedRequired` checked-reader selection and
+  `SuppliedReaderIp` composition, which works with `axum` alone. No geographic-header fallback,
+  downloader, remote lookup or automatic permission decision is added.
+- Breaking pre-release migration: replace `GeoInput { country, subdivision }` with
+  `GeoInput::Assertions { country, subdivision }`, match fields by variant, and explicitly handle
+  or reject `ReaderIp { address, source }`. Update exhaustive matches for resolution `NoMatch`,
+  unavailable `MissingReaderIp`/`NoMatch`, source `LocalDatabase`/`CheckedReaderIp` and trust basis
+  `CheckedReaderIp(GeoIpSource)`. Unsupported inputs return `ProviderFailure`.
+- Replace capability's `Selected { provider, source, trust_basis }` with
+  `Selected { provider, input: NativeGeoInputContract }`. Capability validates configuration
+  without database I/O and does not describe request provenance. Reserve custom provider ID
+  `maxmind` alongside `cloudfront`. No compatibility aliases or unrelated version bumps.
+- Document mounts, proxy trust, redaction, uncertainty, dataset attribution and operator-owned
+  update/deletion duties, including running snapshots and rollback copies, in the
+  [native Geo guide](docs/guide/native-geo.md).
+
 ### Axum buffered JSON limits and body API
 
 Axum now defaults framework-managed JSON buffering to 2 MiB, exactly 2,097,152 bytes.

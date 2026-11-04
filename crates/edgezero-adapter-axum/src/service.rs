@@ -384,6 +384,7 @@ impl AxumServiceState {
             }
         };
         let checked = normalize(&self.trusted_proxy_policy, remote_addr, &parts);
+        let reader_input = self.geo.reader_input(&checked);
         guard.set_forwarding_result(checked.forwarding_result());
         strip_forwarding_headers(&mut parts.headers);
         parts.extensions.insert(checked.effective_host().clone());
@@ -430,7 +431,9 @@ impl AxumServiceState {
                 .await;
             }
         };
-        let geo = self.geo.resolve(remote_addr, &parts.headers);
+        let geo = self
+            .geo
+            .resolve(remote_addr, &parts.headers, reader_input.as_ref());
         Ok(self
             .dispatch_prepared(prepared, parts, native_body, connection, guard, geo)
             .await)
@@ -548,6 +551,10 @@ async fn prepare_native_egress(
 }
 
 #[cfg(test)]
+#[path = "service_geo_reader_tests.rs"]
+mod geo_reader_tests;
+
+#[cfg(test)]
 mod tests {
     #![expect(
         clippy::arbitrary_source_item_ordering,
@@ -615,7 +622,8 @@ mod tests {
         impl GeoProvider for Counted {
             fn resolve(&self, input: &GeoInput) -> GeoResolution {
                 self.0.lock().unwrap().push(input.clone());
-                if input.country.as_bytes().is_err() {
+                if matches!(input, GeoInput::Assertions { country, .. } if country.as_bytes().is_err())
+                {
                     GeoResolution::Error(GeoError::InvalidAssertion)
                 } else {
                     GeoResolution::MissingMetadata
@@ -646,7 +654,7 @@ mod tests {
             id: GeoProviderId::new("counted").unwrap(),
             provider: Arc::new(Counted(Arc::clone(&calls))),
         };
-        let geo = NativeGeo::validate(&selection).unwrap();
+        let geo = NativeGeo::prepare(&selection).unwrap();
         let admission_calls = Arc::new(AtomicUsize::new(0));
         let handler_calls = Arc::new(AtomicUsize::new(0));
         let observed_handler = Arc::clone(&handler_calls);
@@ -759,11 +767,12 @@ mod tests {
             assert_eq!(to_bytes(response.into_body(), 128).await.unwrap(), expected);
         }
         assert_eq!(calls.lock().unwrap().len(), 2);
-        assert_eq!(
-            calls.lock().unwrap()[0].country.as_bytes().unwrap(),
-            Some(b"US".as_slice())
+        assert!(
+            matches!(&calls.lock().unwrap()[0], GeoInput::Assertions { country, .. } if country.as_bytes().unwrap() == Some(b"US".as_slice()))
         );
-        assert_eq!(calls.lock().unwrap()[1].country.as_bytes().unwrap(), None);
+        assert!(
+            matches!(&calls.lock().unwrap()[1], GeoInput::Assertions { country, .. } if country.as_bytes().unwrap().is_none())
+        );
         for path in ["/invalid", "/egress-drop", "/egress-fail"] {
             let expected_calls = calls.lock().unwrap().len().checked_add(1).unwrap();
             let mut request = Request::builder()
@@ -803,7 +812,9 @@ mod tests {
                 "terminal work does not resolve Geo again"
             );
         }
-        calls.lock().unwrap()[2].country.as_bytes().unwrap_err();
+        assert!(
+            matches!(&calls.lock().unwrap()[2], GeoInput::Assertions { country, .. } if country.as_bytes().is_err())
+        );
         for path in ["/refuse", "/abort"] {
             let request = Request::builder()
                 .uri(path)
@@ -878,7 +889,10 @@ mod tests {
         assert_eq!(calls.lock().unwrap().len(), 6);
     }
 
-    async fn to_bytes(mut body: AxumEgressBody, limit: usize) -> Result<Bytes, anyhow::Error> {
+    pub(super) async fn to_bytes(
+        mut body: AxumEgressBody,
+        limit: usize,
+    ) -> Result<Bytes, anyhow::Error> {
         let mut buffered = BytesMut::new();
         loop {
             let next_frame = poll_future(|context| Pin::new(&mut body).poll_frame(context)).await;

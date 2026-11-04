@@ -38,11 +38,13 @@ assert_feature() {
   fi
 }
 
-# The implementation must be default-off and add no normal runtime dependency.
+# CloudFront adds no dependencies; the local reader must remain native opt-in.
 graph native-default edgezero-adapter-axum
 graph native-off edgezero-adapter-axum --no-default-features --features axum
 graph native-on edgezero-adapter-axum --no-default-features --features geo-cloudfront
-for name in native-default native-off native-on; do
+graph native-maxmind edgezero-adapter-axum --no-default-features --features geo-maxmind
+graph native-both edgezero-adapter-axum --no-default-features --features geo-cloudfront,geo-maxmind
+for name in native-default native-off native-on native-maxmind native-both; do
   assert_feature "$name" axum on
   if grep -Eq '^aws-(config|sdk-[^ ]+) v' "$scratch/$name"; then
     fail "AWS SDK leaked into $name"
@@ -51,21 +53,53 @@ done
 assert_feature native-default geo-cloudfront off
 assert_feature native-off geo-cloudfront off
 assert_feature native-on geo-cloudfront on
-for name in native-off native-on; do
-  # Ignore feature annotations and duplicate-tree markers, retaining exact versions.
-  cut -d '|' -f 1 "$scratch/$name" | sort -u > "$scratch/$name.packages"
+assert_feature native-maxmind geo-cloudfront off
+assert_feature native-both geo-cloudfront on
+for name in native-default native-off native-on; do
+  assert_feature "$name" geo-maxmind off
+  if grep -Eq '^maxminddb v' "$scratch/$name"; then
+    fail "MaxMind reader leaked into $name"
+  fi
 done
-if ! cmp -s "$scratch/native-off.packages" "$scratch/native-on.packages"; then
-  diff -u "$scratch/native-off.packages" "$scratch/native-on.packages" >&2 || true
-  fail 'geo-cloudfront changed the isolated normal dependency set'
-fi
+for name in native-maxmind native-both; do
+  assert_feature "$name" geo-maxmind on
+  grep -Eq '^maxminddb v0[.]32[.]0[|]' "$scratch/$name" \
+    || fail "missing pinned maxminddb 0.32.0 in $name"
+  grep -Eq '^sha2 v[^|]+[|]' "$scratch/$name" \
+    || fail "missing snapshot SHA-256 dependency in $name"
+  if grep -Eq '^memmap2 v' "$scratch/$name"; then
+    fail "memory mapping dependency selected in $name"
+  fi
+  if ! awk -F '|' '
+    /^maxminddb v/ {
+      sub(/ [(][*][)]$/, "", $2)
+      count = split($2, selected, ",")
+      for (i = 1; i <= count; i++)
+        if (selected[i] ~ /^(default|mmap|unsafe-str-decode)$/) exit 1
+    }
+  ' "$scratch/$name"; then
+    fail "unsafe or default reader features selected in $name"
+  fi
+done
+# sha2 may already be present transitively in feature-off native graphs.
+for pair in 'native-off native-on' 'native-maxmind native-both'; do
+  read -r baseline cloudfront <<< "$pair"
+  for name in "$baseline" "$cloudfront"; do
+    # Ignore feature annotations and duplicate-tree markers, retaining exact versions.
+    cut -d '|' -f 1 "$scratch/$name" | sort -u > "$scratch/$name.packages"
+  done
+  if ! cmp -s "$scratch/$baseline.packages" "$scratch/$cloudfront.packages"; then
+    diff -u "$scratch/$baseline.packages" "$scratch/$cloudfront.packages" >&2 || true
+    fail "geo-cloudfront changed the isolated normal dependency set in $cloudfront"
+  fi
+done
 
 # Portable core and real platform graphs must not acquire native hosting/stores.
 assert_portable() {
   local name="$1" root="$2"
   shift 2
   graph "$name" "$root" "$@"
-  if grep -Eq '^(edgezero-adapter-axum|edgezero-store-(aws|celld)|axum(-[^ ]+)?|tokio-[^ ]+|reqwest|hyper(-[^ ]+)?|mio|socket2|ipnet|aws-config|aws-sdk-[^ ]+) v' "$scratch/$name"; then
+  if grep -Eq '^(edgezero-adapter-axum|edgezero-store-(aws|celld)|axum(-[^ ]+)?|tokio-[^ ]+|reqwest|hyper(-[^ ]+)?|mio|socket2|ipnet|maxminddb|memmap2|aws-config|aws-sdk-[^ ]+) v' "$scratch/$name"; then
     fail "native runtime/store/SDK leaked into $name"
   fi
   # Pinned worker 0.8.5 already uses tokio 1.52.3 with default-features=false
@@ -95,4 +129,4 @@ for entry in 'cloudflare wasm32-unknown-unknown worker' 'fastly wasm32-wasip1 fa
   grep -Eq "^${sdk} v[^|]+[|]" "$scratch/$adapter" \
     || fail "missing selected platform SDK in $adapter"
 done
-printf 'Geo default-off, native dependency equality, and portable isolation graphs passed.\n'
+printf 'Geo default-off, CloudFront dependency equality, local reader opt-in, and portable isolation graphs passed.\n'

@@ -1,8 +1,9 @@
 # Native Geo providers
 
-Native Axum hosting can resolve CloudFront country and subdivision assertions once per admitted
-request. Geo is off by default. There is no database, reader-IP lookup, remote call, fallback
-provider, CLI option, environment selector, or manifest selector.
+Native Axum hosting can resolve estimated country and subdivision from an operator-supplied
+local GeoLite database, protected CloudFront assertions, or a supplied local provider, once per
+admitted request. Geo is off by default. There is no remote lookup, fallback provider, downloader,
+hot reload, CLI option, environment selector, or manifest selector.
 
 Geography is an estimate, not proof of residence, identity, consent, or permission. Applications
 own jurisdiction recognition and policy. A missing subdivision stays unknown, and a
@@ -11,11 +12,13 @@ syntax-valid subdivision is not necessarily assigned or recognized.
 ## Select a provider in Rust
 
 The public selection API lives in `edgezero_adapter_axum::geo` with the `axum` feature.
-Only the built-in implementation needs the default-off `geo-cloudfront` feature:
+Built-in implementations use default-off features. Choose `geo-maxmind` for a local database,
+`geo-cloudfront` for protected assertions, or both to make both implementations available.
+Compiling both still selects only one provider:
 
 ```toml
 [dependencies]
-edgezero-adapter-axum = { version = "<your-edgezero-version>", default-features = false, features = ["geo-cloudfront"] }
+edgezero-adapter-axum = { version = "<your-edgezero-version>", default-features = false, features = ["geo-maxmind"] }
 ```
 
 Use the same pinned EdgeZero release as your application. This feature enables `axum`, not
@@ -34,6 +37,146 @@ let options = AxumRunOptions::new("127.0.0.1:8787".parse()?)?
     .with_geo(NativeGeoSelection::Off);
 assert_eq!(options.geo_capability()?, NativeGeoCapability::Off);
 ```
+
+### Local GeoLite database
+
+Enable `geo-maxmind` and supply a regular MMDB file. Initially only metadata types
+`GeoLite2-City` and `GeoLite2-Country`, with IP version 4 or 6, are supported. City supplies
+country and optional first-level subdivision; Country supplies country only. Other MMDB
+publishers or types are not supported merely because their format decodes.
+
+For a server directly receiving reader connections:
+
+```rust
+use edgezero_adapter_axum::dev_server::AxumRunOptions;
+use edgezero_adapter_axum::geo::{MaxMindGeoConfig, NativeGeoSelection, ReaderIpExpectation};
+
+let options = AxumRunOptions::new("0.0.0.0:8787".parse()?)?
+    .with_geo(NativeGeoSelection::MaxMind {
+        config: MaxMindGeoConfig::new(
+            "/var/lib/edgezero/geo/GeoLite2-City.mmdb",
+            ReaderIpExpectation::PeerAllowed,
+        ),
+    });
+let _configured = options.geo_capability()?;
+```
+
+Behind a reverse proxy, require an explicitly resolved forwarded reader instead of geolocating
+the proxy. Protect the proxy-to-server network and configure the actual proxy peer ranges:
+
+```rust
+use edgezero_adapter_axum::dev_server::AxumRunOptions;
+use edgezero_adapter_axum::geo::{MaxMindGeoConfig, NativeGeoSelection, ReaderIpExpectation};
+use edgezero_adapter_axum::proxy::{ForwardingHeaderFamily, TrustedProxyPolicy};
+
+let proxy = TrustedProxyPolicy::new(
+    ForwardingHeaderFamily::Forwarded, ["10.20.0.8/32"],
+)?;
+let options = AxumRunOptions::new("0.0.0.0:8787".parse()?)?
+    .with_trusted_proxy_policy(proxy)
+    .with_geo(NativeGeoSelection::MaxMind {
+        config: MaxMindGeoConfig::new(
+            "/var/lib/edgezero/geo/GeoLite2-City.mmdb",
+            ReaderIpExpectation::ForwardedRequired,
+        ),
+    });
+```
+
+Use `ForwardingHeaderFamily::XForwarded` for an ingress that owns the X-Forwarded chain.
+See [trusted proxy configuration](./axum-diagnostics.md#what-makes-a-forwarding-assertion-trustworthy)
+for chain validation and network controls. This is not the protected CloudFront/ALB policy.
+No origin credential or geographic header is needed for local lookup.
+
+| Checked ingress                                  | `PeerAllowed`       | `ForwardedRequired` |
+| ------------------------------------------------ | ------------------- | ------------------- |
+| Trusted Forwarded or X-Forwarded client resolved | Use checked client  | Use checked client  |
+| Direct client with actual socket peer            | Use normalized peer | `MissingReaderIp`   |
+| No usable checked reader or no actual peer       | `MissingReaderIp`   | `MissingReaderIp`   |
+
+IPv4-mapped IPv6 addresses retain ingress normalization. A resolved forwarded client remains
+usable when host or scheme is absent. Malformed or unresolved forwarding can leave direct facts;
+`PeerAllowed` deliberately permits that peer, so it is the wrong expectation for a proxy-only
+reader path. Raw headers, forged public extensions and caller-supplied connection metadata cannot
+supply the private checked reader. Geographic headers never affect local lookup.
+
+#### Mount and prepare the snapshot
+
+Download and verify the dataset in your deployment process, outside the server. Check its
+publisher-provided integrity information and protect the distribution channel. Do not put
+MaxMind credentials in the runtime environment or image. For example, mount an already populated
+host directory read-only into your existing application image:
+
+```sh
+docker run --rm \
+  --mount type=bind,src=/srv/edgezero/geo,dst=/var/lib/edgezero/geo,readonly \
+  -p 8787:8787 your-app-image
+```
+
+The Rust selection above supplies the path; the mount alone enables nothing. Make the file
+readable by the runtime user. EdgeZero creates no database, sidecar or lock file and does not
+need AWS credentials, a writable data root or a database server. File acquisition is currently
+supported on Unix; other platforms reject preparation before opening the source.
+
+Preparation reads the file once into an immutable in-memory reader before application
+initialization, binding and readiness. It rejects missing/nonregular files, unsupported metadata,
+corruption and incompatible consumed field types. Upstream verification is followed by a bounded
+recursive structural pass over reachable data records and borrowed geographic projection checks.
+The pinned reader still accepts some malformed unused metadata fields. This is an open
+[#438 acceptance blocker](https://github.com/IABTechLab/edgezero/issues/438); the data-record pass
+does not close it. Validation also does not prove publisher authenticity. Structurally valid but
+unsupported code strings fail only when looked up.
+
+`MaxMindGeoConfig::limits` is public `MaxMindPreparationLimits`, defaulting to
+`max_database_bytes = 128 * 1024 * 1024` and `max_validation_networks = 32_000_000`.
+The actual read is capped, including an extra-byte overflow check. The visit budget bounds the
+upstream tree allowance and network iteration, including aliases and no-data leaves. The pinned
+reader also bounds per-decode values, payload and depth; verification memoizes shared values,
+while the structural pass expands them under decoder limits. Allocation grows with file bytes,
+referenced values and visited records. These are not fixed-RSS or wall-clock guarantees.
+Exceeding a bound fails startup, never skips validation. Raise limits deliberately and measure
+preparation time and peak memory with your permitted production snapshot before rollout.
+
+Preparation is synchronous and pre-runtime, before signal registration and polling an embedding
+stop future. An already-requested stop still waits for preparation; an invalid selected database
+still fails startup first. Early signals follow the caller/OS disposition. Filesystem I/O time is
+not bounded by byte/work limits. Cooperative startup cancellation applies only after this phase.
+
+After logging initialization, startup diagnostics identify the loaded database type, build epoch
+and SHA-256 of the loaded bytes. These identify the snapshot, not freshness, accuracy or
+signature verification. Configuration Debug redacts paths; reader input Debug redacts addresses.
+Outcomes retain no reader address or database path. Default framework diagnostics do not log
+reader IPs, geographic input headers or raw decode errors. Application code must preserve that
+redaction and avoid address/code/checksum metric labels.
+
+#### Updates, licensing and deletion
+
+GeoLite data is free of charge. A free MaxMind account and download license key are required
+for downloads, not for running a local snapshot. The `maxminddb` reader's ISC license is
+separate from the dataset's [GeoLite EULA](https://www.maxmind.com/en/geolite/eula), incorporated
+Creative Commons terms, attribution and redistribution obligations. Recheck the current terms
+before distributing an image, dataset or derived data. EdgeZero does not bundle production data.
+
+Provide the required attribution in the relevant product documentation and advertising, following
+[MaxMind's guidance](https://support.maxmind.com/knowledge-base/articles/sell-or-display-data-from-geolite-databases-and-web-services):
+
+> This product includes GeoLite Data created by MaxMind, available from https://www.maxmind.com.
+
+Operators own [database updates](https://dev.maxmind.com/geoip/updating-databases/):
+
+1. Download and verify a complete replacement outside the runtime. Never rewrite the source in
+   place during preparation. Publish the finished file or update the mount/reference atomically.
+2. Restart every serving process. Existing processes keep their old in-memory snapshot even if
+   the source is replaced or deleted. A new process validates the replacement before readiness;
+   invalid data fails startup without silently reusing an older file.
+3. Track release dates and retire old data. The EULA requires promptly using updates and ceasing
+   use of and destroying old versions within thirty days after an updated database is released.
+   This includes running in-memory snapshots and retained rollback copies, images and backups.
+   Stop/restart old processes and remove expired artifacts. Roll back only to data still allowed
+   by the terms. Termination has its own immediate destruction requirement.
+
+No updater, watcher, live swap or freshness cutoff is built in. File modification time, a
+successful load and a checksum do not prove freshness. DB-IP City Lite is a separately licensed
+MMDB alternative, not currently supported by this integration.
 
 ### CloudFront
 
@@ -91,19 +234,22 @@ application initializer, and listener binding.
 ### Application-supplied provider
 
 Supply a local implementation of `edgezero_core::geo::GeoProvider`. It works with only `axum`
-enabled, without the built-in `geo-cloudfront` implementation. This composition-only example
+enabled, without either built-in implementation. This composition-only example
 always returns missing metadata; replace `ExampleProvider` with your own bounded implementation:
 
 ```rust
 use std::sync::Arc;
 use edgezero_adapter_axum::dev_server::AxumRunOptions;
 use edgezero_adapter_axum::geo::{NativeGeoSelection, ProtectedCloudFrontAlb};
-use edgezero_core::geo::{GeoInput, GeoProvider, GeoProviderId, GeoResolution};
+use edgezero_core::geo::{GeoError, GeoInput, GeoProvider, GeoProviderId, GeoResolution};
 
 struct ExampleProvider;
 impl GeoProvider for ExampleProvider {
-    fn resolve(&self, _input: &GeoInput) -> GeoResolution {
-        GeoResolution::MissingMetadata
+    fn resolve(&self, input: &GeoInput) -> GeoResolution {
+        match input {
+            GeoInput::Assertions { .. } => GeoResolution::MissingMetadata,
+            GeoInput::ReaderIp { .. } => GeoResolution::Error(GeoError::ProviderFailure),
+        }
     }
 }
 let policy = ProtectedCloudFrontAlb::new(
@@ -119,19 +265,26 @@ let _capability = options.geo_capability()?;
 ```
 
 Provider IDs are public diagnostic labels, never secrets. They match
-`[a-z][a-z0-9._-]{0,63}`. The built-in `cloudfront` identity is reserved and cannot label a
-supplied provider, including when obtained through `GeoProviderId::cloudfront()`.
+`[a-z][a-z0-9._-]{0,63}`. The built-in `cloudfront` and `maxmind` identities are reserved and cannot label a
+supplied provider, including IDs obtained through their built-in constructors.
 
 `GeoProvider::resolve(&self, input: &GeoInput) -> GeoResolution` is synchronous, bounded local
-computation. The input has only a country slot of at most two bytes and a subdivision slot of
-at most three bytes. Each slot is absent, bounded, or marked invalid. Preserve invalid markers;
-do not turn them into missing data. Results use validated `CountryCode`, `SubdivisionCode`,
-and `GeoLocation` types or bounded `GeoError` categories.
+computation. `GeoInput::Assertions { country, subdivision }` carries country and subdivision slots
+of at most two and three bytes. Each slot is absent, bounded, or marked invalid. Preserve invalid
+markers rather than turning them into missing data. `GeoInput::ReaderIp { address, source }`
+carries a typed address and `GeoIpSource`, not arbitrary headers or service handles. Providers
+must return `Error(GeoError::ProviderFailure)` for unsupported input variants, without probing
+another input. Results use validated `CountryCode`, `SubdivisionCode` and `GeoLocation` types,
+`NoMatch`, `MissingMetadata` or bounded `GeoError` categories.
 
 Do not perform blocking I/O, remote requests, filesystem access, or background preparation.
 The portable trait has no `Send`/`Sync` supertraits; native ownership adds these bounds to the
-supplied object. Application Rust is trusted code, not a sandbox. In v1 the supplied provider
-uses the same protected CloudFront/ALB source contract, not an alternative raw-header source.
+supplied object. Application Rust is trusted code, not a sandbox. `Supplied` uses the same
+protected CloudFront/ALB assertion contract. For checked reader input, use
+`NativeGeoSelection::SuppliedReaderIp { expectation, id, provider }`, where expectation is
+`ReaderIpExpectation::PeerAllowed` or `ForwardedRequired`, ID is an application `GeoProviderId`
+and provider is `Arc<dyn GeoProvider + Send + Sync>`. It works with `axum` alone and uses the same
+private checked-reader admission as MaxMind, without claiming to be a local database.
 
 There is exactly one selection. A later `with_geo` call replaces the entire earlier selection;
 it does not merge policies or create a fallback chain. Provider failures do not switch providers.
@@ -141,8 +294,12 @@ it does not merge policies or create a fallback chain. Provider failures do not 
 Capture capability from the final options, then pass those same options to the existing
 initializer-based runner. No extra initializer argument or App registry is needed.
 
-Capability is `NativeGeoCapability::Off` or `NativeGeoCapability::Selected { provider, source,
-trust_basis }`. The CloudFront example above captures it in the initializer closure.
+Capability is `NativeGeoCapability::Off` or `NativeGeoCapability::Selected { provider, input }`.
+Input is `NativeGeoInputContract::ProtectedCloudFrontAlb` or
+`NativeGeoInputContract::ReaderIp { expectation }`. Inspection validates configuration and feature
+availability without opening, reading or preparing a database, even for a nonexistent path.
+It cannot report loaded metadata or eventual per-request provenance. The CloudFront example
+above captures capability in the initializer closure.
 
 The production runner above observes SIGINT and Unix SIGTERM, drains in-flight work, and
 forces non-success shutdown on a second signal. It uses the supplied options without merging
@@ -168,6 +325,8 @@ fn describe(outcome: &GeoOutcome) -> &'static str {
         GeoOutcome::Selected { status, .. } => match status {
             GeoStatus::Unavailable(GeoUnavailableReason::UntrustedIngress) => "source not admitted",
             GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata) => "metadata missing",
+            GeoStatus::Unavailable(GeoUnavailableReason::MissingReaderIp) => "reader unavailable",
+            GeoStatus::Unavailable(GeoUnavailableReason::NoMatch) => "no geographic match",
             GeoStatus::Error(GeoError::InvalidAssertion) => "assertion rejected",
             GeoStatus::Error(GeoError::ProviderFailure) => "provider failed",
             GeoStatus::Located { location, .. } if location.subdivision().is_none() => "country only",
@@ -178,25 +337,40 @@ fn describe(outcome: &GeoOutcome) -> &'static str {
 ```
 
 Every selected outcome retains the selected provider identity, even when source admission
-fails before invocation. Located results carry `GeoSource::CloudFront` and
-`GeoTrustBasis::DeclaredProtectedAlb`. These describe the source and operator-declared path,
-not a cryptographic attestation of distribution identity.
+fails before invocation. Located assertion results carry `GeoSource::CloudFront` and
+`GeoTrustBasis::DeclaredProtectedAlb`. Local MaxMind results carry `GeoSource::LocalDatabase`;
+supplied reader results carry `GeoSource::CheckedReaderIp`. Both reader compositions carry
+`GeoTrustBasis::CheckedReaderIp(source)` with `GeoIpSource::DirectPeer`, `TrustedForwarded` or
+`TrustedXForwarded`. These describe admitted estimates, not identity or residence attestations.
+
+For local databases, absent reader input means `MissingReaderIp` and zero provider calls.
+A valid reader with no record, neither selected code, or IPv6 against an IPv4-only dataset means
+`NoMatch` and one call. A valid country without subdivision is country-only. City reads only
+`country.iso_code` and `subdivisions[0].iso_code`; Country reads only the country code.
+Registered/represented country, names and later subdivisions never fill gaps. Leading zeroes
+are preserved. Empty/malformed present codes, unsupported countries such as `XK`, or subdivision
+without country produce `InvalidAssertion`, not a downgraded country-only result. Unexpected
+reader failures produce `ProviderFailure`. Unknown but syntax-valid subdivisions stay assertions.
 
 ```mermaid
 flowchart TD
     Head[Account original request head] --> Strip[Remove every configured credential field]
     Strip --> Admission[Validate and admit ingress]
     Admission -->|Refused or aborted| Stop[No provider invocation]
-    Admission -->|Admitted| Selection{Provider selected?}
-    Selection -->|No| Off[NoSelection]
-    Selection -->|Yes| Peer{Actual socket peer matches protected policy?}
+    Admission -->|Admitted| Selection{Selected input?}
+    Selection -->|Off| Off[NoSelection]
+    Selection -->|Assertions| Peer{Peer matches protected policy?}
     Peer -->|No or missing| Untrusted[UntrustedIngress, no invocation]
-    Peer -->|Yes| Resolve[Resolve bounded assertion slots exactly once]
+    Peer -->|Yes| Resolve[Resolve selected provider exactly once]
+    Selection -->|Reader IP| Reader{Checked reader meets expectation?}
+    Reader -->|No| Missing[MissingReaderIp, no invocation]
+    Reader -->|Yes| Resolve
     Resolve --> Context[Store private outcome before middleware and handlers]
 ```
 
 Ordinary trusted-proxy configuration, effective reader IP, forwarding headers, public
-extensions, and caller-supplied `ConnectInfo` cannot create Geo source admission. Admission
+extensions, and caller-supplied `ConnectInfo` cannot create protected assertion admission.
+Reader selections use only runner-owned checked ingress facts, not mutable public metadata. Admission
 callbacks run before Geo exists. Header changes or extension insertion/removal by application
 code cannot replace the managed outcome. Response finalization never resolves it again.
 
@@ -322,7 +496,30 @@ Trusted Server adoption, jurisdiction lists, consent interpretation, and Edge Co
 behavior are separate work; this feature does not relax their fail-closed requirements.
 
 [AWS VPC origins](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html),
-other adapters/sources, GeoIP databases, reader-IP inputs, remote providers, hot reload, and
-subdivision catalogues are deferred. VPC origins are not a second supported trust mode here.
-See [Axum diagnostics and trusted proxies](./axum-diagnostics.md) for ordinary forwarding policy,
-which remains independent from Geo source admission.
+other adapters/sources, remote providers, hot reload and subdivision catalogues are deferred. VPC origins are not a second supported trust mode here.
+See [Axum diagnostics and trusted proxies](./axum-diagnostics.md) for forwarding policy,
+which supplies checked readers but remains independent from protected assertion admission.
+
+## Pre-release API migration
+
+This is a coordinated breaking migration in the unpublished workspace, not a compatibility shim.
+External consumers must update before using the next release:
+
+- Replace `GeoInput { country, subdivision }` literals with
+  `GeoInput::Assertions { country, subdivision }`. Replace direct field access with matching;
+  explicitly handle or reject `ReaderIp` in custom providers.
+- Handle `GeoResolution::NoMatch`, `GeoUnavailableReason::MissingReaderIp` and `NoMatch` in
+  exhaustive matches. Preserve uncertainty rather than granting permission on unavailable data.
+- Handle `GeoSource::LocalDatabase`, `GeoSource::CheckedReaderIp` and
+  `GeoTrustBasis::CheckedReaderIp(GeoIpSource)` in provenance consumers.
+- Match capability's `{ provider, input }` instead of the removed `{ provider, source,
+trust_basis }` fields. Startup input contract is not request provenance.
+- Rename any custom provider previously called `maxmind`; it is now reserved like `cloudfront`.
+
+MaxMind warns that GeoLite City is considerably less accurate than paid GeoIP City and does not
+recommend it for commercial use cases. That accuracy warning is not a blanket commercial-use
+prohibition. Evaluate state-level suitability on representative traffic. VPNs, carrier networks,
+proxies and stale data can mislocate readers. No local fixture proves jurisdiction recognition,
+consent compliance or production accuracy. Keep unknown geography fail-closed, test downstream
+policy separately and prevent shared caches from reusing permission-sensitive responses across
+visitors. No automatic response or cache header is added.

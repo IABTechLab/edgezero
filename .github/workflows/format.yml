@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # Keep lint gates active for native-store and Geo stacked PRs.
+    branches: [main, feat/native-celld-stores, feature/pluggable-geo-providers]
 
 permissions:
   contents: read
@@ -119,6 +120,12 @@ jobs:
             feature_sets: |-
               axum
               axum,test-utils
+              geo-cloudfront
+              geo-cloudfront,test-utils
+              geo-maxmind
+              geo-maxmind,test-utils
+              geo-cloudfront,geo-maxmind
+              geo-cloudfront,geo-maxmind,test-utils
     steps:
       - uses: actions/checkout@v6
         with:
