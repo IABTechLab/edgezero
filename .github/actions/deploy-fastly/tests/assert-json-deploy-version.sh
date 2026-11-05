@@ -33,6 +33,7 @@ main() {
   tar -xzf "$fastly_archive" -C "$bin" fastly
 
   PATH="$bin:$PATH" FASTLY_API_TOKEN=dummy-token \
+    EDGEZERO_MANIFEST="$root/$(jq -er '.manifests.edgezero.path' "$root/release.json")" \
     "$cli" deploy --adapter fastly --format json --service-id dummyservice \
     --application-release "$root" >"$envelope" || rc=$?
 
