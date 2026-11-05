@@ -181,6 +181,8 @@ Record bodies use the configured value ceiling, at most 1MiB. Opaque metadata is
 
 `list_keys_with_prefix` returns at most the requested limit, up to1000, in increasing binary key order. A full page can be incomplete; it is not an exhaustive scan or a cross-call snapshot. Zero returns an empty page without I/O. The client validates ordering, uniqueness, key shape, prefix and response bounds. It never substitutes the generic KV listing interface for a failed authoritative record check.
 
+For operator cleanup, `list_physical_keys_with_prefix` explicitly sends `physical=true` and includes expired rows still held by the server. The default identity-graph listing remains live-only. An older record server that rejects this extension produces an error, never a substituted live page. Revoke writers before destructive enumeration/deletion; neither expiry nor a full page proves all physical data has been removed. The allocator is not listed or reset by these operations.
+
 The application supplies the EC or other domain-specific adapter. EdgeZero does not interpret consent, tombstones or identity records. No provider fallback or generic KV migration is implied by this API.
 
 ## Validation and local proofs

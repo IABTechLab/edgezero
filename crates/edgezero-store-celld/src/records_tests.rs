@@ -347,6 +347,34 @@ async fn one_page_listing_is_bounded_sorted_and_prefix_checked() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn physical_listing_is_explicit_and_does_not_change_live_listing() {
+    let fixture = Fixture::new(vec![
+        probe(),
+        reply(200, &json!({"keys":["expired"]})),
+        reply(200, &json!({"keys":[]})),
+    ])
+    .await;
+    let store = prepare(&fixture).await;
+    assert_eq!(
+        store
+            .list_physical_keys_with_prefix("", 1)
+            .await
+            .expect("should list physical rows"),
+        ["expired"]
+    );
+    assert!(
+        store
+            .list_keys_with_prefix("", 1)
+            .await
+            .expect("should list live rows")
+            .is_empty()
+    );
+    let requests = fixture.requests().await;
+    assert!(requests[1].target.ends_with("&physical=true"));
+    assert!(!requests[2].target.contains("physical"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn malformed_pages_do_not_establish_authoritative_results() {
     for body in [
         json!({"keys":["root:b","root:a"]}),

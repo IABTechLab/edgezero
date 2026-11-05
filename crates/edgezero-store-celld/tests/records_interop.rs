@@ -185,6 +185,14 @@ mod tests {
                 .expect("should list live rows")
                 .is_empty()
         );
+        assert!(
+            store
+                .list_physical_keys_with_prefix(key, 1)
+                .await
+                .expect("should enumerate held expired row")
+                .iter()
+                .any(|entry| entry == key)
+        );
         assert_eq!(
             store
                 .insert(

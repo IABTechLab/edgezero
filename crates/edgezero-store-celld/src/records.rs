@@ -248,7 +248,26 @@ impl CelldRecordStore {
         prefix: &str,
         limit: u32,
     ) -> Result<Vec<String>, PreparationError> {
-        self.list_with_deadline(prefix, limit, self.client.deadline()?)
+        self.list_with_deadline(prefix, limit, self.client.deadline()?, false)
+            .await
+    }
+
+    /// Lists one physical prefix page, including expired rows awaiting sweep.
+    ///
+    /// Operator cleanup can enumerate all held data without treating logical
+    /// expiry as physical deletion. This is not the live identity-graph listing.
+    /// A full page may be truncated and carries no snapshot guarantee.
+    ///
+    /// # Errors
+    /// Returns validation/protocol/service errors, including an older server
+    /// that does not support explicit physical enumeration.
+    #[inline]
+    pub async fn list_physical_keys_with_prefix(
+        &self,
+        prefix: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, PreparationError> {
+        self.list_with_deadline(prefix, limit, self.client.deadline()?, true)
             .await
     }
 
@@ -274,7 +293,7 @@ impl CelldRecordStore {
     pub(crate) async fn probe(&self, deadline: Deadline) -> Result<(), PreparationError> {
         let probe_deadline =
             Deadline::at_instant(deadline.instant().min(self.client.deadline()?.instant()));
-        self.list_with_deadline("", 1, probe_deadline)
+        self.list_with_deadline("", 1, probe_deadline, false)
             .await
             .map(|_| ())
     }
@@ -303,6 +322,7 @@ impl CelldRecordStore {
         prefix: &str,
         limit: u32,
         deadline: Deadline,
+        physical: bool,
     ) -> Result<Vec<String>, PreparationError> {
         if !valid_key(prefix, true) || limit > 1_000 {
             return Err(PreparationError::InvalidResource);
@@ -314,6 +334,9 @@ impl CelldRecordStore {
         url.query_pairs_mut()
             .append_pair("prefix", prefix)
             .append_pair("limit", &limit.to_string());
+        if physical {
+            url.query_pairs_mut().append_pair("physical", "true");
+        }
         let bytes = self
             .client
             .execute(
