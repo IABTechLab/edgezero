@@ -418,6 +418,14 @@ tests in `tests/contract.rs` and existing WASM-gated module tests; workerd cases
 `tests/fixtures/reusable-app/crates/fixture-cloudflare/src/lib.rs`, fixture-core qualification,
 and fixture-harness `net.rs`/`runners.rs`.
 
+- [x] Keep the native timer's original absolute deadline through callback allocation and both
+      JavaScript timer-function lookups. Recompute immediately before arming; expired setup
+      registers nothing, backwards time fails closed and encountered scheduling errors retain
+      precedence. Co-located deterministic WASM tests advance the clock during either lookup,
+      verify the reduced delay and cancellation count, and retain completed futures to check
+      clock release. Genuine host-turn barriers keep a real zero-delay yield. This closes only
+      the timer-registration defect, not native latency targets, ordinary-close notification,
+      the other D3 acceptance exits or hosted qualification.
 - [ ] Add workerd cases for begin/batch dispatch during an unrelated awaited timer, arrival during
       origin streaming, and a buffered cap failure while no result is being collected. Demonstrate
       failures before replacing lazy futures. Keep browser-only body behavior separate from workerd.

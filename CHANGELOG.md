@@ -13,6 +13,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Keep Workers outbound deadlines absolute through callback construction and host timer lookup.
+  Recompute the remaining budget immediately before registration, reject clock regression and
+  avoid registering expired timers. Preserve genuine zero-delay fairness yields, scheduling
+  failures and exactly-once callback, clock and waker release; no runtime pin or public API changes.
 - Add bounded lifecycle-fixture entry timing, including request-owned admission samples on three
   existing routes, to distinguish pre-admission, pre-handler and wait/resumption intervals without
   resetting request epochs, reinterpreting Begin results or relaxing acceptance.

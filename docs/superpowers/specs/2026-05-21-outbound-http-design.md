@@ -5055,7 +5055,15 @@ impl with an `OutboundHttpClient` impl, adds `capability()`, and gains a
   permits the production clock to advance. The adapter uses a cancellable
   `globalThis.setTimeout(0)` future because worker 0.8.5's `Delay` binding does not execute
   under the pinned Node WASM runner; the future owns its callback and timer handle and clears
-  the timer when dropped. After the yield, recheck the original absolute
+  the timer when dropped. Absolute outbound waits use the same primitive but retain the original
+  deadline and paired clock through callback construction and both host-function lookups.
+  Immediately before timer registration, reject an observed clock regression and recompute the
+  remaining budget; an expired deadline registers nothing. Encountered scheduling failures remain
+  typed errors, including when setup consumed the budget. Terminal completion releases the owned
+  callback, clock and waker even if the completed future is retained. A fairness yield still
+  registers a real zero-delay host event; it is not an already-expired absolute wait. These checks
+  do not guarantee callback delivery or executor resumption within the qualification tolerance.
+  After the yield, recheck the original absolute
   deadline before processing another item. Count state persists across Rust polls, stream
   yields, and `next()` calls; reset it only after the proven host-event yield completes. A
   self-wake, `Poll::Pending` round trip, microtask-only yield, or fake clock that advances

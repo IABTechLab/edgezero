@@ -119,8 +119,8 @@ mod worker_impl {
         OutboundTask, OutboundTime,
     };
     #[cfg(feature = "test-utils")]
-    use edgezero_core::time::{Deadline, dispatch_budget};
-    use edgezero_core::time::{DispatchBudget, MonotonicClock, MonotonicInstant};
+    use edgezero_core::time::dispatch_budget;
+    use edgezero_core::time::{Deadline, DispatchBudget, MonotonicClock, MonotonicInstant};
     use edgezero_core::{IndependentOutboundProgress, OutboundProgressRuntime};
     use futures::channel::{mpsc, oneshot};
     use futures_util::StreamExt as _;
@@ -144,25 +144,63 @@ mod worker_impl {
         awoken: Rc<Cell<bool>>,
         callback: Option<Closure<dyn FnMut()>>,
         cancellation: Option<(Function, JsValue)>,
-        duration: Duration,
+        deadline: Option<(Deadline, MonotonicClock, Option<MonotonicInstant>)>,
+        finished: bool,
         timeout_handle: Option<JsValue>,
         waker: Rc<RefCell<Option<Waker>>>,
     }
 
     impl HostEventYield {
         fn new() -> Self {
-            Self::after(Duration::ZERO)
-        }
-
-        fn after(duration: Duration) -> Self {
             Self {
                 awoken: Rc::new(Cell::new(false)),
                 callback: None,
                 cancellation: None,
-                duration,
+                deadline: None,
+                finished: false,
                 timeout_handle: None,
                 waker: Rc::new(RefCell::new(None)),
             }
+        }
+
+        fn until(deadline: Deadline, clock: MonotonicClock) -> Self {
+            let mut timer = Self::new();
+            timer.deadline = Some((deadline, clock, None));
+            timer
+        }
+
+        fn remaining(&mut self) -> Result<Option<Duration>, EdgeError> {
+            let Some((deadline, clock, previous)) = &mut self.deadline else {
+                return Ok(Some(Duration::ZERO));
+            };
+            let now = clock.now();
+            if previous.is_some_and(|last| now < last) {
+                return Err(EdgeError::internal(anyhow::anyhow!(
+                    "outbound clock moved backwards during timer setup"
+                )));
+            }
+            *previous = Some(now);
+            Ok(deadline.remaining_at(now))
+        }
+
+        fn release(&mut self) {
+            if let Some(timeout_handle) = self.timeout_handle.take()
+                && let Some((clear, receiver)) = self.cancellation.take()
+                && !self.awoken.get()
+            {
+                let _ignored = clear.call1(&receiver, &timeout_handle);
+            }
+            drop(self.callback.take());
+            drop(self.cancellation.take());
+            drop(self.deadline.take());
+            let previous = self.waker.borrow_mut().take();
+            drop(previous);
+        }
+
+        fn complete(&mut self, outcome: Result<(), EdgeError>) -> Poll<Result<(), EdgeError>> {
+            self.finished = true;
+            self.release();
+            Poll::Ready(outcome)
         }
     }
 
@@ -171,13 +209,18 @@ mod worker_impl {
 
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             let this = self.get_mut();
+            if this.finished {
+                return Poll::Ready(Err(EdgeError::internal(anyhow::anyhow!(
+                    "Cloudflare host-event wait polled after completion"
+                ))));
+            }
+            match this.remaining() {
+                Ok(Some(_remaining)) => {}
+                Ok(None) => return this.complete(Ok(())),
+                Err(error) => return this.complete(Err(error)),
+            }
             if this.awoken.get() {
-                drop(this.callback.take());
-                drop(this.cancellation.take());
-                drop(this.timeout_handle.take());
-                let previous = this.waker.borrow_mut().take();
-                drop(previous);
-                return Poll::Ready(Ok(()));
+                return this.complete(Ok(()));
             }
             let next_waker = cx.waker().clone();
             let previous = this.waker.borrow_mut().replace(next_waker);
@@ -200,24 +243,30 @@ mod worker_impl {
                 .ok()
                 .and_then(|value| value.dyn_into::<Function>().ok())
             else {
-                return Poll::Ready(Err(host_event_schedule_error()));
+                return this.complete(Err(host_event_schedule_error()));
             };
             let Some(clear_timeout) =
                 Reflect::get(&global_scope, &JsValue::from_str("clearTimeout"))
                     .ok()
                     .and_then(|value| value.dyn_into::<Function>().ok())
             else {
-                return Poll::Ready(Err(host_event_schedule_error()));
+                return this.complete(Err(host_event_schedule_error()));
+            };
+            // Callback construction and host lookups must consume the original budget.
+            let remaining = match this.remaining() {
+                Ok(Some(remaining)) => remaining,
+                Ok(None) => return this.complete(Ok(())),
+                Err(error) => return this.complete(Err(error)),
             };
             let milliseconds =
-                i32::try_from(this.duration.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
+                i32::try_from(remaining.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
             let timeout_handle = match set_timeout.call2(
                 &global_scope,
                 callback.as_ref(),
                 &JsValue::from_f64(f64::from(milliseconds)),
             ) {
                 Ok(handle) => handle,
-                Err(_error) => return Poll::Ready(Err(host_event_schedule_error())),
+                Err(_error) => return this.complete(Err(host_event_schedule_error())),
             };
             this.callback = Some(callback);
             this.timeout_handle = Some(timeout_handle);
@@ -232,15 +281,7 @@ mod worker_impl {
     )]
     impl Drop for HostEventYield {
         fn drop(&mut self) {
-            if self.awoken.get() {
-                return;
-            }
-            let Some(timeout_handle) = self.timeout_handle.take() else {
-                return;
-            };
-            if let Some((clear, receiver)) = self.cancellation.take() {
-                let _ignored = clear.call1(&receiver, &timeout_handle);
-            }
+            self.release();
         }
     }
 
@@ -1038,12 +1079,7 @@ mod worker_impl {
 
     pub(crate) fn native_time(clock: MonotonicClock) -> OutboundTime {
         OutboundTime::new(clock, |deadline, paired_clock| {
-            Box::pin(async move {
-                let Some(remaining) = deadline.remaining_at(paired_clock.now()) else {
-                    return Ok(());
-                };
-                HostEventYield::after(remaining).await
-            })
+            Box::pin(HostEventYield::until(deadline, paired_clock))
         })
     }
 
@@ -1229,9 +1265,169 @@ mod worker_impl {
 
         pub(super) struct RestoreGlobal(Function);
 
+        struct TimerSetupObservation {
+            outcome: Poll<Result<(), EdgeError>>,
+            registrations: Option<f64>,
+            milliseconds: Option<f64>,
+            cancellations: Option<f64>,
+        }
+
+        impl TimerSetupObservation {
+            fn capture(lookup: &str, elapsed_ms: i64, missing_function: bool) -> Self {
+                let start = MonotonicInstant::now();
+                let now = Arc::new(Mutex::new(start));
+                let shifted = if elapsed_ms >= 0 {
+                    start
+                        .checked_add(Duration::from_millis(elapsed_ms.unsigned_abs()))
+                        .expect("advanced setup clock")
+                } else {
+                    start
+                        .checked_sub(Duration::from_millis(elapsed_ms.unsigned_abs()))
+                        .expect("regressed setup clock")
+                };
+                let target = Arc::clone(&now);
+                let advance = Closure::<dyn FnMut()>::new(move || {
+                    *target.lock().expect("setup clock") = shifted;
+                });
+                let factory = Function::new_with_args(
+                    "key, advance, missing",
+                    "
+                    const set = Object.getOwnPropertyDescriptor(globalThis, 'setTimeout');
+                    const clear = Object.getOwnPropertyDescriptor(globalThis, 'clearTimeout');
+                    const probe = {arms: 0, clears: 0, milliseconds: null};
+                    const arm = (_, milliseconds) => { probe.arms++; probe.milliseconds = milliseconds; return 123; };
+                    const cancel = () => { probe.clears++; };
+                    Object.defineProperty(globalThis, 'setTimeout', {value: arm, writable: true, configurable: true});
+                    Object.defineProperty(globalThis, 'clearTimeout', {value: cancel, writable: true, configurable: true});
+                    Object.defineProperty(globalThis, key, {configurable: true, get() { advance(); return missing ? undefined : key === 'setTimeout' ? arm : cancel; }});
+                    probe.restore = () => {
+                        Object.defineProperty(globalThis, 'setTimeout', set);
+                        Object.defineProperty(globalThis, 'clearTimeout', clear);
+                    };
+                    return probe;
+                ",
+                );
+                let probe = factory
+                    .call3(
+                        &JsValue::UNDEFINED,
+                        &JsValue::from_str(lookup),
+                        advance.as_ref(),
+                        &JsValue::from_bool(missing_function),
+                    )
+                    .expect("timer setup probe");
+                let restore = Reflect::get(&probe, &JsValue::from_str("restore"))
+                    .expect("restore timer descriptors")
+                    .dyn_into::<Function>()
+                    .expect("restore function");
+                let guard = RestoreGlobal::new(restore);
+                let time = native_time(controlled_clock(now));
+                let mut timer = time.wait_until(Deadline::at_instant(
+                    start
+                        .checked_add(Duration::from_millis(10))
+                        .expect("setup deadline"),
+                ));
+                let outcome = timer.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+                let read = |name| {
+                    Reflect::get(&probe, &JsValue::from_str(name))
+                        .expect("timer observation")
+                        .as_f64()
+                };
+                let registrations = read("arms");
+                let milliseconds = read("milliseconds");
+                drop(timer);
+                let cancellations = read("clears");
+                drop(guard);
+                Self {
+                    outcome,
+                    registrations,
+                    milliseconds,
+                    cancellations,
+                }
+            }
+        }
+
         impl RestoreGlobal {
             pub(super) fn new(restore: Function) -> Self {
                 Self(restore)
+            }
+        }
+
+        #[wasm_bindgen_test]
+        fn absolute_timer_recomputes_remaining_after_host_setup() {
+            for lookup in ["setTimeout", "clearTimeout"] {
+                let observation = TimerSetupObservation::capture(lookup, 7, false);
+                assert!(observation.outcome.is_pending());
+                assert_eq!(observation.registrations, Some(1.0_f64));
+                assert_eq!(observation.milliseconds, Some(3.0_f64));
+                assert_eq!(observation.cancellations, Some(1.0_f64));
+            }
+        }
+
+        #[wasm_bindgen_test]
+        fn absolute_timer_does_not_register_after_expiry_during_host_setup() {
+            for elapsed_ms in [10, 12] {
+                let observation = TimerSetupObservation::capture("clearTimeout", elapsed_ms, false);
+                assert!(matches!(observation.outcome, Poll::Ready(Ok(()))));
+                assert_eq!(observation.registrations, Some(0.0_f64));
+                assert_eq!(observation.cancellations, Some(0.0_f64));
+            }
+        }
+
+        #[wasm_bindgen_test]
+        fn absolute_timer_rejects_regression_during_host_setup_without_registration() {
+            let observation = TimerSetupObservation::capture("clearTimeout", -1, false);
+            assert!(matches!(
+                observation.outcome,
+                Poll::Ready(Err(EdgeError::Internal { .. }))
+            ));
+            assert_eq!(observation.registrations, Some(0.0_f64));
+            assert_eq!(observation.cancellations, Some(0.0_f64));
+        }
+
+        #[wasm_bindgen_test]
+        fn absolute_timer_preserves_setup_failure_after_deadline_expiry() {
+            let observation = TimerSetupObservation::capture("clearTimeout", 12, true);
+            assert!(matches!(
+                observation.outcome,
+                Poll::Ready(Err(EdgeError::Internal { .. }))
+            ));
+            assert_eq!(observation.registrations, Some(0.0_f64));
+            assert_eq!(observation.cancellations, Some(0.0_f64));
+        }
+
+        #[wasm_bindgen_test]
+        fn absolute_timer_releases_clock_when_completed_future_is_retained() {
+            for setup_failure in [false, true] {
+                let restore = setup_failure.then(|| RestoreGlobal::new(
+                    Function::new_no_args("const saved = globalThis.clearTimeout; globalThis.clearTimeout = undefined; return () => {globalThis.clearTimeout = saved;};")
+                        .call0(&JsValue::UNDEFINED).expect("disable clear timer").dyn_into::<Function>().expect("restore clear timer")
+                ));
+                let start = MonotonicInstant::now();
+                let owner = Arc::new(start);
+                let released = Arc::downgrade(&owner);
+                let clock = MonotonicClock::new(move || *owner);
+                let until = if setup_failure {
+                    start
+                        .checked_add(Duration::from_millis(10))
+                        .expect("live deadline")
+                } else {
+                    start
+                };
+                let mut timer = Box::pin(HostEventYield::until(Deadline::at_instant(until), clock));
+                let outcome = timer.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+                let clock_released = released.upgrade().is_none();
+                let state_released = timer.deadline.is_none() && timer.waker.borrow().is_none();
+                drop(restore);
+                if setup_failure {
+                    assert!(matches!(
+                        outcome,
+                        Poll::Ready(Err(EdgeError::Internal { .. }))
+                    ));
+                } else {
+                    assert!(matches!(outcome, Poll::Ready(Ok(()))));
+                }
+                assert!(clock_released);
+                assert!(state_released);
             }
         }
 
@@ -1319,9 +1515,7 @@ mod worker_impl {
                         ],
                         Deadline::after(Duration::from_secs(10)),
                     );
-                    HostEventYield::after(Duration::from_millis(10))
-                        .await
-                        .expect("scheduled fetches");
+                    HostEventYield::new().await.expect("scheduled fetches");
                     (pending, batch)
                 })
                 .await;
@@ -1344,9 +1538,7 @@ mod worker_impl {
                     .as_f64(),
                 Some(3.0_f64)
             );
-            HostEventYield::after(Duration::from_millis(10))
-                .await
-                .expect("cancelled tasks retire");
+            HostEventYield::new().await.expect("cancelled tasks retire");
             assert!(matches!(
                 pending.collect().await,
                 Err(EdgeError::Internal { .. })
@@ -1376,9 +1568,7 @@ mod worker_impl {
             let pending = callback
                 .run(async {
                     let pending = client.begin(request).await.expect("begin");
-                    HostEventYield::after(Duration::from_millis(10))
-                        .await
-                        .expect("fetch enters");
+                    HostEventYield::new().await.expect("fetch enters");
                     pending
                 })
                 .await;
@@ -1403,9 +1593,7 @@ mod worker_impl {
                 .now_or_never()
                 .expect("closed handle settles without SDK polls")
                 .expect_err("scope revoked begin");
-            HostEventYield::after(Duration::from_millis(10))
-                .await
-                .expect("cancelled task retires");
+            HostEventYield::new().await.expect("cancelled task retires");
             let after = witness.snapshot();
             assert!(!after.invalid);
             assert_eq!(after.operation_polls, stopped.operation_polls);
@@ -1449,9 +1637,7 @@ mod worker_impl {
             })
             .boxed_local();
             *owner.borrow_mut() = Some(spawn_owned(work).expect("local scheduler"));
-            HostEventYield::after(Duration::from_millis(10))
-                .await
-                .expect("unrelated host wait");
+            HostEventYield::new().await.expect("unrelated host wait");
             assert_eq!(polls.get(), 1, "cancelled work must not be polled again");
         }
 
@@ -1474,18 +1660,14 @@ mod worker_impl {
                 runner.await;
                 drop(running);
             });
-            HostEventYield::after(Duration::from_millis(10))
-                .await
-                .expect("work enters pending");
+            HostEventYield::new().await.expect("work enters pending");
             assert!(entered.get(), "work entered pending");
             drop(owner);
             assert!(
                 released.upgrade().is_none(),
                 "cancellation immediately releases the source"
             );
-            HostEventYield::after(Duration::from_millis(10))
-                .await
-                .expect("cancelled task retires");
+            HostEventYield::new().await.expect("cancelled task retires");
             assert!(
                 retired.upgrade().is_none(),
                 "no retained task/waker/state cycle"
@@ -1570,9 +1752,7 @@ mod worker_impl {
                     Poll::Ready(())
                 })
                 .await;
-                HostEventYield::after(Duration::from_millis(1))
-                    .await
-                    .expect("fetch microtask");
+                HostEventYield::new().await.expect("fetch microtask");
                 let signal = Reflect::get(&probe, &JsValue::from_str("signal"))
                     .expect("signal")
                     .dyn_into::<web_sys::AbortSignal>()
@@ -1662,9 +1842,7 @@ mod worker_impl {
                 ],
                 Deadline::after(Duration::from_secs(1)),
             );
-            HostEventYield::after(Duration::from_millis(10))
-                .await
-                .expect("unrelated host wait");
+            HostEventYield::new().await.expect("unrelated host wait");
             assert_eq!(
                 Reflect::get(&probe, &JsValue::from_str("calls"))
                     .expect("calls")
@@ -1684,9 +1862,7 @@ mod worker_impl {
                 .begin(OutboundRequest::get("https://fixture.invalid/").expect("request"))
                 .await
                 .expect("begin");
-            HostEventYield::after(Duration::from_millis(10))
-                .await
-                .expect("unrelated host wait");
+            HostEventYield::new().await.expect("unrelated host wait");
             assert_eq!(
                 Reflect::get(&probe, &JsValue::from_str("calls"))
                     .expect("calls")
@@ -1891,7 +2067,15 @@ mod worker_impl {
             let second = Arc::new(WakeCount::default());
             let first_waker = Waker::from(Arc::clone(&first));
             let second_waker = Waker::from(Arc::clone(&second));
-            let mut timer = Box::pin(HostEventYield::after(Duration::from_nanos(1)));
+            let start = MonotonicInstant::now();
+            let mut timer = Box::pin(HostEventYield::until(
+                Deadline::at_instant(
+                    start
+                        .checked_add(Duration::from_nanos(1))
+                        .expect("rounding deadline"),
+                ),
+                constant_clock(start),
+            ));
             assert!(
                 timer
                     .as_mut()
@@ -2469,7 +2653,11 @@ mod worker_impl {
                             HostEventYield::new().await?;
                             *late.lock().expect("clock") = budget.deadline.instant();
                         } else {
-                            HostEventYield::after(budget.duration).await?;
+                            HostEventYield::until(
+                                Deadline::after(budget.duration),
+                                MonotonicClock::default(),
+                            )
+                            .await?;
                         }
                         Ok(())
                     })

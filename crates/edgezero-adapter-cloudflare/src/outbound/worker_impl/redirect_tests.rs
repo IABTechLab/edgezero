@@ -438,9 +438,7 @@ async fn stopped_pending_fetch_body_keeps_original_absolute_deadline() {
         let final_index = usize::from(at_limit);
         for _ in 0_u8..4 {
             assert!(operation.as_mut().now_or_never().is_none());
-            HostEventYield::after(Duration::from_millis(1))
-                .await
-                .expect("fetch settles");
+            HostEventYield::new().await.expect("fetch settles");
         }
         assert!(
             observations(&probe)["pulls"][final_index]
@@ -481,9 +479,7 @@ async fn dropping_follow_aborts_current_fetch_without_another_hop() {
         |_| Ok::<_, Infallible>(OutboundRedirectAction::FollowPrepared),
     );
     assert!(operation.as_mut().now_or_never().is_none());
-    HostEventYield::after(Duration::from_millis(1))
-        .await
-        .expect("first head");
+    HostEventYield::new().await.expect("first head");
     assert!(operation.as_mut().now_or_never().is_none());
     let seen = observations(&probe);
     assert_eq!(seen["requests"].as_array().expect("requests").len(), 2);
