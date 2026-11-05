@@ -446,6 +446,7 @@ mod worker_impl {
             return OutboundBatch::cutoff(context);
         }
         let cutoff = context.observation_cutoff();
+        let batch_time = context.time().clone();
         let (mut sender, receiver) = mpsc::channel(slots.len().saturating_add(1));
         let mut work = FuturesUnordered::new();
         for (index, request) in slots {
@@ -470,23 +471,68 @@ mod worker_impl {
         }
         let task = Box::pin(async move {
             let mut cutoff_unresolved = false;
-            while let Some((index, completed_at, budget, outcome)) = work.next().await {
-                cutoff_unresolved |= cutoff.is_expired_at(completed_at)
-                    && !budget.own_deadline_expired_before(cutoff, completed_at);
-                if sender
-                    .try_send(OutboundBatchDriverEvent::Item {
-                        index,
-                        completed_at,
-                        outcome,
-                    })
-                    .is_err()
-                {
-                    return;
+            let mut timer = batch_time.wait_until(cutoff);
+            let terminal = poll_fn(|cx| {
+                loop {
+                    let expired = match timer.as_mut().poll(cx) {
+                        Poll::Ready(Ok(())) => true,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Pending => cutoff.is_expired_at(batch_time.clock().now()),
+                    };
+                    let mut publish = |(index, completed_at, budget, outcome): (
+                        usize,
+                        MonotonicInstant,
+                        DispatchBudget,
+                        Result<OutboundResponse, EdgeError>,
+                    )| {
+                        cutoff_unresolved |= cutoff.is_expired_at(completed_at)
+                            && !budget.own_deadline_expired_before(cutoff, completed_at);
+                        sender
+                            .try_send(OutboundBatchDriverEvent::Item {
+                                index,
+                                completed_at,
+                                outcome,
+                            })
+                            .is_ok()
+                    };
+                    if expired {
+                        // Observe each absolute guard even when its child timer has not notified.
+                        // The collection is dropped after this sweep and is never polled again.
+                        let mut pending = false;
+                        for pipeline in &mut work {
+                            match pipeline.as_mut().poll(cx) {
+                                Poll::Ready(item) => {
+                                    if !publish(item) {
+                                        return Poll::Ready(Ok(false));
+                                    }
+                                }
+                                Poll::Pending => pending = true,
+                            }
+                        }
+                        return Poll::Ready(Ok(pending || cutoff_unresolved));
+                    }
+                    match work.poll_next_unpin(cx) {
+                        Poll::Ready(Some(item)) => {
+                            if !publish(item) {
+                                return Poll::Ready(Ok(false));
+                            }
+                        }
+                        Poll::Ready(None) => return Poll::Ready(Ok(cutoff_unresolved)),
+                        Poll::Pending if !cutoff.is_expired_at(batch_time.clock().now()) => {
+                            return Poll::Pending;
+                        }
+                        Poll::Pending => {}
+                    }
                 }
-            }
-            if cutoff_unresolved {
-                let _closed = sender.try_send(OutboundBatchDriverEvent::Cutoff);
-            }
+            })
+            .await;
+            drop(work);
+            drop(timer);
+            let _closed = sender.try_send(match terminal {
+                Ok(false) => return,
+                Ok(true) => OutboundBatchDriverEvent::Cutoff,
+                Err(error) => OutboundBatchDriverEvent::Failed(error),
+            });
         });
         match spawn_owned(task) {
             Ok(owner) => OutboundBatch::from_driver(context, receiver, owner),

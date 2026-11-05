@@ -12,6 +12,11 @@
 
 ## Status and Authority
 
+The latest runtime repair is the
+[independent Workers batch cutoff](../../audits/2026-11-04-native-timing-and-disconnect.md#independent-batch-cutoff-2026-11-05).
+Its native run is working-tree characterization, not a replacement exact-candidate record.
+Cold-entry, fast-origin timing, ordinary-close cleanup and qualification gates remain open.
+
 Current exact-head evidence disposition is recorded in the
 [2026-11-05 mapping checkpoint](2026-10-18-trusted-server-outbound-05-qualification.md#exact-head-mapping-checkpoint-2026-11-05).
 Binding readiness and successful PR checks do not establish exact-head execution or close

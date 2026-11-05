@@ -1,5 +1,5 @@
 use core::convert::Infallible;
-use std::io::Write as _;
+use std::io::{Error as IoError, Write as _};
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -7,12 +7,14 @@ use std::time::Duration;
 use edgezero_core::http::StatusCode;
 use edgezero_core::{
     BadGatewayDecodeReason, BadGatewayReason, BudgetSource, ContentTypeProvenance, Deadline,
-    EdgeError, HttpClient, MonotonicClock, MonotonicInstant, OutboundFollowFailure,
-    OutboundRedirectAction, OutboundRedirectLimit, OutboundRedirectStopReason, OutboundRequest,
-    OutboundResponse, ResponseLimitReason,
+    EdgeError, HttpClient, MonotonicClock, MonotonicInstant, OutboundBatchCheck,
+    OutboundBatchTermination, OutboundCollectedSlot, OutboundFollowFailure, OutboundRedirectAction,
+    OutboundRedirectLimit, OutboundRedirectStopReason, OutboundRequest, OutboundResponse,
+    OutboundTime, ResponseLimitReason,
 };
 use flate2::Compression;
 use flate2::write::{GzEncoder, ZlibEncoder};
+use futures::channel::oneshot;
 use futures_util::FutureExt as _;
 use serde_json::{Value, json};
 use wasm_bindgen_test::wasm_bindgen_test;
@@ -23,6 +25,110 @@ use crate::test_runtime::NumericTimeoutGuard;
 
 use super::clock_tests::RestoreGlobal;
 use super::{CloudflareOutboundClient, HostEventYield, native_time};
+
+type TimerSignal = (Deadline, Option<oneshot::Sender<Result<(), EdgeError>>>);
+
+struct BatchTimeControl {
+    drop_cost: Arc<Mutex<Duration>>,
+    epoch: MonotonicInstant,
+    now: Arc<Mutex<MonotonicInstant>>,
+    signals: Arc<Mutex<Vec<TimerSignal>>>,
+}
+
+struct TimerDropCost {
+    cost: Arc<Mutex<Duration>>,
+    now: Arc<Mutex<MonotonicInstant>>,
+}
+
+#[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+impl Drop for TimerDropCost {
+    fn drop(&mut self) {
+        let cost = *self.cost.lock().expect("timer release cost");
+        let mut now = self.now.lock().expect("manual clock");
+        *now = now.checked_add(cost).expect("bounded release cost");
+    }
+}
+
+impl BatchTimeControl {
+    fn new() -> (Self, OutboundTime) {
+        let epoch = MonotonicInstant::now();
+        let now = Arc::new(Mutex::new(epoch));
+        let observed = Arc::clone(&now);
+        let clock = MonotonicClock::new(move || *observed.lock().expect("manual clock"));
+        let signals = Arc::new(Mutex::new(Vec::new()));
+        let registered = Arc::clone(&signals);
+        let drop_cost = Arc::new(Mutex::new(Duration::ZERO));
+        let release_cost = Arc::clone(&drop_cost);
+        let release_clock = Arc::clone(&now);
+        let time = OutboundTime::new(clock, move |deadline, _clock| {
+            let (sender, receiver) = oneshot::channel();
+            registered
+                .lock()
+                .expect("timer registrations")
+                .push((deadline, Some(sender)));
+            let release = TimerDropCost {
+                cost: Arc::clone(&release_cost),
+                now: Arc::clone(&release_clock),
+            };
+            Box::pin(async move {
+                let _retained = release;
+                receiver.await.expect("owned timer signal")
+            })
+        });
+        (
+            Self {
+                drop_cost,
+                epoch,
+                now,
+                signals,
+            },
+            time,
+        )
+    }
+
+    fn active_timers(&self) -> usize {
+        self.signals
+            .lock()
+            .expect("timer registrations")
+            .iter()
+            .filter(|(_, signal)| signal.as_ref().is_some_and(|sender| !sender.is_canceled()))
+            .count()
+    }
+
+    fn advance_to(&self, milliseconds: u64) {
+        *self.now.lock().expect("manual clock") = self
+            .epoch
+            .checked_add(Duration::from_millis(milliseconds))
+            .expect("manual observation");
+    }
+
+    fn deadline(&self, milliseconds: u64) -> Deadline {
+        Deadline::at_instant(
+            self.epoch
+                .checked_add(Duration::from_millis(milliseconds))
+                .expect("original deadline"),
+        )
+    }
+
+    fn wake_first(&self, deadline: Deadline, outcome: Result<(), EdgeError>) {
+        let sender = self
+            .signals
+            .lock()
+            .expect("timer registrations")
+            .iter_mut()
+            .find_map(|(registered, signal)| {
+                if registered.instant() == deadline.instant()
+                    && signal.as_ref().is_some_and(|sender| !sender.is_canceled())
+                {
+                    signal.take()
+                } else {
+                    None
+                }
+            })
+            .expect("live original-deadline timer");
+        sender.send(outcome).expect("timer still observed");
+    }
+}
 
 fn fetch_script(responses: &Value) -> (JsValue, RestoreGlobal) {
     let wire = serde_json::to_string(responses).expect("fixture JSON");
@@ -536,4 +642,367 @@ async fn replacement_fetch_stream_cannot_extend_original_chain_deadline() {
     ));
     assert_eq!(observations(&probe)["pulls"], json!([0_u64, 0_u64]));
     assert_eq!(observations(&probe)["aborts"], json!([1_u64, 1_u64]));
+}
+
+#[wasm_bindgen_test]
+async fn batch_cutoff_does_not_wait_for_each_child_timer_notification() {
+    let _timers = NumericTimeoutGuard::install();
+    for kind in ["pending-head", "pending"] {
+        let (control, time) = BatchTimeControl::new();
+        let client = HttpClient::with_client(CloudflareOutboundClient::with_time(time));
+        let pending = json!({"status":200_u16,"kind":kind,"headers":[]});
+        let (probe, restore) = fetch_script(&json!([pending, pending, pending]));
+        control.advance_to(34);
+        let cutoff = control.deadline(200);
+        let mut batch = client.start_batch_until(
+            (0_u8..3)
+                .map(|index| request(&format!("pending-{index}"), 16))
+                .collect(),
+            cutoff,
+        );
+        HostEventYield::new()
+            .await
+            .expect("exchanges enter pending");
+        let started = observations(&probe);
+        assert_eq!(started["requests"].as_array().expect("requests").len(), 3);
+        let expected_pulls = [u64::from(kind == "pending"); 3];
+        assert_eq!(started["pulls"], json!(expected_pulls));
+        control.advance_to(200);
+        control.wake_first(cutoff, Ok(()));
+        HostEventYield::new().await.expect("one timer notification");
+        let terminal = batch.check().expect("cutoff observation");
+        let released = observations(&probe)["aborts"].clone();
+        assert_eq!(observations(&probe)["pulls"], started["pulls"]);
+        assert_eq!(control.active_timers(), 0);
+        control.advance_to(207);
+        let retained = batch.check().expect("retained terminal");
+        let collected = batch.collect().now_or_never();
+        let after_drop = observations(&probe)["aborts"].clone();
+        drop(restore);
+        assert!(matches!(
+            terminal,
+            OutboundBatchCheck::Finished(OutboundBatchTermination::Cutoff)
+        ));
+        assert!(matches!(
+            retained,
+            OutboundBatchCheck::Finished(OutboundBatchTermination::Cutoff)
+        ));
+        assert_eq!(released, json!([1_u64, 1_u64, 1_u64]));
+        assert_eq!(after_drop, released);
+        let results = collected
+            .expect("no further child wake needed")
+            .expect("valid cutoff");
+        assert!(
+            results
+                .slots()
+                .iter()
+                .all(|slot| matches!(slot, OutboundCollectedSlot::Unresolved))
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+async fn batch_cutoff_final_poll_preserves_an_unnotified_earlier_deadline() {
+    let _timers = NumericTimeoutGuard::install();
+    let (control, time) = BatchTimeControl::new();
+    let client = HttpClient::with_client(CloudflareOutboundClient::with_time(time));
+    let pending = json!({"status":200_u16,"kind":"pending","headers":[]});
+    let (probe, restore) = fetch_script(&json!([pending, pending, pending]));
+    control.advance_to(34);
+    let cutoff = control.deadline(200);
+    let batch = client.start_batch_until(
+        vec![
+            request("own-deadline", 16).timeout(Duration::from_millis(46)),
+            request("cutoff-first", 16),
+            request("cutoff-second", 16),
+        ],
+        cutoff,
+    );
+    HostEventYield::new().await.expect("pending native reads");
+    assert_eq!(observations(&probe)["pulls"], json!([1_u64, 1_u64, 1_u64]));
+    control.advance_to(200);
+    control.wake_first(cutoff, Ok(()));
+    HostEventYield::new()
+        .await
+        .expect("only cutoff timer wakes");
+    let result = batch.collect().now_or_never();
+    let released = observations(&probe)["aborts"].clone();
+    drop(restore);
+    let results = result
+        .expect("no own-timer notification needed")
+        .expect("valid cutoff");
+    assert_eq!(results.termination(), OutboundBatchTermination::Cutoff);
+    let [
+        OutboundCollectedSlot::Resolved(earlier),
+        OutboundCollectedSlot::Unresolved,
+        OutboundCollectedSlot::Unresolved,
+    ] = results.slots()
+    else {
+        panic!("earlier timeout must survive cutoff: {:?}", results.slots());
+    };
+    assert_eq!(earlier.elapsed, Duration::from_millis(46));
+    assert!(matches!(
+        earlier.outcome,
+        Err(EdgeError::GatewayTimeout {
+            cause: BudgetSource::PerCallTimeout,
+            ..
+        })
+    ));
+    assert_eq!(released, json!([1_u64, 1_u64, 1_u64]));
+}
+
+#[wasm_bindgen_test]
+async fn batch_cutoff_timer_failure_retains_partial_results_and_identity() {
+    let _timers = NumericTimeoutGuard::install();
+    let (control, time) = BatchTimeControl::new();
+    let client = HttpClient::with_client(CloudflareOutboundClient::with_time(time));
+    let pending = json!({"status":200_u16,"kind":"pending","headers":[]});
+    let (probe, restore) = fetch_script(&json!([
+        response(200, b"ready", &json!([])),
+        pending,
+        pending
+    ]));
+    control.advance_to(34);
+    let cutoff = control.deadline(200);
+    let mut batch = client.start_batch_until(
+        (0_u8..3)
+            .map(|index| request(&format!("slot-{index}"), 16))
+            .collect(),
+        cutoff,
+    );
+    let mut accumulated = batch.accumulator();
+    for _ in 0_u8..2 {
+        HostEventYield::new()
+            .await
+            .expect("successful slot settles");
+    }
+    let OutboundBatchCheck::Item(item) = batch.check().expect("recorded partial") else {
+        panic!("ready slot must be published before cutoff");
+    };
+    assert_eq!(item.index(), 0);
+    accumulated.insert(item).expect("original receipt");
+    let identity = Arc::new(IoError::other("batch timer failure"));
+    control.advance_to(200);
+    control.wake_first(
+        cutoff,
+        Err(EdgeError::internal(anyhow::anyhow!(Arc::clone(&identity)))),
+    );
+    HostEventYield::new()
+        .await
+        .expect("timer error wakes producer");
+    let collected = batch.collect().now_or_never();
+    let released = observations(&probe)["aborts"].clone();
+    drop(restore);
+    let failure = collected
+        .expect("failed timer terminates promptly")
+        .expect_err("timer failure");
+    let merged_failure = accumulated
+        .merge_failure(failure)
+        .expect("retain completed slot");
+    let original = merged_failure
+        .error()
+        .inner()
+        .expect("original timer error")
+        .downcast_ref::<Arc<IoError>>()
+        .expect("original timer identity");
+    assert!(Arc::ptr_eq(original, &identity));
+    assert!(
+        matches!(merged_failure.slots(), [OutboundCollectedSlot::Resolved(ready), OutboundCollectedSlot::Unresolved, OutboundCollectedSlot::Unresolved] if ready.outcome.is_ok())
+    );
+    assert_eq!(released, json!([0_u64, 1_u64, 1_u64]));
+}
+
+#[wasm_bindgen_test]
+async fn batch_cutoff_retains_an_operational_child_timer_error_before_expiry() {
+    let _timers = NumericTimeoutGuard::install();
+    let (control, time) = BatchTimeControl::new();
+    let client = HttpClient::with_client(CloudflareOutboundClient::with_time(time));
+    let pending = json!({"status":200_u16,"kind":"pending","headers":[]});
+    let (probe, restore) = fetch_script(&json!([pending, pending]));
+    control.advance_to(34);
+    let cutoff = control.deadline(200);
+    let batch = client.start_batch_until(
+        vec![
+            request("own", 16).timeout(Duration::from_millis(46)),
+            request("cutoff", 16),
+        ],
+        cutoff,
+    );
+    HostEventYield::new().await.expect("registered child timer");
+    let identity = Arc::new(IoError::other("child timer failure"));
+    control.advance_to(79);
+    control.wake_first(
+        control.deadline(80),
+        Err(EdgeError::internal(anyhow::anyhow!(Arc::clone(&identity)))),
+    );
+    HostEventYield::new()
+        .await
+        .expect("child failure is recorded");
+    control.advance_to(200);
+    control.wake_first(cutoff, Ok(()));
+    HostEventYield::new().await.expect("cutoff retires sibling");
+    let collected = batch.collect().now_or_never();
+    let released = observations(&probe)["aborts"].clone();
+    drop(restore);
+    let results = collected.expect("terminal batch").expect("valid cutoff");
+    let [
+        OutboundCollectedSlot::Resolved(child),
+        OutboundCollectedSlot::Unresolved,
+    ] = results.slots()
+    else {
+        panic!("child failure must be retained");
+    };
+    let original = child
+        .outcome
+        .as_ref()
+        .expect_err("operational failure")
+        .inner()
+        .expect("typed timer error")
+        .downcast_ref::<Arc<IoError>>()
+        .expect("original identity");
+    assert!(Arc::ptr_eq(original, &identity));
+    assert_eq!(child.elapsed, Duration::from_millis(45));
+    assert_eq!(released, json!([1_u64, 1_u64]));
+}
+
+#[wasm_bindgen_test]
+async fn batch_cutoff_includes_synchronous_cleanup_cost_before_terminal() {
+    let _timers = NumericTimeoutGuard::install();
+    let (control, time) = BatchTimeControl::new();
+    let client = HttpClient::with_client(CloudflareOutboundClient::with_time(time));
+    let pending = json!({"status":200_u16,"kind":"pending","headers":[]});
+    let (probe, restore) = fetch_script(&json!([pending, pending, pending]));
+    control.advance_to(34);
+    let cutoff = control.deadline(200);
+    let mut batch = client.start_batch_until(
+        (0_u8..3)
+            .map(|index| request(&format!("pending-{index}"), 16))
+            .collect(),
+        cutoff,
+    );
+    HostEventYield::new().await.expect("pending bodies");
+    control.advance_to(200);
+    *control.drop_cost.lock().expect("release cost") = Duration::from_millis(2);
+    control.wake_first(cutoff, Ok(()));
+    HostEventYield::new().await.expect("cutoff sweep");
+    let terminal = batch.check().expect("terminal after release");
+    let observed = *control.now.lock().expect("manual clock");
+    let released = observations(&probe)["aborts"].clone();
+    let active = control.active_timers();
+    drop(batch);
+    drop(restore);
+    assert!(matches!(
+        terminal,
+        OutboundBatchCheck::Finished(OutboundBatchTermination::Cutoff)
+    ));
+    assert_eq!(observed, control.deadline(208).instant());
+    assert_eq!(released, json!([1_u64, 1_u64, 1_u64]));
+    assert_eq!(active, 0);
+}
+
+#[wasm_bindgen_test]
+async fn batch_cutoff_timer_retires_on_normal_completion_and_cancellation() {
+    let _timers = NumericTimeoutGuard::install();
+    for complete in [false, true] {
+        let (control, time) = BatchTimeControl::new();
+        let client = HttpClient::with_client(CloudflareOutboundClient::with_time(time));
+        let fixture = if complete {
+            response(200, b"ready", &json!([]))
+        } else {
+            json!({"status":200_u16,"kind":"pending","headers":[]})
+        };
+        let (probe, restore) = fetch_script(&json!([fixture, fixture]));
+        control.advance_to(34);
+        let batch = client.start_batch_until(
+            vec![request("first", 16), request("second", 16)],
+            control.deadline(200),
+        );
+        for _ in 0_u8..2 {
+            HostEventYield::new().await.expect("scheduled exchanges");
+        }
+        if complete {
+            let results = batch
+                .collect()
+                .now_or_never()
+                .expect("ready batch")
+                .expect("completion");
+            assert_eq!(results.termination(), OutboundBatchTermination::Completed);
+        } else {
+            assert_eq!(batch.cancel(), vec![0, 1]);
+        }
+        let active = control.active_timers();
+        let released = observations(&probe)["aborts"].clone();
+        drop(restore);
+        assert_eq!(active, 0);
+        let expected = [u64::from(!complete); 2];
+        assert_eq!(released, json!(expected));
+    }
+}
+
+#[wasm_bindgen_test]
+async fn batch_cutoff_all_earlier_own_deadlines_complete_without_cutoff() {
+    let _timers = NumericTimeoutGuard::install();
+    let (control, time) = BatchTimeControl::new();
+    let client = HttpClient::with_client(CloudflareOutboundClient::with_time(time));
+    let pending = json!({"status":200_u16,"kind":"pending","headers":[]});
+    let (probe, restore) = fetch_script(&json!([pending, pending]));
+    control.advance_to(34);
+    let cutoff = control.deadline(200);
+    let batch = client.start_batch_until(
+        vec![
+            request("first-own", 16).timeout(Duration::from_millis(46)),
+            request("second-own", 16).timeout(Duration::from_millis(46)),
+        ],
+        cutoff,
+    );
+    HostEventYield::new().await.expect("pending own deadlines");
+    control.advance_to(200);
+    control.wake_first(cutoff, Ok(()));
+    HostEventYield::new()
+        .await
+        .expect("only batch wake delivered");
+    let collected = batch.collect().now_or_never();
+    let released = observations(&probe)["aborts"].clone();
+    drop(restore);
+    let results = collected
+        .expect("no own wake needed")
+        .expect("completed own timeouts");
+    assert_eq!(results.termination(), OutboundBatchTermination::Completed);
+    assert!(results.slots().iter().all(|slot| matches!(slot, OutboundCollectedSlot::Resolved(result) if result.elapsed == Duration::from_millis(46) && matches!(result.outcome, Err(EdgeError::GatewayTimeout { cause: BudgetSource::PerCallTimeout, .. })))));
+    assert_eq!(released, json!([1_u64, 1_u64]));
+}
+
+#[wasm_bindgen_test]
+async fn batch_cutoff_detects_expiry_crossed_during_child_cleanup() {
+    let _timers = NumericTimeoutGuard::install();
+    let (control, time) = BatchTimeControl::new();
+    let client = HttpClient::with_client(CloudflareOutboundClient::with_time(time));
+    let pending = json!({"kind":"pending-head"});
+    let (probe, restore) = fetch_script(&json!([pending, pending]));
+    control.advance_to(34);
+    let batch = client.start_batch_until(
+        vec![
+            request("own", 16).timeout(Duration::from_millis(46)),
+            request("cutoff", 16),
+        ],
+        control.deadline(200),
+    );
+    HostEventYield::new().await.expect("pending native heads");
+    control.advance_to(199);
+    *control.drop_cost.lock().expect("release cost") = Duration::from_millis(1);
+    control.wake_first(control.deadline(80), Ok(()));
+    HostEventYield::new()
+        .await
+        .expect("child cleanup crosses cutoff");
+    let collected = batch.collect().now_or_never();
+    let released = observations(&probe)["aborts"].clone();
+    drop(restore);
+    let results = collected
+        .expect("cutoff cannot park after cleanup crosses it")
+        .expect("valid cutoff");
+    assert_eq!(results.termination(), OutboundBatchTermination::Cutoff);
+    assert!(
+        matches!(results.slots(), [OutboundCollectedSlot::Resolved(own), OutboundCollectedSlot::Unresolved] if own.elapsed == Duration::from_millis(46))
+    );
+    assert_eq!(released, json!([1_u64, 1_u64]));
 }

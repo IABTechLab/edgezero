@@ -13,6 +13,11 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Give Workers batches an independent absolute observation-cutoff wait. At expiry, final-poll
+  parked exchanges once to preserve earlier request timeouts and registered timer errors, then
+  release the task group before terminal notification. Recheck expiry across child cleanup;
+  retain normal completion, partial outcomes and synchronous cleanup costs without changing APIs,
+  provider capability levels or qualification tolerances.
 - Keep Workers outbound deadlines absolute through callback construction and host timer lookup.
   Recompute the remaining budget immediately before registration, reject clock regression and
   avoid registering expired timers. Preserve genuine zero-delay fairness yields, scheduling

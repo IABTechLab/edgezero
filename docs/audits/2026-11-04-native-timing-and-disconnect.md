@@ -128,3 +128,43 @@ image and the actual `workerd 2026-10-12` version observation, not inferred pack
 Full exact-head execution/build binding, companion and comparison proofs, unchanged failed
 timing/cancellation gates, manual hosted results, candidate freeze and durable publication
 remain open. This mapping neither authorizes deployment nor changes PR review state.
+
+## Independent Batch Cutoff (2026-11-05)
+
+Fail-first WASM tests confirm a coordinator defect: a Workers batch waits for every individual
+exchange notification before emitting cutoff. One delivered timer wake can therefore leave
+siblings parked. Three regressions fail on the original coordinator: missing cutoff, an
+unnotified earlier-own timeout, and batch-timer failure with a previously delivered receipt.
+A fourth regression exposes expiry crossed during child cleanup; the producer must recheck
+before parking, not reuse its pre-cleanup expiry sample.
+
+The existing batch task now owns one paired absolute-cutoff wait. At expiry it performs one
+borrowed terminal poll of every parked pipeline, preserving existing deadline/error guards,
+then drops the work and timer before terminal publication. No unordered-queue polling follows
+the sweep. Normal completion, exact timer failures, published partials and earlier-own timeout
+classification remain intact. A synthetic cleanup-cost control observes 208 ms after imposing
+eight milliseconds of release work at a 200 ms cutoff; completion is not backdated to hide it.
+The production fix adds no public API, transport, executor or compatibility path.
+
+One unchanged native lifetime run uses working-tree source based on `46019b2d`, with source
+patch SHA-256 `42c389d167fdd9a5ead9bdb3634b6b44d916639f3d3ee4ef6406cd742b069035` and Wasm
+SHA-256 `43c6f0832019562c1126b8683cd959cab9e3b175b2a6a99b5225dbf4dc7877ee`. The existing
+pending-head/body cases pass at **202/203 ms**, retaining the original **205 ms** upper bound.
+All three pending-body sources are released by the observed return. This does not measure
+native timer-callback entry or isolate abort cost, nor qualify a clean committed candidate.
+The capture predates the final timer-state simplification and formatting; it belongs to the
+archived patch, not byte-identical final source. Final-source SDK tests and lint are separate
+evidence. No native rerun or source relabelling is used to obtain acceptance credit.
+
+The full run remains **16 pass/three fail, exit 1**, plus failed cleanup-tail validation:
+cold Begin is **10 ms** versus a **7 ms** upper bound; fast-origin observation is **326 ms**
+versus **325 ms**; ordinary-close cleanup still lacks terminal proof. Workspace verification
+ran concurrently, so this is not an isolated performance comparison. The new fast-origin miss
+is retained, not dismissed as noise or retried for credit. The former 207 ms body-cutoff failure
+and every earlier capture remain unchanged in their own evidence.
+
+Raw capture remains in the existing `outbound/lifetimes/workerd` output. The former exact-head
+capture was moved to `workerd-before-46019b2d-cutoff`; immutable prior packets are unchanged.
+RED/GREEN logs, source patch and capture provenance are under
+`/private/tmp/pr275-cutoff-coordinator/`. Unknown runner image, hosted/manual verification,
+exact-candidate acceptance mapping, freeze and durable publication remain separate open gates.

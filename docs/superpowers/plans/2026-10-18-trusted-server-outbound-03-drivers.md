@@ -418,6 +418,17 @@ tests in `tests/contract.rs` and existing WASM-gated module tests; workerd cases
 `tests/fixtures/reusable-app/crates/fixture-cloudflare/src/lib.rs`, fixture-core qualification,
 and fixture-harness `net.rs`/`runners.rs`.
 
+- [x] Own an independent original-cutoff wait inside the existing scheduled batch. Final-poll
+      parked pipelines once through their existing absolute guards before dropping the group;
+      retain unnotified earlier own timeouts, exact registered timer failures and published
+      partials. Recheck expiry when child work/cleanup crosses it. Use normal container drop,
+      never resume the terminal-swept collection, and release work/timer before terminal notice.
+      Fail-first actual-coordinator WASM tests cover one delivered wake, withheld earlier timers,
+      error identity, retained receipts and expiry crossed during cleanup. Controls retain
+      completion/cancellation and include synthetic synchronous release cost before observation.
+      The one native characterization observes head/body cutoff at 202/203 ms; cold-entry,
+      fast-origin timing, ordinary-close cleanup and full qualification remain open. No API,
+      capability, SDK/runtime pin or tolerance change. See the existing native investigation audit.
 - [x] Keep the native timer's original absolute deadline through callback allocation and both
       JavaScript timer-function lookups. Recompute immediately before arming; expired setup
       registers nothing, backwards time fails closed and encountered scheduling errors retain

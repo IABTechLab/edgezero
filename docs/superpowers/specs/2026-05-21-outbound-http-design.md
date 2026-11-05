@@ -4960,6 +4960,16 @@ impl with an `OutboundHttpClient` impl, adds `capability()`, and gains a
   every `dispatch_budget` call. Buffered survivors become complete Fetch-exchange futures in a
   `FuturesUnordered`; the adapter polls every eligible future before yielding and associates each
   terminal completion with its original index. The Workers event loop provides the concurrency.
+- The scheduled batch owns a paired wait on its original observation cutoff independently of
+  individual exchange timers. Poll that registered wait first and preserve its error as an exact
+  driver failure, not successful cutoff. Recheck expiry after ready child work and before parking.
+  At expiry, final-poll each parked pipeline once, including unnotified members, so its existing
+  absolute guards can expose earlier own-deadline outcomes and registered timer errors. Never
+  resume the unordered collection after this terminal sweep. Drop remaining work and the batch
+  wait before publishing termination; an entirely resolved batch ends through clean EOF rather
+  than an unconditional cutoff. This removes dependence on separate child notifications, not
+  synchronous cleanup costs or provider scheduling limits. Existing earlier-own-deadline
+  validation, resource-release requirements and qualification bounds remain unchanged.
 - A public single `send` takes its monotonic snapshot first, calls
   `validate_for_dispatch(&req)` exactly once immediately afterward, then invokes the same
   private already-validated flow used for batch survivors.
