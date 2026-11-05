@@ -32,6 +32,27 @@ clippy card. G4's approved interface digest and G2's recorded feasibility dispos
 qualification cannot silently approve an API change or convert pending/failed provider evidence
 into a waiver.
 
+### Exact-Head Mapping Checkpoint (2026-11-05)
+
+- [x] Map all 511 inventory legs for reviewed source `562acc1d` using the existing external
+      pre-freeze assembly/report workflow. Preserve 14 exact-head lifetime observations
+      (11 passed/three failed, 19 constituent scenarios), explicit missing results and original
+      build/raw hashes. Do not confuse assembled observation counts with accepted release legs.
+- [x] Retain the 17 matching local-wire sentinels as supporting evidence because the actual
+      invocation overrides the catalog output directory. Retain successful CI separately:
+      its Axum/Fastly build records identify `12287f9f`, not the associated PR head; the other
+      two adapters lack embedded revision evidence. Do not infer exact-head execution from
+      green checks, manufacture command matches or borrow an unrelated build identity.
+- [x] Confirm all three existing CLI modes remain blocked: 247 required results are missing
+      (203 local/44 external), record-level qualification gates remain open, and no release leg
+      is accepted. Conditional and follow-up scope remains unchanged.
+- [ ] Complete remaining exact-head runs/build bindings and companions, resolve the unchanged
+      failed timing/cancellation gates, then perform separately authorized freeze, manual hosted
+      qualification and durable Q5 publication. This checkpoint does not close Q3-Q5.
+
+See the [evidence mapping audit](../../audits/2026-11-04-native-timing-and-disconnect.md#exact-head-evidence-mapping-2026-11-05)
+for the retained bundle, exact hashes, failure boundaries and CI provenance distinction.
+
 ## Policy and Marker Binding (2026-10-30)
 
 EZ-3 acceptance 08 runs the same test-only native preflight conformance helper through each

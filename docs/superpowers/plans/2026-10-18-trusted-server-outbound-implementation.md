@@ -12,6 +12,11 @@
 
 ## Status and Authority
 
+Current exact-head evidence disposition is recorded in the
+[2026-11-05 mapping checkpoint](2026-10-18-trusted-server-outbound-05-qualification.md#exact-head-mapping-checkpoint-2026-11-05).
+Binding readiness and successful PR checks do not establish exact-head execution or close
+failed timing/cancellation, hosted, freeze or durable-publication gates.
+
 ### Split Completion CI Guard (2026-11-04)
 
 At `55e07f69`, 29 checks pass and Fastly's WASM job fails after reporting 309 passed/zero failed.

@@ -75,3 +75,56 @@ This repair closes that setup defect, not the historical cold-start cause or a h
 callback/resumption bound. No SDK/runtime pin, public API, capability, application policy,
 observation cutoff or qualification tolerance changes. Full exact-candidate mapping,
 durable evidence retention, native timing qualification and manual hosted checks remain open.
+
+## Exact-Head Evidence Mapping (2026-11-05)
+
+Reviewed source: `562acc1dedbf169315853900f9395e7ff5160076`. The existing inventory remains
+the authority for all 255 criteria and 511 legs; no identity, applicability, requirement,
+command or tolerance is changed. The existing `--assemble`, `--report` and `--release`
+commands retain this external, pre-freeze review record without a new exporter or schema.
+
+| Inventory category     | Legs | Evidence disposition                                                                                |
+| ---------------------- | ---: | --------------------------------------------------------------------------------------------------- |
+| Required local         |  217 | 14 exact-head lifetime observations: 11 passed, three failed; 203 lack an eligible assembled result |
+| Required external      |   44 | No returned result; all remain missing                                                              |
+| Conditional pending    |   50 | Conditions/approvals remain pending, not approved deferrals                                         |
+| Follow-up not promoted |  200 | Not promoted; 29 ready bindings do not establish passing execution                                  |
+
+The 14 lifetime observations contain 19 distinct constituent scenarios, with 16 passes and
+three failures. Criterion 01 retains cold Begin at 9 ms versus the original 7 ms upper bound;
+criterion 16 retains both pending phases and fails at 207 ms versus 205 ms; criterion 21
+retains all five cleanup paths and fails ordinary-close cancellation. The suite exits 1,
+including its separate cleanup-tail failure. Its actual Wasm SHA-256 is
+`e4730e8f068c15ac35b7c7e28e70327fb06097d787eee7eba60fa6ac26c6c6bd`.
+Passed observations are not qualified acceptance; the release checker accepts **zero** legs
+while record-level gates remain open.
+
+The exact-head wire capture retains 68 exchanges/84 origin requests and 17 matching criterion
+sentinels, but its invocation overrides the inventory's output directory. Preserve the actual
+command and bytes as supporting evidence rather than invent an inventory-exact command in a
+passing result. Similarly, the 203 missing local results are evidence/provenance gaps in this
+assembled record, not 203 demonstrated implementation failures.
+
+All 30 reported PR checks are successful for `562acc1d`. However, the retained
+[CI run](https://github.com/IABTechLab/edgezero/actions/runs/41976717013) must not be relabelled
+as exact-head runtime evidence: Axum and Fastly runtime/build records report
+`12287f9f63ab859bf99a6f264e54927ff4ada95d`; Cloudflare and Spin do not embed a source SHA.
+Default PR checkout is consistent with an integration merge, but checkout parents are not
+retained here. Workflow association alone does not prove exact-head source-to-build identity.
+Keep these successful logs separately as supporting evidence.
+The retained crosswalk identifies 106 legs with matching primary and additional sentinels
+(92 blocking/14 unpromoted follow-up); none gains exact-head credit.
+
+External bundle: `/private/tmp/pr275-562acc1d-closeout/evidence/`. `observations.json` records
+all 511 derived dispositions, actual build identity and supporting provenance; `record.json`
+is the existing checker's pre-freeze draft with verified raw-artifact hashes. Missing results are omitted, not
+fabricated pending observations. `report-report.json` retains 247 missing required results
+(203 local/44 external) and all independently evaluable blockers. Assembly, report and release
+each exit 1 as expected. Temporary local retention is not durable Q5 publication.
+The exact runner image and unobserved package-version precision remain unknown. Preserve
+the original metadata draft under `initial-metadata/`; the active record uses a null runner
+image and the actual `workerd 2026-10-12` version observation, not inferred package versions.
+
+Full exact-head execution/build binding, companion and comparison proofs, unchanged failed
+timing/cancellation gates, manual hosted results, candidate freeze and durable publication
+remain open. This mapping neither authorizes deployment nor changes PR review state.
