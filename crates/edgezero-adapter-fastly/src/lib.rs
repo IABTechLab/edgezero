@@ -18,6 +18,7 @@ pub mod cli;
 #[cfg(feature = "fastly")]
 pub mod config_store;
 pub mod context;
+pub mod delivery_compression;
 #[cfg(feature = "fastly")]
 pub mod key_value_store;
 pub mod lifecycle;
