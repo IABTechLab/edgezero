@@ -65,7 +65,7 @@ fn settle(
     outcome
 }
 fn wrangler_runtime_config(package: &Path, main: &Path) -> Result<String> {
-    let config = fs::read_to_string(package.join("wrangler.toml"))?;
+    let config = fs::read_to_string(package.join("wrangler.fixture.toml"))?;
     let mut skip = false;
     let mut lines = Vec::new();
     for line in config.lines() {
@@ -230,7 +230,7 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     stage_fastly_artifacts(run)?;
     let config_snapshot = run.join("fastly.toml");
     fs::copy(
-        root().join("crates/fixture-fastly/fastly.toml"),
+        root().join("crates/fixture-fastly/fastly.fixture.toml"),
         &config_snapshot,
     )?;
     if args.suite == "smoke" {
@@ -576,7 +576,7 @@ fn smoke_origin_checks(
     Ok(())
 }
 fn logging(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
-    let base = fs::read_to_string(root().join("crates/fixture-fastly/fastly.toml"))?;
+    let base = fs::read_to_string(root().join("crates/fixture-fastly/fastly.fixture.toml"))?;
     let config = run.join("logging.toml");
     fs::write(&config, base)?;
     for variant in ["b", "c", "custom-c", "logger-negative"] {
@@ -761,6 +761,8 @@ fn provider_command(
         let state = run.join(mode).join("worker-state");
         checked(
             Command::new(exe)
+                .arg("--config")
+                .arg(run.join("wrangler.toml"))
                 .args([
                     "kv",
                     "key",
@@ -791,7 +793,7 @@ fn provider_command(
             ])
             .arg(state);
     } else {
-        let manifest = fs::read_to_string(package.join("spin.toml"))?
+        let manifest = fs::read_to_string(package.join("spin.fixture.toml"))?
             .replace(
                 "../../target/wasm32-wasip2/release/fixture_spin.wasm",
                 &staged.display().to_string(),
@@ -806,7 +808,7 @@ fn provider_command(
             .args(["up", "--listen", &format!("127.0.0.1:{port}"), "--from"])
             .arg(config)
             .arg("--runtime-config-file")
-            .arg(package.join("runtime-config.toml"));
+            .arg(package.join("runtime-config.fixture.toml"));
     }
     Ok(command)
 }
@@ -971,7 +973,7 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
         &config,
         format!(
             "{}\n[local_server.backends.fault-origin]\nurl = {:?}\n",
-            fs::read_to_string(root().join("crates/fixture-fastly/fastly.toml"))?,
+            fs::read_to_string(root().join("crates/fixture-fastly/fastly.fixture.toml"))?,
             backend.url("/")
         ),
     )?;

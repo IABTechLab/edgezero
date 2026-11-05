@@ -1,34 +1,35 @@
-# compiled output
+# --- Cargo / Rust ---
 bin/
+# `bin/` above is overly broad — it also blocks Cargo's `src/bin/`
+# directories, which are LEGITIMATE source (one file per binary
+# target). Re-include any `src/bin/` directory anywhere in the tree.
+!**/src/bin/
+!**/src/bin/**
 pkg/
 target/
 
-# local emulator / runtime state -- each adapter's local KV / config
-# store lives under one of these directories:
-#   - Cloudflare local KV  -> .wrangler/state/v3/kv/*/db.sqlite
-#   - Spin local KV        -> .spin/sqlite_key_value.db
-#   - Axum local config    -> .edgezero/local-config-<id>.json
-# All three are populated by `config push --local` (or by the
-# runtime itself on first read) and should not be committed.
-.wrangler/
-.spin/
+# --- EdgeZero core (shared across adapters) ---
+# Runtime dir the CLI creates for adapter-local state:
+#   - `.edgezero/.env`             — Axum's env-line file
+#   - `.edgezero/local-config-<id>.json` — Axum's local config store
+#   - `.edgezero/provision.lock`   — cross-process advisory lock
+#                                    (`provision` + `config push`)
+# The whole `.edgezero/` directory is per-machine and never committed.
 .edgezero/
 
-# Fastly local config-push lock and staging temp files (sidecars next to the
-# manifest; the lock serialises concurrent `config push --local` / `provision`,
-# the temp is the atomic-replace staging file). `TempFileGuard` removes the temp
-# on every normal return, but a SIGKILL / panic-abort mid-push can leave one
-# behind. The globs also cover a manifest named something other than `fastly.toml`.
-.*.edgezero-lock
-.*.edgezero-*.tmp
+# --- Adapter-owned local artifacts ---
+{{{adapter_local_ignore_patterns}}}
 
-# env
+# --- Shared per-crate `.env` ---
+# Provision --local writes EDGEZERO__STORES__*__NAME lines plus
+# commented __KEY overrides here. Operators uncomment / edit the
+# KEY line to point at a preferred local variant.
 .env
 
-# OS
+# --- OS ---
 .DS_Store
 
-# IDE - VSCode
+# --- Editors ---
 .vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json

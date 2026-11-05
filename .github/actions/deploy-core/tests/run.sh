@@ -2479,7 +2479,7 @@ test_fastly_logical_link_documentation() {
   local manifest="$REPO_ROOT/docs/guide/manifest-store-migration.md"
   local blob="$REPO_ROOT/docs/guide/blob-app-config-migration.md"
   local adoption="$REPO_ROOT/docs/guide/deploy-action-adoption.md"
-  local fastly_cli="$REPO_ROOT/crates/edgezero-adapter-fastly/src/cli.rs"
+  local fastly_cli="$REPO_ROOT/crates/edgezero-adapter-fastly/src/cli/staging.rs"
   local corpus="$WORK_DIR/fastly-logical-link-docs.md"
   local example_workflow="$WORK_DIR/application-deploy-workflow.yml"
   local example_deploy="$WORK_DIR/application-deploy-job.yml"

@@ -16,6 +16,7 @@
 
 use crate::config::short_ref;
 use std::collections::BTreeMap;
+use std::io;
 
 // -------------------------------------------------------------------
 // Public types — DiffEntry + DiffKind (alphabetical per clippy rule)
@@ -158,22 +159,19 @@ pub(crate) fn collect_changes(
 /// changed leaf (stdout via `println!`).
 ///
 /// Spec 8.1.2.
-#[expect(
-    clippy::print_stdout,
-    reason = "stream discipline: diff CONTENT goes to stdout, never stderr"
-)]
 pub(crate) fn render_structured(
     remote_data: &serde_json::Value,
     local_data: &serde_json::Value,
     remote_sha: &str,
     local_sha: &str,
-) {
+) -> io::Result<()> {
+    use crate::stream::stdout_line;
     let changes = collect_changes(remote_data, local_data);
-    println!("--- remote (sha256: {})", short_ref(remote_sha));
-    println!("+++ local  (sha256: {})", short_ref(local_sha));
+    stdout_line(&format!("--- remote (sha256: {})", short_ref(remote_sha)))?;
+    stdout_line(&format!("+++ local  (sha256: {})", short_ref(local_sha)))?;
     if changes.is_empty() {
-        println!("(no differences)");
-        return;
+        stdout_line("(no differences)")?;
+        return Ok(());
     }
     for entry in &changes {
         let kind_label = match entry.kind {
@@ -181,14 +179,15 @@ pub(crate) fn render_structured(
             DiffKind::Changed => "changed",
             DiffKind::Removed => "removed",
         };
-        println!("{} [{}]", entry.path, kind_label);
+        stdout_line(&format!("{} [{}]", entry.path, kind_label))?;
         if let Some(from) = &entry.from {
-            println!("  - {from}");
+            stdout_line(&format!("  - {from}"))?;
         }
         if let Some(to) = &entry.to {
-            println!("  + {to}");
+            stdout_line(&format!("  + {to}"))?;
         }
     }
+    Ok(())
 }
 
 /// Render the diff in `json` format: spec 8.1.3 machine-readable envelope
@@ -203,16 +202,13 @@ pub(crate) fn render_structured(
 /// All maps use `BTreeMap` so output is deterministic across runs.
 ///
 /// Spec 8.1.3.
-#[expect(
-    clippy::print_stdout,
-    reason = "stream discipline: diff CONTENT goes to stdout, never stderr"
-)]
 pub(crate) fn render_json(
     remote_data: &serde_json::Value,
     local_data: &serde_json::Value,
     remote_sha: &str,
     local_sha: &str,
-) {
+) -> io::Result<()> {
+    use crate::stream::stdout_line;
     let diff_entries = collect_changes(remote_data, local_data);
     let mut added: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     let mut removed: BTreeMap<String, serde_json::Value> = BTreeMap::new();
@@ -246,10 +242,9 @@ pub(crate) fn render_json(
         "removed": removed,
         "changed": changed,
     });
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| "<unrenderable>".into())
-    );
+    stdout_line(
+        &serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| "<unrenderable>".into()),
+    )
 }
 
 // -------------------------------------------------------------------

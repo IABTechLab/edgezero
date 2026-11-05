@@ -18,6 +18,7 @@ cli = [
     "dep:ctor",
     "dep:toml_edit",
     "dep:walkdir",
+    "dep:tempfile",
 ]
 fastly = ["dep:fastly", "dep:log-fastly"]
 
@@ -47,6 +48,7 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 toml_edit = { workspace = true, optional = true }
 walkdir = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 edgezero-core = { path = "../edgezero-core", features = ["test-utils"] }
