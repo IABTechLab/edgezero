@@ -677,7 +677,9 @@ auth-status = "wrangler whoami --json"
 ```
 
 The native CLI must be on `PATH`; a missing binary surfaces with an
-install hint. A non-zero exit propagates with its stderr verbatim.
+install hint. A non-zero exit propagates with its stderr verbatim, except for
+Cloudflare's built-in `auth status`, which captures `wrangler whoami --json`
+(see [Machine-readable output](#machine-readable-output)).
 
 ::: tip Axum is local-only
 `auth --adapter axum` is intentionally a no-op — the native dev
@@ -691,7 +693,9 @@ Nine commands accept `--format json` so that scripts and CI can gate on
 structured results instead of parsing log lines: `active-version`,
 `auth status`, `build`, `config gc`, `config validate`, `deploy`,
 `healthcheck`, `provision`, and `rollback`. `--format text` is the default and
-leaves each command's output exactly as it was.
+leaves each command's output exactly as it was, with two exceptions: `build`
+rejects a `--format` among its passthrough arguments, and Cloudflare's built-in
+`auth status` changed as described under `auth status` below.
 
 ```bash
 edgezero healthcheck --adapter fastly --service-id "$SID" --version 7 \
@@ -772,8 +776,8 @@ rejected a late `--format`.
 - **Not breaking, no version bump:** adding a key, adding `error.code`, making
   a nullable key always non-null, adding a value to a string enum.
 - **Breaking, version bump:** removing or renaming a key, changing a key's type
-  or meaning, making a non-null key nullable, or changing what `ok` / `result`
-  mean.
+  or meaning, making a non-null key nullable, removing a value from a string
+  enum, or changing what `ok` / `result` mean.
 
 Consumers should ignore unknown keys, handle unknown enum values, and check
 `schema_version`.
@@ -798,8 +802,17 @@ Every result except `config validate`'s also has a non-null `adapter` string.
 | `state` | string | no       | `authenticated`, `unauthenticated`, or `not_applicable` (axum). |
 
 For Cloudflare, `state` is the `loggedIn` field of `wrangler whoami --json`;
-output without that field (for example from a Wrangler too old for `--json`)
-gives `result: null`. For the other adapters, and for a manifest `auth-status`
+output without that field (for example from a Wrangler too old for `--json`),
+and `loggedIn: true` from a `wrangler` that exited non-zero, give
+`result: null`. This changes the text mode of the built-in probe too:
+
+- `auth status` exits `1` when logged out, even though plain `wrangler whoami`
+  exits `0` there. Output without `loggedIn` also exits `1`.
+- wrangler's output is captured, not echoed. A logged-in run prints
+  `[edgezero] wrangler is logged in as <email>`, and a failed probe quotes
+  wrangler's exit status, stdout and stderr in its error.
+
+A manifest `auth-status` override keeps the old behaviour. For the other adapters, and for a manifest `auth-status`
 override, `state` reflects the probe command's exit status only (the probes are
 listed under [Adapter built-ins](#edgezero-auth)): `authenticated` means the
 probe exited `0`, not that a token was checked, and `fastly profile list` only
@@ -847,14 +860,18 @@ A deploy that fails can still have changed the service, so check `result`, not
 only `ok`, before assuming nothing was deployed:
 
 - A managed deploy that fails after creating its draft gives `ok: false` with
-  the result present: `version` is that draft, and `version_state` is `draft`
-  if staging or activation was never attempted, or `unknown` if it was (the
-  request may have committed before failing).
+  the result present: `version` is that draft. If staging or activation was
+  attempted, `version_state` is `unknown` (the request may have committed
+  before failing). Otherwise EdgeZero reads the version back: `draft` if
+  Fastly still shows an editable draft, `published` if another actor
+  activated or staged it, and `unknown` if it is locked or the read failed.
 - A legacy deploy that went live but whose version could not be resolved gives
   `ok: false` with the result present and `version: null`. When the deploy
   command reported a version that could not be verified active, `version` is
   that version with `version_state: unknown`.
-- A failure before anything was created gives `result: null`.
+- `result: null` means EdgeZero has no version to report. A deploy command
+  that failed, or a clone request whose response could not be read, may still
+  have changed the service.
 
 **`healthcheck`**
 
@@ -867,7 +884,7 @@ only `ok`, before assuming nothing was deployed:
 | `staging`          | boolean | no       | Whether the staging IP was probed.                                                                                                                  |
 | `staging_ip`       | string  | yes      | The resolved staging IP; `null` for a production probe.                                                                                             |
 | `healthy`          | boolean | no       | Whether the probe passed.                                                                                                                           |
-| `status_code`      | integer | yes      | The last HTTP status; `null` when no probe got a response.                                                                                          |
+| `status_code`      | integer | yes      | The last HTTP status any probe received; `null` if none did, or if the last parsed status was curl's `000`.                                         |
 | `attempts`         | integer | no       | The number of probes actually made.                                                                                                                 |
 | `version_verified` | boolean | no       | `true` when the version was confirmed active before and after the probe: a healthy production probe with `FASTLY_API_TOKEN` set. Otherwise `false`. |
 
@@ -876,8 +893,9 @@ leaves no probe result gives `result: null`: a version check before the probe,
 or the after-probe version check of a healthy production probe (another version
 went active during the probe).
 
-`status_code` is `null` when the last probe got no response, including curl's
-`000`. The text output prints that as `status-code=0`, as before.
+A transport failure (curl exiting non-zero) does not reset `status_code`: `503`
+then a connection error reports `503`. curl's `000` does, giving `null`; the
+text output prints that as `status-code=0`, as before.
 
 **`rollback`**
 
@@ -945,7 +963,9 @@ failing check in `error.message`.
 
 ### Schema changelog
 
-- **1**: initial version.
+- **1**: initial version. Before its first release, v1 was narrowed:
+  `provision.entries[].action` lost `updated` / `would_update`, and
+  `store.logical` became non-null.
 
 ## Environment Variables
 

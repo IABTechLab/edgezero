@@ -229,8 +229,8 @@ impl DeployResult {
             package_sha256: deployed.package_sha256,
             service_id: deployed.service_id,
             staging,
-            version: deployed.version,
-            version_state: deployed.version_state.map(|state| match state {
+            version: deployed.version.map(|version| version.number),
+            version_state: deployed.version.map(|version| match version.state {
                 DeployedVersionState::Draft => WireDeployedVersionState::Draft,
                 DeployedVersionState::Published => WireDeployedVersionState::Published,
                 DeployedVersionState::Unknown => WireDeployedVersionState::Unknown,
@@ -597,7 +597,7 @@ fn path_string(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::test_support::manifest_guard;
-    use edgezero_adapter::registry::{GcCandidate, GcFailure, ProvisionEntry};
+    use edgezero_adapter::registry::{DeployedVersion, GcCandidate, GcFailure, ProvisionEntry};
     use serde_json::{Value, json};
 
     fn envelope_of<R>(command: CommandName, outcome: &Outcome<R>) -> Value
@@ -750,8 +750,10 @@ mod tests {
             true,
             DeployOutcome {
                 failure: Some("dropped: the envelope's error".to_owned()),
-                version: Some(43),
-                version_state: Some(DeployedVersionState::Draft),
+                version: Some(DeployedVersion {
+                    number: 43,
+                    state: DeployedVersionState::Draft,
+                }),
                 ..DeployOutcome::default()
             },
         ))

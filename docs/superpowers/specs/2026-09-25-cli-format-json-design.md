@@ -24,8 +24,10 @@ lines. The CLI then owns both renderings.
 
 1. Scripts can gate on structured results without parsing log lines.
 2. Every existing invocation behaves exactly as before: same bytes, same
-   streams, same exit codes. The one exception is `build` with a `--format`
-   token among its passthrough arguments, which is now rejected (§5.2).
+   streams, same exit codes. There are two exceptions: `build` with a
+   `--format` token among its passthrough arguments, which is now rejected
+   (§5.2), and Cloudflare's built-in `auth status`, which now reads
+   `wrangler whoami --json` and changes its exit code and output (§8).
 3. Under `--format json`, no byte on stdout is anything other than the
    envelope. This holds by construction and is enforced by lint and tests,
    not by convention.
@@ -203,7 +205,9 @@ This way, downstream CLIs generated from the template before this change get
 
 ### 6.4 Exit codes
 
-Exit codes do not change.
+Exit codes do not change, except for the two Goal 2 exceptions: `build`
+(below) and Cloudflare's built-in `auth status`, which exits `1` when logged
+out or when wrangler's output has no `loggedIn` (§8).
 
 | Situation | Exit | stdout under `json` |
 | --- | --- | --- |
@@ -230,7 +234,8 @@ failure codes differ between binaries.
   adding a value to a string enum.
 - **Breaking changes (bump):** removing or renaming a key; changing a key's
   type or meaning; making a non-null field nullable; changing the envelope's
-  meaning (`ok` semantics, when `result` is `null`).
+  meaning (`ok` semantics, when `result` is `null`); removing a value from a
+  string enum.
 - **What consumers must do:** ignore unknown keys; handle unknown enum values;
   check `schema_version`.
 - A bump is recorded in the CLI reference changelog together with the PR that
@@ -332,7 +337,9 @@ measuring is an `Ok` outcome carrying a `failure` message, not an `Err`:
 - an unhealthy healthcheck has `failure: Some(message)`, so `healthy()` is
   `false`;
 - a non-zero exit from `auth status` is `Unauthenticated { reason }`
-  (`cli_support::native_auth_status`, or a manifest `auth-status` command);
+  (`cli_support::native_auth_status`, or a manifest `auth-status` command).
+  Cloudflare's built-in probe instead reads `loggedIn`, and output without it
+  is an `Err`;
 - a gc run with failed deletes has `failure: Some(GcFailure)`, whose
   `diagnostic` holds exactly the error text it returned before;
 - a deploy that fails after creating a version has `failure: Some(message)`,
@@ -513,12 +520,16 @@ adapter cannot know the path.
   through the API, else the API's active version). Without it, `service_id`
   and `version` are `null`.
 - A managed deploy that fails after creating its draft gives `ok: false` with
-  `result` present: that `version`, with `version_state` `draft` or `unknown`.
+  `result` present: that `version`. `version_state` is `unknown` once staging
+  or activation was attempted; before that it comes from reading the version
+  back (`draft`, `published` if another actor published it, or `unknown`).
 - A legacy deploy that went live but whose version could not be resolved
   gives `ok: false` with `result` present and `version: null`; one whose
   reported version could not be verified active keeps that `version` with
   `version_state: unknown`.
-- A failure before anything was created gives `result: null`.
+- `result: null` means EdgeZero has no version to report. A deploy command
+  that failed, or a clone request whose response could not be read, may still
+  have changed the service.
 
 ### `healthcheck`
 
@@ -539,8 +550,10 @@ adapter cannot know the path.
 - A failure before the probe (invalid arguments, version not active, staging
   IP lookup) gives `result: null`, as does a failed after-probe version check
   on a healthy production probe.
-- `status_code` is `null` when the last probe got no response, including
-  curl's `000`. Text mode keeps printing `status-code=0` for that case.
+- `status_code` is the last HTTP status any probe received, or `null` if none
+  did or the last parsed status was curl's `000`. A transport failure (curl
+  exiting non-zero) keeps the previous status. Text mode keeps printing
+  `status-code=0` for `000`.
 
 ### `rollback`
 
@@ -627,13 +640,14 @@ never on string matches (#383), and text tests assert exact bytes.
    stderr and exit code. The text output of all nine commands is now pinned as
    exact bytes in the end-to-end tests below, so the contract cannot drift. The
    intended changes are `build` rejecting a passthrough `--format` (§5.2) and
-   Cloudflare `auth status` probing `wrangler whoami --json` (§8).
+   Cloudflare `auth status` probing `wrangler whoami --json`, which changes its
+   exit code and output (§8, Goal 2).
 3. **End-to-end stream tests** (`edgezero-cli/tests/format_json.rs`). These run
    `env!("CARGO_BIN_EXE_edgezero")` in a temp project, with fake `curl` /
    `fastly` binaries on `PATH`, and need no network or credentials. The
    harness clears `FASTLY_API_TOKEN`, `FASTLY_SERVICE_ID`, and every
    `EDGEZERO__*` and `DEMO_APP__*` variable. Each JSON test asserts that stdout
-   parses as exactly one JSON value. There are 30 tests:
+   parses as exactly one JSON value. There are 32 tests:
    - **build:** child stdout reaches only stderr under JSON; exact text bytes;
      a usage error leaves stdout empty; a passthrough `--format`, `--format=json`
      or `-- --format json` is rejected with the bundled binary's exit 1 and an
@@ -776,7 +790,8 @@ result shape.
   (§8).
 - **`healthcheck`** treats curl's `000` as a probe that got no response, not
   as status `0`: `status_code` keeps the last real HTTP status, or `null` if
-  no probe got one.
+  no probe got one. (Revision 6 replaced this adapter-side mapping; see
+  there.)
 - **The Fastly production deploy** returns `ActionOutcome::Empty`, like the
   other adapters, and the staged deploy reports the service id it used.
 - **A failed write of the envelope** no longer hides the command's own error:
@@ -821,7 +836,10 @@ bump.
 - **`healthcheck`** maps curl's `000` to `null` only in the JSON result. This
   reverts revision 4's adapter change, which had also altered text output.
 - **Cloudflare `auth status`** reads `loggedIn` from `wrangler whoami --json`;
-  plain `wrangler whoami` exits 0 when logged out.
+  plain `wrangler whoami` exits 0 when logged out. This is a second Goal 2
+  exception: text mode exits `1` when logged out or when the output has no
+  `loggedIn`, prints `[edgezero] wrangler is logged in as <email>` instead of
+  wrangler's output, and folds wrangler's stdout and stderr into the error.
 - **`provision`** drops `updated` / `would_update`, and `store.logical` is
   never `null`: #381 removed the `edgezero_runtime_env` store that produced
   them.
@@ -831,3 +849,22 @@ bump.
   (revision 4 covered a failed command, whose own error is kept).
 - **The build-rejection exit code** is non-zero, not `1`: the bundled binary
   exits `1`, a generated CLI exits `2` (§6.4).
+
+Revision 7 records the changes from the fifth review of #388.
+
+- **`deploy` `version_state: draft`** now needs positive evidence: a managed
+  deploy that fails before publishing reads the version back, and reports
+  `published` if another actor activated or staged it, or `unknown` if it is
+  locked or the read fails.
+- **`DeployOutcome.version`** is one `Option<DeployedVersion { number, state }>`,
+  so a version and its state can no longer disagree. The wire keeps the flat
+  `version` / `version_state` keys.
+- **`result: null`** on `deploy` means EdgeZero has no version to report, not
+  that nothing changed (§8).
+- **`healthcheck` `status_code`** is documented as implemented: a transport
+  failure keeps the previous status, curl's `000` gives `null` (§8).
+- **Cloudflare `auth status`** is a declared Goal 2 exception (§2, §6.4, §9.2);
+  its errors quote the exit code, stdout and stderr without colour, it needs a
+  successful exit for `authenticated`, and it tolerates a notice before the
+  JSON.
+- **Removing a string-enum value** is a breaking change (§6.5).

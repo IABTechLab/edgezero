@@ -126,6 +126,9 @@ static CLOUDFLARE_TEMPLATE_REGISTRATIONS: &[TemplateRegistration] = &[
 
 const TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 
+/// How much of each wrangler stream a failed `auth status` probe quotes.
+const WHOAMI_EXCERPT_CHARS: usize = 400;
+
 const WRANGLER_INSTALL_HINT: &str =
     "install the Cloudflare CLI (`npm install -g wrangler`) and try again";
 
@@ -542,10 +545,14 @@ impl Adapter for CloudflareCliAdapter {
 
 /// `auth status`. Plain `wrangler whoami` exits 0 even when logged out, so
 /// this reads `loggedIn` from `wrangler whoami --json` instead of the exit
-/// status. Output that is not that JSON is a probe failure, not a state.
+/// status. Output that is not that JSON is a probe failure, not a state, as is
+/// `loggedIn: true` from a wrangler that exited non-zero.
 fn auth_status() -> Result<AuthStatusOutcome, String> {
     let output = Command::new("wrangler")
         .args(["whoami", "--json"])
+        // wrangler colours stderr even when piped; keep escapes out of errors.
+        .env("NO_COLOR", "1")
+        .env("FORCE_COLOR", "0")
         .output()
         .map_err(|err| {
             if err.kind() == ErrorKind::NotFound {
@@ -554,19 +561,47 @@ fn auth_status() -> Result<AuthStatusOutcome, String> {
                 format!("failed to spawn `wrangler`: {err}")
             }
         })?;
-    parse_whoami(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
-        format!(
-            "`wrangler whoami --json` exited with status {} without reporting `loggedIn`: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    parse_whoami(&stdout, output.status.success()).ok_or_else(|| {
+        let status = output
+            .status
+            .code()
+            .map_or_else(|| "a signal".to_owned(), |code| format!("status {code}"));
+        let mut lines = vec![format!(
+            "`wrangler whoami --json` exited with {status} without a usable `loggedIn`"
+        )];
+        for (stream, text) in [("stdout", stdout.trim()), ("stderr", stderr.trim())] {
+            if !text.is_empty() {
+                let excerpt: String = text.chars().take(WHOAMI_EXCERPT_CHARS).collect();
+                let ellipsis = if excerpt.len() < text.len() {
+                    "..."
+                } else {
+                    ""
+                };
+                lines.push(format!("{stream}: {excerpt}{ellipsis}"));
+            }
+        }
+        lines.join("\n")
     })
 }
 
 /// The session state in `wrangler whoami --json` output, if it reports one.
-fn parse_whoami(stdout: &str) -> Option<AuthStatusOutcome> {
-    let whoami: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+/// The JSON runs from the last line starting with `{` to the end, so a notice
+/// wrangler prints first does not hide it.
+fn parse_whoami(stdout: &str, success: bool) -> Option<AuthStatusOutcome> {
+    let lines: Vec<&str> = stdout.lines().collect();
+    let whoami = (0..lines.len()).rev().find_map(|start| {
+        let rest = lines.get(start..)?;
+        if !rest.first()?.starts_with('{') {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(&rest.join("\n")).ok()
+    })?;
     let state = if whoami.get("loggedIn")?.as_bool()? {
+        if !success {
+            return None;
+        }
         if let Some(email) = whoami.get("email").and_then(serde_json::Value::as_str) {
             log::info!("[edgezero] wrangler is logged in as {email}");
         }
@@ -2116,7 +2151,18 @@ id = "00112233445566778899aabbccddeeff"
         // Plain-text output (e.g. a wrangler without `--json`) is a probe
         // failure, never "authenticated", even on exit 0.
         let error = state("You are not authenticated.", 0_i32).expect_err("no state");
-        assert!(error.contains("probe stderr"), "{error}");
+        assert_eq!(
+            error,
+            "`wrangler whoami --json` exited with status 0 without a usable `loggedIn`\n\
+             stdout: You are not authenticated.\nstderr: probe stderr"
+        );
+        // A notice before the JSON does not hide it.
+        assert_eq!(
+            state("Update available!\n{\n  \"loggedIn\": true\n}\n", 0_i32),
+            Ok(AuthState::Authenticated)
+        );
+        // `loggedIn: true` with a failed exit is not trusted.
+        state(r#"{"loggedIn": true}"#, 1_i32).expect_err("not trusted");
     }
 
     #[cfg(unix)]

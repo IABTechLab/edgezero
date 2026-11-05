@@ -116,12 +116,17 @@ pub struct DeployOutcome {
     /// The service the deploy targeted, when the adapter resolved one.
     pub service_id: Option<String>,
     /// The platform version the deploy created, staged or activated, when known.
-    pub version: Option<u64>,
-    /// What happened to `version`; `None` when `version` is.
-    pub version_state: Option<DeployedVersionState>,
+    pub version: Option<DeployedVersion>,
 }
 
-/// What a deploy did with [`DeployOutcome::version`].
+/// A platform version a deploy created, and what happened to it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeployedVersion {
+    pub number: u64,
+    pub state: DeployedVersionState,
+}
+
+/// What a deploy did with a [`DeployedVersion`].
 ///
 /// Deliberately exhaustive: the CLI maps each variant onto its versioned JSON
 /// schema.

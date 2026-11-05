@@ -778,7 +778,8 @@ mod tests {
     use crate::args::OutputFormat;
     use crate::test_support::{BASIC_MANIFEST, EnvOverride, manifest_guard};
     use edgezero_adapter::registry::{
-        self as adapter_registry, Adapter, AdapterAction, DeployOwnership, DeployedVersionState,
+        self as adapter_registry, Adapter, AdapterAction, DeployOwnership, DeployedVersion,
+        DeployedVersionState,
     };
     use edgezero_core::manifest::ManifestLoader;
     #[cfg(unix)]
@@ -1220,8 +1221,10 @@ deploy = "touch '{}'"
                 failure: Some("activate request failed".to_owned()),
                 package_sha256: Some("abc123".to_owned()),
                 service_id: Some("SVC1".to_owned()),
-                version: Some(42),
-                version_state: Some(DeployedVersionState::Unknown),
+                version: Some(DeployedVersion {
+                    number: 42,
+                    state: DeployedVersionState::Unknown,
+                }),
             }));
 
         let envelope = deploy_envelope(&recording_deploy_args());
@@ -1253,8 +1256,10 @@ deploy = "touch '{}'"
         *DEPLOY_OUTCOME.lock().expect("deploy outcome lock") =
             Some(ActionOutcome::Deploy(DeployOutcome {
                 failure: Some("stage failed".to_owned()),
-                version: Some(7),
-                version_state: Some(DeployedVersionState::Draft),
+                version: Some(DeployedVersion {
+                    number: 7,
+                    state: DeployedVersionState::Draft,
+                }),
                 ..DeployOutcome::default()
             }));
 
@@ -1276,14 +1281,19 @@ deploy = "touch '{}'"
         let _env = recording_adapter_manifest(&temp);
         *DEPLOY_OUTCOME.lock().expect("deploy outcome lock") =
             Some(ActionOutcome::Deploy(DeployOutcome {
-                version: Some(1),
+                version: Some(DeployedVersion {
+                    number: 1,
+                    state: DeployedVersionState::Published,
+                }),
                 ..DeployOutcome::default()
             }));
         *FINALIZE_OUTCOME.lock().expect("finalize outcome lock") =
             Some(Ok(ActionOutcome::Deploy(DeployOutcome {
                 service_id: Some("SVC1".to_owned()),
-                version: Some(2),
-                version_state: Some(DeployedVersionState::Published),
+                version: Some(DeployedVersion {
+                    number: 2,
+                    state: DeployedVersionState::Published,
+                }),
                 ..DeployOutcome::default()
             })));
 

@@ -441,6 +441,31 @@ crate = "crates/demo-cloudflare"
         );
     }
 
+    /// A transport failure keeps the last status: `503`, then curl exit 7.
+    /// curl's `000` instead resets it to `null`.
+    #[test]
+    fn json_healthcheck_status_code_after_a_failed_retry() {
+        let dir = project();
+        let run = |second: &str| {
+            let curl = fake_curl_script(&format!(
+                "n=\"$(dirname \"$0\")/n\"\n\
+                 if [ -e \"$n\" ]; then {second}; fi\n\
+                 touch \"$n\"\n\
+                 echo 503"
+            ));
+            let mut args = HEALTHCHECK.to_vec();
+            args[10] = "2";
+            args.extend(["--format", "json"]);
+            let output = edgezero(dir.path(), &args, Some(curl.path()));
+            assert_eq!(output.status.code(), Some(1_i32));
+            let result = sole_json_document(&output)["result"].clone();
+            assert_eq!(result["attempts"], json!(2_i32), "{result}");
+            result["status_code"].clone()
+        };
+        assert_eq!(run("exit 7"), json!(503_i32));
+        assert_eq!(run("echo 000; exit 0"), json!(null));
+    }
+
     #[test]
     fn usage_errors_leave_stdout_empty() {
         let dir = project();
@@ -815,6 +840,62 @@ crate = "crates/demo-cloudflare"
             })
         );
         assert!(stderr_of(&output).contains("logged-in\n"));
+    }
+
+    /// The Cloudflare built-in probe reads `loggedIn` from a captured
+    /// `wrangler whoami --json`; wrangler's own output is not echoed.
+    #[test]
+    fn cloudflare_auth_status_reads_whoami_json() {
+        const ARGS: [&str; 4] = ["auth", "status", "--adapter", "cloudflare"];
+        let dir = project_with(AUTH_MANIFEST);
+        let run = |whoami: &str, format: Option<&str>| {
+            let wrangler = fake_binary(
+                "wrangler",
+                &format!("[ \"$*\" = 'whoami --json' ] || exit 64\nprintf '%s' '{whoami}'"),
+            );
+            let mut args = ARGS.to_vec();
+            if let Some(value) = format {
+                args.extend(["--format", value]);
+            }
+            edgezero(dir.path(), &args, Some(wrangler.path()))
+        };
+        let logged_in = r#"{"loggedIn":true,"email":"a@example.com"}"#;
+        let logged_out = r#"{"loggedIn":false}"#;
+
+        let text = run(logged_in, None);
+        assert!(text.status.success(), "stderr: {}", stderr_of(&text));
+        assert_eq!(
+            stdout_of(&text),
+            "[edgezero] wrangler is logged in as a@example.com\n"
+        );
+        let json = run(logged_in, Some("json"));
+        assert!(json.status.success(), "stderr: {}", stderr_of(&json));
+        assert_eq!(
+            sole_json_document(&json)["result"],
+            json!({"adapter": "cloudflare", "state": "authenticated"})
+        );
+
+        // Logged out exits 1 even though wrangler itself exited 0.
+        let out_text = run(logged_out, None);
+        assert_eq!(out_text.status.code(), Some(1_i32));
+        assert!(
+            out_text.stdout.is_empty(),
+            "stdout: {:?}",
+            stdout_of(&out_text)
+        );
+        let out_json = run(logged_out, Some("json"));
+        assert_eq!(out_json.status.code(), Some(1_i32));
+        let envelope = sole_json_document(&out_json);
+        assert_eq!(envelope["ok"], json!(false));
+        assert_eq!(
+            envelope["result"],
+            json!({"adapter": "cloudflare", "state": "unauthenticated"})
+        );
+
+        // Output without `loggedIn` is a probe failure with no result.
+        let plain = run("You are not authenticated.", Some("json"));
+        assert_eq!(plain.status.code(), Some(1_i32));
+        assert!(sole_json_document(&plain)["result"].is_null());
     }
 
     #[test]

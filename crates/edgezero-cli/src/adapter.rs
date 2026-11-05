@@ -72,8 +72,10 @@ impl From<Action> for AdapterAction {
 /// Why [`deploy`] failed.
 #[derive(Debug)]
 pub enum DeployFailure {
-    /// The deploy failed before reporting anything it created. A deploy that
-    /// fails after creating a version is instead an `Ok` [`ActionOutcome::Deploy`]
+    /// The deploy failed with no version to report. It may still have changed
+    /// the service: a deploy command can fail after activating, and a clone
+    /// response can be lost after the clone committed. A deploy that fails
+    /// after reporting a version is instead an `Ok` [`ActionOutcome::Deploy`]
     /// carrying that version and a `failure`.
     Deploy(String),
     /// The deploy went live, but finalizing it (e.g. resolving the activated

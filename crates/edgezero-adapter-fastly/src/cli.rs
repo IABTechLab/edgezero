@@ -33,9 +33,9 @@ use edgezero_adapter::process;
 use edgezero_adapter::registry::{
     ActionOutcome, ActiveVersionOutcome, Adapter, AdapterAction, AdapterDeployContext,
     AdapterPushContext, BuildOutcome, DeployOutcome, DeployOwnership, DeployStoreIds,
-    DeployedVersionState, GcCandidate, GcFailure, GcReport, HealthcheckOutcome, ProvisionAction,
-    ProvisionEntry, ProvisionReport, ProvisionStores, ReadConfigEntry, ResolvedStoreId,
-    RollbackOutcome, StoreKind, register_adapter,
+    DeployedVersion, DeployedVersionState, GcCandidate, GcFailure, GcReport, HealthcheckOutcome,
+    ProvisionAction, ProvisionEntry, ProvisionReport, ProvisionStores, ReadConfigEntry,
+    ResolvedStoreId, RollbackOutcome, StoreKind, register_adapter,
 };
 use edgezero_adapter::release::{VerifiedApplicationRelease, verify_application_release};
 use edgezero_adapter::scaffold::{
@@ -907,18 +907,29 @@ fn deploy_managed_with_context(
     let plan = build_managed_deploy_plan(context, args)?;
     let mut progress = ManagedProgress::default();
     let executed = execute_managed_deploy_plan(&plan, &mut progress);
-    managed_deploy_outcome(plan.service_id, plan.package_sha256, &progress, executed)
+    managed_deploy_outcome(
+        plan.service_id.clone(),
+        plan.package_sha256.clone(),
+        &progress,
+        executed,
+        |version| observed_version_state(&plan, version),
+    )
 }
 
-/// Maps a managed deploy's result onto its outcome. A failure before any
-/// draft exists stays an `Err`: nothing was created.
+/// Maps a managed deploy's result onto its outcome. A failure before the deploy
+/// knows of any draft stays an `Err`: there is no version to report, though a
+/// clone whose response could not be read may still have created one.
+///
+/// A failure before publishing calls `observe`: another actor may have
+/// published the draft, which is often why the deploy failed.
 fn managed_deploy_outcome(
     service_id: String,
     package_sha256: String,
     progress: &ManagedProgress,
     executed: Result<u64, String>,
+    observe: impl FnOnce(u64) -> DeployedVersionState,
 ) -> Result<DeployOutcome, String> {
-    let (version, version_state, failure) = match executed {
+    let (number, state, failure) = match executed {
         Ok(version) => (version, DeployedVersionState::Published, None),
         Err(error) => {
             let Some(version) = progress.version else {
@@ -927,7 +938,7 @@ fn managed_deploy_outcome(
             let state = if progress.publish_attempted {
                 DeployedVersionState::Unknown
             } else {
-                DeployedVersionState::Draft
+                observe(version)
             };
             (version, state, Some(error))
         }
@@ -936,9 +947,35 @@ fn managed_deploy_outcome(
         failure,
         package_sha256: Some(package_sha256),
         service_id: Some(service_id),
-        version: Some(version),
-        version_state: Some(version_state),
+        version: Some(DeployedVersion { number, state }),
     })
+}
+
+/// Reads back what Fastly reports for `version`. `Draft` only when Fastly
+/// still shows it as an unpublished editable draft.
+fn observed_version_state(plan: &ManagedDeployPlan, version: u64) -> DeployedVersionState {
+    let listed = fastly_api_get(
+        &format!("/service/{}/version", plan.service_id),
+        plan.token.as_str(),
+    )
+    .and_then(|raw| parse_service_versions(&raw));
+    match listed {
+        Ok(versions) => versions
+            .iter()
+            .find(|candidate| candidate.number == version)
+            .map_or(DeployedVersionState::Unknown, version_record_state),
+        Err(_error) => DeployedVersionState::Unknown,
+    }
+}
+
+fn version_record_state(record: &ServiceVersionRecord) -> DeployedVersionState {
+    if record.active || !record.environments.is_empty() {
+        DeployedVersionState::Published
+    } else if record.locked {
+        DeployedVersionState::Unknown
+    } else {
+        DeployedVersionState::Draft
+    }
 }
 
 /// How far a managed deploy got before it returned.
@@ -2162,12 +2199,14 @@ impl Adapter for FastlyCliAdapter {
             return Ok(ActionOutcome::Empty);
         };
         validate_service_id(service_id)?;
-        let deployed = |version| {
-            log::info!("version={version}");
+        let deployed = |number| {
+            log::info!("version={number}");
             ActionOutcome::Deploy(DeployOutcome {
                 service_id: Some(service_id.to_owned()),
-                version: Some(version),
-                version_state: Some(DeployedVersionState::Published),
+                version: Some(DeployedVersion {
+                    number,
+                    state: DeployedVersionState::Published,
+                }),
                 ..DeployOutcome::default()
             })
         };
@@ -2188,8 +2227,10 @@ impl Adapter for FastlyCliAdapter {
                         ActionOutcome::Deploy(DeployOutcome {
                             failure: Some(error),
                             service_id: Some(service_id.to_owned()),
-                            version: Some(version),
-                            version_state: Some(DeployedVersionState::Unknown),
+                            version: Some(DeployedVersion {
+                                number: version,
+                                state: DeployedVersionState::Unknown,
+                            }),
                             ..DeployOutcome::default()
                         })
                     },
@@ -7340,8 +7381,10 @@ mod tests {
             outcome,
             ActionOutcome::Deploy(DeployOutcome {
                 service_id: Some("SVC1".to_owned()),
-                version: Some(8),
-                version_state: Some(DeployedVersionState::Published),
+                version: Some(DeployedVersion {
+                    number: 8,
+                    state: DeployedVersionState::Published,
+                }),
                 ..DeployOutcome::default()
             }),
             "finalization reports the verified service version"
@@ -7356,8 +7399,11 @@ mod tests {
             .expect("an unverified version is still reported");
         let ActionOutcome::Deploy(DeployOutcome {
             failure: Some(error),
-            version: Some(9),
-            version_state: Some(DeployedVersionState::Unknown),
+            version:
+                Some(DeployedVersion {
+                    number: 9,
+                    state: DeployedVersionState::Unknown,
+                }),
             ..
         }) = unverified
         else {
@@ -7368,13 +7414,29 @@ mod tests {
 
     #[test]
     fn managed_deploy_outcome_keeps_a_created_version_on_failure() {
-        let outcome = |progress: &ManagedProgress, executed| {
-            managed_deploy_outcome("SVC1".to_owned(), "abc".to_owned(), progress, executed)
+        let outcome = |progress: &ManagedProgress, executed, observed| {
+            managed_deploy_outcome(
+                "SVC1".to_owned(),
+                "abc".to_owned(),
+                progress,
+                executed,
+                |_version| observed,
+            )
+        };
+        let state = |result: Result<DeployOutcome, String>| {
+            result
+                .expect("outcome")
+                .version
+                .map(|version| version.state)
         };
 
         let preflight = ManagedProgress::default();
         assert_eq!(
-            outcome(&preflight, Err("clone failed".to_owned())),
+            outcome(
+                &preflight,
+                Err("clone failed".to_owned()),
+                DeployedVersionState::Draft
+            ),
             Err("clone failed".to_owned()),
             "a failure before any draft exists reports nothing"
         );
@@ -7384,30 +7446,94 @@ mod tests {
             publish_attempted: false,
         };
         assert_eq!(
-            outcome(&drafted, Err("link create failed".to_owned())),
+            outcome(
+                &drafted,
+                Err("link create failed".to_owned()),
+                DeployedVersionState::Draft
+            ),
             Ok(DeployOutcome {
                 failure: Some("link create failed".to_owned()),
                 package_sha256: Some("abc".to_owned()),
                 service_id: Some("SVC1".to_owned()),
-                version: Some(42),
-                version_state: Some(DeployedVersionState::Draft),
+                version: Some(DeployedVersion {
+                    number: 42,
+                    state: DeployedVersionState::Draft,
+                }),
             })
+        );
+        assert_eq!(
+            state(outcome(
+                &drafted,
+                Err("Fastly version 42 is no longer an unpublished editable draft".to_owned()),
+                DeployedVersionState::Published
+            )),
+            Some(DeployedVersionState::Published),
+            "a draft another actor published is not reported as a draft"
         );
 
         let publishing = ManagedProgress {
             version: Some(42),
             publish_attempted: true,
         };
-        let unknown = outcome(&publishing, Err("activate timed out".to_owned())).expect("outcome");
-        assert_eq!(unknown.version_state, Some(DeployedVersionState::Unknown));
-        assert_eq!(unknown.failure.as_deref(), Some("activate timed out"));
-
-        let published = outcome(&publishing, Ok(42)).expect("outcome");
+        let unknown = outcome(
+            &publishing,
+            Err("activate timed out".to_owned()),
+            DeployedVersionState::Draft,
+        );
         assert_eq!(
-            published.version_state,
+            unknown
+                .as_ref()
+                .ok()
+                .and_then(|deployed| deployed.failure.as_deref()),
+            Some("activate timed out")
+        );
+        assert_eq!(
+            state(unknown),
+            Some(DeployedVersionState::Unknown),
+            "a publish attempt is never read back as a draft"
+        );
+
+        let published = outcome(&publishing, Ok(42), DeployedVersionState::Draft).expect("outcome");
+        assert_eq!(
+            published.version.map(|version| version.state),
             Some(DeployedVersionState::Published)
         );
         assert_eq!(published.failure, None);
+    }
+
+    #[test]
+    fn version_record_state_reports_draft_only_for_an_editable_draft() {
+        let record = |active, locked, staged: bool| ServiceVersionRecord {
+            active,
+            locked,
+            environments: if staged {
+                vec![
+                    serde_json::from_str(
+                        r#"{"name":"staging","active_version":42,"service_id":"SVC1"}"#,
+                    )
+                    .expect("environment"),
+                ]
+            } else {
+                Vec::new()
+            },
+            number: 42,
+        };
+        assert_eq!(
+            version_record_state(&record(false, false, false)),
+            DeployedVersionState::Draft
+        );
+        assert_eq!(
+            version_record_state(&record(true, true, false)),
+            DeployedVersionState::Published
+        );
+        assert_eq!(
+            version_record_state(&record(false, true, true)),
+            DeployedVersionState::Published
+        );
+        assert_eq!(
+            version_record_state(&record(false, true, false)),
+            DeployedVersionState::Unknown
+        );
     }
 
     #[test]
