@@ -13,7 +13,7 @@ Generated Axum targets forward two independent, default-off features:
 features = ["celld-config", "celld-kv"]
 ```
 
-The provider crate uses `config` and `kv`. Its settings compile without live transport dependencies. Applications do not depend on the celld runtime or V8. Existing AWS features and the `aws-stores` alias keep their current membership.
+The provider crate uses `config` and `kv`. Its separate `records` feature also enables the KV transport and exposes conditional records directly to application-specific adapters. It does not change the generic KV interface or enable a framework binding implicitly. Its settings compile without live transport dependencies. Applications do not depend on the celld runtime or V8. Existing AWS features and the `aws-stores` alias keep their current membership.
 
 A deployment file cannot enable a provider omitted from the application binary. Startup checks the compiled capabilities before preparing any selected store.
 
@@ -163,9 +163,25 @@ Binary and empty values remain distinct from missing keys. Missing delete succee
 
 Listing returns one bounded page, including a short or empty continuing page. It is not a snapshot. Cursors bind endpoint, alias and prefix, but never confer authorization. Preserve a returned continuation rather than scanning repeatedly to fill a page.
 
-The client disables redirects, ambient proxies, retries and decompression. It validates the version header and bounds streamed values, pages and error bodies. Celld scoped dispatch also disables ambiguous replay. A failed or timed-out mutation may have applied. The provider does not promise exactly-once operations, CAS or transactions.
+The client disables redirects, ambient proxies, retries and decompression. It validates the version header and bounds streamed values, pages and error bodies. Celld scoped dispatch also disables ambiguous replay. A failed or timed-out mutation may have applied. The ordinary KV provider does not promise exactly-once operations, CAS or transactions.
 
 Provider-owned errors and Debug output redact credentials and omit remote payloads, URLs and source chains. Dependency DEBUG/TRACE logging is outside that promise. Application-owned initializer errors and logs remain the application's responsibility. Review deployment logging before enabling it.
+
+## Conditional records
+
+The additive conditional-record server extension is required for `records`; the original `f72ae21a` listener does not implement it. Existing config and ordinary KV requests keep their version1 contract. Every record response must additionally carry exactly one `x-celld-record-version: 1` header, including errors and HEAD responses.
+
+`CelldPreparation::prepare_records` accepts the same explicit endpoint, access policy and service alias shape as `CelldKvSettings`. It returns a live `CelldRecordStore` after one bounded read-only prefix-list probe. The probe establishes protocol support and listing authorization, not write/delete permission or fleet durability. A failed or cancelled preparation poisons the session. Returned handles retain no row snapshot and give each live call a fresh operation deadline.
+
+Records use `/v1/stores/{alias}/record` and `/record-keys`. They are separate from ordinary KV, even when a key has identical bytes. A lookup returns opaque body bytes, optional opaque metadata and a positive u64 generation. Null metadata differs from present empty metadata. Generation strings on the wire preserve values above JavaScript's integer precision limit.
+
+Writes select `Add`, `Overwrite` or `IfGenerationMatch`. The server evaluates the condition, allocates a durable generation and writes the row in one transaction. A validated HTTP412 `precondition_failed` becomes `RecordWriteOutcome::PreconditionFailed`, not an infrastructure error. Other failures remain errors and are not automatically replayed. A lost mutation response may follow a committed write; the client never invents a successful acknowledgement.
+
+Record bodies use the configured value ceiling, at most 1MiB. Opaque metadata is at most 1024 bytes. Relative TTL is positive, rounds upward to milliseconds and starts on the server inside the transaction. Record TTL does not inherit the ordinary KV 60-second minimum. The server rejects unrepresentable expiry rather than clamping it. GET and listing hide expired rows; `key_exists` uses exact physical HEAD, conservatively including expired rows awaiting collection. Hard deletion does not reset the generation allocator.
+
+`list_keys_with_prefix` returns at most the requested limit, up to1000, in increasing binary key order. A full page can be incomplete; it is not an exhaustive scan or a cross-call snapshot. Zero returns an empty page without I/O. The client validates ordering, uniqueness, key shape, prefix and response bounds. It never substitutes the generic KV listing interface for a failed authoritative record check.
+
+The application supplies the EC or other domain-specific adapter. EdgeZero does not interpret consent, tombstones or identity records. No provider fallback or generic KV migration is implied by this API.
 
 ## Validation and local proofs
 
@@ -187,4 +203,14 @@ EDGEZERO_GENERATED_TEST_TARGET_DIR=/absolute/path/to/disposable-build-cache \
 node scripts/run_native_celld_integration.mjs
 ```
 
-Missing prerequisites fail the command. It uses disposable data and dummy credentials, checks private namespace isolation, and runs a generated native app against the embedded API with certificate verification. It does not access a real fleet or AWS account. The plan records executed results and remaining gates. Multi-node forwarding, reload, production storage/replication, upgrades and stress acceptance remain separate work.
+For the conditional-record client, start a disposable modified celld listener with a trusted-network `identity` alias and read/write/delete/list grants, then run:
+
+```sh
+CELLD_RECORDS_ENDPOINT=http://127.0.0.1:7780 \
+  cargo test -p edgezero-store-celld --features records \
+  --test records_interop -- --ignored --nocapture
+```
+
+Use the actual loopback port reported by the disposable listener. This explicit test rejects non-loopback/HTTPS endpoints, uses only fictional fixture rows and removes its `interop:` keys. It checks conditional contention, delete/recreate generation safety, expiry, listing and the full value/metadata envelope. It is separate from the authenticated TLS generated-consumer proof.
+
+Missing prerequisites fail the command. The generated-consumer proof uses disposable data and dummy credentials, checks private namespace isolation, and runs a generated native app against the embedded API with certificate verification. It does not access a real fleet or AWS account. The plan records executed results and remaining gates. Multi-node forwarding, reload, production storage/replication, upgrades and stress acceptance remain separate work.
