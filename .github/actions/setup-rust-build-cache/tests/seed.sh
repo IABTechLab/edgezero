@@ -148,6 +148,14 @@ for mode in hit partial; do
     grep -Fq 'expected error-free Rust compiler-cache reuse' "$WORK_DIR/log" || fail 'partial reuse failed for an unrelated reason'
   fi
 done
+# The workflow runs both probes by repository-relative path, then changes directory.
+for script in seed-compiler-cache.sh assert-compiler-reuse.sh; do
+  rm -rf -- "$CARGO_TARGET_DIR" "$PROBE_STATE"
+  mkdir -p "$CARGO_TARGET_DIR" "$PROBE_STATE"
+  (cd -- "$ACTION_DIR/../../.." &&
+    PROBE_MODE=hit bash ".github/actions/setup-rust-build-cache/tests/$script") >"$WORK_DIR/log" 2>&1 ||
+    fail "$script fails when invoked by its workflow-relative path"
+done
 # Cleanup must never follow restored symlinks outside the fixture root.
 for target in test-host wasm32-wasip1; do
   for component in namespace debug; do

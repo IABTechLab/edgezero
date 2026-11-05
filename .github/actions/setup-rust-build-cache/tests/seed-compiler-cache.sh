@@ -10,8 +10,9 @@ expected="$(realpath "${RUNNER_TEMP:?}")/edgezero-rust-cache/cache-restore-smoke
   printf '::error::compiler seed must use its confined fixture target directory\n' >&2
   exit 1
 }
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=compiler-stats.sh
-source "$(dirname -- "${BASH_SOURCE[0]}")/compiler-stats.sh"
+source "$script_dir/compiler-stats.sh"
 cd "$fixture"
 host=$(rustc -vV | sed -n 's/^host: //p')
 [[ "$host" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*$ ]] || {
