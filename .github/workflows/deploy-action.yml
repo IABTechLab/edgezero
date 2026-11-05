@@ -831,6 +831,37 @@ jobs:
           EDGEZERO__TEST__PUSHED_STORE: ${{ steps.production.outputs.store }}
         run: .github/actions/deploy-fastly/tests/assert-config-push.sh
 
+  json-deploy-smoke:
+    needs: fixture-release
+    runs-on: ubuntu-latest
+    env:
+      EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME: config-prod
+      EDGEZERO__STORES__KV__CACHE__NAME: cache-prod
+      EDGEZERO__STORES__SECRETS__CREDENTIALS__NAME: credentials-prod
+      FAKE_EXPECTED_PACKAGE_DIGEST: ${{ needs.fixture-release.outputs.package-digest }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: edgezero-fastly-release
+          path: fixture-release
+
+      - name: Install the stateful fake Fastly provider
+        run: .github/actions/deploy-fastly/tests/make-fake-fastly-env.sh
+      - name: A failure after the clone reports the draft
+        env:
+          FAKE_FAIL_AFTER_VERSION: "1"
+        run: .github/actions/deploy-fastly/tests/assert-json-deploy-version.sh draft
+
+      - name: Reset the fake Fastly provider
+        run: .github/actions/deploy-fastly/tests/make-fake-fastly-env.sh
+      - name: A failed activation response reports an unknown state
+        env:
+          FAKE_FAIL_AFTER_ACTIVATION: "1"
+        run: .github/actions/deploy-fastly/tests/assert-json-deploy-version.sh unknown
+
   recovery-smoke:
     needs: fixture-release
     runs-on: ubuntu-latest
