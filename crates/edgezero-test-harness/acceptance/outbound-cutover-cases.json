@@ -3100,7 +3100,7 @@
       "owner": "EdgeZero",
       "task": "D1b",
       "substep": "EZ-3-acceptance-04-unit-fastly",
-      "sentinel": "outbound::fastly_impl::tests::ez_3_acceptance_04_known_first_sdk_dispatch_preserves_completion_and_input_order",
+      "sentinel": "outbound::fastly_impl::tests::ez_3_acceptance_04_known_first_sdk_dispatch_preserves_input_identity",
       "command": "scripts/run_test_nonzero.sh --inventory unit/fastly cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib",
       "expected": "Given a batch ordered new, known, new, known, then both known-origin slots SHOULD be sent before the first registration, the run records the order, and collection restores input-index order. Unit, given slot 1 finishes before slot 0, `next` returns indices 1 then 0 while the collected vector remains indexed 0 then 1.\n\nViceroy 0.21.0:",
       "artifact_path": "outbound/redirect/fastly/runtime-unit-tests.log",
@@ -3108,6 +3108,7 @@
       "comparison": false,
       "additional_sentinels": [
         "outbound::fastly_impl::tests::ez_3_acceptance_04_warm_priority_uses_the_per_call_backend_anchor",
+        "outbound::progress::tests::readiness_preserves_original_slot_deadlines_and_completion_order",
         "outbound::fastly_impl::tests::request_plan_keeps_streamed_body_and_original_context_without_sdk_io",
         "outbound::fastly_impl::tests::request_plan_registration_lookup_rejects_every_identity_collision"
       ]

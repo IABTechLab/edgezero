@@ -75,6 +75,7 @@ impl Stream for Scheduled {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        pump(&this.driver, cx);
         let observation = {
             let mut driver = this.driver.borrow_mut();
             if let Some(event) = driver.ready.pop_front() {
@@ -297,12 +298,20 @@ where
     let polling = poll_fn(move |cx| {
         let next = pending.next();
         futures_util::pin_mut!(next);
-        driver
-            .with_current(|| captured.poll(&paired, entered, cx, next.as_mut()))
-            .map(|result| match result {
+        driver.with_current(|| {
+            let mut observed = captured.poll(&paired, entered, cx, next.as_mut());
+            if observed.is_pending() {
+                if let Err(error) = captured.with(|| driver.observe_ready()).and_then(identity) {
+                    return Poll::Ready(Some(OutboundBatchDriverEvent::Failed(error)));
+                }
+                // Record this turn before another slot's provider call can advance its clock.
+                observed = captured.poll(&paired, entered, cx, next.as_mut());
+            }
+            observed.map(|result| match result {
                 Ok(event) => event,
                 Err(error) => Some(OutboundBatchDriverEvent::Failed(error)),
             })
+        })
     });
     let mut receiver = bind_batch(scope, polling);
     let mut ready = Vec::new();
@@ -410,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_receiver_observation_never_polls_producer() {
+    fn scheduled_receiver_observation_services_the_producer_without_waiting() {
         let callback = OutboundScopeOwner::callback();
         let polls = Rc::new(Cell::new(0_usize));
         let counted = Rc::clone(&polls);
@@ -426,21 +435,11 @@ mod tests {
         });
         let mut receiver = callback.with(|| bind_batch(&callback.scope(), source));
         let mut context = Context::from_waker(Waker::noop());
-        assert!(receiver.as_mut().poll_next(&mut context).is_pending());
-        assert_eq!(
-            polls.get(),
-            0,
-            "receiver observation cannot poll the producer"
-        );
-        callback.with(|| super::poll_current(&mut context));
-        assert_eq!(polls.get(), 1);
         assert!(matches!(
             receiver.as_mut().poll_next(&mut context),
             Poll::Ready(Some(OutboundBatchDriverEvent::Item { index: 0, .. }))
         ));
-        assert!(receiver.as_mut().poll_next(&mut context).is_pending());
-        assert_eq!(polls.get(), 1, "empty receiver cannot resume the producer");
-        callback.with(|| super::poll_current(&mut context));
+        assert_eq!(polls.get(), 1);
         assert!(matches!(
             receiver.as_mut().poll_next(&mut context),
             Poll::Ready(None)

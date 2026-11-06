@@ -87,6 +87,7 @@ pub(super) trait Transport {
     #[cfg(feature = "test-utils")]
     fn body_recorder(body: &Self::Body) -> Option<NativeBodyRecorder>;
     fn head_handle(pending: &Self::Pending) -> Option<u32>;
+    fn is_ready(&mut self, handle: u32) -> Result<bool, EdgeError>;
     fn poll_head(
         &mut self,
         pending: Self::Pending,
@@ -312,6 +313,18 @@ impl<T: Transport + 'static> Progress<T> {
         }
     }
 
+    pub(super) fn observe_ready(&self) -> Result<(), EdgeError> {
+        let (result, wakes) = {
+            let mut state = self.state.borrow_mut();
+            let observed = state.observe_ready();
+            (observed, take(&mut state.wakes))
+        };
+        for waiting in wakes {
+            waiting.wake();
+        }
+        result
+    }
+
     pub(super) fn poll_once<Output>(
         &self,
         cx: &mut Context<'_>,
@@ -533,6 +546,49 @@ impl<T: Transport> Drop for Lease<T> {
 }
 
 impl<T: Transport> State<T> {
+    fn observe_ready(&mut self) -> Result<(), EdgeError> {
+        let (_expired, _remaining) = self.timers();
+        let count = self.slots.len();
+        let first = self.cursor.min(count);
+        for index in (first..count).chain(0..first) {
+            let Some(slot) = self.slots.get_mut(index).and_then(Option::as_mut) else {
+                continue;
+            };
+            let observed_at = slot.sample()?;
+            if slot.budget.deadline.is_expired_at(observed_at) && expire(slot, &mut self.wakes) {
+                self.cursor = index.saturating_add(1);
+                return Ok(());
+            }
+        }
+        for index in (first..count).chain(0..first) {
+            let Some(slot) = self.slots.get(index).and_then(Option::as_ref) else {
+                continue;
+            };
+            let ready = match &slot.phase {
+                Phase::Head(_) => true,
+                Phase::Body {
+                    handle: Some(body),
+                    next: None,
+                    requested: true,
+                } => self.transport.is_ready(T::body_handle(body))?,
+                Phase::Body { .. } | Phase::HeadReady(_) => false,
+            };
+            if ready {
+                self.cursor = index.saturating_add(1);
+                self.service(index)?;
+                if self
+                    .slots
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|serviced| !matches!(serviced.phase, Phase::Head(_)))
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn opaque_head(&self) -> Option<usize> {
         self.slots
             .iter()
@@ -989,6 +1045,7 @@ pub(super) fn wait_current(deadline: Deadline, clock: MonotonicClock) -> Outboun
 )]
 mod tests {
     use std::io::ErrorKind;
+    use std::iter::repeat_with;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -1019,6 +1076,7 @@ mod tests {
 
     #[derive(Default)]
     struct Observations {
+        advance_on_head: Option<(u32, MonotonicInstant)>,
         clock_samples: Vec<MonotonicInstant>,
         complete_at: Option<MonotonicInstant>,
         domains: Vec<Vec<u32>>,
@@ -1077,6 +1135,13 @@ mod tests {
         fn head_handle(pending: &Handle) -> Option<u32> {
             (!pending.opaque).then_some(pending.id)
         }
+        fn is_ready(&mut self, handle: u32) -> Result<bool, EdgeError> {
+            let ready = handle != 0;
+            if ready {
+                self.observations.borrow_mut().permission = Some(handle);
+            }
+            Ok(ready)
+        }
         fn poll_head(
             &mut self,
             pending: Handle,
@@ -1090,6 +1155,11 @@ mod tests {
                 observed.spurious_heads = observed.spurious_heads.saturating_sub(1);
                 HeadPoll::Pending(pending)
             } else {
+                if let Some((id, at)) = observed.advance_on_head
+                    && id == pending.id
+                {
+                    *self.now.lock().expect("clock") = at;
+                }
                 if let Some(at) = observed.complete_at {
                     *self.now.lock().expect("clock") = at;
                 }
@@ -1457,14 +1527,14 @@ mod tests {
         let started = *now.lock().unwrap();
         let released = Rc::new(Cell::new(0));
         let body = progress.body(
-            handle(3, 32_768, false, &released),
+            handle(3, READ_BYTES * 8, false, &released),
             budget(&now, 100, BudgetSource::PerCallTimeout),
         );
         let finished = Rc::new(Cell::new(false));
         let terminal = Rc::clone(&finished);
         let clock = progress.clock();
         let source = stream! {
-            assert_eq!(collect(body).await.unwrap(), 32_768);
+            assert_eq!(collect(body).await.unwrap(), READ_BYTES * 8);
             terminal.set(true);
             yield OutboundBatchDriverEvent::Item { index: 4, completed_at: clock.now(), outcome: Err(EdgeError::bad_gateway("terminal fixture")) };
         };
@@ -1516,6 +1586,255 @@ mod tests {
     }
 
     #[test]
+    fn begun_readiness_records_ready_heads_without_a_host_wait() {
+        use super::super::scope::begin;
+        use edgezero_core::{OutboundScopeOwner, OutboundTime};
+
+        let callback = OutboundScopeOwner::callback();
+        let (progress, observed, now) = fixture();
+        observed.borrow_mut().spurious_heads = usize::MAX;
+        let released = Rc::new(Cell::new(0));
+        let head = progress.head(
+            handle(1, 0, false, &released),
+            budget(&now, 100, BudgetSource::PerCallTimeout),
+        );
+        let entered = *now.lock().unwrap();
+        let mut pending = begin(
+            &callback.scope(),
+            Box::pin(async move {
+                assert_eq!(head.receive().await?, 1);
+                Err(EdgeError::bad_gateway("observed ready head"))
+            }),
+            &progress,
+            &OutboundTime::new(progress.clock(), super::wait_current),
+            entered,
+        )
+        .unwrap();
+        observed.borrow_mut().spurious_heads = 0;
+        observed.borrow_mut().polls.clear();
+        assert!(
+            pending.is_ready(),
+            "a check must service an already-ready head"
+        );
+        assert!(pending.is_ready(), "the original outcome remains cached");
+        assert_eq!(observed.borrow().polls, [1]);
+        assert!(observed.borrow().waits.is_empty());
+        assert_eq!(released.get(), 1);
+        assert_eq!(
+            block_on(pending.collect()).unwrap_err().message(),
+            "observed ready head"
+        );
+    }
+
+    #[test]
+    fn batch_readiness_records_arrival_before_later_collection() {
+        use super::super::scope::schedule_batch;
+        use edgezero_core::{OutboundBatchDriverEvent, OutboundScopeOwner, OutboundTime};
+
+        let callback = OutboundScopeOwner::callback();
+        let (progress, observed, now) = fixture();
+        observed.borrow_mut().spurious_heads = usize::MAX;
+        let released = Rc::new(Cell::new(0));
+        let head = progress.head(
+            handle(1, 0, false, &released),
+            budget(&now, 100, BudgetSource::PerCallTimeout),
+        );
+        let entered = *now.lock().unwrap();
+        let clock = progress.clock();
+        let source = stream! {
+            assert_eq!(head.receive().await.unwrap(), 1);
+            yield OutboundBatchDriverEvent::Item {
+                index: 0,
+                completed_at: clock.now(),
+                outcome: Err(EdgeError::bad_gateway("observed ready head")),
+            };
+        };
+        let mut receiver = callback.with(|| {
+            schedule_batch(
+                &callback.scope(),
+                source,
+                &progress,
+                &OutboundTime::new(progress.clock(), super::wait_current),
+                entered,
+            )
+        });
+        observed.borrow_mut().spurious_heads = 0;
+        *now.lock().unwrap() = entered + Duration::from_millis(7);
+        let event = receiver
+            .as_mut()
+            .poll_next(&mut Context::from_waker(Waker::noop()));
+        let Poll::Ready(Some(OutboundBatchDriverEvent::Item { completed_at, .. })) = event else {
+            panic!("a nonblocking observation must service the ready outcome");
+        };
+        *now.lock().unwrap() = entered + Duration::from_millis(50);
+        assert_eq!(completed_at, entered + Duration::from_millis(7));
+        assert!(observed.borrow().waits.is_empty());
+        assert_eq!(released.get(), 1);
+    }
+
+    #[test]
+    fn readiness_records_an_error_before_a_sibling_advances_the_clock() {
+        use super::super::{scope::schedule_batch, testing};
+        use edgezero_core::{
+            OutboundBatch, OutboundBatchCheck, OutboundBatchDriverEvent, OutboundRequest,
+            OutboundScopeOwner, OutboundTime,
+        };
+        use futures_util::stream::FuturesUnordered;
+        let callback = OutboundScopeOwner::callback();
+        let (progress, observed, now) = fixture();
+        let entered = *now.lock().unwrap();
+        let released = Rc::new(Cell::new(0));
+        observed.borrow_mut().spurious_heads = usize::MAX;
+        observed.borrow_mut().source_error = true;
+        let mut pipelines = FuturesUnordered::new();
+        for index in 0_usize..2 {
+            let head = progress.head(
+                handle(u32::try_from(index + 1).unwrap(), 0, false, &released),
+                budget(&now, 100, BudgetSource::PerCallTimeout),
+            );
+            let clock = progress.clock();
+            pipelines.push(async move {
+                let outcome = head.receive().await.and_then(|_| {
+                    Err(EdgeError::internal(anyhow::anyhow!(
+                        "error fixture cannot succeed"
+                    )))
+                });
+                OutboundBatchDriverEvent::Item {
+                    index,
+                    completed_at: clock.now(),
+                    outcome,
+                }
+            });
+        }
+        let source = stream! { while let Some(item) = pipelines.next().await { yield item; } };
+        let time = OutboundTime::new(progress.clock(), super::wait_current);
+        let context = testing::batch_context_for_requests(
+            repeat_with(|| {
+                OutboundRequest::get("https://fixture.invalid/")
+                    .unwrap()
+                    .timeout(Duration::from_millis(100))
+            })
+            .take(2)
+            .collect(),
+            time.clone(),
+            Deadline::at_instant(entered + Duration::from_secs(1)),
+        );
+        let scheduled =
+            callback.with(|| schedule_batch(&callback.scope(), source, &progress, &time, entered));
+        let mut batch = OutboundBatch::from_driver(context, scheduled, testing::owner());
+        observed.borrow_mut().spurious_heads = 0;
+        observed.borrow_mut().advance_on_head = Some((2, entered + Duration::from_millis(150)));
+        *now.lock().unwrap() = entered + Duration::from_millis(5);
+        let OutboundBatchCheck::Item(item) = batch.check().unwrap() else {
+            panic!("first terminal error must be recorded");
+        };
+        assert_eq!(item.index(), 0);
+        assert_eq!(item.result().elapsed, Duration::from_millis(5));
+        assert!(matches!(
+            item.result().outcome,
+            Err(EdgeError::BadGateway { .. })
+        ));
+        assert!(observed.borrow().waits.is_empty());
+        drop(batch);
+        assert_eq!(released.get(), 2);
+    }
+
+    #[test]
+    fn readiness_preserves_original_slot_deadlines_and_completion_order() {
+        use super::super::{scope::schedule_batch, testing};
+        use edgezero_core::{
+            OutboundBatch, OutboundBatchCheck, OutboundBatchDriverEvent, OutboundBatchTermination,
+            OutboundCollectedSlot, OutboundRequest, OutboundScopeOwner, OutboundTime,
+        };
+        use futures_util::stream::FuturesUnordered;
+
+        let callback = OutboundScopeOwner::callback();
+        let (progress, observed, now) = fixture();
+        let entered = *now.lock().unwrap();
+        let durations = [120_u64, 110, 140, 130].map(Duration::from_millis);
+        let released = Rc::new(Cell::new(0));
+        let mut pipelines = FuturesUnordered::new();
+        for (index, duration) in durations.into_iter().enumerate() {
+            let head = progress.head(
+                handle(0, 0, false, &released),
+                budget(
+                    &now,
+                    u64::try_from(duration.as_millis()).unwrap(),
+                    BudgetSource::PerCallTimeout,
+                ),
+            );
+            let clock = progress.clock();
+            pipelines.push(async move {
+                let outcome = head.receive().await.and_then(|_| {
+                    Err(EdgeError::internal(anyhow::anyhow!(
+                        "pending fixture head cannot succeed"
+                    )))
+                });
+                OutboundBatchDriverEvent::Item {
+                    index,
+                    completed_at: clock.now(),
+                    outcome,
+                }
+            });
+        }
+        let source = stream! {
+            while let Some(item) = pipelines.next().await { yield item; }
+        };
+        let time = OutboundTime::new(progress.clock(), super::wait_current);
+        let context = testing::batch_context_for_requests(
+            durations
+                .into_iter()
+                .map(|duration| {
+                    OutboundRequest::get("https://fixture.invalid/")
+                        .unwrap()
+                        .timeout(duration)
+                })
+                .collect(),
+            time.clone(),
+            Deadline::at_instant(entered + Duration::from_secs(1)),
+        );
+        let scheduled =
+            callback.with(|| schedule_batch(&callback.scope(), source, &progress, &time, entered));
+        let mut batch = OutboundBatch::from_driver(context, scheduled, testing::owner());
+        for index in [1, 0] {
+            *now.lock().unwrap() = entered + durations[index];
+            let OutboundBatchCheck::Item(item) = batch.check().unwrap() else {
+                panic!("expired slot must be observable without a wait");
+            };
+            assert_eq!(item.index(), index);
+            assert_eq!(item.result().elapsed, durations[index]);
+            assert!(matches!(
+                item.result().outcome,
+                Err(EdgeError::GatewayTimeout {
+                    cause: BudgetSource::PerCallTimeout,
+                    ..
+                })
+            ));
+        }
+        *now.lock().unwrap() = entered + Duration::from_millis(150);
+        let result = block_on(batch.collect()).unwrap();
+        assert_eq!(result.termination(), OutboundBatchTermination::Completed);
+        for slot in &result.slots()[..2] {
+            assert!(matches!(slot, OutboundCollectedSlot::AlreadyDelivered));
+        }
+        for index in [2, 3] {
+            let OutboundCollectedSlot::Resolved(slot) = &result.slots()[index] else {
+                panic!("expected positional timeout result");
+            };
+            assert_eq!(slot.elapsed, durations[index]);
+            assert!(matches!(
+                slot.outcome,
+                Err(EdgeError::GatewayTimeout {
+                    cause: BudgetSource::PerCallTimeout,
+                    ..
+                })
+            ));
+        }
+        assert_eq!(released.get(), durations.len());
+        assert!(observed.borrow().waits.is_empty());
+    }
+
+    #[test]
     fn begin_runs_without_collection_and_readiness_never_waits() {
         use super::super::scope::begin;
         use edgezero_core::{OutboundScopeOwner, OutboundTime};
@@ -1523,18 +1842,19 @@ mod tests {
         let (progress, observed, now) = fixture();
         let released = Rc::new(Cell::new(0));
         let body = progress.body(
-            handle(7, 16_385, false, &released),
+            handle(7, READ_BYTES * 8 + 1, false, &released),
             budget(&now, 100, BudgetSource::PerCallTimeout),
         );
+        let entered = *now.lock().unwrap();
         let mut pending = begin(
             &callback.scope(),
             Box::pin(async move {
-                assert_eq!(collect(body).await?, 16_385);
+                assert_eq!(collect(body).await?, READ_BYTES * 8 + 1);
                 Err(EdgeError::bad_gateway("complete pipeline failure"))
             }),
             &progress,
             &OutboundTime::new(progress.clock(), super::wait_current),
-            *now.lock().unwrap(),
+            entered,
         )
         .unwrap();
         assert!(!pending.is_ready());

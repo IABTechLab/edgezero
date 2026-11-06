@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Let Fastly nonblocking readiness observations service ready heads and demanded body reads
+  through the existing scheduler, without entering a native wait. Record original arrivals,
+  preserve cached outcomes and paired deadlines, and retain the 16 KiB raw-read bound.
 - Dispatch every live Fastly batch slot before setup returns, even when an earlier slot
   completes synchronously. Buffer immediate outcomes through the existing scheduler without
   waiting for provider readiness; retain indices, deadlines and undrained-prefix cleanup.

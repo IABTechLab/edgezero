@@ -159,6 +159,14 @@ pub(crate) fn batch_context_using(
     })
     .take(slot_count)
     .collect();
+    batch_context_for_requests(requests, time, observation_cutoff)
+}
+
+pub(super) fn batch_context_for_requests(
+    requests: Vec<OutboundRequest>,
+    time: OutboundTime,
+    observation_cutoff: Deadline,
+) -> OutboundBatchContext {
     drop(
         HttpClient::with_client(Capture::new(time, true))
             .start_batch_until(requests, observation_cutoff),
