@@ -217,9 +217,9 @@ deliberately authorize or re-sign a replacement request; EdgeZero does not strip
 second time afterward. Ordinary request validation and normalization still apply. EdgeZero does
 not add `Referer` or `Origin`.
 
-The prepared request retains every unchanged option: timeout, deadline, cache policy and tags,
+The prepared request retains every unchanged option: timeout, deadline, cache policy,
 upload/response/header/decoder/chunk limits, response decoding, proxy marker, Image Optimizer,
-TLS verification, connect timeout and stream idle policy. Use `take_prepared_request()` to modify
+and connect timeout. Use `take_prepared_request()` to modify
 it, then return `Follow(request)`. A fresh request is a complete replacement with its own defaults;
 caps and options are not implicitly copied into it. Subsequent automatic preparation inherits
 the effective preceding request's options, not the initial defaults.
