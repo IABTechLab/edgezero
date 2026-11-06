@@ -180,3 +180,6 @@ jobs:
 
       - name: Run Prettier (check)
         run: npm run format
+
+      - name: Build docs
+        run: npm run build
