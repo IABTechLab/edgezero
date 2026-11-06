@@ -40,6 +40,9 @@ scripts/                      # Build/deploy/test helper scripts
 # Full workspace test (primary CI command)
 cargo test --workspace --all-targets
 
+# Core doctests (not included by --all-targets)
+cargo test -p edgezero-core --doc
+
 # Test a specific crate
 cargo test -p edgezero-core
 cargo test -p edgezero-adapter-fastly
@@ -186,8 +189,9 @@ Every PR must pass:
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 3. `cargo test --workspace --all-targets`
-4. `cargo check --workspace --all-targets --features "fastly cloudflare spin"`
-5. `cargo check -p edgezero-adapter-spin --target wasm32-wasip2 --features spin`
+4. `cargo test -p edgezero-core --doc`
+5. `cargo check --workspace --all-targets --features "fastly cloudflare spin"`
+6. `cargo check -p edgezero-adapter-spin --target wasm32-wasip2 --features spin`
 
 Docs CI additionally runs ESLint + Prettier on the `docs/` directory.
 
@@ -283,7 +287,7 @@ Custom commands live in `.claude/commands/`:
 
 | Command           | Purpose                                            |
 | ----------------- | -------------------------------------------------- |
-| `/check-ci`       | Run all 4 CI gate checks locally                   |
+| `/check-ci`       | Run all 6 CI gate checks locally                   |
 | `/test-all`       | Run full workspace test suite                      |
 | `/test-crate`     | Run tests for a specific crate                     |
 | `/review-changes` | Staff-engineer-level review of uncommitted changes |

@@ -480,13 +480,14 @@ fn custom_stream_checks(
         large,
         json!({"variant":variant,"repetition":repetition,"assertion":"large_progressive_stream"}),
     ))?;
+    *backend.release.0.lock().unwrap() = false;
     let failure_token = crate::token();
     let failure = net::request(
         port,
         "/stream-error",
         &failure_token,
         Some(&backend.url(&format!("/abort?token={failure_token}"))),
-        None,
+        Some(&backend.release),
     );
     let failure = match failure {
         Ok(reply) => {
