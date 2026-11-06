@@ -66,13 +66,14 @@ pub(super) fn schedule_batch(
                     let outcome = future.await;
                     (index, budget, clock.now(), outcome)
                 }
+                .boxed_local()
             })
             .collect::<FuturesUnordered<_>>();
         let mut timer = time.wait_until(cutoff);
         let mut timer_done = false;
         let mut late = false;
-        loop {
-            let observation = poll_fn(|cx| {
+        let terminal = poll_fn(|cx| {
+            loop {
                 if !timer_done && let Poll::Ready(result) = timer.as_mut().poll(cx) {
                     timer_done = true;
                     if let Err(error) = result {
@@ -80,39 +81,53 @@ pub(super) fn schedule_batch(
                     }
                 }
                 let expired = cutoff.is_expired_at(time.clock().now());
+                let mut publish =
+                    |(index, budget, completed_at, outcome): (usize, DispatchBudget, _, _)| {
+                        let own_timeout = budget.own_deadline_expired_before(cutoff, completed_at);
+                        late |= cutoff.is_expired_at(completed_at) && !own_timeout;
+                        sender
+                            .unbounded_send(OutboundBatchDriverEvent::Item {
+                                index,
+                                completed_at,
+                                outcome,
+                            })
+                            .is_ok()
+                    };
+                if expired {
+                    // A timer need not notify before cutoff. Poll each absolute guard once,
+                    // then retire this collection without polling completed children again.
+                    let mut unresolved = false;
+                    for pipeline in &mut exchanges {
+                        match pipeline.as_mut().poll(cx) {
+                            Poll::Ready(item) => {
+                                if !publish(item) {
+                                    return Poll::Ready(Ok(false));
+                                }
+                            }
+                            Poll::Pending => unresolved = true,
+                        }
+                    }
+                    return Poll::Ready(Ok(unresolved || late));
+                }
                 match exchanges.poll_next_unpin(cx) {
-                    Poll::Ready(item) => Poll::Ready(Ok(item)),
-                    Poll::Pending if expired => Poll::Ready(Ok(None)),
-                    Poll::Pending => Poll::Pending,
-                }
-            })
-            .await;
-            match observation {
-                Err(error) => {
-                    drop(sender.unbounded_send(OutboundBatchDriverEvent::Failed(error)));
-                    return;
-                }
-                Ok(Some((index, budget, completed_at, outcome))) => {
-                    let own_timeout = budget.own_deadline_expired_before(cutoff, completed_at);
-                    late |= cutoff.is_expired_at(completed_at) && !own_timeout;
-                    if sender
-                        .unbounded_send(OutboundBatchDriverEvent::Item {
-                            index,
-                            completed_at,
-                            outcome,
-                        })
-                        .is_err()
-                    {
-                        return;
+                    Poll::Ready(Some(item)) => {
+                        if !publish(item) {
+                            return Poll::Ready(Ok(false));
+                        }
                     }
-                }
-                Ok(None) => {
-                    if late || !exchanges.is_empty() {
-                        drop(sender.unbounded_send(OutboundBatchDriverEvent::Cutoff));
-                    }
-                    return;
+                    Poll::Ready(None) => return Poll::Ready(Ok(late)),
+                    Poll::Pending if cutoff.is_expired_at(time.clock().now()) => {}
+                    Poll::Pending => return Poll::Pending,
                 }
             }
+        })
+        .await;
+        drop(timer);
+        drop(exchanges);
+        match terminal {
+            Err(error) => drop(sender.unbounded_send(OutboundBatchDriverEvent::Failed(error))),
+            Ok(true) => drop(sender.unbounded_send(OutboundBatchDriverEvent::Cutoff)),
+            Ok(false) => {}
         }
     }
     .boxed_local();
@@ -162,6 +177,7 @@ mod tests {
         OutboundPreparedBatch, OutboundRequest, OutboundResponse, OutboundScopeOwner,
         OutboundSendMode, OutboundTime,
     };
+    use futures::channel::oneshot;
     use futures::executor::{LocalPool, block_on};
     use futures::task::LocalSpawnExt as _;
     use futures_util::future::{LocalBoxFuture, pending, poll_fn};
@@ -670,6 +686,102 @@ mod tests {
     }
 
     #[test]
+    fn cutoff_observes_an_expired_slot_without_its_timer_notification() {
+        let mut executor = LocalPool::new();
+        let spawner = executor.spawner();
+        let start = MonotonicInstant::now();
+        let now = Arc::new(Mutex::new(start));
+        let observed = Arc::clone(&now);
+        let clock = MonotonicClock::new(move || *observed.lock().expect("clock"));
+        let time = OutboundTime::new(clock.clone(), |_, _| Box::pin(pending()));
+        let cutoff = Deadline::at_instant(start + Duration::from_millis(10));
+        let own = DispatchBudget {
+            cause: BudgetSource::PerCallTimeout,
+            deadline: Deadline::at_instant(start + Duration::from_millis(5)),
+            duration: Duration::from_millis(5),
+        };
+        let later = DispatchBudget {
+            deadline: cutoff,
+            duration: Duration::from_millis(10),
+            ..own
+        };
+        let releases = Rc::new(Cell::new(0_usize));
+        let first_owner = Release(Rc::clone(&releases));
+        let second_owner = Release(Rc::clone(&releases));
+        let polls = Rc::new(Cell::new(0_usize));
+        let first_polls = Rc::clone(&polls);
+        let (wake, notification) = oneshot::channel::<()>();
+        let slots = vec![
+            (
+                0,
+                own,
+                async move {
+                    let _owner = first_owner;
+                    poll_fn(move |_| {
+                        first_polls.set(first_polls.get() + 1);
+                        if own.deadline.is_expired_at(clock.now()) {
+                            Poll::Ready(Err(EdgeError::gateway_timeout_caused(
+                                "own timeout",
+                                own.cause,
+                            )))
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await
+                }
+                .boxed_local(),
+            ),
+            (
+                1,
+                later,
+                async move {
+                    let _owner = second_owner;
+                    notification.await.expect("sibling notification");
+                    pending().await
+                }
+                .boxed_local(),
+            ),
+        ];
+        let (mut events, owner) = schedule_batch(slots, time, cutoff, move |task| {
+            spawner.spawn_local(task).expect("schedule batch");
+        })
+        .expect("schedule batch");
+        executor.run_until_stalled();
+        assert_eq!(polls.get(), 1);
+        *now.lock().expect("clock") = start + Duration::from_millis(11);
+        wake.send(()).expect("notify only sibling");
+        executor.run_until_stalled();
+        assert!(
+            matches!(
+                executor.run_until(events.next()),
+                Some(OutboundBatchDriverEvent::Item {
+                    index: 0,
+                    outcome: Err(EdgeError::GatewayTimeout {
+                        cause: BudgetSource::PerCallTimeout,
+                        ..
+                    }),
+                    ..
+                })
+            ),
+            "an unnotified earlier deadline must resolve before cutoff"
+        );
+        assert_eq!(polls.get(), 2, "cutoff polls each parked pipeline once");
+        assert_eq!(
+            releases.get(),
+            2,
+            "retire SDK work before terminal notification"
+        );
+        assert!(matches!(
+            executor.run_until(events.next()),
+            Some(OutboundBatchDriverEvent::Cutoff)
+        ));
+        assert!(executor.run_until(events.next()).is_none());
+        drop(owner);
+        assert_eq!(releases.get(), 2);
+    }
+
+    #[test]
     fn cutoff_retains_prior_own_timeout_but_not_equal_deadline() {
         let mut executor = LocalPool::new();
         let spawner = executor.spawner();
@@ -739,70 +851,57 @@ mod tests {
         drop(owner);
     }
 
+    struct BatchClient {
+        time: OutboundTime,
+        dispatch:
+            Box<dyn Fn(OutboundDispatchRequest) -> OutboundFuture<OutboundHead> + Send + Sync>,
+    }
+
+    impl OutboundHttpClient for BatchClient {
+        fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
+            Rc::new(IndependentOutboundProgress)
+        }
+
+        fn time(&self) -> OutboundTime {
+            self.time.clone()
+        }
+
+        fn validate_supported_options(
+            &self,
+            request: &OutboundRequest,
+            mode: OutboundSendMode,
+        ) -> Result<(), EdgeError> {
+            validate_for_dispatch(request, mode)
+        }
+
+        fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
+            (self.dispatch)(request)
+        }
+
+        fn begin(&self, _request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+            Err(EdgeError::internal(anyhow::anyhow!("batch-only fixture")))
+        }
+
+        fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
+            let (context, requests) = batch.into_slots();
+            let slots = requests
+                .into_iter()
+                .map(|(index, request)| {
+                    let budget = request.budget();
+                    let head = self.dispatch_head(request);
+                    (
+                        index,
+                        budget,
+                        async move { head.await?.finish().await }.boxed_local(),
+                    )
+                })
+                .collect();
+            schedule_prepared_batch(context, slots, block_on)
+        }
+    }
+
     #[test]
     fn late_operational_timer_error_completes_at_the_retained_own_deadline() {
-        struct Client {
-            time: OutboundTime,
-            observed: Arc<Mutex<MonotonicInstant>>,
-            completed_at: MonotonicInstant,
-        }
-
-        impl OutboundHttpClient for Client {
-            fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
-                Rc::new(IndependentOutboundProgress)
-            }
-
-            fn time(&self) -> OutboundTime {
-                self.time.clone()
-            }
-
-            fn validate_supported_options(
-                &self,
-                request: &OutboundRequest,
-                mode: OutboundSendMode,
-            ) -> Result<(), EdgeError> {
-                validate_for_dispatch(request, mode)
-            }
-
-            fn dispatch_head(
-                &self,
-                _request: OutboundDispatchRequest,
-            ) -> OutboundFuture<OutboundHead> {
-                let observed = Arc::clone(&self.observed);
-                let completed_at = self.completed_at;
-                Box::pin(async move {
-                    *observed.lock().expect("clock") = completed_at;
-                    Err(EdgeError::internal(anyhow::anyhow!(
-                        "operational timer failure"
-                    )))
-                })
-            }
-
-            fn begin(
-                &self,
-                _request: OutboundDispatchRequest,
-            ) -> Result<OutboundPending, EdgeError> {
-                Err(EdgeError::internal(anyhow::anyhow!("batch-only fixture")))
-            }
-
-            fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
-                let (context, requests) = batch.into_slots();
-                let slots = requests
-                    .into_iter()
-                    .map(|(index, request)| {
-                        let budget = request.budget();
-                        let head = self.dispatch_head(request);
-                        (
-                            index,
-                            budget,
-                            async move { head.await?.finish().await }.boxed_local(),
-                        )
-                    })
-                    .collect();
-                schedule_prepared_batch(context, slots, block_on)
-            }
-        }
-
         let start = MonotonicInstant::now();
         let end = start
             .checked_add(Duration::from_millis(10))
@@ -813,10 +912,17 @@ mod tests {
             MonotonicClock::new(move || *clock_now.lock().expect("clock")),
             |_, _| Box::pin(pending()),
         );
-        let client = HttpClient::with_client(Client {
+        let client = HttpClient::with_client(BatchClient {
             time,
-            observed,
-            completed_at: end,
+            dispatch: Box::new(move |_request| {
+                let sampled = Arc::clone(&observed);
+                Box::pin(async move {
+                    *sampled.lock().expect("clock") = end;
+                    Err(EdgeError::internal(anyhow::anyhow!(
+                        "operational timer failure"
+                    )))
+                })
+            }),
         });
         let request = OutboundRequest::get("https://example.com/")
             .expect("request")
@@ -834,6 +940,73 @@ mod tests {
         assert_eq!(slot.elapsed, Duration::from_millis(5));
         assert!(matches!(
             &slot.outcome,
+            Err(EdgeError::GatewayTimeout {
+                cause: BudgetSource::PerCallTimeout,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn collect_keeps_unnotified_own_timeout_and_unresolved_cutoff_sibling() {
+        let start = MonotonicInstant::now();
+        let end = start
+            .checked_add(Duration::from_millis(10))
+            .expect("cutoff");
+        let observed = Arc::new(Mutex::new(start));
+        let sampled = Arc::clone(&observed);
+        let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
+        let time = OutboundTime::new(clock.clone(), |_, _| Box::pin(pending()));
+        let late = end
+            .checked_add(Duration::from_millis(1))
+            .expect("late notification");
+        let client = HttpClient::with_client(BatchClient {
+            time,
+            dispatch: Box::new(move |request| {
+                let budget = request.budget();
+                let paired_clock = clock.clone();
+                let sampled_clock = Arc::clone(&observed);
+                Box::pin(poll_fn(move |cx| {
+                    if budget.cause == BudgetSource::BatchCutoff {
+                        *sampled_clock.lock().expect("clock") = late;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    } else if budget.deadline.is_expired_at(paired_clock.now()) {
+                        Poll::Ready(Err(EdgeError::gateway_timeout_caused(
+                            "own timeout",
+                            budget.cause,
+                        )))
+                    } else {
+                        Poll::Pending
+                    }
+                }))
+            }),
+        });
+        let requests = [5_u64, 50]
+            .into_iter()
+            .map(|millis| {
+                OutboundRequest::get("https://fixture.invalid/")
+                    .expect("request")
+                    .timeout(Duration::from_millis(millis))
+            })
+            .collect();
+        let result = block_on(
+            client
+                .start_batch_until(requests, Deadline::at_instant(end))
+                .collect(),
+        )
+        .expect("retain earlier own timeout before cutoff");
+        assert_eq!(result.termination(), OutboundBatchTermination::Cutoff);
+        let [
+            OutboundCollectedSlot::Resolved(slot),
+            OutboundCollectedSlot::Unresolved,
+        ] = result.slots()
+        else {
+            panic!("expected own timeout and unresolved sibling");
+        };
+        assert_eq!(slot.elapsed, Duration::from_millis(5));
+        assert!(matches!(
+            slot.outcome,
             Err(EdgeError::GatewayTimeout {
                 cause: BudgetSource::PerCallTimeout,
                 ..
