@@ -91,6 +91,7 @@ impl SecretField {
 /// be a scalar secret-reference leaf. Applications own activation and descriptor
 /// coverage and must return all active requests together.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct ImplicitSecretLookup {
     /// Fixed application-owned purpose identifier.
     pub descriptor_id: String,
@@ -102,6 +103,31 @@ pub struct ImplicitSecretLookup {
     pub store_id: String,
 }
 
+impl ImplicitSecretLookup {
+    /// Construct public lookup metadata, never a resolved credential.
+    #[must_use]
+    #[inline]
+    pub fn new<Descriptor, FieldPath, Store, Key>(
+        descriptor_id: Descriptor,
+        field_path: FieldPath,
+        store_id: Store,
+        key: Key,
+    ) -> Self
+    where
+        Descriptor: Into<String>,
+        FieldPath: Into<String>,
+        Store: Into<String>,
+        Key: Into<String>,
+    {
+        Self {
+            descriptor_id: descriptor_id.into(),
+            field_path: field_path.into(),
+            key: key.into(),
+            store_id: store_id.into(),
+        }
+    }
+}
+
 /// Per-field metadata emitted by `#[derive(AppConfig)]`. `config validate`
 /// / `config push` and the runtime secret walk reflect over this to gate
 /// secret-aware behaviour.
@@ -109,7 +135,10 @@ pub trait AppConfigMeta {
     /// Opt into compiled, active credential requests instead of raw secret leaves.
     /// `None` preserves the existing annotation walk; `Some(vec![])` means no
     /// credentials are active. Compile from effective defaults and reject invalid
-    /// or incomplete application metadata before returning a plan.
+    /// or incomplete application metadata before returning a plan. `Some` replaces
+    /// all CLI annotation-leaf checks, including non-empty values, store declarations
+    /// and store references, even when `secret_fields()` is non-empty. The compiler
+    /// must cover every active credential; this does not change runtime leaf resolution.
     ///
     /// # Errors
     /// Returns a credential-free application compilation diagnostic.
@@ -138,7 +167,7 @@ pub trait AppConfigMeta {
 
     /// Every `#[secret]` / `#[secret(store_ref)]` leaf on the struct,
     /// including those reached through `#[app_config(nested)]` children,
-    /// each carrying its full path from this struct\'s root.
+    /// each carrying its full path from this struct's root.
     fn secret_fields() -> Vec<SecretField>;
 }
 
@@ -832,6 +861,15 @@ mod tests {
         fn secret_fields() -> Vec<SecretField> {
             vec![]
         }
+    }
+
+    #[test]
+    fn implicit_lookup_constructor_preserves_public_metadata() {
+        let lookup = ImplicitSecretLookup::new("purpose", "owners[0]", "vault", "derived_key");
+        assert_eq!(lookup.descriptor_id, "purpose");
+        assert_eq!(lookup.field_path, "owners[0]");
+        assert_eq!(lookup.store_id, "vault");
+        assert_eq!(lookup.key, "derived_key");
     }
 
     fn write_fixture(contents: &str) -> NamedTempFile {

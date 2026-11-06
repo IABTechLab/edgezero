@@ -2,7 +2,8 @@
 //! stores or links, or imply that retained runtime state has refreshed.
 
 use super::{
-    ResourceKind, collect_paginated_store_inventory, curl_config_capture, curl_quote,
+    ResourceInventories, ResourceKind, RuntimeStoreIds, StoreInventory,
+    collect_paginated_store_inventory, curl_config_capture, curl_quote, desired_resource_links,
     effective_deploy_environment, effective_fastly_service_id, require_token,
     resolve_deploy_manifest_path, validate_service_id,
 };
@@ -13,7 +14,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-/// Maximum raw secret bytes documented by Fastly, before Base64 encoding.
+/// Local maximum raw bytes, before Base64 encoding. Fastly documents "64KB"
+/// without specifying whether it means 64,000 or 65,536 bytes; provider boundary
+/// acceptance remains unverified.
 pub const FASTLY_SECRET_MAX_BYTES: usize = 0x0001_0000;
 
 /// Exact physical resources selected by deployment configuration.
@@ -104,9 +107,8 @@ impl FastlySecretTransport for CurlTransport {
         }
         // Existing transport keeps authentication and body off argv, disables
         // curlrc and does not follow redirects. Never expose stderr or body.
-        let output = curl_config_capture(&config).map_err(|_error| {
-            "Fastly secret API transport failed; mutation outcome may be unknown".to_owned()
-        })?;
+        let output = curl_config_capture(&config)
+            .map_err(|_error| "Fastly secret API transport failed".to_owned())?;
         let (response_body, status_line) = output
             .rsplit_once('\n')
             .ok_or_else(|| "Fastly secret API returned no HTTP status".to_owned())?;
@@ -122,7 +124,9 @@ impl FastlySecretTransport for CurlTransport {
 }
 
 /// Resolve existing stores and the service selected by existing deployment inputs.
-/// No provider mutation is performed.
+/// No provider mutation is performed. Every declared Config, KV and Secret Store
+/// must already exist. The result describes deployment-selected resources, not
+/// only the stores needed for one secret write.
 ///
 /// # Errors
 /// Returns an error for invalid/conflicting inputs, authentication, incomplete
@@ -151,7 +155,9 @@ pub fn resolve_resources_with_transport(
             .id
     };
     let environment = effective_deploy_environment(context)?;
-    let mut stores = Vec::new();
+    let mut config = StoreInventory::default();
+    let mut kv = StoreInventory::default();
+    let mut secret = StoreInventory::default();
     for (kind, ids, endpoint) in [
         (
             ResourceKind::Config,
@@ -183,35 +189,29 @@ pub fn resolve_resources_with_transport(
                 kind.display_name()
             )
         })?;
-        for logical_id in ids {
-            let physical_name = environment
-                .store_name_checked(kind.selector_kind(), logical_id)
-                .map_err(|_error| "invalid Fastly store selector".to_owned())?;
-            let resource_id = inventory
-                .by_name
-                .get(&physical_name)
-                .ok_or_else(|| format!("selected Fastly {} does not exist", kind.display_name()))?
-                .clone();
-            validate_resource_id(&resource_id)?;
-            stores.push(FastlyStoreResource {
-                kind: kind.selector_kind().to_owned(),
-                logical_id: logical_id.clone(),
-                physical_name,
-                resource_id,
-            });
+        match kind {
+            ResourceKind::Config => config = inventory,
+            ResourceKind::Kv => kv = inventory,
+            ResourceKind::Secret => secret = inventory,
         }
     }
-    stores.sort_by(|left, right| {
-        (&left.kind, &left.logical_id).cmp(&(&right.kind, &right.logical_id))
-    });
-    for pair in stores.windows(2) {
-        if let [left, right] = pair
-            && left.kind == right.kind
-            && left.logical_id == right.logical_id
-        {
-            return Err("duplicate logical Fastly store declaration".to_owned());
-        }
-    }
+    // Inventory errors can contain provider-supplied identifiers. Do not expose
+    // them. Desired-link errors only name requested manifest/environment selectors.
+    let inventories = ResourceInventories::from_inventories(config, kv, secret)
+        .map_err(|_error| "ambiguous Fastly resource inventories".to_owned())?;
+    let stores = desired_resource_links(
+        &RuntimeStoreIds::from(&context.stores),
+        &environment,
+        &inventories,
+    )?
+    .into_iter()
+    .map(|link| FastlyStoreResource {
+        kind: link.kind.selector_kind().to_owned(),
+        logical_id: link.alias,
+        physical_name: link.selected_name,
+        resource_id: link.resource_id,
+    })
+    .collect();
     Ok(FastlySecretResources { service_id, stores })
 }
 
@@ -244,7 +244,11 @@ fn request(
     body: Option<&str>,
 ) -> Result<FastlySecretResponse, String> {
     transport.request(method, path, body).map_err(|_error| {
-        "Fastly secret API transport failed; mutation outcome may be unknown".to_owned()
+        if method == "GET" {
+            "Fastly secret API transport failed".to_owned()
+        } else {
+            "Fastly secret API transport failed; mutation outcome may be unknown".to_owned()
+        }
     })
 }
 
@@ -366,13 +370,18 @@ pub fn write_secret_with_transport(
     };
     let path = format!("/resources/stores/secret/{resource_id}/secrets");
     let response = request(transport, method, &path, Some(&body))?;
-    if !(200..300).contains(&response.status) {
-        return Err(format!(
-            "Fastly secret write not confirmed; outcome may be unknown (HTTP {})",
-            response.status
-        ));
+    // Explicit HTTP rejections per RFC 9110 section 15.5 and Fastly's documented
+    // 429 rate limiting. Do not assume every 4xx proves no write occurred.
+    // Neither rejected nor uncertain writes are retried here.
+    match response.status {
+        200..=299 => Ok(()),
+        status @ (400 | 401 | 403 | 404 | 409 | 413 | 429) => {
+            Err(format!("Fastly rejected the secret write (HTTP {status})"))
+        }
+        status => Err(format!(
+            "Fastly secret write not confirmed; outcome may be unknown (HTTP {status})"
+        )),
     }
-    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -615,6 +624,173 @@ mod tests {
             );
             assert_eq!(fake.requests.borrow().len(), 1);
         }
+    }
+
+    #[test]
+    fn resource_resolution_rejects_missing_and_duplicate_declared_stores() {
+        for duplicate in [false, true] {
+            let context = AdapterDeployContext {
+                adapter_manifest_path: Some("fastly.toml".into()),
+                service_id: Some("FictionalService1".to_owned()),
+                stores: DeployStoreIds {
+                    secrets: if duplicate {
+                        vec!["vault".to_owned(); 2]
+                    } else {
+                        vec!["vault".to_owned()]
+                    },
+                    ..Default::default()
+                },
+                variable_defaults: BTreeMap::from([(
+                    "EDGEZERO__STORES__SECRETS__VAULT__NAME".to_owned(),
+                    "selected-vault".to_owned(),
+                )]),
+                ..Default::default()
+            };
+            let body = if duplicate {
+                r#"{"data":[{"id":"secret-1","name":"selected-vault"}],"meta":{"next_cursor":null}}"#
+            } else {
+                r#"{"data":[],"meta":{"next_cursor":null}}"#
+            };
+            let fake = Fake::new(&[(200, body)]);
+            let error =
+                resolve_resources_with_transport(&context, &fake).expect_err("invalid declaration");
+            assert!(error.contains("vault"), "{error}");
+            if duplicate {
+                assert!(error.contains("declared more than once"), "{error}");
+            } else {
+                assert!(
+                    error.contains("selected-vault") && error.contains("does not exist"),
+                    "{error}"
+                );
+            }
+            assert_eq!(fake.requests.borrow().len(), 1);
+        }
+    }
+
+    #[test]
+    fn resource_resolution_reuses_cross_kind_ambiguity_checks_without_provider_details() {
+        let context = AdapterDeployContext {
+            adapter_manifest_path: Some("fastly.toml".into()),
+            service_id: Some("FictionalService1".to_owned()),
+            stores: DeployStoreIds {
+                config: vec!["config".to_owned()],
+                secrets: vec!["vault".to_owned()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let fake = Fake::new(&[
+            (200, r#"[{"id":"reflected-provider-data","name":"config"}]"#),
+            (
+                200,
+                r#"{"data":[{"id":"reflected-provider-data","name":"vault"}],"meta":{"next_cursor":null}}"#,
+            ),
+        ]);
+        let error =
+            resolve_resources_with_transport(&context, &fake).expect_err("ambiguous resource kind");
+        assert_eq!(error, "ambiguous Fastly resource inventories");
+        assert_eq!(fake.requests.borrow().len(), 2);
+
+        let missing_config = Fake::new(&[
+            (200, "[]"),
+            (
+                200,
+                r#"{"data":[{"id":"secret-1","name":"vault"}],"meta":{"next_cursor":null}}"#,
+            ),
+        ]);
+        let missing_error = resolve_resources_with_transport(&context, &missing_config)
+            .expect_err("all declared kinds must exist");
+        assert!(
+            missing_error.contains("Config Store") && missing_error.contains("logical `config`"),
+            "{missing_error}"
+        );
+    }
+
+    #[test]
+    fn resource_resolution_names_invalid_selectors_without_their_values() {
+        let context = AdapterDeployContext {
+            adapter_manifest_path: Some("fastly.toml".into()),
+            service_id: Some("FictionalService1".to_owned()),
+            stores: DeployStoreIds {
+                secrets: vec!["vault".to_owned()],
+                ..Default::default()
+            },
+            variable_defaults: BTreeMap::from([(
+                "EDGEZERO__STORES__SECRETS__VAULT__NAME".to_owned(),
+                "private-canary\n".to_owned(),
+            )]),
+            ..Default::default()
+        };
+        let fake = Fake::new(&[]);
+        let error =
+            resolve_resources_with_transport(&context, &fake).expect_err("invalid selector");
+        assert!(
+            error.contains("EDGEZERO__STORES__SECRETS__VAULT__NAME"),
+            "{error}"
+        );
+        assert!(!error.contains("private-canary"));
+        assert!(fake.requests.borrow().is_empty());
+    }
+
+    #[test]
+    fn write_errors_distinguish_explicit_rejection_from_uncertainty_without_retrying() {
+        for action in [SecretWriteAction::Create, SecretWriteAction::Replace] {
+            for status in [400, 401, 403, 404, 409, 413, 429, 302, 408, 422, 500, 503] {
+                let fake = Fake::new(&[(status, "private-canary-response")]);
+                let error =
+                    write_secret_with_transport("store-123", "fixture", b"value", action, &fake)
+                        .expect_err("provider failure");
+                let rejected = matches!(status, 400 | 401 | 403 | 404 | 409 | 413 | 429);
+                assert_eq!(error.contains("rejected"), rejected, "{error}");
+                assert_eq!(error.contains("unknown"), !rejected, "{error}");
+                assert!(error.contains(&status.to_string()));
+                assert!(!error.contains("private-canary"));
+                assert_eq!(fake.requests.borrow().len(), 1, "writes are never retried");
+            }
+        }
+    }
+
+    #[test]
+    fn transport_errors_only_report_mutation_uncertainty_for_writes() {
+        let fake = Fake::new(&[]);
+        let error =
+            secret_exists_with_transport("store-123", "fixture", &fake).expect_err("GET failed");
+        assert_eq!(error, "Fastly secret API transport failed");
+        let write_error = write_secret_with_transport(
+            "store-123",
+            "fixture",
+            b"value",
+            SecretWriteAction::Create,
+            &fake,
+        )
+        .expect_err("write failed");
+        assert!(write_error.contains("unknown") && !write_error.contains("fictional"));
+        assert_eq!(fake.requests.borrow().len(), 2);
+    }
+
+    #[test]
+    fn local_raw_byte_limit_accepts_exact_boundary_and_rejects_larger_values() {
+        let fake = Fake::new(&[(201, "{}")]);
+        let mut value = vec![b'x'; FASTLY_SECRET_MAX_BYTES];
+        write_secret_with_transport(
+            "store-123",
+            "fixture",
+            &value,
+            SecretWriteAction::Create,
+            &fake,
+        )
+        .expect("local maximum");
+        value.push(b'x');
+        let error = write_secret_with_transport(
+            "store-123",
+            "fixture",
+            &value,
+            SecretWriteAction::Create,
+            &fake,
+        )
+        .expect_err("over local maximum");
+        assert!(error.contains("65536"));
+        assert_eq!(fake.requests.borrow().len(), 1);
     }
 
     #[cfg(unix)]

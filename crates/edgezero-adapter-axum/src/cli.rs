@@ -363,7 +363,10 @@ impl Adapter for AxumCliAdapter {
         let mut claimed: BTreeMap<String, &TypedSecretEntry<'_>> = BTreeMap::new();
         for entry in entries {
             let var = if let Some(native_name) = &entry.native_name {
-                if native_name.is_empty()
+                if !native_name
+                    .bytes()
+                    .next()
+                    .is_some_and(|byte| byte.is_ascii_uppercase() || byte == b'_')
                     || !native_name.bytes().all(|byte| {
                         byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
                     })
@@ -1537,6 +1540,32 @@ mod tests {
         assert!(err.contains("`api_token`"), "{err}");
         assert!(err.contains("`backup_token`"), "{err}");
         assert!(err.contains("`EDGEZERO__SECRETS__UPSTREAM_TOKEN`"), "{err}");
+    }
+
+    #[test]
+    fn validate_typed_secrets_checks_exact_native_environment_names() {
+        for name in ["A", "A1", "_TOKEN", "_"] {
+            let entries = [TypedSecretEntry::new("default", "owner", "obsolete/key")
+                .with_native_name(name.to_owned())];
+            AXUM_ADAPTER
+                .validate_typed_secrets(&entries)
+                .expect("portable native name");
+        }
+        for name in [
+            "",
+            "1TOKEN",
+            "lowercase",
+            "WITH-HYPHEN",
+            "WITH SPACE",
+            "CAF\u{c9}",
+        ] {
+            let entries = [TypedSecretEntry::new("default", "owner", "obsolete/key")
+                .with_native_name(name.to_owned())];
+            let error = AXUM_ADAPTER
+                .validate_typed_secrets(&entries)
+                .expect_err("invalid native environment name");
+            assert_eq!(error, "invalid native environment name for `owner`");
+        }
     }
 
     #[test]

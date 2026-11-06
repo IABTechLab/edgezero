@@ -1,10 +1,14 @@
 //! Host helpers shared with application-specific secret commands.
 
 pub use edgezero_adapter::registry::{AdapterDeployContext, DeployStoreIds};
-pub use edgezero_adapter_fastly::cli::secrets::*;
+pub use edgezero_adapter_fastly::cli::secrets::{
+    FASTLY_SECRET_MAX_BYTES, FastlySecretResources, FastlySecretResponse, FastlySecretTransport,
+    FastlyStoreResource, SecretWriteAction, resolve_resources, resolve_resources_with_transport,
+    secret_exists, secret_exists_with_transport, write_secret, write_secret_with_transport,
+};
 
 use edgezero_core::manifest::ManifestLoader;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Build the same manifest-selected paths, logical stores and variable defaults
 /// used by deployment. The caller supplies its effective application manifest
@@ -18,38 +22,24 @@ pub fn context_from_manifest(
     path: &Path,
     service_id: Option<&str>,
 ) -> Result<AdapterDeployContext, String> {
-    let loader = ManifestLoader::from_path(path).map_err(|_error| {
-        "failed to load application manifest for Fastly secret operations".to_owned()
+    let loader = ManifestLoader::from_path(path).map_err(|error| {
+        // Parser errors can contain source lines, including inline values.
+        format!(
+            "failed to load application manifest {} for Fastly secret operations ({:?})",
+            path.display(),
+            error.kind()
+        )
     })?;
     crate::ensure_adapter_defined("fastly", Some(&loader))?;
-    let stores = &loader.manifest().stores;
+    let application_manifest_path = crate::checked_application_manifest_path(path)?;
+    let (context, path_error) =
+        crate::deploy_context_from_loader(Some(&loader), "fastly", Some(application_manifest_path));
+    if let Some(error) = path_error {
+        return Err(error);
+    }
     Ok(AdapterDeployContext {
-        adapter_manifest_path: crate::resolve_adapter_manifest_path(Some(&loader), "fastly")?
-            .map(PathBuf::from),
-        application_manifest_path: Some(
-            path.canonicalize()
-                .map_err(|_error| "failed to resolve application manifest path".to_owned())?,
-        ),
         service_id: service_id.map(str::to_owned),
-        stores: DeployStoreIds {
-            config: stores
-                .config
-                .as_ref()
-                .map(|decl| decl.ids.clone())
-                .unwrap_or_default(),
-            kv: stores
-                .kv
-                .as_ref()
-                .map(|decl| decl.ids.clone())
-                .unwrap_or_default(),
-            secrets: stores
-                .secrets
-                .as_ref()
-                .map(|decl| decl.ids.clone())
-                .unwrap_or_default(),
-        },
-        variable_defaults: crate::manifest_variable_defaults(loader.manifest(), "fastly"),
-        ..Default::default()
+        ..context
     })
 }
 
@@ -57,6 +47,44 @@ pub fn context_from_manifest(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn manifest_errors_name_the_path_without_exposing_parser_source() {
+        let dir = tempfile::tempdir().expect("directory");
+        let manifest = dir.path().join("selected-edgezero.toml");
+        let missing = context_from_manifest(&manifest, None).expect_err("missing manifest");
+        assert!(missing.contains(&manifest.display().to_string()));
+        assert!(missing.contains("NotFound"));
+        fs::write(
+            &manifest,
+            "[app]\nname = \"fixture\"\nprivate = \"private-canary-source\" trailing\n",
+        )
+        .expect("invalid manifest");
+        let error = context_from_manifest(&manifest, None).expect_err("malformed manifest");
+        assert!(error.contains(&manifest.display().to_string()));
+        assert!(error.contains("InvalidData"));
+        assert!(!error.contains("private-canary") && !error.contains("trailing"));
+    }
+
+    #[test]
+    fn shared_context_defers_adapter_path_errors_for_deploy_but_secret_helpers_reject() {
+        let dir = tempfile::tempdir().expect("directory");
+        let manifest = dir.path().join("edgezero.toml");
+        fs::write(&manifest, "[app]\nname = \"fixture\"\n[adapters.fastly.adapter]\ncrate = \"fixture\"\nmanifest = \"missing-fastly.toml\"\n")
+            .expect("manifest");
+        let loader = ManifestLoader::from_path(&manifest).expect("loaded manifest");
+        let (context, path_error) = crate::deploy_context_from_loader(
+            Some(&loader),
+            "fastly",
+            Some(manifest.canonicalize().expect("path")),
+        );
+        assert!(context.adapter_manifest_path.is_none());
+        let expected = path_error.expect("deferred deploy error");
+        assert!(expected.contains("missing-fastly.toml"));
+        let error = context_from_manifest(&manifest, None)
+            .expect_err("secret helpers require adapter path");
+        assert_eq!(error, expected);
+    }
 
     #[test]
     fn context_uses_selected_manifest_paths_stores_and_adapter_defaults() {
@@ -94,6 +122,18 @@ adapters = ["fastly"]
         assert_eq!(
             context.application_manifest_path,
             Some(manifest.canonicalize().expect("path"))
+        );
+        let loader = ManifestLoader::from_path(&manifest).expect("loaded manifest");
+        let (mut deploy_context, path_error) = crate::deploy_context_from_loader(
+            Some(&loader),
+            "fastly",
+            Some(manifest.canonicalize().expect("path")),
+        );
+        assert!(path_error.is_none());
+        deploy_context.service_id = Some("FictionalService".to_owned());
+        assert_eq!(
+            context, deploy_context,
+            "secret helpers use deployment-selected context"
         );
         assert_eq!(context.service_id.as_deref(), Some("FictionalService"));
         assert_eq!(context.stores.secrets, ["fictional_secrets"]);

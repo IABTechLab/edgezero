@@ -722,6 +722,14 @@ pub trait Adapter: Sync + Send {
         Ok(())
     }
 
+    /// Whether native secret names have separate namespaces per physical store.
+    /// Flat-namespace adapters retain the default. The CLI resolves store aliases
+    /// before collision checks when this is true.
+    #[inline]
+    fn secret_names_scoped_per_store(&self) -> bool {
+        false
+    }
+
     /// Typed-only check that needs `#[secret]` field values — the
     /// CLI calls this only from the typed validation flow.
     /// `entries` carries both `KeyInDefault` and `KeyInNamedStore`
@@ -913,6 +921,7 @@ mod tests {
         // method here exercises the trait's default impl.
         assert!(FIRST.merged_id_kinds().is_empty());
         assert!(FIRST.single_store_kinds().is_empty());
+        assert!(!FIRST.secret_names_scoped_per_store());
         assert_eq!(
             FIRST.validate_adapter_manifest(Path::new("/tmp"), None, None),
             Ok(())

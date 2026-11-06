@@ -1,10 +1,13 @@
 #![expect(
+    clippy::self_named_module_files,
+    reason = "Workspace also denies mod_module_files; follow Spin's cli.rs plus cli/ submodule convention instead of contradictory module-file lints"
+)]
+#![expect(
     clippy::arbitrary_source_item_ordering,
     reason = "the managed deployment planning and execution state machine is kept as one cohesive block"
 )]
 
 /// Narrow host operations for reviewed secret provisioning.
-#[path = "secret_operations.rs"]
 pub mod secrets;
 
 use std::cell::{Cell, RefCell};
@@ -390,7 +393,7 @@ struct LinkReconciliation {
     delete_link_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct StoreInventory {
     by_name: BTreeMap<String, String>,
 }
@@ -476,14 +479,14 @@ impl ResourceInventories {
         })
     }
 
-    fn resolve(&self, kind: ResourceKind, name: &str) -> Result<String, String> {
+    fn resolve(&self, kind: ResourceKind, logical_id: &str, name: &str) -> Result<String, String> {
         self.for_kind(kind)
             .by_name
             .get(name)
             .cloned()
             .ok_or_else(|| {
                 format!(
-                    "selected Fastly {} `{name}` does not exist in the complete provider inventory",
+                    "selected Fastly {} `{name}` (logical `{logical_id}`) does not exist in the complete provider inventory",
                     kind.display_name()
                 )
             })
@@ -642,7 +645,7 @@ fn desired_resource_links(
             let selected_name = environment
                 .store_name_checked(kind.selector_kind(), logical_id)
                 .map_err(|error| format!("invalid Fastly deploy environment: {error}"))?;
-            let resource_id = inventories.resolve(kind, &selected_name)?;
+            let resource_id = inventories.resolve(kind, logical_id, &selected_name)?;
             let desired = DesiredResourceLink {
                 kind,
                 alias: logical_id.clone(),
@@ -2730,6 +2733,10 @@ impl Adapter for FastlyCliAdapter {
         // support multiple distinct platform resources per kind,
         // unlike spin's flat-namespace single-store model.
         &[]
+    }
+
+    fn secret_names_scoped_per_store(&self) -> bool {
+        true
     }
 
     fn validate_typed_secrets(&self, entries: &[TypedSecretEntry<'_>]) -> Result<(), String> {
@@ -6790,7 +6797,7 @@ mod tests {
     use edgezero_adapter::cli_support::read_package_name;
     use edgezero_core::env_config::EnvConfig;
     #[cfg(unix)]
-    use edgezero_core::test_env::{EnvOverride, PathPrepend};
+    use edgezero_core::test_env::{EnvOverride, PathPrepend, env_lock};
     #[cfg(unix)]
     use std::collections::BTreeMap;
     use std::collections::HashSet;
@@ -6798,6 +6805,8 @@ mod tests {
     use std::iter::once;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
+    #[cfg(unix)]
+    use std::ptr;
     #[cfg(unix)]
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -10360,9 +10369,18 @@ exit 1
     /// test threads don't race on the environment variable.
     #[cfg(unix)]
     fn path_mutation_guard() -> &'static Mutex<()> {
-        use std::sync::OnceLock;
-        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-        GUARD.get_or_init(|| Mutex::new(()))
+        env_lock()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_mutation_guard_uses_the_shared_environment_lock() {
+        assert!(ptr::eq(path_mutation_guard(), env_lock()));
+    }
+
+    #[test]
+    fn native_secret_names_are_scoped_per_physical_store() {
+        assert!(FastlyCliAdapter.secret_names_scoped_per_store());
     }
 
     #[cfg(unix)]

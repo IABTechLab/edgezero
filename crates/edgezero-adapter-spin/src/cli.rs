@@ -543,13 +543,13 @@ impl Adapter for SpinCliAdapter {
             if !is_valid_spin_key(&spin_var) {
                 let reason = spin_key_rule_violation(&spin_var);
                 return Err(format!(
-                    "`#[secret]` field `{field}` does not reference a valid Spin variable name. {reason}. Pick a secret reference that conforms; its value is redacted.",
+                    "secret lookup at `{field}` does not reference a valid Spin variable name. {reason}. Use a conforming native name; the name is redacted.",
                     field = entry.field_name,
                 ));
             }
             if let Some(prev_field) = seen.insert(spin_var.clone(), entry.field_name.as_str()) {
                 return Err(format!(
-                    "`#[secret]` fields `{prev_field}` and `{this_field}` reference the same Spin variable after lowercasing; Spin's flat variable namespace cannot disambiguate them. Pick distinct secret references; their values are redacted.",
+                    "secret lookups at `{prev_field}` and `{this_field}` reference the same Spin variable; Spin's flat variable namespace cannot disambiguate them. Use distinct native names; the names are redacted.",
                     this_field = entry.field_name,
                 ));
             }
