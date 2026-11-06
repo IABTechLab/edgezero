@@ -202,20 +202,20 @@ async fn inspect(ctx: RequestContext) -> Result<Text<String>, EdgeError> {
 
 `RequestContext` provides these methods:
 
-| Method           | Returns                                             |
-| ---------------- | --------------------------------------------------- |
-| `method()`       | `&Method` - request method                         |
-| `uri()`          | `&Uri` - request URI                               |
-| `headers()`      | `&HeaderMap` - request headers                      |
-| `path_params()`  | `&PathParams` - raw path parameters                 |
-| `path::<T>()`    | Deserialize path params to `T`                      |
-| `query::<T>()`   | Deserialize query string to `T`                     |
-| `json_within::<T>(max).await` | Bounded JSON deserialization as `Result<T, EdgeError>` |
-| `form_within::<T>(max).await` | Bounded form deserialization as `Result<T, EdgeError>` |
-| `body_bytes(max).await` | `Result<Bytes, EdgeError>` - bounded, cached body read |
-| `take_body()`    | `Result<Body, EdgeError>` - transfer body ownership  |
-| `into_request()` | `Result<Request, EdgeError>` - consume context, take request |
-| `http_client()`  | `Option<HttpClient>` - adapter outbound HTTP client |
+| Method                        | Returns                                                      |
+| ----------------------------- | ------------------------------------------------------------ |
+| `method()`                    | `&Method` - request method                                   |
+| `uri()`                       | `&Uri` - request URI                                         |
+| `headers()`                   | `&HeaderMap` - request headers                               |
+| `path_params()`               | `&PathParams` - raw path parameters                          |
+| `path::<T>()`                 | Deserialize path params to `T`                               |
+| `query::<T>()`                | Deserialize query string to `T`                              |
+| `json_within::<T>(max).await` | Bounded JSON deserialization as `Result<T, EdgeError>`       |
+| `form_within::<T>(max).await` | Bounded form deserialization as `Result<T, EdgeError>`       |
+| `body_bytes(max).await`       | `Result<Bytes, EdgeError>` - bounded, cached body read       |
+| `take_body()`                 | `Result<Body, EdgeError>` - transfer body ownership          |
+| `into_request()`              | `Result<Request, EdgeError>` - consume context, take request |
+| `http_client()`               | `Option<HttpClient>` - adapter outbound HTTP client          |
 
 ### Store Extractors
 

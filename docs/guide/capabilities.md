@@ -67,14 +67,14 @@ Sources: [Cloudflare Workers limits](https://developers.cloudflare.com/workers/p
 
 ## Ingress Matrix
 
-| Capability                       | Axum        | Cloudflare  | Fastly      | Spin        |
-| -------------------------------- | ----------- | ----------- | ----------- | ----------- |
-| `ingress-admission`              | Native      | Native      | Native      | Native      |
-| `ingress-admission-abort`        | Native      | BestEffort  | BestEffort  | BestEffort  |
-| `inbound-read-deadlines`         | Native      | BestEffort  | BestEffort  | BestEffort  |
-| Host-certified empty inbound bodies | Native | Native[^empty-inbound] | BestEffort | Unsupported[^empty-inbound] |
-| `raw-ingress-head-limits`        | Unsupported | Unsupported | Unsupported | Unsupported |
-| `raw-ingress-framing-validation` | Unsupported | Unsupported | Unsupported | Unsupported |
+| Capability                          | Axum        | Cloudflare             | Fastly      | Spin                        |
+| ----------------------------------- | ----------- | ---------------------- | ----------- | --------------------------- |
+| `ingress-admission`                 | Native      | Native                 | Native      | Native                      |
+| `ingress-admission-abort`           | Native      | BestEffort             | BestEffort  | BestEffort                  |
+| `inbound-read-deadlines`            | Native      | BestEffort             | BestEffort  | BestEffort                  |
+| Host-certified empty inbound bodies | Native      | Native[^empty-inbound] | BestEffort  | Unsupported[^empty-inbound] |
+| `raw-ingress-head-limits`           | Unsupported | Unsupported            | Unsupported | Unsupported                 |
+| `raw-ingress-framing-validation`    | Unsupported | Unsupported            | Unsupported | Unsupported                 |
 
 All standard adapters resolve the route and run the application admission policy before
 middleware, handler dispatch, or body polling. Axum can preempt an asynchronous body read.
@@ -127,7 +127,8 @@ its deadline BestEffort. This does not establish raw framing guarantees. See
 [Fastly ingress conversion](./adapters/fastly.md#ingress-body-conversion) for the SDK and deadline
 boundaries.
 
-[^empty-inbound]: Host-certified empty inbound bodies is a behavior row, not a declarable
+[^empty-inbound]:
+    Host-certified empty inbound bodies is a behavior row, not a declarable
     manifest capability. Cloudflare preserves SDK-certified absence, but the workerd runtime
     leg remains unverified. Spin preserves explicit `Content-Length: 0` without constructing a
     read stream; other host-certified absence is Unsupported. This is not generic header-based
@@ -288,10 +289,10 @@ not included. These limitations block whole-response-lifetime certification.
 | Capability                              | Axum                              | Cloudflare                        | Fastly                              | Spin                              |
 | --------------------------------------- | --------------------------------- | --------------------------------- | ----------------------------------- | --------------------------------- |
 | `outbound-http`                         | Native                            | Native                            | BestEffort⁹                         | Native                            |
-| `ResponseDecoding::Original`            | Native                            | Native                            | BestEffort[^fastly-observation]       | Native                            |
-| `HttpClient::begin`                     | Native                            | Native                            | BestEffort[^fastly-observation]       | Native                            |
-| Nonblocking completion checks          | Native                            | Native                            | BestEffort[^fastly-observation]       | Native                            |
-| Arrival-time recording                 | Native                            | Native                            | BestEffort[^fastly-observation]       | Native                            |
+| `ResponseDecoding::Original`            | Native                            | Native                            | BestEffort[^fastly-observation]     | Native                            |
+| `HttpClient::begin`                     | Native                            | Native                            | BestEffort[^fastly-observation]     | Native                            |
+| Nonblocking completion checks           | Native                            | Native                            | BestEffort[^fastly-observation]     | Native                            |
+| Arrival-time recording                  | Native                            | Native                            | BestEffort[^fastly-observation]     | Native                            |
 | `outbound-authority-override`           | Native                            | BestEffort⁸                       | Native                              | Unsupported[^spin-authority]      |
 | `outbound-batch-cancellation`           | Native                            | BestEffort⁸                       | BestEffort⁴                         | BestEffort⁸                       |
 | `outbound-batch-completion-order`       | Native                            | Native                            | BestEffort⁴                         | Native                            |
@@ -423,7 +424,8 @@ routing and hosted delivery of that override remain unqualified, so support is B
 recording are behavior rows, not declarable manifest capabilities. They describe the corresponding
 APIs rather than adding more manifest flags.
 
-[^fastly-observation]: Fastly preserves adapter-visible encoded responses and uses cooperative
+[^fastly-observation]:
+    Fastly preserves adapter-visible encoded responses and uses cooperative
     progress for Begin and nonblocking observations. A check does not enter a native wait; buffered
     outcomes are recorded when EdgeZero finishes processing them, not at an unobservable transport
     instant. Synchronous host work and application CPU intervals can delay progress. Original
@@ -586,18 +588,18 @@ not require provider host registration.
 
 Each `OutboundRequest` owns independent limits:
 
-| Control                      | Scope                                                                                                       | Default |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------- | ------- |
-| `timeout / deadline`         | Earliest configured timeout or absolute deadline                                                           | 30 s when neither is set |
-| `max_request_body_bytes`     | Buffered or streamed request bytes                                                                          | 8 MiB   |
-| `max_encoded_response_bytes` | Upstream transport bytes before decoding                                                                    | Unset   |
-| `max_decoded_response_bytes` | Identity or EdgeZero-decoded gzip/deflate/Brotli output                                                     | Unset   |
-| `max_response_bytes`         | Final buffered response, including raw passthrough                                                          | 1 MiB   |
-| `max_response_header_bytes`  | Adapter-visible upstream header name/value bytes before normalization, plus `x-edgezero-proxy` when enabled | Unset   |
-| `max_response_header_count`  | Adapter-visible upstream header fields before normalization, plus `x-edgezero-proxy` when enabled           | Unset   |
-| `max_brotli_window_bits`     | Brotli stream header checked before decoder allocation                                                      | 24      |
-| `max_decoder_bytes`          | Pinned policy charge for Brotli/gzip/deflate decoder state                                                  | 32 MiB  |
-| `max_chunk_bytes`            | Maximum emitted item size after decoding or passthrough                                                     | Unset   |
+| Control                      | Scope                                                                                                       | Default                  |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `timeout / deadline`         | Earliest configured timeout or absolute deadline                                                            | 30 s when neither is set |
+| `max_request_body_bytes`     | Buffered or streamed request bytes                                                                          | 8 MiB                    |
+| `max_encoded_response_bytes` | Upstream transport bytes before decoding                                                                    | Unset                    |
+| `max_decoded_response_bytes` | Identity or EdgeZero-decoded gzip/deflate/Brotli output                                                     | Unset                    |
+| `max_response_bytes`         | Final buffered response, including raw passthrough                                                          | 1 MiB                    |
+| `max_response_header_bytes`  | Adapter-visible upstream header name/value bytes before normalization, plus `x-edgezero-proxy` when enabled | Unset                    |
+| `max_response_header_count`  | Adapter-visible upstream header fields before normalization, plus `x-edgezero-proxy` when enabled           | Unset                    |
+| `max_brotli_window_bits`     | Brotli stream header checked before decoder allocation                                                      | 24                       |
+| `max_decoder_bytes`          | Pinned policy charge for Brotli/gzip/deflate decoder state                                                  | 32 MiB                   |
+| `max_chunk_bytes`            | Maximum emitted item size after decoding or passthrough                                                     | Unset                    |
 
 Request upload overflow is `EdgeError::PayloadTooLarge` with typed `OutboundUpload` origin;
 inbound reader overflow carries `Inbound` instead. Buffered uploads over their cap reject

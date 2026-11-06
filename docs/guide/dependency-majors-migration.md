@@ -67,13 +67,13 @@ toolchain in `.tool-versions`, move it up with the dependencies; the
 A scaffolded app's `.tool-versions` also pins the provider CLIs, and
 those moved too:
 
-| Tool      | Old     | New         | Applies to                  |
-| --------- | ------- | ----------- | --------------------------- |
-| `rust`    | 1.95.0  | **1.98.1**  | every app                   |
-| `fastly`  | 15.1.0  | **16.0.0**  | Fastly adapter              |
-| `viceroy` | 0.17.0  | **0.21.0**  | Fastly local testing        |
-| `spin`    | Unspecified | **4.1.0** | Spin adapter                |
-| `nodejs`  | 24.12.0 | **24.20.0** | Cloudflare (wrangler), docs |
+| Tool      | Old         | New         | Applies to                  |
+| --------- | ----------- | ----------- | --------------------------- |
+| `rust`    | 1.95.0      | **1.98.1**  | every app                   |
+| `fastly`  | 15.1.0      | **16.0.0**  | Fastly adapter              |
+| `viceroy` | 0.17.0      | **0.21.0**  | Fastly local testing        |
+| `spin`    | Unspecified | **4.1.0**   | Spin adapter                |
+| `nodejs`  | 24.12.0     | **24.20.0** | Cloudflare (wrangler), docs |
 
 The deploy action's `install-fastly.sh` checks its bundled `versions.json` against
 the action repository's `.tool-versions`, not the application's file. An application

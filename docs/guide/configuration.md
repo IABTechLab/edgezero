@@ -540,11 +540,11 @@ When commands are omitted, the CLI falls back to built-in adapter helpers.
 Logging can be configured per adapter under `[adapters.<name>.logging]` or via a top-level
 `[logging.<name>]` block. If both are present, the adapter-specific block takes precedence.
 
-| Field         | Adapters     | Description                                                 |
-| ------------- | ------------ | ----------------------------------------------------------- |
-| `endpoint`    | Fastly       | Log endpoint name                                           |
-| `level`       | All          | Log level: `trace`, `debug`, `info`, `warn`, `error`, `off` |
-| `echo_stdout` | Fastly | Mirror logs to stdout. The Axum runner ignores it                  |
+| Field         | Adapters | Description                                                 |
+| ------------- | -------- | ----------------------------------------------------------- |
+| `endpoint`    | Fastly   | Log endpoint name                                           |
+| `level`       | All      | Log level: `trace`, `debug`, `info`, `warn`, `error`, `off` |
+| `echo_stdout` | Fastly   | Mirror logs to stdout. The Axum runner ignores it           |
 
 Manifest logging settings and runtime `EDGEZERO__LOGGING__*` overrides are separate; consult
 the adapter guide for which source its runner consumes. Cloudflare and Spin do not install a
@@ -701,7 +701,7 @@ Arguments:
 | App identifier | positional (optional)   | Name for the generated struct instead of `App`; must come immediately after the path, before any keyword argument     |
 | `owns_logging` | `owns_logging = <bool>` | Sets `Hooks::owns_logging()`. Defaults to `false`                                                                     |
 | `state`        | `state = <expr>`        | Registers the expression's state value. Use `state = load_state()?` to propagate a typed failure before configuration |
-| `configure`    | `configure = <expr>`    | Fallible `Hooks::configure` callback, invoked after routes and state are assembled                                      |
+| `configure`    | `configure = <expr>`    | Fallible `Hooks::configure` callback, invoked after routes and state are assembled                                    |
 
 ```rust
 edgezero_core::app!(
