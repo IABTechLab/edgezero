@@ -66,7 +66,8 @@ pub fn main() -> Result<(), fastly::Error> {
 ```
 
 Do not add Fastly's response-returning entrypoint attribute. EdgeZero initializes the ABI,
-receives the client request, and owns `stream_to_client` through final body-handle close.
+receives the client request, commits the response head once, and owns the streaming response
+lifetime through final body-handle close.
 
 `run_app` builds per-id `KV` / `Config` / `Secret` registries from the portable
 store metadata baked into `App` by the `app!` macro. Logging settings are baked
@@ -246,7 +247,7 @@ not freeze an active outer callback; a standalone helper owns only its fallback 
 Outside EdgeZero's Fastly callback/helper lifecycle, `current()` returns `None`.
 
 Fastly also has documented deadline, upload, elastic-budget, batch-isolation, and lazy downstream
-streaming limitations. EdgeZero owns the low-level `stream_to_client` lifetime and writes portable
+streaming limitations. EdgeZero owns the low-level streaming response lifetime and writes portable
 response chunks without whole-body collection. Synchronous source polls and hostcalls cannot be
 preempted, so downstream streaming and response-egress guarantees remain BestEffort. See
 [Capabilities](/guide/capabilities) before marking a capability required.
@@ -377,16 +378,17 @@ Access Fastly-specific APIs via the request context extensions:
 
 ```rust
 use edgezero_core::context::RequestContext;
+use edgezero_core::http::Response;
+use edgezero_core::{action, Body, EdgeError};
 use edgezero_adapter_fastly::context::FastlyRequestContext;
 
+#[action]
 async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
-    // Access Fastly context from extensions
-    if let Some(fastly_ctx) = ctx.extensions().get::<FastlyRequestContext>() {
-        let client_ip = fastly_ctx.client_ip;
-        // ...
-    }
-
-    // ...
+    let client_ip = ctx.extensions()
+        .get::<FastlyRequestContext>()
+        .and_then(|fastly_ctx| fastly_ctx.client_ip);
+    let body = client_ip.map_or_else(|| "unavailable".to_owned(), |ip| ip.to_string());
+    Ok(Response::new(Body::from(body)))
 }
 ```
 
@@ -446,7 +448,7 @@ fn main() -> Result<(), fastly::Error> {
 
 `serve_app_with_hooks` additionally accepts a preparation hook
 `FnMut(&mut fastly::Request, &mut Extensions)` and a finalization hook
-`FnMut(&mut edgezero_core::Response) -> State`. Preparation runs before admission;
+`FnMut(&mut edgezero_core::http::Response) -> State`. Preparation runs before admission;
 finalization runs only for routed responses, before egress policy and framing.
 Detached admission responses skip finalization. The retained helper discards the
 finalizer's state after delivery; use the request-level send helper in a custom
@@ -515,8 +517,8 @@ construction.
 
 For an EdgeZero response, call `request::send_request_with_registries_and_hooks`
 with the app, store metadata, received request, preparation hook,
-and finalization hook. It runs canonical admission, injects fresh `Kv`, `Config`,
-`Secrets`, and `AppConfig` registries, then owns framing, streaming, deadlines, and
+and finalization hook. It runs canonical admission, injects three fresh registries backing
+the four `Kv`, `Config`, `Secrets`, and `AppConfig` extractors, then owns framing, streaming, deadlines, and
 terminal delivery. Preparation borrows a mutable native request and extension bag;
 finalization borrows a mutable routed core response. Neither hook returns a
 response for the callback to send separately. The hard-cut result is
@@ -555,7 +557,7 @@ exclude the global observer; an admitted source-error response also reports
 provider capabilities.
 
 The manual response lifetime remains adapter-owned: append every header value,
-commit once through `stream_to_client`, account accepted body bytes, and finish or
+commit the head once through the raw Fastly ABI, account accepted body bytes, and finish or
 abandon the body handle exactly once. A native response constructed directly by
 your callback, such as a health reply, must instead be explicitly sent there;
 manual native streams must be pumped, flushed, and finished before returning.
@@ -708,8 +710,15 @@ and failed ones. `initialization_attempts()` counts only actual builder calls.
 These counters describe this sandbox and are part of the public lifecycle API.
 They do not establish client completion or provider reuse.
 
-Use `lifecycle::run_custom(Request::from_client(), callback)` for the single-request
-branch, initializing the Fastly ABI before receiving that request. It creates
+For the single-request branch, initialize the ABI before evaluating the request argument:
+
+```rust,ignore
+fastly::init();
+lifecycle::run_custom(fastly::Request::from_client(), callback)
+```
+
+This fragment assumes an application-provided `callback`. `run_custom` cannot initialize the
+ABI before Rust evaluates its arguments. It creates
 fresh state without entering `Serve` and returns the callback's `Result<(), E>`
 directly, without asking the SDK to render an error. Use an ordinary `fn main`;
 the response-returning SDK entrypoint attribute does not own this delivery lifecycle.
