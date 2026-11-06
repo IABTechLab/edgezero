@@ -1253,6 +1253,10 @@ fn first_violating_field(errors: &validator::ValidationErrors) -> Option<String>
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "legacy app-config fixtures intentionally exercise the default-compatible implicit lookup hooks"
+)]
 mod tests {
     use super::*;
     use crate::app_config::{AppConfigMeta, SecretField, SecretKind, SecretPathSegment};

@@ -1,7 +1,14 @@
 #![expect(
+    clippy::self_named_module_files,
+    reason = "Workspace also denies mod_module_files; follow Spin's cli.rs plus cli/ submodule convention instead of contradictory module-file lints"
+)]
+#![expect(
     clippy::arbitrary_source_item_ordering,
     reason = "the managed deployment planning and execution state machine is kept as one cohesive block"
 )]
+
+/// Narrow host operations for reviewed secret provisioning.
+pub mod secrets;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -30,7 +37,8 @@ use edgezero_adapter::cli_support::{
 };
 use edgezero_adapter::registry::{
     Adapter, AdapterAction, AdapterDeployContext, AdapterPushContext, DeployOwnership,
-    DeployStoreIds, ProvisionStores, ReadConfigEntry, ResolvedStoreId, register_adapter,
+    DeployStoreIds, ProvisionStores, ReadConfigEntry, ResolvedStoreId, TypedSecretEntry,
+    register_adapter,
 };
 use edgezero_adapter::release::{VerifiedApplicationRelease, verify_application_release};
 use edgezero_adapter::scaffold::{
@@ -385,7 +393,7 @@ struct LinkReconciliation {
     delete_link_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct StoreInventory {
     by_name: BTreeMap<String, String>,
 }
@@ -471,14 +479,14 @@ impl ResourceInventories {
         })
     }
 
-    fn resolve(&self, kind: ResourceKind, name: &str) -> Result<String, String> {
+    fn resolve(&self, kind: ResourceKind, logical_id: &str, name: &str) -> Result<String, String> {
         self.for_kind(kind)
             .by_name
             .get(name)
             .cloned()
             .ok_or_else(|| {
                 format!(
-                    "selected Fastly {} `{name}` does not exist in the complete provider inventory",
+                    "selected Fastly {} `{name}` (logical `{logical_id}`) does not exist in the complete provider inventory",
                     kind.display_name()
                 )
             })
@@ -637,7 +645,7 @@ fn desired_resource_links(
             let selected_name = environment
                 .store_name_checked(kind.selector_kind(), logical_id)
                 .map_err(|error| format!("invalid Fastly deploy environment: {error}"))?;
-            let resource_id = inventories.resolve(kind, &selected_name)?;
+            let resource_id = inventories.resolve(kind, logical_id, &selected_name)?;
             let desired = DesiredResourceLink {
                 kind,
                 alias: logical_id.clone(),
@@ -2013,8 +2021,8 @@ fn owns_managed_deploy(context: &AdapterDeployContext) -> bool {
 // spin requires them (variable-name regex, `[component.*]`
 // discovery, flat-namespace collision). The trait surface is typed
 // generically so any future adapter with similar constraints can
-// override — but fastly has no equivalent platform requirements,
-// so the no-op defaults are correct:
+// override. Fastly inherits the first two defaults but validates explicit
+// native secret names:
 //
 // - `validate_app_config_keys`: Fastly Config Store keys accept
 //   alphanumeric + `-` / `_` / `.` up to 256 chars. Any reasonable
@@ -2023,15 +2031,15 @@ fn owns_managed_deploy(context: &AdapterDeployContext) -> bool {
 //   `fastly compute validate` at validate-time. We keep
 //   `config validate` pure-Rust so it stays fast and
 //   tool-independent.
-// - `validate_typed_secrets`: Fastly's KV / Config / Secret
-//   stores are independent namespaces — no spin-style flat-
-//   namespace collision risk to detect.
+// - `validate_typed_secrets`: explicit native names must use Fastly's secret
+//   name alphabet. Legacy entries retain their existing behavior. The CLI
+//   checks collisions within each selected physical Secret Store.
 //
 // `single_store_kinds` IS overridden below — explicitly returns
 // `&[]` for documentation, matching the inherited default.
 #[expect(
     clippy::missing_trait_methods,
-    reason = "see the explanatory block comment immediately above; fastly's no-op defaults for the three validate_* hooks are intentional and documented. `read_config_entry` and `read_config_entry_local` are both overridden below. `single_store_kinds` IS overridden below (returns `&[]`)."
+    reason = "see the explanatory block comment immediately above; Fastly inherits validate_app_config_keys and validate_adapter_manifest. validate_typed_secrets, read_config_entry, read_config_entry_local and single_store_kinds are overridden below."
 )]
 impl Adapter for FastlyCliAdapter {
     fn deploy(&self, context: &AdapterDeployContext, args: &[String]) -> Result<(), String> {
@@ -2725,6 +2733,24 @@ impl Adapter for FastlyCliAdapter {
         // support multiple distinct platform resources per kind,
         // unlike spin's flat-namespace single-store model.
         &[]
+    }
+
+    fn secret_names_scoped_per_store(&self) -> bool {
+        true
+    }
+
+    fn validate_typed_secrets(&self, entries: &[TypedSecretEntry<'_>]) -> Result<(), String> {
+        for entry in entries {
+            if let Some(name) = entry.native_name.as_deref() {
+                secrets::validate_key(name).map_err(|_error| {
+                    format!(
+                        "invalid native Fastly secret name for `{}`",
+                        entry.field_name
+                    )
+                })?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -6771,7 +6797,7 @@ mod tests {
     use edgezero_adapter::cli_support::read_package_name;
     use edgezero_core::env_config::EnvConfig;
     #[cfg(unix)]
-    use edgezero_core::test_env::{EnvOverride, PathPrepend};
+    use edgezero_core::test_env::{EnvOverride, PathPrepend, env_lock};
     #[cfg(unix)]
     use std::collections::BTreeMap;
     use std::collections::HashSet;
@@ -6779,6 +6805,8 @@ mod tests {
     use std::iter::once;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
+    #[cfg(unix)]
+    use std::ptr;
     #[cfg(unix)]
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -6796,6 +6824,37 @@ mod tests {
     // `PathPrepend` (RAII $PATH guard) is the shared helper imported above from
     // `edgezero_core::test_env`; the merge with edition-2024 main replaced our
     // local copy with it (its `set_var` calls are wrapped for 2024's unsafe-env).
+
+    #[test]
+    fn typed_secrets_validate_native_names_without_changing_legacy_mapping() {
+        let entries = [
+            TypedSecretEntry::new("default", "legacy", "legacy/key"),
+            TypedSecretEntry::new("default", "pull", "obsolete/key")
+                .with_native_name("Native-secret_123.name".to_owned()),
+        ];
+        FASTLY_ADAPTER
+            .validate_typed_secrets(&entries)
+            .expect("native names use Fastly's alphabet, not the obsolete key");
+    }
+
+    #[test]
+    fn typed_secrets_reject_invalid_native_names_without_echoing_them() {
+        for name in [
+            "",
+            "invalid/name",
+            "invalid name",
+            "invalid\nname",
+            "invalid:name",
+            "invalid\u{540d}\u{5b57}",
+        ] {
+            let entry = TypedSecretEntry::new("default", "subjects[0]", "ts1_fixture")
+                .with_native_name(name.to_owned());
+            let error = FASTLY_ADAPTER
+                .validate_typed_secrets(&[entry])
+                .expect_err("invalid native name");
+            assert_eq!(error, "invalid native Fastly secret name for `subjects[0]`");
+        }
+    }
 
     // ── Fastly staging lifecycle helpers ──────────────────────────────
 
@@ -10310,9 +10369,18 @@ exit 1
     /// test threads don't race on the environment variable.
     #[cfg(unix)]
     fn path_mutation_guard() -> &'static Mutex<()> {
-        use std::sync::OnceLock;
-        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-        GUARD.get_or_init(|| Mutex::new(()))
+        env_lock()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_mutation_guard_uses_the_shared_environment_lock() {
+        assert!(ptr::eq(path_mutation_guard(), env_lock()));
+    }
+
+    #[test]
+    fn native_secret_names_are_scoped_per_physical_store() {
+        assert!(FastlyCliAdapter.secret_names_scoped_per_store());
     }
 
     #[cfg(unix)]
