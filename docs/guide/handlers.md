@@ -204,14 +204,17 @@ async fn inspect(ctx: RequestContext) -> Result<Text<String>, EdgeError> {
 
 | Method           | Returns                                             |
 | ---------------- | --------------------------------------------------- |
-| `request()`      | `&Request` - full HTTP request                      |
+| `method()`       | `&Method` - request method                         |
+| `uri()`          | `&Uri` - request URI                               |
+| `headers()`      | `&HeaderMap` - request headers                      |
 | `path_params()`  | `&PathParams` - raw path parameters                 |
 | `path::<T>()`    | Deserialize path params to `T`                      |
 | `query::<T>()`   | Deserialize query string to `T`                     |
-| `json::<T>()`    | Deserialize JSON body to `T`                        |
-| `form::<T>()`    | Deserialize form body to `T`                        |
-| `body()`         | `&Body` - raw request body                          |
-| `into_request()` | `Request` - consume context, take request           |
+| `json_within::<T>(max).await` | Bounded JSON deserialization as `Result<T, EdgeError>` |
+| `form_within::<T>(max).await` | Bounded form deserialization as `Result<T, EdgeError>` |
+| `body_bytes(max).await` | `Result<Bytes, EdgeError>` - bounded, cached body read |
+| `take_body()`    | `Result<Body, EdgeError>` - transfer body ownership  |
+| `into_request()` | `Result<Request, EdgeError>` - consume context, take request |
 | `http_client()`  | `Option<HttpClient>` - adapter outbound HTTP client |
 
 ### Store Extractors
@@ -226,9 +229,11 @@ and extracted by id:
 | `Secrets`      | `.default()` / `.named(id)` → a secret-store handle (`require_str(name)`).                                                         |
 | `AppConfig<C>` | Your typed app config, deserialised from the blob and with `#[secret]` fields resolved. See [Configuration](/guide/configuration). |
 
-```rust
+```rust,ignore
+// MyAppConfig is the application's derived configuration schema.
 use edgezero_core::extractor::{AppConfig, Kv};
-use edgezero_core::{EdgeError, Text};
+use edgezero_core::response::Text;
+use edgezero_core::{action, EdgeError};
 
 #[action]
 async fn handler(
@@ -434,7 +439,8 @@ Use the synchronous error renderer when framework and handler errors must use an
 fixed-size wire body:
 
 ```rust
-use edgezero_core::{Body, EdgeError, Response};
+use edgezero_core::http::Response;
+use edgezero_core::{Body, EdgeError};
 
 fn configure_app(app: &mut edgezero_core::app::App) -> Result<(), EdgeError> {
     app.set_error_response_renderer(|error| Response::new(Body::from(error.kind())));
