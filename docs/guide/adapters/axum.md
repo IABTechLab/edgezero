@@ -332,7 +332,7 @@ attach stores to the supplied server explicitly. It does not install a global te
 An app assembled with Cloudflare or Spin platform metadata keeps that metadata and all configured
 policies, but receives Axum connection context, not a Cloudflare or Spin provider request context.
 `router.oneshot` remains a routing-only unit-test facility: it skips this ingress and egress path.
-Begun-outbound-request coverage additionally depends on the separate eager-dispatch implementation.
+Begun outbound requests and spawned local work complete under this facility as in production.
 
 Run tests:
 
