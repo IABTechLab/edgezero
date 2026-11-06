@@ -509,27 +509,42 @@ impl Process {
         }
         self.1.expected_exit_code = expected;
         loop {
-            if let Err(error) = check_cancelled(cancelled) {
-                let cleanup = self.finish();
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    cleanup.err().map_or_else(
-                        || error.to_string(),
-                        |cleanup| format!("{error}; cleanup: {cleanup}"),
-                    ),
-                )
-                .into());
-            }
+            self.check_cancellation(cancelled)?;
             if let Some(status) = self.0.try_wait()? {
-                self.1.command_status = Some(status);
-                if status.code() != Some(expected) {
-                    self.1.failures.push(format!("command exited: {status}"));
-                }
-                self.finish()?;
-                return Ok(status);
+                return self.complete_command(status, expected, cancelled);
             }
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn check_cancellation(&mut self, cancelled: &AtomicBool) -> Result<()> {
+        if let Err(error) = check_cancelled(cancelled) {
+            let cleanup = self.finish();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                cleanup.err().map_or_else(
+                    || error.to_string(),
+                    |cleanup| format!("{error}; cleanup: {cleanup}"),
+                ),
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn complete_command(
+        &mut self,
+        status: ExitStatus,
+        expected: i32,
+        cancelled: &AtomicBool,
+    ) -> Result<ExitStatus> {
+        self.1.command_status = Some(status);
+        self.check_cancellation(cancelled)?;
+        if status.code() != Some(expected) {
+            self.1.failures.push(format!("command exited: {status}"));
+        }
+        self.finish()?;
+        Ok(status)
     }
     pub fn finish(&mut self) -> Result<()> {
         if let Some(outcome) = &self.1.finished {
@@ -1085,6 +1100,10 @@ mod process_tests {
 
     impl Drop for Fixture {
         fn drop(&mut self) {
+            if thread::panicking() {
+                eprintln!("preserved failed process fixture: {}", self.0.display());
+                return;
+            }
             let _ = fs::remove_dir_all(&self.0);
         }
     }
@@ -1579,6 +1598,40 @@ mod process_tests {
             assert!(fixture.0.join("checked-reaped").is_file(), "{signal}");
             until(|| std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
         }
+    }
+
+    #[test]
+    fn failed_process_fixture_preserves_diagnostics_until_explicit_cleanup() {
+        let fixture = Fixture::new();
+        let path = fixture.0.clone();
+        fs::write(path.join("runtime.log"), b"failure evidence").unwrap();
+        let outcome = std::panic::catch_unwind(move || {
+            let _retained = fixture;
+            panic!("controlled fixture failure");
+        });
+        assert!(outcome.is_err());
+        assert_eq!(
+            fs::read(path.join("runtime.log")).unwrap(),
+            b"failure evidence"
+        );
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn cancellation_wins_when_a_child_exit_is_observed_after_the_signal() {
+        let fixture = Fixture::new();
+        let mut process = fixture.spawn("exit-nonzero");
+        until(|| process.child_status().unwrap().is_some());
+        let status = process.child_status().unwrap().unwrap();
+        let cancelled = AtomicBool::new(true);
+        let error = process.complete_command(status, 0, &cancelled).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::Interrupted)
+        );
+        assert!(!LIVE_GROUPS.lock().unwrap().contains_key(&process.0.id()));
     }
 
     #[test]
