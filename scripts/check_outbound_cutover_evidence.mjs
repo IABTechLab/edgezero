@@ -18,6 +18,8 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SPEC = "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md";
 const INVENTORY =
   "crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json";
+const UNPROMOTED_FOLLOWUP_CONDITION =
+  "Follow-up not promoted or confirmed present";
 const FOCUS_COMMAND =
   "CARGO_NET_OFFLINE=true scripts/test_integration.sh check";
 const FOCUS_PROOFS = [
@@ -481,7 +483,7 @@ export function inventoryCoverage(manifest, source, reviewedLegSetSha256) {
       condition:
         entry.condition ??
         (category === "follow-up-not-promoted"
-          ? "Follow-up not promoted or confirmed present"
+          ? UNPROMOTED_FOLLOWUP_CONDITION
           : null),
     };
   });
@@ -851,7 +853,7 @@ export function inspectRelease(
           approved
             ? mapping?.approval === c.approval
             : mapping?.condition ===
-                (c.condition ?? "follow-up not promoted or confirmed present"),
+                (c.condition ?? UNPROMOTED_FOLLOWUP_CONDITION),
           `${id}: unjustified applicability deferral`,
         ),
       );

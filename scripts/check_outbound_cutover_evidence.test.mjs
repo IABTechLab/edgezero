@@ -2062,6 +2062,28 @@ test("rejects wrong environments, duplicates and extra results", () => {
     assert.throws(() => release(inventory(), record));
   }
 });
+test("coverage conditions justify an unpromoted follow-up without approving it", () => {
+  const input = source.replaceAll("EZ-1", "EZ-24");
+  const manifest = inventory(input);
+  for (const entry of manifest.cases) entry.applicability = "follow-up";
+  const coverage = checker.inventoryCoverage(
+    manifest,
+    input,
+    fixtureLegPolicy(input),
+  );
+  const record = evidence(manifest);
+  record.applicability = manifest.cases.map((entry, index) => ({
+    case_id: entry.case_id,
+    environment: entry.environment,
+    disposition: "deferred",
+    condition: coverage.legs[index].condition,
+  }));
+  record.results = [];
+  assert.equal(release(manifest, record, input).deferred, 2);
+  assert.deepEqual(manifest.decisions, []);
+  record.applicability[0].condition = "not implemented";
+  assert.throws(() => release(manifest, record, input), /deferral/);
+});
 test("rejects unjustified deferral and missing applicability maps", () => {
   const record = evidence();
   record.applicability[0] = {
