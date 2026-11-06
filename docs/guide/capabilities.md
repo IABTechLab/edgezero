@@ -474,7 +474,9 @@ SDK-erased or unrecognized causes remain `Unknown`. Neither promises complete DN
 
 `Unknown` describes an observed opaque/unrecognized cause; absent optional codes remain absent.
 Timer-only expiry, late success, clean EOF and local validation do not invent provider evidence.
-The phase identifies the observed API boundary, not whether request bytes were sent. Detail is
+The phase identifies the observed API boundary, not whether request bytes were sent: `Send`
+for an immediate Fastly SDK dispatch failure and `ResponseHeaders` for a failure returned by
+polling its pending response. Detail is
 fixed-size and text-free: it carries no URLs, header values, body bytes or provider messages, and
 does not change framework wire responses or existing error classification. Framework code does
 not log provider detail; any future framework logging must be debug or lower. Application logging

@@ -401,7 +401,11 @@ pub fn validate(case: Case, adapter: &str, token: &str, capture: &Value) -> Resu
                 _ => return Err("unknown paired adapter".to_owned()),
             };
             let phase = if matches!(case.kind, Kind::Error(ErrorCase::Head)) {
-                "Send"
+                if adapter == "fastly" {
+                    "ResponseHeaders"
+                } else {
+                    "Send"
+                }
             } else {
                 "ResponseBodyRead"
             };

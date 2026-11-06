@@ -1686,7 +1686,7 @@ mod tests {
             matches!(
                 error.provider_failure_detail(),
                 Some(ProviderFailureDetail::Fastly {
-                    phase: ProviderFailurePhase::Send,
+                    phase: ProviderFailurePhase::ResponseHeaders,
                     cause: FastlyFailureCause::ConnectionRefused
                         | FastlyFailureCause::InternalError {
                             status: Some(1_i32)

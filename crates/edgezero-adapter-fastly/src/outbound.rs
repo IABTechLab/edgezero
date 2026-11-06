@@ -423,7 +423,13 @@ mod fastly_impl {
                     HeadPoll::Pending(pending)
                 }
                 PollResult::Done(result) => HeadPoll::Ready(result.map_err(|error| {
-                    map_configured_send_cause(error.root_cause(), budget, clock, pending.configured)
+                    map_configured_send_cause(
+                        error.root_cause(),
+                        budget,
+                        clock,
+                        pending.configured,
+                        ProviderFailurePhase::ResponseHeaders,
+                    )
                 })),
             }
         }
@@ -746,6 +752,7 @@ mod fastly_impl {
                                     budget,
                                     time.clock(),
                                     configured,
+                                    ProviderFailurePhase::Send,
                                 )
                             })
                         })?
@@ -1323,24 +1330,12 @@ mod fastly_impl {
         }
     }
 
-    #[cfg(test)]
-    fn map_send_cause(
-        cause: &SendErrorCause,
-        budget: DispatchBudget,
-        clock: &MonotonicClock,
-    ) -> EdgeError {
-        with_fastly_detail(
-            super::classify_send_failure(cause_to_failure(cause), budget, clock.now()),
-            ProviderFailurePhase::Send,
-            send_failure_cause(cause),
-        )
-    }
-
     fn map_configured_send_cause(
         cause: &SendErrorCause,
         budget: DispatchBudget,
         clock: &MonotonicClock,
         configured: bool,
+        phase: ProviderFailurePhase,
     ) -> EdgeError {
         let failure = if configured && matches!(cause, SendErrorCause::ConnectionTimeout) {
             super::SendFailure::ConnectTimeout
@@ -1349,7 +1344,7 @@ mod fastly_impl {
         };
         with_fastly_detail(
             super::classify_send_failure(failure, budget, clock.now()),
-            ProviderFailurePhase::Send,
+            phase,
             send_failure_cause(cause),
         )
     }
@@ -1498,7 +1493,13 @@ mod fastly_impl {
         let pending = PendingHead {
             configured,
             sdk: Box::new(request.send_async(backend).map_err(|error| {
-                map_configured_send_cause(error.root_cause(), budget, clock, configured)
+                map_configured_send_cause(
+                    error.root_cause(),
+                    budget,
+                    clock,
+                    configured,
+                    ProviderFailurePhase::Send,
+                )
             })?),
         };
         #[cfg(test)]
@@ -1528,7 +1529,13 @@ mod fastly_impl {
     ) -> Result<FastlyResponse, EdgeError> {
         ensure_dispatch_budget(started_at, budget, &clock)?;
         let (writer, pending) = request.send_async_streaming(backend).map_err(|error| {
-            map_configured_send_cause(error.root_cause(), budget, &clock, configured)
+            map_configured_send_cause(
+                error.root_cause(),
+                budget,
+                &clock,
+                configured,
+                ProviderFailurePhase::Send,
+            )
         })?;
         #[cfg(feature = "test-utils")]
         let queued = own_sdk_operation(
@@ -2086,6 +2093,59 @@ mod fastly_impl {
             for mode in [OutboundSendMode::Send, OutboundSendMode::Batch] {
                 sdk_cache_selection(mode, OutboundCachePolicy::Bypass);
             }
+        }
+
+        #[test]
+        fn pending_head_failure_reports_response_headers_phase() {
+            use edgezero_core::OutboundScopeOwner;
+
+            let trace = NativeSdkTrace::new(Duration::ZERO);
+            let time = trace.time();
+            let callback = OutboundScopeOwner::callback();
+            let scope = callback.with(super::super::scope::capture);
+            let progress = super::super::scope::native_progress(&scope, &time, trace.entered)
+                .expect("native progress");
+            let dispatch = callback.with(|| {
+                testing::dispatch(
+                    OutboundRequest::get("http://127.0.0.1:9/head-failure-private-token")
+                        .expect("request")
+                        .timeout(Duration::from_secs(1)),
+                    time.clone(),
+                )
+            });
+            let prepared = FastlyOutboundClient::with_time(time)
+                .configure(dispatch)
+                .expect("backend");
+            let mut request = build_fastly_request(
+                &prepared.parts.method,
+                &prepared.parts.uri,
+                &prepared.parts.headers,
+                OutboundCachePolicy::Bypass,
+            );
+            request.set_body(Vec::<u8>::new());
+            let sdk = request
+                .send_async(prepared.backend)
+                .expect("send returns a pending handle");
+            let lease = progress.head(
+                PendingHead {
+                    configured: false,
+                    sdk: Box::new(sdk),
+                },
+                prepared.context.budget(),
+            );
+            let error = block_on(progress.drive(lease.receive()))
+                .expect("progress driver")
+                .expect_err("closed port");
+            assert!(matches!(error, EdgeError::Internal { .. }));
+            assert!(matches!(
+                error.provider_failure_detail(),
+                Some(ProviderFailureDetail::Fastly {
+                    phase: ProviderFailurePhase::ResponseHeaders,
+                    cause: FastlyFailureCause::InternalError { .. },
+                })
+            ));
+            assert!(!error.message().contains("private-token"));
+            callback.close();
         }
 
         fn native_gzip_fixture() -> Bytes {
@@ -5020,34 +5080,43 @@ mod fastly_impl {
             let now = MonotonicInstant::now();
             let clock = constant_clock(now);
             for (source, expected) in cases {
-                for expired in [false, true] {
-                    let mut budget = clock_budget(now, Duration::from_secs(1));
-                    if expired {
-                        budget.deadline = Deadline::at_instant(now);
+                for phase in [
+                    ProviderFailurePhase::Send,
+                    ProviderFailurePhase::ResponseHeaders,
+                ] {
+                    for expired in [false, true] {
+                        let mut budget = clock_budget(now, Duration::from_secs(1));
+                        if expired {
+                            budget.deadline = Deadline::at_instant(now);
+                        }
+                        let plain = super::super::classify_send_failure(
+                            cause_to_failure(&source),
+                            budget,
+                            now,
+                        );
+                        let mapped =
+                            map_configured_send_cause(&source, budget, &clock, false, phase);
+                        assert_eq!(
+                            mapped.provider_failure_detail(),
+                            Some(&ProviderFailureDetail::Fastly {
+                                phase,
+                                cause: expected,
+                            })
+                        );
+                        assert_eq!(mapped.message(), plain.message());
+                        assert_eq!(mapped.to_string(), plain.to_string());
+                        assert_eq!(mapped.status(), plain.status());
+                        assert_eq!(mapped.kind(), plain.kind());
+                        assert!(
+                            !format!("{:?}", mapped.provider_failure_detail())
+                                .contains("provider-secret-token")
+                        );
+                        let before = plain.into_response().expect("plain wire");
+                        let after = mapped.into_response().expect("mapped wire");
+                        assert_eq!(before.status(), after.status());
+                        assert_eq!(before.headers(), after.headers());
+                        assert_eq!(before.body().as_bytes(), after.body().as_bytes());
                     }
-                    let plain =
-                        super::super::classify_send_failure(cause_to_failure(&source), budget, now);
-                    let mapped = map_send_cause(&source, budget, &clock);
-                    assert_eq!(
-                        mapped.provider_failure_detail(),
-                        Some(&ProviderFailureDetail::Fastly {
-                            phase: ProviderFailurePhase::Send,
-                            cause: expected,
-                        })
-                    );
-                    assert_eq!(mapped.message(), plain.message());
-                    assert_eq!(mapped.to_string(), plain.to_string());
-                    assert_eq!(mapped.status(), plain.status());
-                    assert_eq!(mapped.kind(), plain.kind());
-                    assert!(
-                        !format!("{:?}", mapped.provider_failure_detail())
-                            .contains("provider-secret-token")
-                    );
-                    let before = plain.into_response().expect("plain wire");
-                    let after = mapped.into_response().expect("mapped wire");
-                    assert_eq!(before.status(), after.status());
-                    assert_eq!(before.headers(), after.headers());
-                    assert_eq!(before.body().as_bytes(), after.body().as_bytes());
                 }
             }
         }

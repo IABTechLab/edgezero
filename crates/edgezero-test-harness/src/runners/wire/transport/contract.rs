@@ -454,7 +454,7 @@ pub(super) mod tests {
                     _ => unreachable!(),
                 };
                 Some(
-                    json!({"adapter":name,"phase":if case.kind == vectors::Kind::Error(vectors::ErrorCase::Head) {"Send"} else {"ResponseBodyRead"},"cause":"Unknown"}),
+                    json!({"adapter":name,"phase":if case.kind == vectors::Kind::Error(vectors::ErrorCase::Head) {if adapter == "fastly" {"ResponseHeaders"} else {"Send"}} else {"ResponseBodyRead"},"cause":"Unknown"}),
                 )
             } else {
                 None
