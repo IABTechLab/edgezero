@@ -316,8 +316,9 @@ an optimizer fallback or another provider fetch.
 
 ## Forward An Inbound Request
 
-This example preserves the inbound method and body, replaces the target URI, removes a private
-header, and converts the outbound response back into a core response.
+This example preserves the inbound method, forwards the inbound body for methods that carry one,
+replaces the target URI, removes a private header, and converts the outbound response back into a
+core response. GET and HEAD requests are forwarded without a body.
 
 On Axum, the converter preserves a transport-certified empty body (`is_end_stream()`) as buffered
 empty after admission, for any method, without reading it. Actual HTTP/1 GET/HEAD forwards with
@@ -636,8 +637,9 @@ After the last item, continue calling `next()` to await clean driver EOF and rec
 index, or out-of-range index still fails collection while retaining the previously collected
 slots. Custom drivers must finish after their last item; zero-slot drivers are validated too.
 
-`client.send_all_until(requests, observation_cutoff).await` collects the same driver into an
-index-aligned `OutboundCollectedSlot` values. `Resolved` owns a newly collected result;
+`client.send_all_until(requests, observation_cutoff).await` collects the same driver into
+`OutboundBatchResults`, whose index-aligned `OutboundCollectedSlot` values and `termination`
+retain each input's outcome and explain why collection stopped. `Resolved` owns a newly collected result;
 `AlreadyDelivered` marks an item previously transferred by `check` or `next`; `Unresolved` marks
 a cutoff-abandoned slot. `Completed` forbids unresolved slots, while `Cutoff` requires one.
 A premature, malformed or failed driver returns `OutboundBatchFailure` with its exact error and
