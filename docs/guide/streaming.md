@@ -35,15 +35,15 @@ async fn stream_data() -> Response {
 
 ## How Streaming Works
 
-The router keeps `Body::Stream` intact until the adapter response coordinator:
+The router keeps a streamed `Body` intact until the adapter response coordinator:
 
 1. Your handler returns `Body::stream(...)` with a `Stream` of chunks
 2. Core validates response framing and wraps declared-length enforcement around the source
 3. The adapter polls one chunk at a time under its host's demand or write readiness
 4. Accepted bytes, deadline/abort events, and one terminal outcome are recorded by that adapter
 
-Axum uses a connection-local Hyper body, Cloudflare a JavaScript stream writer, Fastly
-`stream_to_client`, and Spin a WASI body writer. See [Capabilities](/guide/capabilities) for the
+Axum uses a connection-local Hyper body, Cloudflare a JavaScript stream writer, Fastly an
+adapter-owned streaming body handle, and Spin a WASI body writer. See [Capabilities](/guide/capabilities) for the
 exact acceptance and completion boundary on each target.
 
 Application retention does not change this ownership. Every dispatch creates
@@ -56,7 +56,7 @@ Fastly's `serve_app` and `serve_app_with_hooks` retain an app through
 borrow request/response values; they do not return a native response for the SDK
 to send again. Cloudflare's `dispatch_app::<A>(&app, req, env, ctx)` returns a
 Worker response backed by its request-local coordinator. Spin's
-`dispatch_app::<A>(&app, req)` returns a raw `SpinResponse` whose body and
+`dispatch_app::<A>(&app, req)` returns `anyhow::Result<SpinResponse>`, and the response body and
 transmission lifetime remain owned by the adapter coordinator. None of these
 paths collect the complete response before handoff.
 
@@ -121,8 +121,12 @@ pass through unchanged. Identity bodies keep their decoded-byte cap under either
 Encoded transport bytes, decoded output, and final buffered bytes have independent limits; see
 [Capabilities](/guide/capabilities#limits-and-accounting).
 
+An absent `Accept-Encoding` is sent as `identity`; request compressed encodings explicitly
+when the response should exercise transport decoding.
+
 ```rust
 let request = OutboundRequest::get("https://api.example.com/data")?
+    .header("accept-encoding", "gzip, br")?
     .max_encoded_response_bytes(2 * 1024 * 1024)
     .max_decoded_response_bytes(8 * 1024 * 1024)
     .stream_response();
