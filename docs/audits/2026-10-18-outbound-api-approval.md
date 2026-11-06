@@ -775,3 +775,19 @@ historical failures intact. Excluding those broader diagnostic cases from ordina
 coverage choice, not proof that every observed failure is environmental or permission to waive
 candidate-specific qualification. The original +5 ms target, logical deadlines, typed-error/read
 safety requirements, public protocol and frozen requirements/Interfaces remain unchanged.
+
+## Review-Fix Runtime Provenance Clarification (2026-11-06)
+
+AG approved the review-fix plan for all 40 threads in review `5798502238` in this conversation.
+Thread `4491177715` corrects the description of the already approved local/CI runtime baseline:
+the tracked repaired Viceroy 0.21.0 is required for both error-preserving readiness and bounded
+subsequent reads. This implements no new runtime policy, installed pin change or hosted promotion.
+
+The dated clarification is appended to the requirements' existing Scoped Amendment. Its complete
+document SHA-256 changes from
+`431eed70e0f4ea0fcab5ddc186a185147a27bf9f5eb0515a95523c572ba3a1b2` to
+`c92d145789e5fc4f5d12e93e579450eba76760e2070b8dfe9bb40dfd437c5f29`.
+Refresh only the inventory's complete-document identity and its corresponding guard snapshot.
+All per-criterion text/digests, acceptance identities, environment legs, applicability, approvals,
+read-safety obligations, strict suppression/parity requirements and qualification gates remain
+unchanged. Historical approval digests and negative evidence are retained, not relabeled.

@@ -28,6 +28,13 @@ timers and slack are not approved or changed. Typed body-error preservation and 
 subsequent-read safety remain requirements; an uninterruptible body-read fallback is not permitted.
 Acceptance scope, IDs, statuses, applicability and comparison gates are unchanged.
 
+**Local-runtime baseline clarification (2026-11-06).** Under the previously approved
+[scoped multiplexer implementation](../../audits/2026-10-18-outbound-api-approval.md#scoped-fastly-current-operation-multiplexer-approval-2026-10-25),
+the local/CI Viceroy 0.21.0 readiness and subsequent-read legs use the explicitly selected tracked
+repaired build. This is not evidence for unmodified Viceroy or hosted Fastly. Original acceptance
+criteria, read-safety obligations, SDK suppression/parity requirements and qualification gates
+remain unchanged.
+
 ## Purpose
 
 Trusted Server (TS) is moving onto EdgeZero PR 275 in one hard cut. TS will use EdgeZero's

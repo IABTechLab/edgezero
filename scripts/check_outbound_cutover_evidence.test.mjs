@@ -170,7 +170,7 @@ const localCloseoutKeys = new Set([
 const localCloseoutKeyDigest =
   "d57706880e4a496a4a23d4a7ca02026a2c2ba3b52528ef4c4f92adad2e5f0dec";
 const localCloseoutUnchangedDigest =
-  "f7e99d663de8c037ece6a46929448b77d1dc48539854fceeb529fb4f0b146803";
+  "be545bf4c83cc5883e098f9145bc98e3541a5cae557bc47486f7a5919add21d6";
 const localCloseoutScopeDigest =
   "fb3bf7503c46a6f3987f9063964a23c306a3c6cc65bff8c7e44383e7fec9ffb1";
 const localCloseoutArtifacts = new Map([

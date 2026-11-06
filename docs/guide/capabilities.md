@@ -385,9 +385,11 @@ the driver. An occupied result slot backpressures only its own exchange. Cached 
 retain their opaque cache state and use nonblocking polling with one shared positive 1 ms pulse.
 Cold backend registration can still delay dispatch; synchronous provider work and SDK cleanup
 remain non-preemptible. This is not callback-wide scheduling or a hosted isolation guarantee.
-Local error-preserving readiness requires the explicitly selected
+Local error-preserving readiness and bounded subsequent reads require the explicitly selected
 [Viceroy repair](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/patches/viceroy/README.md);
-the stock runtime still loses source errors.
+stock Viceroy 0.21.0 both loses source errors and can report empty frames as ready even though
+the SDK read skips them and waits again. A stock-runtime read after fresh readiness can therefore
+block past the deadline or cutoff; it does not establish the bounded-read guarantee.
 Hosted runtime behavior and resource ownership remain unqualified, so support stays BestEffort.
 
 ⁵ Spin's host may reject phase

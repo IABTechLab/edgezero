@@ -417,6 +417,12 @@ export CARGO_TARGET_WASM32_WASIP1_RUNNER="viceroy run"
 cargo test -p edgezero-adapter-fastly --features fastly --target wasm32-wasip1 --test contract
 ```
 
+This installs the stock reference runtime. The bounded-readiness and subsequent-read legs instead
+require the explicitly selected, hash-verified [tracked Viceroy repair](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/patches/viceroy/README.md).
+Select that binary through `CARGO_TARGET_WASM32_WASIP1_RUNNER` and the harness's `VICEROY_BIN`;
+do not cite stock 0.21.0 as bounded-read evidence. This local selection does not change installed
+runtime pins or establish hosted Fastly guarantees.
+
 Fastly SDK-linked Wasm binaries require Viceroy for execution; plain Wasmtime
 does not provide the `fastly_*` host imports needed by the adapter tests.
 
