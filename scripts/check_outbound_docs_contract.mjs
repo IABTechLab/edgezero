@@ -223,6 +223,11 @@ const expectedResponseEgressRows = [
 ]
 const expectedLimitHeader = ['Control', 'Scope', 'Default']
 const expectedLimitRows = [
+  [
+    'timeout / deadline',
+    'Earliest configured timeout or absolute deadline',
+    '30 s when neither is set',
+  ],
   ['max_request_body_bytes', 'Buffered or streamed request bytes', '8 MiB'],
   [
     'max_encoded_response_bytes',
@@ -2466,7 +2471,7 @@ const responseEgressProviderCaveats = new Map([
     'Fastly',
     [
       'hands buffered heads and complete bodies to the host together',
-      'account synchronous body-handle writes through `stream_to_client` close',
+      'account synchronous body-handle writes through close',
       'cannot preempt a blocked source poll or hostcall',
       'loses the body handle if `finish` itself fails',
     ],
@@ -2480,14 +2485,30 @@ const responseEgressProviderCaveats = new Map([
     ],
   ],
 ])
+function missingEgressCaveat(bullet, requiredFragments) {
+  return requiredFragments.find((fragment) => !bullet.includes(fragment)) ?? null
+}
+
+const fastlyCaveats = responseEgressProviderCaveats.get('Fastly')
+if (
+  missingEgressCaveat(fastlyCaveats.join('; '), fastlyCaveats) !== null ||
+  missingEgressCaveat(
+    fastlyCaveats.join('; ').replace(
+      'writes through close',
+      'writes through `stream_to_client` close'
+    ),
+    fastlyCaveats
+  ) === null
+) {
+  fail('Fastly delivery caveat self-test failed')
+}
 for (const [provider, requiredFragments] of responseEgressProviderCaveats) {
-  const bullet = responseEgressProviderBullet(provider)
-  for (const requiredFragment of requiredFragments) {
-    if (!bullet.includes(requiredFragment)) {
-      fail(
-        `${capabilityPath} ${provider} response-egress caveat is missing: ${requiredFragment}`
-      )
-    }
+  const missing = missingEgressCaveat(
+    responseEgressProviderBullet(provider),
+    requiredFragments
+  )
+  if (missing !== null) {
+    fail(`${capabilityPath} ${provider} response-egress caveat is missing: ${missing}`)
   }
 }
 
@@ -2526,7 +2547,22 @@ for (let index = limitsHeaderIndex + 2; index < lines.length; index += 1) {
   }
   actualLimitRows.push([normalizeCapability(row[0]), row[1], row[2]])
 }
-if (JSON.stringify(actualLimitRows) !== JSON.stringify(expectedLimitRows)) {
+function exactLimitRows(rows) {
+  return JSON.stringify(rows) === JSON.stringify(expectedLimitRows)
+}
+if (!exactLimitRows(structuredClone(expectedLimitRows)))
+  fail('valid outbound limits rejected')
+for (const altered of [
+  expectedLimitRows.slice(1),
+  [...expectedLimitRows, expectedLimitRows[0]],
+  expectedLimitRows.toReversed(),
+  expectedLimitRows.map((row, index) =>
+    index === 0 ? [row[0], row[1], 'Unset'] : row
+  ),
+]) {
+  if (exactLimitRows(altered)) fail('invalid outbound limit rows accepted')
+}
+if (!exactLimitRows(actualLimitRows)) {
   fail(
     `outbound limits mismatch\nexpected=${JSON.stringify(expectedLimitRows)}\nactual=${JSON.stringify(actualLimitRows)}`
   )

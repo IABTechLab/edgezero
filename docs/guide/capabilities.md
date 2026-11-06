@@ -8,8 +8,8 @@ adapter before starting the adapter command.
 
 ```toml
 [capabilities]
-required = ["outbound-deadlines"]
-optional = ["outbound-http"]
+required = ["outbound-cache-bypass"]
+optional = ["outbound-deadlines", "outbound-http"]
 
 [capabilities.outbound]
 hosts = ["https://api.example.com", "https://*.example.net:*"]
@@ -103,7 +103,7 @@ any adapter.
 
 Axum additionally enforces a finite adapter-owned HTTP/1 connection pool, combined raw-head
 byte and field-count limits, and absolute idle-plus-header timeouts before admission. Its
-[bounded HTTP/1 ingress configuration](/guide/adapters/axum#bounded-http1-ingress) publishes the
+[bounded HTTP/1 ingress configuration](/guide/adapters/axum#bounded-http-1-ingress) publishes the
 effective limits, accept-loop overshoot, parser storage assumptions, and response-header cache
 safety policy. These controls do not supply independent raw-target/field-section accounting or
 the strict framing policy, so they do not promote either raw-ingress capability above.
@@ -266,7 +266,7 @@ terminal report. The boundaries remain `BestEffort` because none proves end-clie
   coordinator alive with `waitUntil`; deployed disconnect and completion timing remain unproved.
 - Fastly hands buffered heads and complete bodies to the host together, accounting transmitted
   source bytes once at successful handoff; this is not proof of client receipt. Actual streams
-  account synchronous body-handle writes through `stream_to_client` close, but Fastly cannot
+  account synchronous body-handle writes through close, but Fastly cannot
   preempt a blocked source poll or hostcall and loses the body handle if `finish` itself fails.
 - Spin owns the WASI response/body/result writers through handoff and races pending operations
   against its timer. An early successful host response-result observation is retired once without
@@ -378,10 +378,10 @@ an error under the unchanged aggregate deadline race. For first-byte/between-byt
 promise one fully elastic pool or bounded host teardown. Fastly's B31 timers no longer impose
 a fixed phase split; its separate deadline/host-blocking limitations remain unchanged.
 
-⁶ Fastly uses an undecorated, send-owning entrypoint and the low-level `stream_to_client` response
-lifetime. Scripted pump tests and the raw ABI Viceroy test prove the pieces, but the production
-`run_app` composition has not yet been exercised end to end under Viceroy. The lazy-passthrough
-cell therefore remains `BestEffort`; synchronous preemption and finish limitations separately
+⁶ Fastly uses an undecorated, send-owning entrypoint, commits the head once, and owns the streaming
+response lifetime through body-handle close. Scripted pump and raw ABI Viceroy tests provide
+local characterization, not hosted qualification. The lazy-passthrough cell remains
+`BestEffort`; synchronous preemption and finish limitations separately
 keep the response-egress cells BestEffort.
 
 ⁷ Spin writes one portable chunk at a time through the WASI body writer. Unit tests and target
@@ -394,6 +394,8 @@ but no deployed host-observed cancellation artifact currently proves a finite ca
 its outbound and streamed-upload deadline cells therefore remain `BestEffort`. Cloudflare also
 exposes normalized header strings rather than original raw octets and field boundaries, although
 it preserves the visible header semantics used by the client.
+Cloudflare authority override requests a wire Host distinct from the URI authority; provider
+routing and hosted delivery of that override remain unqualified, so support is BestEffort.
 
 ⁹ Fastly outbound HTTP uses dynamic backends, which must be enabled on the deployed service.
 The CLI cannot currently prove that entitlement. If disabled, dispatch returns a typed 502
@@ -548,6 +550,7 @@ Each `OutboundRequest` owns independent limits:
 
 | Control                      | Scope                                                                                                       | Default |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------- | ------- |
+| `timeout / deadline`         | Earliest configured timeout or absolute deadline                                                           | 30 s when neither is set |
 | `max_request_body_bytes`     | Buffered or streamed request bytes                                                                          | 8 MiB   |
 | `max_encoded_response_bytes` | Upstream transport bytes before decoding                                                                    | Unset   |
 | `max_decoded_response_bytes` | Identity or EdgeZero-decoded gzip/deflate/Brotli output                                                     | Unset   |
