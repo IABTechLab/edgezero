@@ -54,6 +54,18 @@ mod sdk {
     impl Guest for BodylessWire {
         async fn handle(request: Request) -> Result<Response, ErrorCode> {
             let path = request.get_path_with_query().unwrap_or_default();
+            if path == "/sdk-provider-diagnostics" {
+                drop(request);
+                if !fixture_spin_support::outbound::provider_error_payloads_hold() {
+                    return Err(ErrorCode::InternalError(Some(
+                        "SDK failure payload projection changed".to_owned(),
+                    )));
+                }
+                return json!({"provider_diagnostics":"pass", "cases":3,
+                    "source":"injected-sdk-error-values", "qualification":false})
+                .to_string()
+                .into_response();
+            }
             if path.starts_with("/progress/transport/") {
                 let incoming = SpinRequest::from_request(request)?;
                 let app = App::with_name_and_platform(

@@ -332,6 +332,9 @@ The CLI and HTTP components live in `crates/fixture-spin-async` and
 Pinned Wasmtime and Spin must already be installed (`WASMTIME_BIN`/`SPIN_BIN` may select them).
 The Rust runner checks every ready runtime-owned `unit/spin` marker in its owning phase and
 reopens the persisted JSONL to validate complete wire, policy and representation inventories.
+The wire component also projects injected SDK TLS-alert, unknown DNS-rcode and internal-error
+payloads through the real adapter mapper inside Spin 4.1. It checks retained numeric values and
+text-free diagnostics/wire output. This is runtime projection evidence, not a real DNS/TLS outage.
 The capability-metadata row is separately owned by the existing exact CLI command in Unit Settings;
 it cannot use an SDK log as a substitute.
 Criterion 11 requires both native shared-head tests, the CLI component's native SDK bodyless/205
@@ -1161,6 +1164,18 @@ completion, and client completion are distinct. Missing final summaries after a
 crash are not zero attempted requests.
 
 ## Fastly comparisons
+
+The existing custom smoke variants each exercise admission refusal, admission abort and a
+normalized-error detached abort. They correlate preparation/admission/delivery/terminal counts,
+instance and ordinal, assert finalization is skipped, and reject unused-origin or post-send work.
+Refusal commits one empty 403. Abort returns `FastlyRequestDelivery::Aborted`, with no response
+report or completion attempt;
+Viceroy's served-module path then sends its own empty default 200 when the guest sent nothing
+(`src/execute.rs`, downstream sender closure; `empty_ok_response_by_default` runtime test).
+The capture labels that response `host_default_after_no_send`, not EdgeZero egress or proof of
+transport abort. Closure before a head is separately recorded; timeouts are not accepted. Native
+converter panic controls cover GET/HEAD fallback and exactly-once reports on unwind-capable hosts,
+not panic containment on aborting WASM targets. No capability or hosted guarantee is promoted.
 
 The provider/application boundary is documented in
 [`Custom lifecycle contract`](../../docs/guide/adapters/fastly.md#custom-lifecycle-contract).

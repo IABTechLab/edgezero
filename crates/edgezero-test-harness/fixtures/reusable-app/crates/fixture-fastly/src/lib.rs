@@ -285,6 +285,7 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
     initialized(&obs, &token);
     let app = state.state().unwrap();
     let attempts = state.initialization_attempts();
+    let delivery_probe = req.get_path().starts_with("/delivery/");
     let client = Arc::new(Mutex::new(None::<HttpClient>));
     let request_client = Arc::clone(&client);
     let delivered = send_request_with_registries_and_hooks(
@@ -292,11 +293,20 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
         stores,
         req,
         |raw, extensions| {
+            if delivery_probe {
+                lifecycle("prepare_called", &obs, &token);
+                if raw.get_path() == "/delivery/detached-abort" {
+                    raw.set_url(format!("http://localhost/{}", "x".repeat(9 * 1024)));
+                }
+            }
             raw.set_header("x-fixture-mutated", "true");
             extensions.insert(obs.clone());
             extensions.insert(request_client);
         },
         |response| {
+            if delivery_probe {
+                lifecycle("finalize_called", &obs, &token);
+            }
             finalize_response(response, attempts);
             if reject_framing {
                 response
@@ -432,6 +442,16 @@ impl Hooks for MeasuredApp {
             std::hint::black_box(parsed);
         }
         FixtureApp::configure(app)?;
+        app.set_detached_response_egress_decision_factory(|head| {
+            use edgezero_core::{DetachedResponseEgressDecision, DEFAULT_RESPONSE_WRITE_BUDGET};
+            if head.error_kind() == "uri_too_long" {
+                println!("{}", serde_json::json!({"event":"detached_abort_factory",
+                    "instance":fixture_core::instance_id(),"error_kind":head.error_kind(),"status":head.status().as_u16()}));
+                DetachedResponseEgressDecision::Abort
+            } else {
+                DetachedResponseEgressDecision::Send { completion: ResponseEgressCompletion::empty(), deadline: head.write_deadline_after(DEFAULT_RESPONSE_WRITE_BUDGET) }
+            }
+        });
         app.set_ingress_admission_policy(|head| {
             let token = head
                 .headers()
@@ -439,8 +459,11 @@ impl Hooks for MeasuredApp {
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or("missing")
                 .to_owned();
-            AdmissionDecision::Admit {
-                completion: ResponseEgressCompletion::new(move |report| {
+            println!("{}", serde_json::json!({"event":"admission_entered", "token":token,"instance":fixture_core::instance_id()}));
+            if head.target().path() == "/delivery/admission-abort" {
+                return AdmissionDecision::Abort;
+            }
+            let completion = ResponseEgressCompletion::new(move |report| {
                     println!(
                         "{}",
                         serde_json::json!({"event":"egress_terminal","instance":fixture_core::instance_id(),
@@ -448,7 +471,15 @@ impl Hooks for MeasuredApp {
                             "body_kind":format!("{:?}",report.body_kind),"bytes_written":report.bytes_written,
                             "fallback":report.fallback_disposition.map(|value|format!("{value:?}"))})
                     );
-                }),
+                });
+            if head.target().path() == "/delivery/refuse" {
+                let mut response = CoreResponse::new(Body::empty());
+                *response.status_mut() = StatusCode::FORBIDDEN;
+                fixture_core::launch::stamp(&mut response);
+                return AdmissionDecision::Refuse { completion, response };
+            }
+            AdmissionDecision::Admit {
+                completion,
                 grant: IngressGrant::empty(),
                 read_deadline: head.read_deadline_after(DEFAULT_INBOUND_READ_BUDGET),
             }

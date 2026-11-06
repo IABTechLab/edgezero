@@ -45,6 +45,71 @@ use spin_sdk::wasip3::http_compat::BodyWriter;
 use spin_sdk::wasip3::wit_bindgen::StreamResult;
 use spin_sdk::wasip3::wit_future;
 
+/// Runs the real projection with injected SDK values inside the Spin HTTP runtime.
+pub fn provider_error_payloads_hold() -> bool {
+    use edgezero_core::SpinDnsRcode;
+    use edgezero_core::response::IntoResponse as _;
+    use spin_sdk::wasip3::http::types::{DnsErrorPayload, ErrorCode, TlsAlertReceivedPayload};
+
+    let now = MonotonicInstant::now();
+    let Some(expires) = now.checked_add(Duration::from_secs(1)) else {
+        return false;
+    };
+    for (source, expected) in [
+        (
+            ErrorCode::TlsAlertReceived(TlsAlertReceivedPayload {
+                alert_id: Some(255),
+                alert_message: Some("private-sdk-token".to_owned()),
+            }),
+            SpinFailureCause::TlsAlertReceived {
+                alert_id: Some(255),
+            },
+        ),
+        (
+            ErrorCode::DnsError(DnsErrorPayload {
+                rcode: Some("private-sdk-token".to_owned()),
+                info_code: Some(65535),
+            }),
+            SpinFailureCause::DnsError {
+                rcode: Some(SpinDnsRcode::Unknown),
+                info_code: Some(65535),
+            },
+        ),
+        (
+            ErrorCode::InternalError(Some("private-sdk-token".to_owned())),
+            SpinFailureCause::InternalError,
+        ),
+    ] {
+        let error = test_support::map_spin_host_error(
+            &source,
+            Deadline::at_instant(expires),
+            BudgetSource::PerCallTimeout,
+            now,
+            ProviderFailurePhase::Send,
+        );
+        if error.provider_failure_detail()
+            != Some(&ProviderFailureDetail::Spin {
+                phase: ProviderFailurePhase::Send,
+                cause: expected,
+            })
+            || format!("{:?}", error.provider_failure_detail()).contains("private-sdk-token")
+        {
+            return false;
+        }
+        let Ok(response) = error.into_response() else {
+            return false;
+        };
+        if !response.body().as_bytes().is_some_and(|bytes| {
+            !bytes
+                .windows(b"private-sdk-token".len())
+                .any(|part| part == b"private-sdk-token")
+        }) {
+            return false;
+        }
+    }
+    true
+}
+
 fn bodyless_request_resources_hold() -> bool {
     if !matches!(test_support::empty_request_trailers(), Ok(None)) {
         return false;

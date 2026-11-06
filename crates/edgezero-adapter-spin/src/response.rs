@@ -1371,6 +1371,57 @@ mod tests {
         }
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), panic = "unwind"))]
+    #[test]
+    fn policy_panic_keeps_framing_reasons_empty() {
+        use edgezero_core::response_egress_framing::test_support::policy_panic_fixture;
+
+        for method in [Method::GET, Method::HEAD] {
+            let head = method == Method::HEAD;
+            let fixture = policy_panic_fixture(method.clone());
+            let Err(failure) = fixture
+                .envelope
+                .begin(ResponseEgressFramingMode::ExplicitBufferedLength)
+            else {
+                panic!("policy rejection");
+            };
+            let (attempt, clock, cause) = failure.into_parts();
+            assert_eq!(cause, ResponseEgressOutcome::ConversionError);
+            assert!(fixture.completed.lock().expect("completion").is_empty());
+            assert!(fixture.observed.lock().expect("observer").is_empty());
+            let state = Rc::new(RefCell::new(MockState::default()));
+            let mut committer = MockCommitter::new(Rc::clone(&state));
+            let response =
+                start_fallback(&method, cause, attempt, &clock, &mut committer).expect("fallback");
+            committer.run_task();
+            assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(
+                state.borrow().accepted,
+                if head {
+                    b"".as_slice()
+                } else {
+                    INTERNAL_FALLBACK_BODY
+                }
+            );
+            assert_eq!(state.borrow().aborts, 0);
+            assert_eq!(committer.responses.borrow().len(), 1);
+            let completed = fixture.completed.lock().expect("completed").clone();
+            assert_eq!(completed.len(), 1);
+            assert_eq!(*fixture.observed.lock().expect("observed"), completed);
+            let report = &completed[0];
+            assert_eq!(report.outcome, ResponseEgressOutcome::ConversionError);
+            assert_eq!(report.body_kind, ResponseEgressBodyKind::Fallback);
+            assert_eq!(
+                report.fallback_disposition,
+                Some(ResponseEgressFallbackDisposition::Completed)
+            );
+            assert_eq!(report.bytes_written, if head { 0 } else { 21 });
+            assert_eq!(report.framing_failures.application(), None);
+            assert_eq!(report.framing_failures.fallback(), None);
+            assert!(report.source_failure.is_none());
+        }
+    }
+
     #[test]
     fn provider_diagnostics_reach_response_observer_before_deadline_arbitration() {
         use edgezero_core::error::BadGatewayReason;

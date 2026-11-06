@@ -953,6 +953,18 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
     let outcome: Result<((usize, usize), (usize, usize))> = (|| {
         let running = process.insert(Process::start(&mut command, &log, port)?);
         controls(port, &origins, &component_logs, running)?;
+        let diagnostic_reply =
+            net::request(port, "/sdk-provider-diagnostics", &token(), None, None)?;
+        let diagnostic_probe = guest(&diagnostic_reply)?;
+        require(
+            diagnostic_reply["status"] == 200
+                && diagnostic_probe
+                    == json!({
+            "provider_diagnostics":"pass", "cases":3, "source":"injected-sdk-error-values", "qualification":false}),
+            "Spin runtime provider diagnostics changed",
+        )?;
+        records.push(json!({"event":"provider-diagnostic-payloads", "adapter":"spin", "status":"pass",
+            "cases":3, "source":"injected-sdk-error-values", "client":diagnostic_reply, "qualification":false}))?;
         let mut matrix = Matrix {
             adapter: "spin",
             endpoint: "/p5",

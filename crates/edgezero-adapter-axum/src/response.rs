@@ -981,6 +981,50 @@ mod tests {
         }
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), panic = "unwind"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn policy_panic_keeps_framing_reasons_empty() {
+        use edgezero_core::ResponseEgressFallbackDisposition;
+        use edgezero_core::response_egress_framing::test_support::policy_panic_fixture;
+
+        for method in [Method::GET, Method::HEAD] {
+            let head = method == Method::HEAD;
+            let fixture = policy_panic_fixture(method);
+            let connection = EgressConnection::default();
+            let response = super::prepare_egress_response(fixture.envelope, &connection).await;
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let mut body = Box::pin(response.into_body());
+            let mut bytes = Vec::new();
+            while let Some(frame) = poll_future(|cx| body.as_mut().poll_frame(cx)).await {
+                bytes.extend_from_slice(frame.expect("fallback frame").data_ref().expect("data"));
+            }
+            drop(body);
+            assert_eq!(
+                bytes,
+                if head {
+                    b"".as_slice()
+                } else {
+                    INTERNAL_FALLBACK_BODY
+                }
+            );
+            assert!(connection.is_empty());
+            let completed = fixture.completed.lock().expect("completed").clone();
+            assert_eq!(completed.len(), 1);
+            assert_eq!(*fixture.observed.lock().expect("observed"), completed);
+            let report = &completed[0];
+            assert_eq!(report.outcome, ResponseEgressOutcome::ConversionError);
+            assert_eq!(report.body_kind, ResponseEgressBodyKind::Fallback);
+            assert_eq!(
+                report.fallback_disposition,
+                Some(ResponseEgressFallbackDisposition::Completed)
+            );
+            assert_eq!(report.bytes_written, if head { 0 } else { 21 });
+            assert_eq!(report.framing_failures.application(), None);
+            assert_eq!(report.framing_failures.fallback(), None);
+            assert!(report.source_failure.is_none());
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn provider_diagnostics_reach_response_observer_before_deadline_arbitration() {
         let detail = ProviderFailureDetail::Axum {

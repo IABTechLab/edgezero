@@ -49,6 +49,46 @@ impl ResponseEgressObserver for Observer {
     }
 }
 
+/// Constructs a valid response whose application egress policy panics.
+#[cfg(all(not(target_arch = "wasm32"), panic = "unwind"))]
+#[expect(
+    clippy::panic,
+    reason = "negative fixture exercises containment of application policy panics"
+)]
+#[must_use]
+#[inline]
+pub fn policy_panic_fixture(method: Method) -> FramingFixture {
+    use crate::response_egress::{ResponseEgressObserverHandle, ResponseEgressRequestMetadata};
+    use crate::router::RouteMetadata;
+
+    let now = MonotonicInstant::now();
+    let completed = Reports::default();
+    let observed = Reports::default();
+    let completion_reports = Arc::clone(&completed);
+    let envelope = ResponseEgressEnvelope::new(
+        Response::new(Body::from("must-not-escape")),
+        ResponseEgressRequestMetadata::new(
+            method.clone(),
+            now,
+            Some(RouteMetadata::new(method, "/policy-panic")),
+        ),
+        ResponseEgressCompletion::new(move |report| {
+            completion_reports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(report.clone());
+        }),
+        Arc::new(|_, _| panic!("private policy payload")),
+        ResponseEgressObserverHandle::new(Observer(Arc::clone(&observed))),
+        MonotonicClock::new(move || now),
+    );
+    FramingFixture {
+        completed,
+        envelope,
+        observed,
+    }
+}
+
 /// Constructs a malformed framing fixture.
 ///
 /// # Errors

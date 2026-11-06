@@ -457,6 +457,9 @@ fn fastly_variant(
             port,
         )?;
         let seen = fastly_probes(args, port, variant, repetition, records)?;
+        if args.suite == "smoke" && variant.starts_with("custom-") {
+            custom_delivery_checks(port, &backend, &log, variant, repetition, records)?;
+        }
         if ["c", "custom-c"].contains(&variant) {
             thread::sleep(Duration::from_secs(2));
             let reply = req(port, "/probe/after-idle")?;
@@ -521,6 +524,172 @@ fn fastly_variant(
         json!({"adapter":"fastly"}),
         outcome.and(teardown),
     )
+}
+
+fn custom_delivery_checks(
+    port: u16,
+    backend: &Backend,
+    log: &Path,
+    variant: &str,
+    repetition: usize,
+    records: &mut Records,
+) -> Result<()> {
+    for case in ["refuse", "admission-abort", "detached-abort"] {
+        let token = token();
+        let response = net::request(
+            port,
+            &format!("/delivery/{case}"),
+            &token,
+            Some(&backend.url(&format!("/chunks?token={token}"))),
+            None,
+        );
+        let wire = match response {
+            Ok(reply) if case == "refuse" => {
+                require(
+                    reply["status"] == 403
+                        && reply["body"] == ""
+                        && !reply["headers"].as_array().unwrap().iter().any(|field| {
+                            field[0] == "x-fixture-finalized" || field[0] == "x-fixture-attempts"
+                        }),
+                    "admission refusal wire response differs",
+                )?;
+                reply
+            }
+            Ok(reply) => {
+                // Viceroy execute.rs closes an unused sender with Response::default().
+                require(
+                    reply["status"] == 200
+                        && reply["body"] == ""
+                        && reply["headers"].as_array().is_some_and(|fields| {
+                            fields.iter().all(|field| {
+                                field[0] == "date"
+                                    || (field[0] == "content-length" && field[1] == "0")
+                            })
+                        }),
+                    "abort differs from Viceroy's empty default response",
+                )?;
+                json!({"host_default_after_no_send":reply,"not_edgezero_egress":true})
+            }
+            Err(error) if case != "refuse" => {
+                require(
+                    error.downcast_ref::<net::ResponseHeadAborted>().is_some(),
+                    "abort must not time out or fail after a partial head",
+                )?;
+                json!({"closed_before_head":true})
+            }
+            Err(error) => return Err(error),
+        };
+        await_evidence(|| {
+            require(
+                logs(log)
+                    .iter()
+                    .any(|event| event["event"] == "guest_completed" && event["token"] == token),
+                "missing policy delivery callback completion",
+            )
+        })?;
+        let events = logs(log);
+        let expected = if case == "refuse" {
+            json!({"disposition":"detached","commitment":"Committed","body_kind":"Application","outcome":"Completed","fallback":null,"may_send_native":false})
+        } else {
+            json!({"disposition":"aborted","commitment":null,"body_kind":null,"outcome":null,"fallback":null,"may_send_native":false})
+        };
+        validate_fastly_delivery_report(&token, &events, &expected)?;
+        for (name, count) in [
+            ("prepare_called", 1),
+            ("finalize_called", 0),
+            ("admission_entered", usize::from(case != "detached-abort")),
+            ("guest_completed", 1),
+        ] {
+            require(
+                events
+                    .iter()
+                    .filter(|event| event["event"] == name && event["token"] == token)
+                    .count()
+                    == count,
+                format!("policy delivery {name} count differs"),
+            )?;
+        }
+        let report = events
+            .iter()
+            .find(|event| event["event"] == "delivery_report" && event["token"] == token)
+            .ok_or("missing delivery report")?;
+        let position = |name: &str| {
+            events
+                .iter()
+                .position(|event| event["event"] == name && event["token"] == token)
+                .ok_or("missing policy lifecycle witness")
+        };
+        require(
+            position("request_start")? < position("prepare_called")?
+                && position("prepare_called")? < position("delivery_report")?
+                && position("delivery_report")? < position("guest_completed")?,
+            "policy delivery lifecycle ordering differs",
+        )?;
+        require(
+            events
+                .iter()
+                .filter(|event| event["token"] == token && event.get("instance").is_some())
+                .all(|event| {
+                    event["instance"] == report["instance"]
+                        && event
+                            .get("ordinal")
+                            .is_none_or(|ordinal| Some(ordinal) == report.get("ordinal"))
+                }),
+            "policy delivery crossed a request instance or ordinal",
+        )?;
+        require(
+            report.get("bytes_written")
+                == Some(&if case == "refuse" {
+                    json!(0)
+                } else {
+                    Value::Null
+                })
+                && report.get("no_attempt_reason") == Some(&Value::Null),
+            "policy delivery report invented bytes or a no-attempt cause",
+        )?;
+        if case == "detached-abort" {
+            let start = events
+                .iter()
+                .position(|event| event["event"] == "request_start" && event["token"] == token)
+                .ok_or("missing request start")?;
+            let end = events
+                .iter()
+                .position(|event| event["event"] == "guest_completed" && event["token"] == token)
+                .ok_or("missing request end")?;
+            require(
+                start < end
+                    && events[start..end]
+                        .iter()
+                        .filter(|event| {
+                            event["event"] == "detached_abort_factory"
+                                && event["instance"] == report["instance"]
+                                && event["error_kind"] == "uri_too_long"
+                                && event["status"] == 414
+                        })
+                        .count()
+                        == 1,
+                "missing normalized-error abort factory witness",
+            )?;
+        }
+        require(
+            !backend
+                .receipts
+                .lock()
+                .unwrap()
+                .contains(&format!("/post-send?token={token}")),
+            "detached or aborted delivery scheduled post-send work",
+        )?;
+        require(
+            !backend
+                .receipts
+                .lock()
+                .unwrap()
+                .contains(&format!("/chunks?token={token}")),
+            "policy refusal or abort contacted the unused backend",
+        )?;
+        records.push(json!({"event":"admission-delivery","variant":variant,"repetition":repetition,"case":case,"token":token,"status":"pass","client":wire,"qualification":false}))?;
+    }
+    Ok(())
 }
 
 const DECLARED_KV_FAILURE_CASES: [(&str, u16, usize); 7] = [
