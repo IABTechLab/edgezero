@@ -168,3 +168,55 @@ capture was moved to `workerd-before-46019b2d-cutoff`; immutable prior packets a
 RED/GREEN logs, source patch and capture provenance are under
 `/private/tmp/pr275-cutoff-coordinator/`. Unknown runner image, hosted/manual verification,
 exact-candidate acceptance mapping, freeze and durable publication remain separate open gates.
+
+## Merged-Head Native Characterization (2026-11-05)
+
+One unchanged lifecycle invocation ran on clean merged source
+`b56fccd2448dd7260c9353553cf3fe4c0b385273`, without concurrent builds, verification or a warmup.
+The actual Wasm SHA-256 is
+`5db99ff9dc2ce9a51d6eb4400358a1de4ad14f0a0beb1b4182debd92c54e8b10`.
+The existing suite reports **15 passing/four failing scenarios, exit 1**, plus failed tail
+validation. Pending-head/body cutoff returns at **203/202 ms**, within the original 205 ms
+bound. The cold path records admission **3 ms**, handler **8 ms** and Begin **9 ms** against
+the 7 ms upper bound. Timeout-before-cutoff origin EOF is **1307 ms** against 1305 ms; fast
+origin EOF is **286 ms** against 265 ms, and its Next returns at **336 ms** against 325 ms.
+The slow-origin diagnostic also retains EOF at 1306 ms. Ordinary-close cleanup remains unproved.
+No failure is waived, reanchored, attributed to scheduler noise or retried for credit.
+
+Raw results remain in the existing `outbound/lifetimes/workerd` output. The preceding capture
+is preserved separately as `workerd-before-b56fccd2-isolated`; earlier immutable packets are
+unchanged. The event stream SHA-256 is
+`3c36a72fca1fd54a26e29596e103da107c8bb577612bb3f6992ce1b145ad3b2f`.
+This is clean-source characterization before the following egress repair, not frozen-candidate
+qualification or evidence for later bytecode. Hosted and durable-publication gates remain open.
+
+## Absolute Response-Write Wait Repair (2026-11-05)
+
+Four deterministic regressions fail on the existing Workers egress race: setup consumes the
+whole budget, a pending source poll crosses expiry, a repoll sees expiry without a timer callback,
+and seven milliseconds of setup still registers the original ten-millisecond relative delay.
+The corrected race reuses the existing outbound absolute timer, checks cancellation and the
+application clock before and after operation polls, and never waits for notification to recognize
+observed expiry. Timer failures and regression remain transport failures.
+
+Full SDK validation caught an intermediate accounting regression: a completed four-byte write
+was hidden by earlier expiry arbitration. The unchanged ownership test now requires the accepted
+prefix as before. A private operation-kind distinction within the same race permits one noop-waker
+observation of an already-created native promise, never an expired body producer. Ready results
+retain the selected failure and accepted bytes; pending promises do not delay termination. No
+second executor, transport, timer implementation, public API or compatibility path is added.
+
+This fixes the deterministic write-wait gaps, not the native timing or ordinary-close failures
+above. The survivor's one-second ACK can expire while the controller still awaits victim cleanup,
+explaining the observed protocol reordering without demonstrating victim release. Failed-case
+records remain beyond the validated cursor, so the final tail error is consequential, not separate
+proof of a leak. Neither effect justifies weakening the strict cleanup gate or substituting reset.
+RED/GREEN and SDK logs are retained under `/private/tmp/pr275-egress-absolute-*.log`; temporary
+storage is not durable Q5 publication. Capability levels, provider pins and acceptance bounds
+remain unchanged.
+
+Verification passes all five root Rust gates (2,666 tests across 33 binaries, one existing
+ignored), all 134 Workers SDK tests and 30 contracts, and strict WASM lint with and without
+test utilities. Ten added WASM regressions run through the existing phase, without another
+runner or CI job. Both independent reviews find no remaining scoped defect. These results
+do not close the clean-head native failures, source freeze or manual hosted qualification.

@@ -13,6 +13,11 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Keep Workers response-write waits on the existing paired absolute timer, including operation
+  setup and source polls that remain pending. Recheck cancellation, expiry and clock regression
+  without waiting for every timer notification. Preserve already-ready native write results for
+  accepted-byte accounting without polling expired body producers or retrying native I/O; timer
+  failures remain transport failures. Hosted lifecycle qualification remains separate.
 - Give Workers batches an independent absolute observation-cutoff wait. At expiry, final-poll
   parked exchanges once to preserve earlier request timeouts and registered timer errors, then
   release the task group before terminal notification. Recheck expiry across child cleanup;

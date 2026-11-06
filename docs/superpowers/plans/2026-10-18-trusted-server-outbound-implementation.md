@@ -12,7 +12,13 @@
 
 ## Status and Authority
 
-The latest runtime repair is the
+The current repair is the
+[absolute Workers response-write wait](../../audits/2026-11-04-native-timing-and-disconnect.md#absolute-response-write-wait-repair-2026-11-05).
+It reuses the existing timer and race, preserves accepted native bytes and rejects expired source
+polls. The preceding clean merged-head native characterization retains four failed scenarios and
+the tail failure; it does not qualify the repair or supersede the original timing/cleanup gates.
+
+The preceding runtime repair is the
 [independent Workers batch cutoff](../../audits/2026-11-04-native-timing-and-disconnect.md#independent-batch-cutoff-2026-11-05).
 Its native run is working-tree characterization, not a replacement exact-candidate record.
 Cold-entry, fast-origin timing, ordinary-close cleanup and qualification gates remain open.

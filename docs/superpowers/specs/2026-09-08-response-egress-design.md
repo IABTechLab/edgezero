@@ -727,6 +727,15 @@ same task always polls an independent deadline timer, so no downstream pull is r
 expiry. On clean EOF it closes the writer before reporting `HostHandoff`; Workers exposes no
 socket-flush or response-pump completion callback.
 
+The deadline wait uses the adapter's existing paired absolute-timer primitive. Operation setup
+consumes that same budget; every poll checks the injected clock, including when a source remains
+pending or a timer callback has not notified. Timer setup/operational errors and observed clock
+regression remain transport failures, not fabricated timeouts. Cancellation retains precedence.
+After termination is selected, only an already-created native promise may receive one nonblocking
+observation poll to retain an available write result and its accepted-byte accounting. It cannot
+start another write, await a microtask, retry, or turn the terminal failure into success. An expired
+body producer is not polled. Pending native promises are dropped without waiting for settlement.
+
 Request abort and readable-side cancellation are complementary signals. Until deployed
 evidence proves that `Request.signal` means downstream response-consumer loss for a specific
 topology, it is `RequestCancelled`, not `ClientDisconnected`. A generic write rejection without
