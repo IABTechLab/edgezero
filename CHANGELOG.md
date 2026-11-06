@@ -491,8 +491,8 @@ their scope when introduced; the current summary supersedes their then-pending A
   provider-side cancellation.
 - Validate local/CI Fastly receive paths using the explicitly selected, hash-verified Viceroy
   source repair without replacing the installed runtime. Do not upgrade capabilities or claim
-  hosted qualification. Callback-wide ownership, eager public modes, full pipeline migration
-  and dispatch-slack retirement remain open.
+  hosted qualification. Later head-first checkpoints implement callback-wide ownership, eager
+  public modes and the shared pipeline, and retire dispatch-slack rejection; qualification remains open.
 - Gate the actual-client functional inventory through the existing harness's explicit
   `outbound-client-progress` suite. Preserve the broader `outbound-readiness` SDK diagnostic,
   strict timing assertions and failed observations separately. Functional CI requires complete
@@ -1341,9 +1341,9 @@ Earlier PR revisions additionally require these migrations:
   evidence; Fastly and Spin retain their documented phase-timer/teardown limitations.
 - Fastly fanout is dispatch-before-harvest, not guaranteed simultaneous overlap. Synchronous
   registration/body drain and bounded handle-selection groups limit completion order, cancellation,
-  and slot isolation; dynamic backends require provider enablement. A 25 ms dispatch-slack guard can
-  reject a still-live slot before synchronous cold registration, including heterogeneous hosts and
-  budgets. Cloudflare header fidelity and authority override remain `BestEffort`; Spin authority
+  and slot isolation; dynamic backends require provider enablement. The former dispatch-slack
+  rejection is removed; original deadlines still apply across heterogeneous hosts and budgets.
+  Cloudflare header fidelity and authority override remain `BestEffort`; Spin authority
   override is rejected because routing and authority cannot be separated through its provider API.
 - Response-egress abort, backpressure, completion, and write deadlines remain `BestEffort` on all
   adapters. An exactly-once guest lifecycle report does not prove end-client receipt or a finite

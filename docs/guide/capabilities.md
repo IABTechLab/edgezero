@@ -347,13 +347,14 @@ not included. These limitations block whole-response-lifetime certification.
     override is rejected before body polling or provider dispatch because the adapter cannot
     preserve the required routing/TLS separation.
 
-¹ Fastly cannot preempt cold dynamic-backend registration or guest-to-origin writes. Before a
-cache-miss registration in `start_batch_until`, EdgeZero checks the original absolute deadline.
-Preparation that takes more than 25 ms while that deadline remains live no longer causes an
-internal dispatch-slack error. Expiry is rechecked after synchronous preparation and registration;
-a late return retains the original timeout cause without restarting the budget. A cold registration
-that passes the entry check can still block. Removing the fixed slack refusal does not make SDK
-host calls preemptible or provide one end-to-end wall-clock guarantee. Fastly's B31 aggregate policy
+¹ Fastly response-header waits and body reads enforce the original absolute deadline and return
+`GatewayTimeout` with the selecting `BudgetSource` on expiry. The +5 ms window is a measured
+qualification target, not a guaranteed scheduler-resumption bound. Three synchronous preparation
+operations cannot be preempted: cold dynamic-backend registration, guest-to-origin writes, and
+the inbound read that settles a forwarded GET/HEAD. EdgeZero checks expiry before and after each
+such operation and rejects a late return without restarting the budget. The optimizer's separate
+synchronous exception is documented above. These limits do not provide one end-to-end wall-clock
+guarantee. Fastly's B31 aggregate policy
 anchors provider timers to the configured per-call timeout
 (clamped to seven days), or the original selected duration if no timeout is configured. It rounds
 up to milliseconds, then to the smallest of `2^0` through `2^29` milliseconds or the seven-day
