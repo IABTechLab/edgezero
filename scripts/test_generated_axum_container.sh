@@ -137,7 +137,8 @@ test -s "$WORK/os-roots.pem"
 node "$HELPERS" runtime-tar "$WORK/runtime.tar" "$PLATFORM"
 # Distroless contains no diagnostic shell or ldd. ELF inspection above and actual
 # HTTP/TLS execution below check the executable and its library/CA dependencies.
-[[ "$(docker image inspect "$IMAGE" --format '{{.Config.User}}')" == 10001:10001 ]]
+[[ "$(docker image inspect "$IMAGE" --format '{{.Config.User}}')" == 10001:10001 ]] \
+  || { echo 'Image must run as UID/GID 10001' >&2; exit 1; }
 
 # A private bridge supports loopback publication. Docker internal networks may not.
 docker network create "$NETWORK" >/dev/null
@@ -179,13 +180,15 @@ start_app() {
   "$ready" || { echo "$case_name never served its published port" >&2; exit 1; }
   test "$(cat "$WORK/root-body")" = "$NAME app"
   [[ "$(docker inspect "$container" --format '{{.Config.User}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}}')" \
-    == '10001:10001 true [ALL] [no-new-privileges:true]' ]]
+    == '10001:10001 true [ALL] [no-new-privileges:true]' ]] \
+    || { echo 'Container restrictions missing' >&2; exit 1; }
 }
 start_app trusted https://upstream:8443 \
   --tmpfs /app/.edgezero:rw,noexec,nosuid,size=1m,uid=10001,gid=10001,mode=0700 \
   --mount "type=bind,src=$WORK/trusted.pem,dst=/etc/ssl/certs/ca-certificates.crt,readonly"
 [[ "$(docker inspect "$ID-trusted" --format '{{index .HostConfig.Tmpfs "/app/.edgezero"}}')" \
-  == 'rw,noexec,nosuid,size=1m,uid=10001,gid=10001,mode=0700' ]]
+  == 'rw,noexec,nosuid,size=1m,uid=10001,gid=10001,mode=0700' ]] \
+  || { echo 'Container tmpfs settings missing' >&2; exit 1; }
 # Poll the controlled upstream too; its first request may race server startup.
 for _ in $(seq 1 30); do
   curl --silent --fail --max-time 5 "http://127.0.0.1:$PORT/proxy/index.html" > "$WORK/trusted-body" \
@@ -196,11 +199,13 @@ grep -q 'edgezero controlled TLS' "$WORK/trusted-body"
 # Only test rejection after proving the same endpoint is reachable and serving TLS.
 start_app untrusted https://upstream:8443
 status="$(curl --silent --max-time 35 -o "$WORK/untrusted-body" -w '%{http_code}' "http://127.0.0.1:$PORT/proxy/index.html")"
-[[ "$status" =~ ^5[0-9][0-9]$ ]]
+[[ "$status" =~ ^5[0-9][0-9]$ ]] \
+  || { echo 'Untrusted TLS request did not fail with HTTP 5xx' >&2; exit 1; }
 if grep -q 'edgezero controlled TLS' "$WORK/untrusted-body"; then exit 1; fi
 start_app wrong-host https://wrong-host:8443 --mount "type=bind,src=$WORK/trusted.pem,dst=/etc/ssl/certs/ca-certificates.crt,readonly"
 status="$(curl --silent --max-time 35 -o "$WORK/wrong-host-body" -w '%{http_code}' "http://127.0.0.1:$PORT/proxy/index.html")"
-[[ "$status" =~ ^5[0-9][0-9]$ ]]
+[[ "$status" =~ ^5[0-9][0-9]$ ]] \
+  || { echo 'Wrong-host TLS request did not fail with HTTP 5xx' >&2; exit 1; }
 if grep -q 'edgezero controlled TLS' "$WORK/wrong-host-body"; then exit 1; fi
 echo 'PASS: generated app context, native libraries, UID, read-only root, capabilities, tmpfs configuration, HTTP and controlled TLS.'
 echo 'Packaging only; no readiness, durable restart, SIGTERM or production certification.'

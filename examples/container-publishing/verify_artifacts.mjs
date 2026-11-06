@@ -303,8 +303,9 @@ export function scan_policy(report, exceptions, manifestDigest, today = new Date
   }
   if (policy === 'report-only') console.error(`WARNING: report-only scan: ${counts.HIGH} HIGH, ${counts.CRITICAL} CRITICAL package findings, ${fixable} with fixes. Packaging evidence only; not approved for release.`);
 }
-// Advisory inventory is report-only; OS release policy remains a separate gate.
-export function check_advisories(record, inputs) {
+// Inventory collection is report-only; strict release verification also gates Rust findings.
+export function check_advisories(record, inputs, { policy = 'strict' } = {}) {
+  require(['strict', 'report-only'].includes(policy), 'Invalid advisory policy');
   require(record.schema === 1 && record.lock_sha256 === inputs.lock_sha256, 'Advisory lockfile/input mismatch');
   require(record.tool?.name === 'cargo-audit' && typeof record.tool.version === 'string' &&
     /^[0-9]+\.[0-9]+\.[0-9]+(?![\s\S])/.test(record.tool.version), 'Advisory tool identity missing');
@@ -312,11 +313,19 @@ export function check_advisories(record, inputs) {
   require(typeof report?.database?.['last-commit'] === 'string' && /^[0-9a-f]{40}(?![\s\S])/.test(report.database['last-commit']) &&
     typeof report.database['last-updated'] === 'string' && !Number.isNaN(Date.parse(report.database['last-updated'])), 'Advisory database identity missing');
   require(equal(report.settings?.ignore, []) && equal(report.settings?.target_arch, []) && equal(report.settings?.target_os, []) &&
-    report.settings?.severity === null, 'Filtered advisory report');
+    report.settings?.severity === null && Array.isArray(report.settings?.informational_warnings) &&
+    equal(new Set(report.settings.informational_warnings), new Set(['unmaintained', 'unsound', 'notice'])), 'Filtered advisory report');
   require(Number.isSafeInteger(report.lockfile?.['dependency-count']) && report.lockfile['dependency-count'] > 0, 'Empty advisory inventory');
   const findings = report.vulnerabilities;
   require(Array.isArray(findings?.list) && findings.count === findings.list.length &&
     findings.found === (findings.count > 0), 'Invalid advisory findings');
+  const warnings = report.warnings;
+  require(warnings && typeof warnings === 'object' && !Array.isArray(warnings) &&
+    Object.values(warnings).every(Array.isArray), 'Invalid advisory warnings');
+  if (policy === 'strict') {
+    require(!findings.found, 'Blocked Rust vulnerabilities; see rust-advisories.json');
+    require(!warnings.unsound?.length, 'Blocked Rust unsound advisories; see rust-advisories.json');
+  }
 }
 export function check_inputs(inputs, revision, runId) {
   require(inputs.revision === revision, 'Input/source revision mismatch');
@@ -380,7 +389,7 @@ export async function verify(bundle, revision, runId, platform, exceptions, { po
   for (const [name, expected] of Object.entries(receipt.sidecars)) require(checksum(path.join(bundle, name)) === expected, 'Metadata checksum mismatch');
   const inputs = load(path.join(bundle, 'inputs.json'));
   check_inputs(inputs, revision, runId);
-  check_advisories(load(path.join(bundle, 'rust-advisories.json')), inputs);
+  check_advisories(load(path.join(bundle, 'rust-advisories.json')), inputs, { policy });
   const provenance = load(path.join(bundle, 'provenance.json'));
   require(provenance.subject === info.manifest_digest && provenance.revision === revision, 'Provenance subject/source mismatch');
   require(equal(provenance.inputs, inputs) && provenance.run_id === runId, 'Provenance input/run mismatch');

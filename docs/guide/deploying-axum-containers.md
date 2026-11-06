@@ -129,7 +129,7 @@ publishing that new digest.
 
 ## Kubernetes
 
-The [Kubernetes guide draft](https://github.com/IABTechLab/edgezero/blob/91cb3e65c9f220fe8c5c5f5c6a8ddfd3b23cee5b/docs/superpowers/specs/2026-10-14-deploying-axum-kubernetes.md) selects kind and
+The [Kubernetes guide draft](https://github.com/IABTechLab/edgezero/blob/main/docs/superpowers/specs/2026-10-14-deploying-axum-kubernetes.md) selects kind and
 Envoy Gateway for disposable-cluster verification, with plain manifests and
 separate local stateless, AWS-provider and single-writer redb profiles. The planned
 AWS profile includes AppConfig Agent, Secrets Manager and DynamoDB after accepted
@@ -147,7 +147,7 @@ provides explicit `X86_64`/`ARM64` task architecture, read-only root settings an
 configurable stop timeout. This fits the native image and avoids pretending a
 container's local disk is durable redb storage.
 
-The [AWS reference deployment draft](https://github.com/IABTechLab/edgezero/blob/91cb3e65c9f220fe8c5c5f5c6a8ddfd3b23cee5b/docs/superpowers/plans/2026-10-14-aws-reference-deployment.md)
+The [AWS reference deployment draft](https://github.com/IABTechLab/edgezero/blob/main/docs/superpowers/plans/2026-10-14-aws-reference-deployment.md)
 extends this direction with AppConfig Agent, Secrets Manager, an ECR publishing
 option and an optional DynamoDB profile. It defines acceptance checks and open
 design decisions, not verified cloud support.

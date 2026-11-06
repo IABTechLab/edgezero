@@ -3,9 +3,6 @@ name: Deploy actions
 on:
   pull_request:
     paths:
-      # ANY workflow or action change must start the repository-wide pin gate (and
-      # the smokes) — including a brand-new action directory or an unrelated
-      # workflow like test.yml that could introduce a floating ref.
       - .github/actions/**
       - .github/workflows/**
       - .github/zizmor.yml
@@ -26,9 +23,6 @@ on:
   push:
     branches: [main]
     paths:
-      # ANY workflow or action change must start the repository-wide pin gate (and
-      # the smokes) — including a brand-new action directory or an unrelated
-      # workflow like test.yml that could introduce a floating ref.
       - .github/actions/**
       - .github/workflows/**
       - .github/zizmor.yml
@@ -55,6 +49,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Keep validator versions paired with .github/workflows/axum-container.yml.
   ACTIONLINT_VERSION: 1.7.7
   ZIZMOR_VERSION: 1.16.3
   YQ_VERSION: 4.53.3
@@ -89,8 +84,7 @@ jobs:
           "$RUNNER_TEMP/tools/bin/actionlint" -shellcheck='shellcheck -S warning'
 
       - name: Third-party action pin gate
-        run: |
-          .github/actions/deploy-core/tests/check-action-pins.sh
+        run: .github/actions/deploy-core/tests/check-action-pins.sh
 
       - name: Zizmor security scan
         run: '"$RUNNER_TEMP/tools/bin/zizmor" --offline .github'
@@ -103,10 +97,6 @@ jobs:
             .github/actions/deploy-core/tests/*.sh \
             scripts/install-actionlint.sh \
             scripts/install-yq.sh
-
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
-        with:
-          node-version-file: .tool-versions
 
       - name: Bash contract tests
         run: .github/actions/deploy-core/tests/run.sh

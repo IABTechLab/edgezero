@@ -223,9 +223,10 @@ The verifier's `verify` and `index` commands accept `--scan-policy report-only`;
 policy comes from the caller, never from a bundle's receipt or scan metadata.
 
 The default is `strict`. The application release workflow and `release-record`
-always use strict verification. High and Critical findings block release,
-including findings without a fix. The publishing helper rejects report-only
-policy for GHCR before any publication; only its disposable loopback destination
+always use strict verification. High and Critical image findings block release,
+including findings without a fix. Rust vulnerabilities and `unsound` warnings
+also block strict verification, as described below. The publishing helper rejects
+report-only policy for GHCR before any publication; only its disposable loopback destination
 permits it. Neither policy uses `--ignore-unfixed` or an unreviewed ignore file.
 
 Exceptions must come from an independently trusted, owner-reviewed policy file,
@@ -245,7 +246,7 @@ a waiver before registry login or publication. Supporting exceptions in an
 adapted workflow requires a separately reviewed approval path and the same
 trusted list supplied to every verification and the signed release record.
 
-## Rust dependency advisory inventory
+## Rust dependency advisory policy
 
 Each native build job installs `cargo-audit` 0.22.2 from its checksum-pinned
 source crate at `static.crates.io`, using `cargo install --path --locked` with
@@ -255,13 +256,21 @@ hash, audit tool version, advisory database identity and complete JSON report.
 It is checksummed with the other bundle sidecars and its lockfile binding and
 unfiltered report shape are verified during handoff and publication.
 
-This inventory is report-only: advisory findings are retained, while execution
-errors, missing database identity, ignored/filtered reports and lockfile mismatch
-fail the check. It does not silently extend the OS High/Critical exception policy
-to Rust advisories or certify reachability of every locked crate. Application
-owners must define advisory release policy before claiming complete dependency
-acceptance. The image scanner's SBOM is still not independent analysis of every
-statically linked Rust dependency.
+Inventory collection and framework packaging verification are report-only:
+findings are retained, while execution errors, missing database identity,
+ignored/filtered reports and lockfile mismatch fail the check. Under `strict`,
+`verify`, `index` and `release-record` also reject any Rust vulnerability or
+`unsound` warning. Other informational warnings remain report-only. Both
+policies require a complete warning inventory, so omitting or corrupting it
+cannot bypass the strict gate.
+
+This gate applies to the complete prepared lockfile, including dependencies that
+may not be reachable in the final application. It does not certify reachability
+or independent analysis of every statically linked Rust dependency. Applications
+must fix blocked dependencies before releasing with this recipe. The OS
+High/Critical exception file does not waive Rust findings, and the sample has no
+automatic Rust advisory exception path. Any adapted advisory waiver policy needs
+separate owner review.
 
 Registry publication/attestation verification and production runtime/deployment
 acceptance require their own retained execution evidence. See

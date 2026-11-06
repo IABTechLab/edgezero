@@ -63,8 +63,9 @@ function fixture(root, arch = 'amd64', revision = REV, variant = undefined) {
   put(path.join(root, 'rust-advisories.json'), {
     schema: 1, lock_sha256: 'c'.repeat(64), tool: { name: 'cargo-audit', version: '0.22.2' },
     report: { database: { 'last-commit': 'd'.repeat(40), 'last-updated': '2026-10-28T00:00:00Z' },
-      lockfile: { 'dependency-count': 1 }, settings: { ignore: [], target_arch: [], target_os: [], severity: null },
-      vulnerabilities: { found: false, count: 0, list: [] } },
+      lockfile: { 'dependency-count': 1 }, settings: { ignore: [], target_arch: [], target_os: [], severity: null,
+        informational_warnings: ['unmaintained', 'unsound', 'notice'] },
+      vulnerabilities: { found: false, count: 0, list: [] }, warnings: {} },
   });
   put(path.join(root, 'scan.json'), { SchemaVersion: 2, Metadata: { ImageID: config.digest, DiffIDs: [diffId], OS: { Family: 'debian' } }, Results: [{ Class: 'os-pkgs', Type: 'debian', Target: 'fixture', Vulnerabilities: [] }] });
   put(path.join(root, 'scanner.json'), { Version: 'test', VulnerabilityDB: { UpdatedAt: '2026-10-07' }, SubjectManifestDigest: image.digest });
@@ -367,6 +368,18 @@ caseTest('release record recomputes committed source', async ({ root }) => {
       digest: { sha256: String(index + 1).repeat(64) },
     }]);
   }
+  const advisoryFile = path.join(bundles[0], 'rust-advisories.json');
+  const cleanAdvisory = v.load(advisoryFile);
+  for (const [field, value, error] of [
+    ['vulnerabilities', { found: true, count: 1, list: [{ advisory: { id: 'RUSTSEC-test' } }] }, /Blocked Rust vulnerabilities/],
+    ['warnings', { unsound: [{ advisory: { id: 'RUSTSEC-test' } }] }, /Blocked Rust unsound advisories/],
+  ]) {
+    put(advisoryFile, { ...cleanAdvisory, report: { ...cleanAdvisory.report, [field]: value } });
+    v.seal(bundles[0], revision, '123-1', 'linux/amd64');
+    await assert.rejects(v.release_record(source, bundles, data, revision, '123-1', []), error);
+  }
+  put(advisoryFile, cleanAdvisory);
+  v.seal(bundles[0], revision, '123-1', 'linux/amd64');
   // A dirty working tree must not replace the committed source used above.
   fs.writeFileSync(path.join(source, 'Cargo.lock'), 'dirty working tree');
   assert.equal((await v.release_record(source, bundles, data, revision, '123-1', [])).source.lock_sha256, sha(contents['Cargo.lock']));
@@ -398,6 +411,32 @@ caseTest('advisory sidecar binds to the prepared lockfile under both policies', 
     await assert.rejects(v.verify(root, REV, '123-1', 'linux/amd64', [], { policy }), /Advisory lockfile\/input mismatch/);
   }
 });
+for (const [kind, findings, error] of [
+  ['vulnerabilities', { vulnerabilities: { found: true, count: 1, list: [{ advisory: { id: 'RUSTSEC-test' } }] } }, /Blocked Rust vulnerabilities/],
+  ['unsound warnings', { warnings: { unsound: [{ advisory: { id: 'RUSTSEC-test' } }] } }, /Blocked Rust unsound advisories/],
+]) {
+  caseTest(`strict verify and index reject Rust ${kind} while report-only retains them`, async ({ root, seal, cli, arm }) => {
+    const file = path.join(root, 'rust-advisories.json');
+    const record = v.load(file);
+    put(file, { ...record, report: { ...record.report, ...findings } });
+    const receipt = seal();
+    assert.deepEqual(await v.verify(root, REV, '123-1', 'linux/amd64', [], { policy: 'report-only' }), receipt);
+    const strict = run(cli);
+    assert.notEqual(strict.status, 0);
+    assert.match(strict.stderr, error);
+    assert.equal(run([...cli, '--scan-policy', 'report-only']).status, 0);
+    const index = ['index', root, arm(), '--revision', REV, '--run-id', '123-1'];
+    const strictIndex = run(index);
+    assert.notEqual(strictIndex.status, 0);
+    assert.match(strictIndex.stderr, error);
+    assert.equal(run([...index, '--scan-policy', 'report-only']).status, 0);
+    // OS exceptions cannot waive the separate Rust release gate.
+    await assert.rejects(v.verify(root, REV, '123-1', 'linux/amd64', [{
+      manifest_digest: receipt.manifest_digest, vulnerability: 'RUSTSEC-test', package: 'tokio',
+      owner: 'operator', reason: 'OS policy only', expires: '2100-01-01',
+    }]), error);
+  });
+}
 caseTest('index requires two same-run variants', ({ seal }) => {
   const one = seal(), two = { ...one, platform: 'linux/arm64', manifest_digest: 'sha256:' + 'c'.repeat(64) };
   assert.deepEqual(new Set(v.runtime_index([one, two]).manifests.map(manifest => manifest.platform.architecture)), new Set(['amd64', 'arm64']));

@@ -100,7 +100,8 @@ if [[ "$MODE" == build ]]; then
   curl --fail --silent --show-error --location \
     "https://static.crates.io/crates/cargo-audit/cargo-audit-${CARGO_AUDIT_VERSION}.crate" \
     --output "$WORK/cargo-audit.crate"
-  printf '%s  %s\n' "$CARGO_AUDIT_SHA256" "$WORK/cargo-audit.crate" | sha256sum --check --strict
+  [[ "$(sha256sum "$WORK/cargo-audit.crate" | awk '{print $1}')" == "$CARGO_AUDIT_SHA256" ]] \
+    || { echo 'cargo-audit checksum mismatch' >&2; exit 1; }
   mkdir "$WORK/audit-source"
   tar -xzf "$WORK/cargo-audit.crate" -C "$WORK/audit-source"
   [[ -f "$WORK/audit-source/cargo-audit-$CARGO_AUDIT_VERSION/Cargo.lock" ]] \

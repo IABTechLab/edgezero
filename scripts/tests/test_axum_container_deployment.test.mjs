@@ -28,7 +28,8 @@ docker() {
           echo 'mock teardown failed' >&2
           return 42
         fi ;;
-      config|stop) ;;
+      config) return "$CONFIG_EXIT" ;;
+      stop) ;;
       *) return 97 ;;
     esac
   elif [[ "$1" == inspect ]]; then
@@ -63,7 +64,7 @@ function runSmoke(t, overrides = {}, name = 'container-probe') {
   const result = spawnSync('bash', [script, 'localhost/app@sha256:' + 'a'.repeat(64), name], {
     encoding: 'utf8', timeout: 5000,
     env: { ...process.env, BASH_ENV: bashEnv, TMPDIR: directory, MOCK_DIR: directory,
-      FAIL_PHASE: '', WRONG_BODY_PHASE: '', EXPECTED_NAME: name, STOP_EXIT: '0', DOWN_FAILURES: '0',
+      FAIL_PHASE: '', WRONG_BODY_PHASE: '', EXPECTED_NAME: name, STOP_EXIT: '0', DOWN_FAILURES: '0', CONFIG_EXIT: '0',
       RESTRICTIONS: '10001:10001 true [ALL] [no-new-privileges:true]', ...overrides },
   });
   assert.ifError(result.error);
@@ -83,6 +84,17 @@ test('Compose smoke polls both starts and refreshes the published port', t => {
   assert.ok(result.events.includes('compose stop'));
   assert.ok(result.events.includes('compose start'));
   assert.equal(result.events.filter(event => event === 'compose down').length, 1);
+  assert.equal(result.events.at(-1), 'compose down');
+});
+
+test('Compose config failure preserves its status and visible diagnostics', t => {
+  const result = runSmoke(t, { CONFIG_EXIT: '43', DOWN_FAILURES: '1' });
+  assert.equal(result.status, 43);
+  assert.doesNotMatch(result.stdout, /PASS:/);
+  const diagnostics = result.stderr.match(/Diagnostics: ([^\n]+)/)?.[1];
+  assert.ok(diagnostics, result.stderr);
+  assert.match(readFileSync(join(diagnostics, 'cleanup-compose.log'), 'utf8'), /fixture container logs/);
+  assert.ok(!result.events.includes('compose up'));
   assert.equal(result.events.at(-1), 'compose down');
 });
 

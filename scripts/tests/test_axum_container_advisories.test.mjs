@@ -35,7 +35,8 @@ for (const scenario of ['success', 'bad checksum', 'missing lock']) {
     fs.writeFileSync(path.join(bin, 'cargo'), `#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.INSTALLED, JSON.stringify({ args: process.argv.slice(2), rust: process.env.RUSTUP_TOOLCHAIN }));\n`, { mode: 0o755 });
     // Execute the shipping block, but use a tiny local archive and no network or Cargo.
     const block = handoff.slice(handoff.indexOf('  curl --fail --silent --show-error --location'), handoff.indexOf('  mkdir "$WORK/audit-home"'));
-    assert.ok(block.includes('sha256sum --check --strict'));
+    assert.ok(!block.includes('sha256sum --check'));
+    assert.ok(block.includes('sha256sum "$WORK/cargo-audit.crate"'));
     const result = spawnSync('bash', ['-euo', 'pipefail', '-c', block], { encoding: 'utf8', env: {
       ...process.env, PATH: `${bin}:${process.env.PATH}`, WORK: work, rust_pin: '1.95.0',
       CARGO_AUDIT_VERSION: auditVersion,
@@ -52,8 +53,10 @@ for (const scenario of ['success', 'bad checksum', 'missing lock']) {
     } else {
       assert.notEqual(result.status, 0);
       assert.ok(!fs.existsSync(installed));
-      if (scenario === 'bad checksum') assert.ok(!fs.existsSync(path.join(work, 'audit-source')));
-      else assert.match(result.stderr, /Expected packaged cargo-audit lockfile/);
+      if (scenario === 'bad checksum') {
+        assert.match(result.stderr, /cargo-audit checksum mismatch/);
+        assert.ok(!fs.existsSync(path.join(work, 'audit-source')));
+      } else assert.match(result.stderr, /Expected packaged cargo-audit lockfile/);
     }
   });
 }
@@ -69,7 +72,8 @@ function fixture(t, { count = 0, status = Number(count > 0), version = '0.22.2' 
   const report = {
     database: { 'last-commit': 'a'.repeat(40), 'last-updated': '2026-10-28T00:00:00Z' },
     lockfile: { 'dependency-count': 1 },
-    settings: { ignore: [], target_arch: [], target_os: [], severity: null },
+    settings: { ignore: [], target_arch: [], target_os: [], severity: null,
+      informational_warnings: ['unmaintained', 'unsound', 'notice'] },
     vulnerabilities: { found: count > 0, count, list: count ? [{ advisory: { id: 'RUSTSEC-2026-0001' } }] : [] },
     warnings: {},
   };
@@ -100,20 +104,42 @@ test('audit rejects mismatched lock bytes before invoking the tool', t => {
   assert.throws(() => auditLock(f.lock, f.inputsFile, f.output, '/missing/tool', '0.22.2'), /lockfile\/input mismatch/);
   assert.ok(!fs.existsSync(f.output));
 });
+test('strict advisory policy permits other informational warnings but not vulnerabilities or unsoundness', t => {
+  const f = fixture(t);
+  const record = { schema: 1, lock_sha256: f.inputs.lock_sha256, tool: { name: 'cargo-audit', version: '0.22.2' }, report: f.report };
+  record.report.warnings = { unmaintained: [{ advisory: { id: 'RUSTSEC-test' } }], unsound: [] };
+  assert.doesNotThrow(() => check_advisories(record, f.inputs));
+  record.report.warnings.unsound.push({ advisory: { id: 'RUSTSEC-test' } });
+  assert.throws(() => check_advisories(record, f.inputs), /Blocked Rust unsound advisories/);
+  assert.doesNotThrow(() => check_advisories(record, f.inputs, { policy: 'report-only' }));
+  record.report.warnings.unsound = [];
+  record.report.vulnerabilities = { found: true, count: 1, list: [{ advisory: { id: 'RUSTSEC-test' } }] };
+  assert.throws(() => check_advisories(record, f.inputs), /Blocked Rust vulnerabilities/);
+  assert.doesNotThrow(() => check_advisories(record, f.inputs, { policy: 'report-only' }));
+});
 for (const mutate of [
   r => { delete r.report.database; },
   r => { r.report.settings.ignore = ['RUSTSEC-2026-0001']; },
   r => { r.report.settings.target_arch = ['aarch64']; },
   r => { r.report.settings.target_os = ['linux']; },
   r => { r.report.settings.severity = 'high'; },
+  r => { delete r.report.settings.informational_warnings; },
+  r => { r.report.settings.informational_warnings = []; },
+  r => { r.report.settings.informational_warnings = ['unsound']; },
+  r => { r.report.settings.informational_warnings = ['unmaintained', 'notice']; },
   r => { r.report.lockfile['dependency-count'] = 0; },
   r => { r.report.vulnerabilities.count = 1; },
   r => { r.report.vulnerabilities.found = true; },
+  r => { delete r.report.warnings; },
+  r => { r.report.warnings = []; },
+  r => { r.report.warnings.unsound = {}; },
 ]) {
   test(`advisory validation rejects missing or filtered evidence: ${mutate}`, t => {
     const f = fixture(t);
     const record = { schema: 1, lock_sha256: f.inputs.lock_sha256, tool: { name: 'cargo-audit', version: '0.22.2' }, report: f.report };
     mutate(record);
-    assert.throws(() => check_advisories(record, f.inputs));
+    for (const policy of ['strict', 'report-only']) {
+      assert.throws(() => check_advisories(record, f.inputs, { policy }));
+    }
   });
 }

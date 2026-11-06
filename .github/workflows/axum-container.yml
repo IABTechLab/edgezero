@@ -48,21 +48,19 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Keep validator versions paired with .github/workflows/deploy-action.yml.
   ACTIONLINT_VERSION: 1.7.7
   ZIZMOR_VERSION: 1.16.3
   YQ_VERSION: 4.53.3
 
 jobs:
-  prepare:
+  static-checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
-        with:
-          node-version-file: .tool-versions
       - name: Install pinned validation binaries
         run: |
           bin="$RUNNER_TEMP/tools/bin"
@@ -89,6 +87,16 @@ jobs:
       - name: ShellCheck Axum container scripts
         run: shellcheck -e SC1091 scripts/*axum_container*.sh examples/container-publishing/publish.sh
 
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .tool-versions
       - name: Use the declared Rust toolchain
         run: |
           version=$(awk '$1 == "rust" { print $2 }' .tool-versions)
@@ -183,7 +191,7 @@ jobs:
           retention-days: 7
 
   handoff:
-    needs: native
+    needs: [static-checks, native]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:

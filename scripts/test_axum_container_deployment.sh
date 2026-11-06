@@ -17,7 +17,8 @@ wait_for_http() {
     sleep 1
   done
   curl --fail --silent --max-time 2 "http://127.0.0.1:$PORT/" > "$WORK/body"
-  [[ "$(< "$WORK/body")" == "$NAME app" ]]
+  [[ "$(< "$WORK/body")" == "$NAME app" ]] \
+    || { echo 'Unexpected HTTP response body' >&2; exit 1; }
 }
 cleanup() {
   status=$?
@@ -31,13 +32,14 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
-compose config > "$WORK/config.yaml"
+compose config > "$WORK/config.yaml" || { status=$?; exit "$status"; }
 compose up -d --no-build --pull never
 CONTAINER="$(compose ps -q app)"
 PORT="$(compose port app 8787 | awk -F: '{print $NF}')"
 wait_for_http
 [[ "$(docker inspect "$CONTAINER" --format '{{.Config.User}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}}')" \
-  == '10001:10001 true [ALL] [no-new-privileges:true]' ]]
+  == '10001:10001 true [ALL] [no-new-privileges:true]' ]] \
+  || { echo 'Compose restrictions missing' >&2; exit 1; }
 compose stop
 [[ "$(docker inspect "$CONTAINER" --format '{{.State.ExitCode}}')" == 0 ]] \
   || { echo 'Container did not stop cleanly' >&2; exit 1; }
@@ -45,6 +47,6 @@ compose start
 PORT="$(compose port app 8787 | awk -F: '{print $NF}')"
 wait_for_http
 compose logs > "$WORK/compose.log" 2>&1 || true
-compose down > "$WORK/teardown.log" 2>&1
+compose down > "$WORK/teardown.log" 2>&1 || { status=$?; exit "$status"; }
 echo 'PASS: no-store Compose config, restricted HTTP startup, stop/start and teardown.'
 echo 'No production readiness, durable state or bounded SIGTERM acceptance is implied.'

@@ -339,7 +339,7 @@ npm ci --prefix scripts --ignore-scripts
 ./scripts/test_generated_axum_container.sh /path/to/container-probe
 ```
 
-See the [smoke script prerequisites](https://github.com/IABTechLab/edgezero/blob/d7c4ee9e4a9db1d547272b3f13a6177f10098dba/scripts/test_generated_axum_container.sh)
+See the [smoke script prerequisites](https://github.com/IABTechLab/edgezero/blob/main/scripts/test_generated_axum_container.sh)
 for the authoritative tool list. CI uses the Node version in `.tool-versions`;
 this is a tested pin, not a different minimum-version requirement. The separate
 handoff helper additionally needs jq, rustup and Cargo for its advisory inventory.

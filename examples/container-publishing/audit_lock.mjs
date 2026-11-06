@@ -19,11 +19,11 @@ export function auditLock(lockfile, inputsFile, output, binary, version) {
   assert.ok(result.status === 0 || result.status === 1, `cargo-audit execution failed (${result.status})`);
   const report = JSON.parse(result.stdout);
   const record = { schema: 1, lock_sha256: inputs.lock_sha256, tool: { name: 'cargo-audit', version }, report };
-  check_advisories(record, inputs);
+  check_advisories(record, inputs, { policy: 'report-only' });
   assert.equal(result.status, Number(report.vulnerabilities.found), 'Unexpected cargo-audit result status');
   assert.equal(checksum(lockfile), inputs.lock_sha256, 'Audit lockfile changed during inspection');
   fs.writeFileSync(output, JSON.stringify(record, null, 2) + '\n');
-  console.error(`Rust advisory inventory: ${report.vulnerabilities.count} vulnerabilities; report-only, not release approval.`);
+  console.error(`Rust advisory inventory: ${report.vulnerabilities.count} vulnerabilities, ${report.warnings.unsound?.length ?? 0} unsound warnings; report-only, not release approval.`);
   return record;
 }
 
