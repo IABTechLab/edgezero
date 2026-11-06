@@ -305,19 +305,25 @@ where
             })
     });
     let mut receiver = bind_batch(scope, polling);
-    let observation = progress.with_current(|| {
+    let mut ready = Vec::new();
+    progress.with_current(|| {
         scope
             .with(|| {
                 let mut cx = Context::from_waker(Waker::noop());
-                poll_current(&mut cx);
-                receiver.as_mut().poll_next(&mut cx)
+                loop {
+                    poll_current(&mut cx);
+                    match receiver.as_mut().poll_next(&mut cx) {
+                        Poll::Ready(Some(event)) => ready.push(event),
+                        Poll::Pending | Poll::Ready(None) => break,
+                    }
+                }
             })
-            .unwrap_or_else(|error| Poll::Ready(Some(OutboundBatchDriverEvent::Failed(error))))
+            .unwrap_or_else(|error| ready.push(OutboundBatchDriverEvent::Failed(error)));
     });
-    if let Poll::Ready(Some(event)) = observation {
-        iter([event]).chain(receiver).boxed_local()
-    } else {
+    if ready.is_empty() {
         receiver
+    } else {
+        iter(ready).chain(receiver).boxed_local()
     }
 }
 

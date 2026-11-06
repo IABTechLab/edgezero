@@ -5605,6 +5605,16 @@ mod fastly_impl {
                     Deadline::at_instant(trace.entered + Duration::from_secs(1)),
                 )
             });
+            assert_eq!(
+                *trace.events.borrow(),
+                [
+                    ("register", expected[0].clone()),
+                    ("send", expected[0].clone()),
+                    ("register", expected[1].clone()),
+                    ("send", expected[1].clone()),
+                ],
+                "every live slot must dispatch before batch setup returns"
+            );
             let OutboundBatchCheck::Item(item) = batch.check().expect("expired slot") else {
                 panic!("the expired slot must be recorded during batch setup");
             };
@@ -5624,17 +5634,6 @@ mod fastly_impl {
                     .as_mut()
                     .poll(&mut Context::from_waker(Waker::noop()))
             });
-            let events = trace.events.borrow();
-            assert_eq!(
-                *events,
-                [
-                    ("register", expected[0].clone()),
-                    ("send", expected[0].clone()),
-                    ("register", expected[1].clone()),
-                    ("send", expected[1].clone()),
-                ]
-            );
-            drop(events);
             trace.advance(Duration::from_secs(1));
             let result = match continued {
                 Poll::Ready(result) => result.expect("continued batch"),

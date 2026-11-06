@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Dispatch every live Fastly batch slot before setup returns, even when an earlier slot
+  completes synchronously. Buffer immediate outcomes through the existing scheduler without
+  waiting for provider readiness; retain indices, deadlines and undrained-prefix cleanup.
 - Replace Workers response-egress abort polling with one owned event listener per active
   operation. Unregister it on completion or drop, release retained wakers, and keep cancellation,
   absolute deadlines and native accepted-byte accounting intact. This removes periodic abort

@@ -1397,6 +1397,57 @@ mod tests {
     }
 
     #[test]
+    fn batch_bootstrap_buffers_ready_events_and_releases_an_undrained_prefix() {
+        use super::super::scope::schedule_batch;
+        use edgezero_core::{OutboundBatchDriverEvent, OutboundScopeOwner, OutboundTime};
+
+        for terminal in [false, true] {
+            let callback = OutboundScopeOwner::callback();
+            let (progress, observed, now) = fixture();
+            let started = *now.lock().unwrap();
+            let released = Rc::new(Cell::new(0));
+            let owner = handle(99, 0, false, &released);
+            let dispatched = Rc::new(Cell::new(0_usize));
+            let recorded = Rc::clone(&dispatched);
+            let source = stream! {
+                let _owner = owner;
+                for index in 0..3 {
+                    recorded.set(recorded.get() + 1);
+                    yield OutboundBatchDriverEvent::Item {
+                        index,
+                        completed_at: started,
+                        outcome: Err(EdgeError::bad_request("immediate slot failure")),
+                    };
+                }
+                recorded.set(recorded.get() + 1);
+                if terminal {
+                    yield OutboundBatchDriverEvent::Cutoff;
+                } else {
+                    pending::<()>().await;
+                }
+            };
+            let time = OutboundTime::new(progress.clock(), super::wait_current);
+            let mut receiver = callback
+                .with(|| schedule_batch(&callback.scope(), source, &progress, &time, started));
+            assert_eq!(dispatched.get(), 4, "setup must not stop at a ready item");
+            assert!(observed.borrow().waits.is_empty());
+            assert!(matches!(
+                receiver
+                    .as_mut()
+                    .poll_next(&mut Context::from_waker(Waker::noop())),
+                Poll::Ready(Some(OutboundBatchDriverEvent::Item { index: 0, .. }))
+            ));
+            assert_eq!(released.get(), usize::from(terminal));
+            drop(receiver);
+            assert_eq!(
+                released.get(),
+                1,
+                "dropping a queued prefix releases its source"
+            );
+        }
+    }
+
+    #[test]
     fn callback_idle_consumer_observes_complete_pipeline_at_terminal_time() {
         use super::super::scope::schedule_batch;
         use edgezero_core::{OutboundBatchDriverEvent, OutboundScopeOwner, OutboundTime};
