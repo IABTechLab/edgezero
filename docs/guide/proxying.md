@@ -550,6 +550,15 @@ provider DNS/TLS phase coverage still need qualification. Spin passes it as an a
 host refuses it. Axum and Cloudflare accept it at BestEffort, retaining aggregate enforcement;
 they do not create per-request clients to emulate an independent phase timer.
 
+DNS and TLS phase coverage is target-specific:
+
+- Fastly: provider coverage remains unverified until hosted qualification.
+- Spin: coverage is host-defined and unverified on Spin 4.1.
+- Axum: the independent setting is not applied; DNS, TCP connect and TLS are bounded only by
+  the aggregate deadline.
+- Cloudflare: the independent setting is not applied; DNS, TCP connect and TLS are bounded only
+  by the aggregate deadline.
+
 ## Begin An Exchange
 
 `begin` settles a permitted unknown GET/HEAD body, then schedules the complete exchange before
