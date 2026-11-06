@@ -4,6 +4,17 @@ mod platforms;
 
 const ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
 
+fn ci_cargo_command(sentinels: Option<&str>) -> Command {
+    // Keep the PATH proxy instead of executing inherited Cargo metadata through Bash.
+    if let Some(sentinels) = sentinels {
+        let mut command = Command::new("bash");
+        command.args(["scripts/run_test_nonzero.sh", sentinels, "cargo"]);
+        command
+    } else {
+        Command::new("cargo")
+    }
+}
+
 fn read_artifact(path: &Path) -> Result<String> {
     let mut text = String::new();
     fs::File::open(path)?
@@ -215,7 +226,6 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
         "CI runtime suite requires the Spin adapter",
     )?;
     let repo = repository_root();
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let wasmtime = pinned_tool("WASMTIME_BIN", "wasmtime", &repo, run, records)?;
     let spin = pinned_tool("SPIN_BIN", "spin", &repo, run, records)?;
 
@@ -255,35 +265,32 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
     let sdk_log = phase(
         "spin",
         "sdk-tests",
-        Command::new("bash")
-            .args([
-                "scripts/run_test_nonzero.sh",
-                "router_dispatches_get_and_returns_response\nspin_error_code_table_is_exhaustive",
-            ])
-            .arg(&cargo)
-            .args([
-                "test",
-                "--offline",
-                "--locked",
-                "-p",
-                "edgezero-adapter-spin",
-                "--no-default-features",
-                "--features",
-                "spin,test-utils",
-                "--target",
-                "wasm32-wasip2",
-                "--test",
-                "contract",
-                "--test",
-                "sdk_resources",
-            ])
-            .env(
-                "CARGO_TARGET_WASM32_WASIP2_RUNNER",
-                format!(
-                    "{} run -W component-model-async=y -S p3=y -S http=y",
-                    wasmtime.display()
-                ),
+        ci_cargo_command(Some(
+            "router_dispatches_get_and_returns_response\nspin_error_code_table_is_exhaustive",
+        ))
+        .args([
+            "test",
+            "--offline",
+            "--locked",
+            "-p",
+            "edgezero-adapter-spin",
+            "--no-default-features",
+            "--features",
+            "spin,test-utils",
+            "--target",
+            "wasm32-wasip2",
+            "--test",
+            "contract",
+            "--test",
+            "sdk_resources",
+        ])
+        .env(
+            "CARGO_TARGET_WASM32_WASIP2_RUNNER",
+            format!(
+                "{} run -W component-model-async=y -S p3=y -S http=y",
+                wasmtime.display()
             ),
+        ),
         &repo,
         run,
         records,
@@ -309,7 +316,7 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
     phase(
         "spin",
         "async-build",
-        Command::new(&cargo)
+        ci_cargo_command(None)
             .args(["build", "--offline", "--locked", "--manifest-path"])
             .arg(fixtures.join("Cargo.toml"))
             .env("CARGO_TARGET_DIR", fixtures.join("target"))
@@ -396,6 +403,21 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ci_commands_use_the_cargo_proxy_instead_of_toolchain_metadata() {
+        let mut sdk = ci_cargo_command(Some("required"));
+        sdk.arg("test");
+        assert_eq!(sdk.get_program(), "bash");
+        assert_eq!(
+            sdk.get_args().collect::<Vec<_>>(),
+            ["scripts/run_test_nonzero.sh", "required", "cargo", "test"]
+        );
+        let mut build = ci_cargo_command(None);
+        build.arg("build");
+        assert_eq!(build.get_program(), "cargo");
+        assert_eq!(build.get_args().collect::<Vec<_>>(), ["build"]);
+    }
 
     #[test]
     fn diagnostic_bytes_do_not_replace_the_failed_command_status() {
