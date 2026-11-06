@@ -277,7 +277,7 @@ impl FastlyRequestContext {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use edgezero_core::body::Body;
     use edgezero_core::http::{StatusCode, request_builder};
@@ -285,6 +285,7 @@ mod tests {
     use std::net::IpAddr;
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::str::FromStr as _;
+    use std::sync::Once;
     #[cfg(not(target_arch = "wasm32"))]
     use std::thread;
 
@@ -292,6 +293,7 @@ mod tests {
 
     std::thread_local! {
         static REGISTRATION_LOGS: RefCell<Vec<(log::Level, String)>> = const { RefCell::new(Vec::new()) };
+        static REGISTRATION_CHECK: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
     }
 
     impl log::Log for RegistrationLogger {
@@ -303,12 +305,39 @@ mod tests {
 
         fn log(&self, record: &log::Record<'_>) {
             if self.enabled(record.metadata()) {
+                REGISTRATION_CHECK.with(|saved| {
+                    if let Some(check) = saved.borrow().as_ref() {
+                        check();
+                    }
+                });
                 REGISTRATION_LOGS.with(|logs| {
                     logs.borrow_mut()
                         .push((record.level(), record.args().to_string()));
                 });
             }
         }
+    }
+
+    #[cfg(feature = "fastly")]
+    pub(crate) fn capture_registration_logs<Output>(
+        check: impl Fn() + 'static,
+        operation: impl FnOnce() -> Output,
+    ) -> (Output, Vec<(log::Level, String)>) {
+        init_registration_logger();
+        REGISTRATION_LOGS.with(|logs| logs.borrow_mut().clear());
+        REGISTRATION_CHECK.with(|saved| saved.replace(Some(Box::new(check))));
+        let output = operation();
+        REGISTRATION_CHECK.with(RefCell::take);
+        (output, REGISTRATION_LOGS.with(RefCell::take))
+    }
+
+    fn init_registration_logger() {
+        static LOGGER: RegistrationLogger = RegistrationLogger;
+        static INITIALIZED: Once = Once::new();
+        INITIALIZED.call_once(|| {
+            log::set_logger(&LOGGER).expect("one logger in this unit-test binary");
+            log::set_max_level(log::LevelFilter::Trace);
+        });
     }
 
     fn public_wire(outcome: Result<u8, &str>) -> (StatusCode, Vec<u8>) {
@@ -332,9 +361,7 @@ mod tests {
     fn registration_warning_obeys_fifty_millisecond_boundary() {
         use crate::lifecycle::with_callback;
         use edgezero_core::{MonotonicClock, MonotonicInstant};
-        static LOGGER: RegistrationLogger = RegistrationLogger;
-        log::set_logger(&LOGGER).expect("one logger in this unit-test binary");
-        log::set_max_level(log::LevelFilter::Trace);
+        init_registration_logger();
         let start = MonotonicInstant::now();
         let now = Arc::new(Mutex::new(start));
         let sampled = Arc::clone(&now);

@@ -1072,6 +1072,8 @@ mod fastly_impl {
         budget_remaining(budget, clock)?;
         if let Some((registered_identity, backend)) = cache.get(&name) {
             if registered_identity != &identity {
+                drop(cache);
+                log::warn!("Fastly backend refused: settings mismatch");
                 return Err(EdgeError::internal(anyhow::anyhow!(
                     "dynamic backend name collision; refusing to reuse"
                 )));
@@ -1079,10 +1081,31 @@ mod fastly_impl {
             return Ok(backend.clone());
         }
         let result = register(&name, &identity)?;
-        finish_backend_creation(result, budget, clock, |backend| {
+        let refusal = match &result {
+            Err(BackendCreationError::NameInUse) => {
+                Some("Fastly backend refused: name already in use")
+            }
+            Err(
+                BackendCreationError::BetweenBytesTimeoutTooLarge(_)
+                | BackendCreationError::ConnectTimeoutTooLarge(_)
+                | BackendCreationError::EncodingError(_)
+                | BackendCreationError::FirstByteTimeoutTooLarge(_)
+                | BackendCreationError::InvalidHealthcheckValue(_)
+                | BackendCreationError::NameTooLong(_),
+            ) => Some("Fastly backend refused: rejected configuration"),
+            Ok(_) | Err(BackendCreationError::Disallowed | BackendCreationError::HostError(_)) => {
+                None
+            }
+        };
+        let outcome = finish_backend_creation(result, budget, clock, |backend| {
             cache.insert(name, (identity, backend.clone()));
             Ok(backend)
-        })
+        });
+        drop(cache);
+        if let Some(reason) = refusal {
+            log::warn!("{reason}");
+        }
+        outcome
     }
 
     fn build_fastly_request(
@@ -4080,6 +4103,65 @@ mod fastly_impl {
         }
 
         #[test]
+        fn backend_refusals_log_once_without_payloads_or_registry_lock() {
+            use crate::context::tests::capture_registration_logs;
+
+            let start = MonotonicInstant::now();
+            let budget = clock_budget(start, Duration::from_secs(1));
+            let clock = constant_clock(start);
+            let request = OutboundRequest::get("https://private-token.invalid/").expect("request");
+            let (identity, _) = backend_identity(request, budget).expect("identity");
+            for (mismatch, failure, message) in [
+                (true, None, "Fastly backend refused: settings mismatch"),
+                (
+                    false,
+                    Some(BackendCreationError::NameInUse),
+                    "Fastly backend refused: name already in use",
+                ),
+                (
+                    false,
+                    Some(BackendCreationError::NameTooLong(
+                        "provider-private-token".to_owned(),
+                    )),
+                    "Fastly backend refused: rejected configuration",
+                ),
+            ] {
+                let registry = Arc::new(Mutex::new(HashMap::new()));
+                if mismatch {
+                    let mut other = identity.clone();
+                    other.wire_authority = "other-private-token.invalid".to_owned();
+                    registry
+                        .lock()
+                        .expect("registry")
+                        .insert(backend_name(&identity), (other, 7_u8));
+                }
+                let checked = Arc::clone(&registry);
+                let (outcome, logs) = capture_registration_logs(
+                    move || {
+                        assert!(
+                            checked.try_lock().is_ok(),
+                            "logger must run outside registry lock"
+                        );
+                    },
+                    || {
+                        cached_backend(&registry, identity.clone(), budget, &clock, None, |_, _| {
+                            assert!(!mismatch, "collision must not register");
+                            Ok(Err(failure.expect("provider refusal")))
+                        })
+                    },
+                );
+                let error = outcome.expect_err("refused backend");
+                assert!(matches!(error, EdgeError::Internal { .. }));
+                assert_eq!(logs, vec![(log::Level::Warn, message.to_owned())]);
+                assert!(!error.message().contains("private-token"));
+                assert_eq!(
+                    registry.lock().expect("registry").len(),
+                    usize::from(mismatch)
+                );
+            }
+        }
+
+        #[test]
         fn b31_registry_retains_late_success_and_rechecks_cached_deadlines() {
             let start = MonotonicInstant::now();
             let budget = clock_budget(start, Duration::from_secs(1));
@@ -5782,7 +5864,17 @@ mod fastly_impl {
                         &result.slots()[index],
                         OutboundCollectedSlot::Unresolved
                             | OutboundCollectedSlot::Resolved(edgezero_core::OutboundSlotResult {
-                                outcome: Ok(_) | Err(EdgeError::BadGateway { .. }),
+                                outcome: Ok(_)
+                                    | Err(EdgeError::BadGateway { .. }
+                                        | EdgeError::Internal {
+                                            provider_detail: Some(ProviderFailureDetail::Fastly {
+                                                phase: ProviderFailurePhase::ResponseHeaders,
+                                                cause: FastlyFailureCause::InternalError {
+                                                    status: Some(1_i32)
+                                                },
+                                            }),
+                                            ..
+                                        }),
                                 ..
                             })
                     ),

@@ -481,6 +481,9 @@ fixed-size and text-free: it carries no URLs, header values, body bytes or provi
 does not change framework wire responses or existing error classification. Framework code does
 not log provider detail; any future framework logging must be debug or lower. Application logging
 and correlation remain application-owned. Fixed framing-rule error logs are separate.
+Fastly backend settings mismatch, name-in-use and rejected-configuration refusals also emit one
+fixed category-only warning after releasing the registry lock. These warnings contain no provider
+detail, backend name, host or URL and do not change the public error.
 
 This row publishes the implemented SDK projection, not full EZ-16 acceptance, invocation-bound
 scope ownership, explicit redirect following, hosted cause provenance, cancellation or client delivery.
