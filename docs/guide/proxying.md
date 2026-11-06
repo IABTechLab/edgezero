@@ -288,7 +288,14 @@ Viceroy and services without the feature return typed `BadGatewayReason::ImageOp
 The SDK's optimizer call is synchronous and cannot be cancelled while executing. Its complete
 blocking horizon is **unknown**: a timeout does not promise prompt return from that call. When
 control returns, the original absolute deadline wins, including over a late successful transform.
+The call can exceed twice the effective remaining budget, especially when an absolute deadline
+shortens a reusable backend's configured per-call timeout. Measure elapsed from original method
+entry, and record host-call entry and return separately. The +5 ms tolerance is a measured
+qualification target, not a hard scheduler guarantee or a finite blocking horizon. Cold backend
+registration or GET/HEAD settlement that returns after the original deadline fails preparation
+without entering the optimizer.
 Normal header/body limits, content-encoding policy and lazy streamed delivery apply to the result.
+Post-head body reads retain that same original outbound deadline.
 Hosted transformation and performance parity remain unqualified.
 
 EdgeZero retains the built target and signature-bearing headers subject to normal filtering.

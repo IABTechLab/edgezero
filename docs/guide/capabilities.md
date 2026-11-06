@@ -322,9 +322,16 @@ not included. These limitations block whole-response-lifetime certification.
     optimizer service. Region is required; only bodiless GET/HEAD with default caching are
     supported. Viceroy has no optimizer and returns typed `ImageOptimizerUnavailable` (502).
     The synchronous call cannot be interrupted and its full blocking horizon is unknown.
+    It can exceed twice the effective remaining budget, especially when an absolute deadline
+    shortens a reusable backend's configured per-call timeout. Measure elapsed from the original
+    method entry and record host-call entry and return separately; +5 ms is a measured
+    qualification target, not a hard scheduler guarantee or a finite blocking horizon.
+    Cold registration or forwarded GET/HEAD settlement that returns after the deadline fails
+    preparation and never enters the optimizer.
     The original absolute deadline is checked before dispatch and after return; late results
     are rejected, not granted additional budget. Existing response limits and lazy streamed
-    handling apply afterward. Begun requests and batch slots reject the option. Explicit redirect
+    handling apply afterward under the same original outbound deadline, including post-head body
+    reads. Begun requests and batch slots reject the option. Explicit redirect
     following uses the same supported single-send mapping on each hop, without another fetch,
     buffering or serialization. No hosted transformation, pooling or performance qualification is claimed.
 
