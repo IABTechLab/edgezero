@@ -586,6 +586,12 @@ ownership, so dropping the completed pending handle cannot abort that body. The 
 continues to govern it. Axum manual eager clients require an active Tokio `LocalSet`; standard
 server entrypoints already supply one. See target guides for scheduling and teardown limitations.
 
+A streamed response fed by a begun request lives until the earlier of that request's deadline,
+measured from `begin`, and the response write deadline, which defaults to 30 s from
+`egress_started_at` (the start of the response-write attempt). Once egress starts, waiting for
+the body counts against both budgets. Holding it before egress still consumes the begun request's
+budget; an application-supplied absolute egress deadline may also include that earlier queue time.
+
 ## Batch Requests
 
 `start_batch_until` accepts buffered request bodies and buffered response mode only. It yields
