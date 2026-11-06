@@ -72,6 +72,7 @@ Sources: [Cloudflare Workers limits](https://developers.cloudflare.com/workers/p
 | `ingress-admission`              | Native      | Native      | Native      | Native      |
 | `ingress-admission-abort`        | Native      | BestEffort  | BestEffort  | BestEffort  |
 | `inbound-read-deadlines`         | Native      | BestEffort  | BestEffort  | BestEffort  |
+| Host-certified empty inbound bodies | Native | Native[^empty-inbound] | BestEffort | Unsupported[^empty-inbound] |
 | `raw-ingress-head-limits`        | Unsupported | Unsupported | Unsupported | Unsupported |
 | `raw-ingress-framing-validation` | Unsupported | Unsupported | Unsupported | Unsupported |
 
@@ -113,18 +114,24 @@ after admission for any method, without reading them. The body remains Initial, 
 framing remains `HostManaged`. Local HTTP/1 GET/HEAD forwards with absent framing or
 `Content-Length: 0` succeed even after the inbound read deadline when passed through
 `into_request`; core's first `body_bytes` deadline check is unchanged and can still return 408.
-Unknown streams, including chunked-empty and nonempty GET controls that still return 400 without
-origin contact, retain their existing behavior. This narrow
-conversion checkpoint does not complete general GET/HEAD settlement, add a capability row or
-promote any matrix cell.
+The shared facade settles unknown GET/HEAD sources before backend setup: clean empty EOF may
+proceed, while the first nonempty byte returns 400 without origin contact. Settlement preserves
+the original outbound budget and inbound limits; a forward that must read can return 408.
 
 Fastly preserves actual SDK body absence (`try_take_body() == None`) as buffered empty after
 admission, without constructing an SDK body. Every present SDK body stays lazy: zero host length
 does not certify EOF or account for SDK-prefetched bytes and pending writes. Normal Fastly
-`from_client()` requests carry a body handle even when bodiless, so general GET/HEAD forwarding
-remains unfinished. This changes no matrix cell or framing claim. See
+`from_client()` requests carry a body handle even when bodiless. The shared GET/HEAD settlement
+path handles those present sources too; the synchronous host read remains non-preemptible and
+its deadline BestEffort. This does not establish raw framing guarantees. See
 [Fastly ingress conversion](./adapters/fastly.md#ingress-body-conversion) for the SDK and deadline
 boundaries.
+
+[^empty-inbound]: Host-certified empty inbound bodies is a behavior row, not a declarable
+    manifest capability. Cloudflare preserves SDK-certified absence, but the workerd runtime
+    leg remains unverified. Spin preserves explicit `Content-Length: 0` without constructing a
+    read stream; other host-certified absence is Unsupported. This is not generic header-based
+    emptiness inference on other adapters.
 
 Inbound readers and body extractors return 413 for byte-cap overflow, 400 for malformed
 payloads, and 408 for an expired admitted read deadline. Demo and scaffold fallback policies

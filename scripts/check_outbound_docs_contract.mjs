@@ -82,6 +82,13 @@ const expectedIngressRows = [
     'BestEffort',
   ],
   [
+    'Host-certified empty inbound bodies',
+    'Native',
+    'Native',
+    'BestEffort',
+    'Unsupported',
+  ],
+  [
     'raw-ingress-head-limits',
     'Unsupported',
     'Unsupported',
@@ -1594,6 +1601,9 @@ if (JSON.stringify(actualMemoryRows) !== JSON.stringify(expectedMemoryRows)) {
   )
 }
 const normalizedCapabilitySource = capabilitySource.replaceAll(/\s+/gu, ' ')
+if (!normalizedCapabilitySource.includes(
+  'Host-certified empty inbound bodies is a behavior row, not a declarable manifest capability.'
+)) fail('empty-body behavior must not be advertised as a manifest capability')
 for (const fragment of [
   'SDK failure evidence, not stronger transport guarantees',
   'pinned Viceroy can report an internal cause',
