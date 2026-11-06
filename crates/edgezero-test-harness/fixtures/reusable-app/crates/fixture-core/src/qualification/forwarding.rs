@@ -250,7 +250,7 @@ async fn forward(ctx: RequestContext, State(signal): State<Value>) -> Result<Res
                 "begin requires a buffered request body; use send for a streamed upload" => {
                     "streamed_begin"
                 }
-                "image_optimizer is not supported by fastly batches"
+                "image_optimizer is not supported by fastly begun requests or batches"
                 | "image_optimizer is not supported by cloudflare"
                 | "image_optimizer is not supported by spin" => "unsupported_option",
                 _ => "other",

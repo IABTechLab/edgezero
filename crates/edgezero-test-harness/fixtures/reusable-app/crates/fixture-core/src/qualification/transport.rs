@@ -158,7 +158,9 @@ fn error(error: &EdgeError) -> Value {
         "image_optimizer is not supported by axum"
         | "image_optimizer is not supported by cloudflare"
         | "image_optimizer is not supported by spin"
-        | "image_optimizer is not supported by fastly batches" => Some("unsupported_optimizer"),
+        | "image_optimizer is not supported by fastly begun requests or batches" => {
+            Some("unsupported_optimizer")
+        }
         "GET/HEAD request must not carry a body" => Some("get_body"),
         "image_optimizer requires GET or HEAD" => Some("optimizer_method"),
         text if text.contains("image_optimizer") && text.contains("cache") => {

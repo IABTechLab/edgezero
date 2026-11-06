@@ -6308,7 +6308,7 @@ fn validate_supported_options(
         && matches!(mode, OutboundSendMode::Batch | OutboundSendMode::Begin)
     {
         return Err(EdgeError::bad_request(
-            "image_optimizer is not supported by fastly batches",
+            "image_optimizer is not supported by fastly begun requests or batches",
         ));
     }
     Ok(())
@@ -6349,6 +6349,28 @@ mod send_failure_policy_tests {
 
     use super::testing;
     use super::*;
+
+    #[test]
+    #[cfg(any(feature = "fastly", feature = "test-utils"))]
+    fn optimizer_rejection_names_begun_requests_and_batches() {
+        use edgezero_core::{OutboundImageOptimizerOptions, OutboundImageOptimizerRegion};
+        let request = OutboundRequest::get("https://fixture.invalid/image")
+            .expect("request")
+            .image_optimizer(
+                OutboundImageOptimizerOptions::new().region(OutboundImageOptimizerRegion::UsEast),
+            );
+        for mode in [OutboundSendMode::Begin, OutboundSendMode::Batch] {
+            let error = validate_supported_options(&request, mode).expect_err("unsupported mode");
+            assert_eq!(error.status().as_u16(), 400);
+            assert_eq!(
+                error.message(),
+                "image_optimizer is not supported by fastly begun requests or batches"
+            );
+        }
+        for mode in [OutboundSendMode::Send, OutboundSendMode::Follow] {
+            validate_supported_options(&request, mode).expect("supported native mode");
+        }
+    }
 
     fn scripted_optimizer_return(
         duration: Duration,
