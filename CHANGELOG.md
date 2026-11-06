@@ -1156,7 +1156,7 @@ their scope when introduced; the current summary supersedes their then-pending A
   `after(Duration)` resolves in `ResponseEgressEnvelope::begin` and excludes time before egress
   starts. Preserve the selected deadline through policy, framing, conversion, and delivery.
 - Replace response-object handoff and whole-stream buffering with adapter-owned response pumps:
-  Axum's Hyper connection, Cloudflare's writer/abort lifetime, Fastly's manual `stream_to_client`,
+  Axum's Hyper connection, Cloudflare's writer/abort lifetime, Fastly's adapter-owned streaming body handle,
   and Spin's owned WASI response/body/result writers. Account accepted payload prefixes and release
   sources on timeout, disconnect, source failure, and terminal transport errors.
 - Fix Spin streamed egress when its host response-result future succeeds before body production
@@ -1245,11 +1245,11 @@ maximum before entering an adapter runner. `resolve_logging_level(&EnvConfig)` s
 level resolution. Managed Axum/Fastly loggers retain `edgezero::boot` warnings and errors at
 `Warn` even when ordinary logging is `Error` or `Off`. Cloudflare/Spin initializers remain no-ops.
 
-Fastly `runtime_env_config` now returns `FastlyRuntimeConfig` with an `env` field and bounded
-deferred diagnostics. Custom callers must initialize logging and call `emit_boot_diagnostics()`;
-the former direct `EnvConfig` return is removed, with no compatibility alias. Managed runners
-initialize logging before application configuration. Axum now returns logger-setup errors instead
-of ignoring them; preinstalled backends must use `owns_logging = true`.
+Fastly `runtime_env_config`, `FastlyRuntimeConfig`, and `emit_boot_diagnostics()` are removed.
+Custom entrypoints use baked `Hooks::logging_for("fastly")` and logical store aliases through
+`Hooks::stores()`. Managed runners initialize logging before application configuration. Axum
+returns logger-setup errors instead of ignoring them; preinstalled backends must use
+`owns_logging = true`.
 
 Axum's `run_app_with_preflight` supports checks after logger setup and before configuration or
 listener binding. The bundled demo uses it without first installing the CLI logger. Terminal CLI
@@ -1279,20 +1279,20 @@ errors remain visible on stderr regardless of runtime logging level.
 
 ### Additional Hard Migrations
 
-| Removed or changed API                                                                                | Replacement                                                                                                             |
-| ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `ProxyClient`, `ProxyHandle`, `ProxyRequest`, `ProxyResponse`, `ProxyService`, adapter `*ProxyClient` | `OutboundHttpClient`, `HttpClient`, `OutboundRequest`, `OutboundResponse`, client forwarding, adapter `*OutboundClient` |
-| Infallible proxy request constructors and tuple `into_parts()`                                        | Fallible `OutboundRequest` constructors / `from_parts` and structured `OutboundRequestParts`                            |
-| Proxy request extension access and `body_mut()`                                                       | Application-owned state and outbound request builders / structured parts                                                |
-| `Body::from_stream` with arbitrary external errors                                                    | Typed `EdgeError` items, or `Body::from_external_stream` for external errors                                            |
-| Synchronous/unbounded request-context body access                                                     | Async `body_bytes(max)`, `json_within(max)`, `form_within(max)`; fallible `take_body()` / `into_request()`              |
-| `EdgeError::MethodNotAllowed.allowed: String`                                                         | Structured `Vec<Method>` used to render the mandatory `Allow` header                                                    |
-| `config_out_of_date_from_serde`                                                                       | `store_deserialization_from_serde` and `EdgeError::StoreExtraction { reason, .. }`                                      |
-| Store implementations with only unbounded reads                                                       | Required `ConfigStore::get_bounded` / `SecretStore::get_bytes_bounded` implementations                                  |
-| Decoder helpers without a memory policy                                                               | Codec helpers accepting decoder budgets and Brotli window policy                                                        |
-| Response-returning Fastly entrypoints and `#[fastly::main]`                                           | An undecorated `main` calling a send-owning adapter runner                                                              |
-| Transport-blind response converters and stream-buffer fallback constants                              | Adapter-owned response-egress coordinators                                                                              |
-| Fastly `runtime_env_config(...) -> EnvConfig`                                                         | `FastlyRuntimeConfig`, using `.env` and `emit_boot_diagnostics()` after logger setup                                    |
+| Removed or changed API                                                                                | Replacement                                                                                                                                                        |
+| ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ProxyClient`, `ProxyHandle`, `ProxyRequest`, `ProxyResponse`, `ProxyService`, adapter `*ProxyClient` | `OutboundHttpClient`, `HttpClient`, `OutboundRequest`, `OutboundResponse`, client forwarding, adapter `*OutboundClient`                                            |
+| Infallible proxy request constructors and tuple `into_parts()`                                        | Fallible `OutboundRequest` constructors / `from_parts` and structured `OutboundRequestParts`                                                                       |
+| Proxy request extension access and `body_mut()`                                                       | Application-owned state and outbound request builders / structured parts                                                                                           |
+| `Body::from_stream` with arbitrary external errors                                                    | Typed `EdgeError` items, or `Body::from_external_stream` for external errors                                                                                       |
+| Synchronous/unbounded request-context body access                                                     | Async `body_bytes(max)`, `json_within(max)`, `form_within(max)`; fallible `take_body()` / `into_request()`                                                         |
+| `EdgeError::MethodNotAllowed.allowed: String`                                                         | Structured `Vec<Method>` used to render the mandatory `Allow` header                                                                                               |
+| `config_out_of_date_from_serde`                                                                       | `store_deserialization_from_serde` and `EdgeError::StoreExtraction { reason, .. }`                                                                                 |
+| Store implementations with only unbounded reads                                                       | Required `ConfigStore::get_bounded` / `SecretStore::get_bytes_bounded` implementations                                                                             |
+| Decoder helpers without a memory policy                                                               | Codec helpers accepting decoder budgets and Brotli window policy                                                                                                   |
+| Response-returning Fastly entrypoints and `#[fastly::main]`                                           | An undecorated `main` calling a send-owning adapter runner                                                                                                         |
+| Transport-blind response converters and stream-buffer fallback constants                              | Adapter-owned response-egress coordinators                                                                                                                         |
+| Fastly `runtime_env_config(...) -> EnvConfig`                                                         | Removed. Use `run_app`, `run_app_with_hooks`, or `request::send_request_with_registries_and_hooks` with baked `Hooks::stores()` and `Hooks::logging_for("fastly")` |
 
 Earlier PR revisions additionally require these migrations:
 
@@ -1315,7 +1315,7 @@ Earlier PR revisions additionally require these migrations:
   assumptions. Spin's SQLite config writer is reverified against Spin 4.1.0.
 - Update runtime/tool pins to Spin CLI `4.1.0`, Viceroy `0.21.0`, and Wasmtime `48.0.2`; generated
   projects select corresponding SDK generations and applicable platform CLI/Viceroy pins. Root
-  workspace dependencies use exact SDK pins. Rust `1.95.0`, Node `24.12.0`, and Fastly CLI `15.1.0`
+  workspace dependencies use exact SDK pins. Rust `1.98.1`, Node `24.20.0`, and Fastly CLI `16.0.0`
   remain the workspace toolchain.
 
 ### Tests, Documentation, And Maintenance
