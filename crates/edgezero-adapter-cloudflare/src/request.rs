@@ -1557,14 +1557,17 @@ mod tests {
     fn scope_terminal_router(
         mode: &'static str,
         body_wait: oneshot::Receiver<()>,
+        pending_notice: oneshot::Sender<()>,
         tail_notice: oneshot::Sender<()>,
         source_drops: Arc<AtomicUsize>,
         source_polls: Arc<AtomicUsize>,
     ) -> RouterService {
         let gate_slot = Arc::new(Mutex::new(Some(body_wait)));
+        let pending_slot = Arc::new(Mutex::new(Some(pending_notice)));
         let tail_slot = Arc::new(Mutex::new(Some(tail_notice)));
         RouterService::builder().get("/",move |ctx:RequestContext| {
             let gate=gate_slot.lock().expect("source gate").take().expect("one request");
+            let pending=pending_slot.lock().expect("pending signal").take().expect("one request");
             let tail=tail_slot.lock().expect("tail signal").take().expect("one request");
             let guard=ScopeSourceDrop(Arc::clone(&source_drops));
             let observed_polls=Arc::clone(&source_polls);
@@ -1576,6 +1579,7 @@ mod tests {
                     observed_polls.fetch_add(1,Ordering::SeqCst);
                     yield Ok(Bytes::from_static(b"live"));
                     observed_polls.fetch_add(1,Ordering::SeqCst);
+                    pending.send(()).expect("pending observer");
                     gate.await.expect("source release");
                     observed_polls.fetch_add(1,Ordering::SeqCst);
                     if mode=="source" {yield Err(EdgeError::bad_gateway("controlled source failure"));}
@@ -1639,12 +1643,14 @@ mod tests {
         ] {
             let probe = ScopeFetchProbe::install();
             let (release, wait) = oneshot::channel::<()>();
+            let (pending_ready, pending_started) = oneshot::channel::<()>();
             let (tail_ready, tail_started) = oneshot::channel::<()>();
             let drops = Arc::new(AtomicUsize::new(0));
             let polls = Arc::new(AtomicUsize::new(0));
             let router = scope_terminal_router(
                 mode,
                 wait,
+                pending_ready,
                 tail_ready,
                 Arc::clone(&drops),
                 Arc::clone(&polls),
@@ -1681,6 +1687,10 @@ mod tests {
             );
             let value = Reflect::get(&prefix, &JsValue::from_str("value")).expect("prefix value");
             assert_eq!(Uint8Array::new(&value).to_vec(), b"live");
+            // Readable delivery alone does not acknowledge the native write promise.
+            pending_started
+                .await
+                .expect("first write accounted before terminal action");
             assert_eq!(probe.count("calls"), Some(3.0_f64));
             assert_eq!(probe.count("aborts"), Some(0.0_f64));
             RETAINED_PROGRESS.with(|storage| {
@@ -1698,7 +1708,7 @@ mod tests {
                 trigger_scope_terminal(mode, release, tail_started, &controller, &reader).await;
             let report = terminal.await.expect("canonical terminal");
             assert_eq!(report.outcome, expected);
-            assert_eq!(report.bytes_written, 4);
+            assert_eq!(report.bytes_written, 4, "{mode}");
             assert_eq!(
                 drops.load(Ordering::SeqCst),
                 1,

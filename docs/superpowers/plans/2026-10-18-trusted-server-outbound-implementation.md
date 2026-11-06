@@ -12,7 +12,14 @@
 
 ## Status and Authority
 
-The current repair is the
+The current repair replaces recurring Workers response-egress abort polling with an owned
+listener inside the existing operation race. See the
+[event-driven cancellation checkpoint](../../audits/2026-11-04-native-timing-and-disconnect.md#event-driven-response-cancellation-2026-11-06).
+Original deadlines, accepted-byte accounting, source ownership and capability levels remain
+unchanged. The preceding clean `6e5ce765` run still fails two timing scenarios and ordinary-close
+cleanup; it is not evidence for the listener repair or final qualification.
+
+The preceding repair is the
 [absolute Workers response-write wait](../../audits/2026-11-04-native-timing-and-disconnect.md#absolute-response-write-wait-repair-2026-11-05).
 It reuses the existing timer and race, preserves accepted native bytes and rejects expired source
 polls. The preceding clean merged-head native characterization retains four failed scenarios and

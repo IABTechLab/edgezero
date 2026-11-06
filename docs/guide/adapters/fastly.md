@@ -730,6 +730,12 @@ Dynamic-backend capacity is service-wide, and registrations may wait for capacit
 (see Fastly's [dynamic-backend limit behavior](https://www.fastly.com/documentation/reference/compute/errors)).
 A sandbox request limit alone does not bound origin diversity or request fan-out.
 
+Fastly's current [registration and same-name rules](https://www.fastly.com/documentation/guides/integrations/non-fastly-services/developer-guide-backends/#the-same-name-rule)
+describe successful re-registration when the name and all properties match, and failure when
+properties conflict. EdgeZero derives stable names from the complete backend configuration;
+an actual `NameInUse` error remains fail-closed rather than adopting unverified settings from
+another registration. This documented contract is not hosted proof of cross-sandbox reuse.
+
 The local fixtures are in `crates/edgezero-test-harness/fixtures/reusable-app`. Local reuse and streaming
 results do not establish deployed eviction frequency, endpoint-handle validity,
 resource accounting, or performance. Named endpoint delivery must be verified

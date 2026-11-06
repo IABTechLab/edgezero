@@ -220,3 +220,57 @@ ignored), all 134 Workers SDK tests and 30 contracts, and strict WASM lint with 
 test utilities. Ten added WASM regressions run through the existing phase, without another
 runner or CI job. Both independent reviews find no remaining scoped defect. These results
 do not close the clean-head native failures, source freeze or manual hosted qualification.
+
+## Clean-Head Characterization (2026-11-06)
+
+One inventory-exact Workers lifecycle invocation ran on clean source
+`6e5ce7650e6ec8d52d0189dedc72fbecc54d5eb8`, without concurrent builds, source edits or warmup.
+It uses the same direct Miniflare listener, compatibility settings, pinned runtime and original
+budgets. Actual Wasm SHA-256:
+`d8f4798f04f3553ea3bbbd5e40b53fa2a5b25994f5cdc8890516e9ef4a1b4c5b`.
+
+The run retains **16 passing/three failing constituent scenarios, exit 1**, plus failed tail
+validation. These map to **11 passing/three failing inventory legs**, not sixteen passing legs.
+Cold Begin is **10 ms** against the unchanged **7 ms** upper bound; fast-origin slot elapsed is
+**152 ms** against **146 +/- 5 ms**. Ordinary-close cleanup still lacks the required terminal
+proof. The consequential tail failure is not independently established leakage. No failure is
+waived, reanchored or retried for credit.
+
+The raw archive is `/private/tmp/pr275-6e5ce765-native-lifetimes.tar.gz`, SHA-256
+`73bae29ef823784cce6d811bcaa6eeef08145764aa071f5aecbffeb9bd1e5996`.
+The prior capture is preserved as `workerd-b56fccd2-before-6e5ce765`. Invocation output and the
+local command crosswalk are under `/private/tmp/pr275-6e5ce765-closeout/`. This is pre-freeze
+characterization, not durable Q5 publication or proof for later source. All original failed
+captures remain retained.
+
+## Event-Driven Response Cancellation (2026-11-06)
+
+Review identifies a separate concrete cost: a pending egress operation schedules recurring
+one-millisecond abort checks. Three new WASM regressions fail before repair: no event listener
+or timer-independent wake, no callback cleanup, and no registration-failure handling.
+
+The existing operation race now owns one abort listener. Its callback only notifies the current
+waker; signal state remains authoritative, including after synthetic abort events. Registration
+rechecks cancellation, the original deadline and clock regression before operation construction.
+Terminal completion and drop remove the same callback and release its waker, including partially
+successful registration. The independent absolute deadline wait, `writer.closed()` rejection
+watch and genuine zero-delay source fairness yield remain unchanged. No public API, transport,
+executor, dependency pin or capability promotion is added.
+
+Full SDK validation exposes a fixture ordering assumption: reading the prefix is not proof that
+the native write promise is acknowledged. Prompt abort can precede that acknowledgement, so a
+still-pending promise cannot report accepted bytes. The ownership fixture now uses a test-only
+oneshot at the second source poll, proving the first write was accounted before terminal action.
+The four-byte assertion and every cleanup assertion remain unchanged; no timer, spin or extra
+microtask wait is added. Separate tests retain pending and already-ready native-promise cases.
+
+This removes periodic cancellation wakeups, not the provider notification gap or the timing
+failures above. Hosted CPU impact is unmeasured. Exact-candidate execution, manual hosted
+checks, human re-review, freeze and durable qualification remain open.
+
+Verification passes all five root Rust gates (2,666 tests across 33 binaries, one existing
+ignored), all 137 Workers SDK tests, 30 WASM contracts, five native adapter contracts, and both
+strict WASM feature configurations. Docs formatting/lint/build and legacy/documentation/coverage
+guards pass. Two independent scoped reviews find no implementation defect; neither is maintainer
+approval. The initial sandboxed workspace run cannot bind loopback sockets; the permitted TCP
+run passes. No native timing or hosted gate is closed by these results.

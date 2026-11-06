@@ -447,23 +447,26 @@ mod platform {
         MonotonicClock, ResponseEgressFramingMode, StartOutcome, StatusCode, ensure_deadline,
         manual_response_encoding, start_fallback, start_prepared,
     };
+    use std::cell::RefCell;
     use std::future::Future;
     use std::pin::Pin;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::task::{Context as TaskContext, Poll, Waker};
 
     use edgezero_core::response_egress::{ResponseEgressAttempt, ResponseEgressEnvelope};
+    use edgezero_core::time::MonotonicInstant;
     use futures_util::FutureExt as _;
     use futures_util::StreamExt as _;
     use futures_util::future::poll_fn;
     use worker::js_sys::{BigInt, Uint8Array};
+    use worker::wasm_bindgen::JsCast as _;
+    use worker::wasm_bindgen::closure::Closure;
     use worker::wasm_bindgen_futures::JsFuture;
     use worker::worker_sys::FixedLengthStream;
     use worker::{AbortSignal, Context, Delay, EncodeBody, Response as CfResponse};
 
     use crate::outbound::{copy_header_values, native_time};
-
-    const ABORT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
     const fn public_message(error: DeliveryError) -> &'static str {
         match error {
@@ -640,9 +643,82 @@ mod platform {
         })
     }
 
-    async fn wait_for_abort(signal: AbortSignal) {
-        while !signal.aborted() {
-            Delay::from(ABORT_POLL_INTERVAL).await;
+    struct AbortWait {
+        signal: AbortSignal,
+        callback: Closure<dyn FnMut()>,
+        waker: Rc<RefCell<Option<Waker>>>,
+    }
+
+    impl AbortWait {
+        fn register(
+            signal: &AbortSignal,
+            deadline: Deadline,
+            clock: &MonotonicClock,
+        ) -> Result<(Self, MonotonicInstant), IoFailureKind> {
+            if signal.aborted() {
+                return Err(IoFailureKind::Cancelled);
+            }
+            let previous = clock.now();
+            if deadline.is_expired_at(previous) {
+                return Err(IoFailureKind::Deadline);
+            }
+            let waker = Rc::new(RefCell::new(None::<Waker>));
+            let notified = Rc::clone(&waker);
+            let callback = Closure::new(move || {
+                let waiting = notified.borrow_mut().take();
+                if let Some(task_waker) = waiting {
+                    task_waker.wake();
+                }
+            });
+            let wait = Self {
+                signal: signal.clone(),
+                callback,
+                waker,
+            };
+            let registered = wait
+                .signal
+                .add_event_listener_with_callback("abort", wait.callback.as_ref().unchecked_ref());
+            if signal.aborted() {
+                return Err(IoFailureKind::Cancelled);
+            }
+            let registered_at = clock.now();
+            if registered_at < previous {
+                return Err(IoFailureKind::Transport);
+            }
+            if deadline.is_expired_at(registered_at) {
+                return Err(IoFailureKind::Deadline);
+            }
+            registered.map_err(|_error| IoFailureKind::Transport)?;
+            Ok((wait, registered_at))
+        }
+    }
+
+    impl Future for AbortWait {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+            let previous = self.waker.borrow_mut().replace(cx.waker().clone());
+            drop(previous);
+            if self.signal.aborted() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
+    impl Drop for AbortWait {
+        fn drop(&mut self) {
+            let waiting = self.waker.borrow_mut().take();
+            drop(waiting);
+            drop(self.signal.remove_event_listener_with_callback(
+                "abort",
+                self.callback.as_ref().unchecked_ref(),
+            ));
         }
     }
 
@@ -658,14 +734,12 @@ mod platform {
         OperationFactory: FnOnce() -> Operation,
         Operation: Future,
     {
-        if signal.aborted() {
-            return RaceEvent::Cancelled;
-        }
-        let mut previous = clock.now();
-        if deadline.is_expired_at(previous) {
-            return RaceEvent::Deadline;
-        }
-        let cancellation = wait_for_abort(signal.clone());
+        let (cancellation, mut previous) = match AbortWait::register(signal, deadline, clock) {
+            Ok(registered) => registered,
+            Err(IoFailureKind::Cancelled) => return RaceEvent::Cancelled,
+            Err(IoFailureKind::Deadline) => return RaceEvent::Deadline,
+            Err(IoFailureKind::Transport) => return RaceEvent::TransportFailed,
+        };
         let timer = native_time(clock.clone()).wait_until(deadline);
         let operation_future = operation();
         futures_util::pin_mut!(cancellation, timer, operation_future);
@@ -985,11 +1059,12 @@ mod platform {
         use edgezero_core::response_egress_framing::PreparedResponseEgress;
         use edgezero_core::time::MonotonicInstant;
         use futures::channel::oneshot;
+        use futures::task::{ArcWake, waker as task_waker};
         use futures_util::{future, stream};
         use wasm_bindgen_test::wasm_bindgen_test;
         use worker::js_sys::{Array, Function, Promise, Reflect, global};
+        use worker::wasm_bindgen::JsValue;
         use worker::wasm_bindgen::closure::Closure;
-        use worker::wasm_bindgen::{JsCast as _, JsValue};
 
         use super::super::INTERNAL_FALLBACK_BODY;
         use super::super::tests::RecordingObserver;
@@ -2030,10 +2105,200 @@ mod platform {
                     .is_pending()
             );
             drop(operation);
-            assert_eq!(
-                scheduled.to_vec(),
-                vec![JsValue::from_f64(1.0), JsValue::from_f64(3.0)]
+            assert_eq!(scheduled.to_vec(), vec![JsValue::from_f64(3.0)]);
+        }
+
+        fn observe_abort_listeners(signal: &AbortSignal) -> (Array, Array) {
+            let added = Array::new();
+            let removed = Array::new();
+            Function::new_with_args(
+                "signal, added, removed",
+                "const add = signal.addEventListener, remove = signal.removeEventListener;
+                 signal.addEventListener = function(type, callback, ...options) {
+                     if (type === 'abort') added.push(callback);
+                     return add.call(this, type, callback, ...options);
+                 };
+                 signal.removeEventListener = function(type, callback, ...options) {
+                     if (type === 'abort') removed.push(callback);
+                     return remove.call(this, type, callback, ...options);
+                 };",
+            )
+            .call3(&JsValue::UNDEFINED, signal, &added, &removed)
+            .expect("observe native listener ownership");
+            (added, removed)
+        }
+
+        struct AbortWakeCounter(AtomicUsize);
+
+        impl ArcWake for AbortWakeCounter {
+            fn wake(self: Arc<Self>) {
+                Self::wake_by_ref(&self);
+            }
+
+            fn wake_by_ref(arc_self: &Arc<Self>) {
+                arc_self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[wasm_bindgen_test]
+        fn response_egress_abort_wakes_pending_operation_without_timer_delivery() {
+            let _timers = NumericTimeoutGuard::install();
+            let controller = web_sys::AbortController::new().expect("controller");
+            let signal: AbortSignal = controller.signal().into();
+            let (added, removed) = observe_abort_listeners(&signal);
+            let clock = MonotonicClock::default();
+            let deadline = clock.deadline_after(Duration::from_secs(10));
+            let mut operation = Box::pin(race_operation(
+                future::pending::<()>,
+                EgressOperationKind::BodySource,
+                deadline,
+                &clock,
+                &signal,
+                None,
+            ));
+            let first = Arc::new(AbortWakeCounter(AtomicUsize::new(0)));
+            let second = Arc::new(AbortWakeCounter(AtomicUsize::new(0)));
+            for counter in [&first, &second] {
+                let waker = task_waker(Arc::clone(counter));
+                assert!(
+                    operation
+                        .as_mut()
+                        .poll(&mut TaskContext::from_waker(&waker))
+                        .is_pending()
+                );
+            }
+            assert_eq!(added.length(), 1);
+            assert_eq!(removed.length(), 0);
+            // A synthetic event is not cancellation and must not consume the listener.
+            Function::new_with_args("signal", "signal.dispatchEvent(new Event('abort'));")
+                .call1(&JsValue::UNDEFINED, &signal)
+                .expect("synthetic abort event");
+            let waker = task_waker(Arc::clone(&second));
+            assert!(
+                operation
+                    .as_mut()
+                    .poll(&mut TaskContext::from_waker(&waker))
+                    .is_pending()
             );
+            let before = second.0.load(Ordering::SeqCst);
+            controller.abort();
+            assert_eq!(first.0.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                second.0.load(Ordering::SeqCst),
+                before.checked_add(1).expect("abort wake")
+            );
+            assert!(matches!(
+                operation
+                    .as_mut()
+                    .poll(&mut TaskContext::from_waker(&waker)),
+                Poll::Ready(RaceEvent::Cancelled)
+            ));
+            assert_eq!(removed.to_vec(), added.to_vec());
+            drop(operation);
+            assert_eq!(removed.length(), 1);
+        }
+
+        #[wasm_bindgen_test]
+        fn response_egress_abort_listener_releases_on_success_error_and_drop() {
+            let _timers = NumericTimeoutGuard::install();
+            for result in [Some(Ok(())), Some(Err(())), None] {
+                let controller = web_sys::AbortController::new().expect("controller");
+                let signal: AbortSignal = controller.signal().into();
+                let (added, removed) = observe_abort_listeners(&signal);
+                let clock = MonotonicClock::default();
+                let deadline = clock.deadline_after(Duration::from_secs(10));
+                let counter = Arc::new(AbortWakeCounter(AtomicUsize::new(0)));
+                let retained = Arc::downgrade(&counter);
+                let waker = task_waker(counter);
+                let mut operation = Box::pin(race_operation(
+                    || poll_fn(move |_| result.map_or(Poll::Pending, Poll::Ready)),
+                    EgressOperationKind::BodySource,
+                    deadline,
+                    &clock,
+                    &signal,
+                    None,
+                ));
+                let observed = operation
+                    .as_mut()
+                    .poll(&mut TaskContext::from_waker(&waker));
+                assert_eq!(observed.is_ready(), result.is_some());
+                assert_eq!(added.length(), 1);
+                if result.is_some() {
+                    assert_eq!(removed.to_vec(), added.to_vec());
+                }
+                drop(operation);
+                drop(waker);
+                assert_eq!(removed.to_vec(), added.to_vec());
+                assert!(retained.upgrade().is_none());
+                controller.abort();
+                assert_eq!(removed.length(), 1);
+            }
+        }
+
+        #[wasm_bindgen_test]
+        fn response_egress_abort_listener_failure_does_not_start_operation() {
+            for expected in [
+                IoFailureKind::Transport,
+                IoFailureKind::Cancelled,
+                IoFailureKind::Deadline,
+            ] {
+                let controller = web_sys::AbortController::new().expect("controller");
+                let signal: AbortSignal = controller.signal().into();
+                let (added, removed) = observe_abort_listeners(&signal);
+                let start = MonotonicInstant::now();
+                let until = start.checked_add(Duration::from_secs(1)).expect("deadline");
+                let expired = Arc::new(AtomicBool::new(false));
+                let sample = Arc::clone(&expired);
+                let clock = MonotonicClock::new(move || {
+                    if sample.load(Ordering::SeqCst) {
+                        until
+                    } else {
+                        start
+                    }
+                });
+                let on_add = Closure::<dyn FnMut()>::new(move || {
+                    if expected == IoFailureKind::Cancelled {
+                        controller.abort();
+                    }
+                    expired.store(expected == IoFailureKind::Deadline, Ordering::SeqCst);
+                });
+                Function::new_with_args(
+                    "signal, notify",
+                    "const add = signal.addEventListener;
+                     signal.addEventListener = function(...args) {
+                         add.apply(this, args); notify(); throw new Error('listener unavailable');
+                     };",
+                )
+                .call2(&JsValue::UNDEFINED, &signal, on_add.as_ref())
+                .expect("listener registration failure");
+                let constructed = Rc::new(Cell::new(false));
+                let observed = Rc::clone(&constructed);
+                let mut operation = Box::pin(race_operation(
+                    move || {
+                        observed.set(true);
+                        future::pending::<()>()
+                    },
+                    EgressOperationKind::BodySource,
+                    Deadline::at_instant(until),
+                    &clock,
+                    &signal,
+                    None,
+                ));
+                let event = operation
+                    .as_mut()
+                    .poll(&mut TaskContext::from_waker(Waker::noop()));
+                assert!(matches!(
+                    (expected, event),
+                    (
+                        IoFailureKind::Transport,
+                        Poll::Ready(RaceEvent::TransportFailed)
+                    ) | (IoFailureKind::Cancelled, Poll::Ready(RaceEvent::Cancelled))
+                        | (IoFailureKind::Deadline, Poll::Ready(RaceEvent::Deadline))
+                ));
+                assert!(!constructed.get());
+                assert_eq!(added.length(), 1);
+                assert_eq!(removed.to_vec(), added.to_vec());
+            }
         }
 
         #[wasm_bindgen_test]

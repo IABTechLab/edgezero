@@ -743,6 +743,13 @@ that signal is `TransportError`. Deadline or cancellation aborts the writable st
 pending source state, and terminalizes exactly once. A losing write promise must not remain
 able to account bytes or report completion after abort.
 
+Each active source/write/close race owns one abort-event listener, not a recurring cancellation
+timer. Registration and each poll recheck the signal; only its actual aborted state establishes
+cancellation. Completion, registration failure and dropped operations remove the identical
+callback and release its retained waker before dropping the closure. Failed registration is a
+transport failure unless cancellation or the original deadline has already won. Readable delivery
+alone does not establish write-promise acknowledgement or change the accepted-byte boundary.
+
 High-water-mark behavior, fixed-length semantics, request-signal behavior, and runtime
 cancellation require deployed Workers evidence before promotion to `Native`.
 

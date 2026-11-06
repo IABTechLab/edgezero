@@ -13,6 +13,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Replace Workers response-egress abort polling with one owned event listener per active
+  operation. Unregister it on completion or drop, release retained wakers, and keep cancellation,
+  absolute deadlines and native accepted-byte accounting intact. This removes periodic abort
+  wakeups; it does not establish hosted disconnect notification or stronger capabilities.
 - Keep Workers response-write waits on the existing paired absolute timer, including operation
   setup and source polls that remain pending. Recheck cancellation, expiry and clock regression
   without waiting for every timer notification. Preserve already-ready native write results for
