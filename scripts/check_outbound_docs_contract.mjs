@@ -121,6 +121,10 @@ const expectedConfigRows = [
 ]
 const expectedOutboundRows = [
   ['outbound-http', 'Native', 'Native', 'BestEffort', 'Native'],
+  ['ResponseDecoding::Original', 'Native', 'Native', 'BestEffort', 'Native'],
+  ['HttpClient::begin', 'Native', 'Native', 'BestEffort', 'Native'],
+  ['Nonblocking completion checks', 'Native', 'Native', 'BestEffort', 'Native'],
+  ['Arrival-time recording', 'Native', 'Native', 'BestEffort', 'Native'],
   [
     'outbound-authority-override',
     'Native',
@@ -1604,6 +1608,9 @@ const normalizedCapabilitySource = capabilitySource.replaceAll(/\s+/gu, ' ')
 if (!normalizedCapabilitySource.includes(
   'Host-certified empty inbound bodies is a behavior row, not a declarable manifest capability.'
 )) fail('empty-body behavior must not be advertised as a manifest capability')
+if (!normalizedCapabilitySource.includes(
+  'recording are behavior rows, not declarable manifest capabilities.'
+)) fail('outbound behavior rows must not be advertised as manifest capabilities')
 for (const fragment of [
   'SDK failure evidence, not stronger transport guarantees',
   'pinned Viceroy can report an internal cause',

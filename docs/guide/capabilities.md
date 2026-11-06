@@ -288,6 +288,10 @@ not included. These limitations block whole-response-lifetime certification.
 | Capability                              | Axum                              | Cloudflare                        | Fastly                              | Spin                              |
 | --------------------------------------- | --------------------------------- | --------------------------------- | ----------------------------------- | --------------------------------- |
 | `outbound-http`                         | Native                            | Native                            | BestEffort⁹                         | Native                            |
+| `ResponseDecoding::Original`            | Native                            | Native                            | BestEffort[^fastly-observation]       | Native                            |
+| `HttpClient::begin`                     | Native                            | Native                            | BestEffort[^fastly-observation]       | Native                            |
+| Nonblocking completion checks          | Native                            | Native                            | BestEffort[^fastly-observation]       | Native                            |
+| Arrival-time recording                 | Native                            | Native                            | BestEffort[^fastly-observation]       | Native                            |
 | `outbound-authority-override`           | Native                            | BestEffort⁸                       | Native                              | Unsupported[^spin-authority]      |
 | `outbound-batch-cancellation`           | Native                            | BestEffort⁸                       | BestEffort⁴                         | BestEffort⁸                       |
 | `outbound-batch-completion-order`       | Native                            | Native                            | BestEffort⁴                         | Native                            |
@@ -403,6 +407,17 @@ exposes normalized header strings rather than original raw octets and field boun
 it preserves the visible header semantics used by the client.
 Cloudflare authority override requests a wire Host distinct from the URI authority; provider
 routing and hosted delivery of that override remain unqualified, so support is BestEffort.
+
+`ResponseDecoding::Original`, `HttpClient::begin`, nonblocking completion checks and arrival-time
+recording are behavior rows, not declarable manifest capabilities. They describe the corresponding
+APIs rather than adding more manifest flags.
+
+[^fastly-observation]: Fastly preserves adapter-visible encoded responses and uses cooperative
+    progress for Begin and nonblocking observations. A check does not enter a native wait; buffered
+    outcomes are recorded when EdgeZero finishes processing them, not at an unobservable transport
+    instant. Synchronous host work and application CPU intervals can delay progress. Original
+    deadlines remain in force and recorded arrivals are not backdated. These provider limitations
+    keep these behavior rows BestEffort.
 
 ⁹ Fastly outbound HTTP uses dynamic backends, which must be enabled on the deployed service.
 The CLI cannot currently prove that entitlement. If disabled, dispatch returns a typed 502
