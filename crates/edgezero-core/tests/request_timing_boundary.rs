@@ -9,12 +9,30 @@ mod tests {
     use edgezero_core::middleware::{Middleware, Next, RequestTimingMiddleware};
     use edgezero_core::request_timing::RequestTimings;
     use edgezero_core::response::response_with_body;
-    use edgezero_core::router::RouterService;
+    use edgezero_core::router::{PreDispatchHook, RouterService};
     use futures::executor::block_on;
     use futures::stream;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     type Handle = RequestTimings<1>;
+
+    // Keep the installation logic in sync with docs/guide/middleware.md.
+    // The observer is test-only: unmatched requests do not return their extensions.
+    struct TimingHook {
+        observed: Arc<Mutex<Vec<Handle>>>,
+    }
+
+    #[async_trait(?Send)]
+    impl PreDispatchHook for TimingHook {
+        async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+            let existing = request.extensions().get::<Handle>().cloned();
+            let timings = existing.unwrap_or_else(Handle::new);
+            request.extensions_mut().insert(timings.clone());
+            self.observed.lock().unwrap().push(timings);
+            Ok(None)
+        }
+    }
 
     // Keep this application-owned example in sync with docs/guide/middleware.md.
     struct TimingBoundary;
@@ -133,6 +151,105 @@ mod tests {
             handles[1].snapshot(|view| view.phases).unwrap(),
             [Some(Duration::from_millis(3))]
         );
+    }
+
+    #[test]
+    fn hook_installs_independent_handles_before_lookup_without_lifecycle_marks() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let router = RouterService::builder()
+            .pre_dispatch_hook(TimingHook {
+                observed: Arc::clone(&observed),
+            })
+            .middleware(RequestTimingMiddleware::<1>::new().with_excluded_paths(&["/health"]))
+            .get("/timed", success)
+            .get("/health", success)
+            .build();
+        for (method, uri, status) in [
+            (Method::GET, "/timed", StatusCode::OK),
+            (Method::GET, "/missing", StatusCode::NOT_FOUND),
+            (Method::POST, "/timed", StatusCode::METHOD_NOT_ALLOWED),
+            (Method::GET, "/health?check=1", StatusCode::OK),
+        ] {
+            let response = block_on(router.oneshot(request(method, uri, None))).unwrap();
+            assert_eq!(response.status(), status);
+            let timings = observed.lock().unwrap().last().unwrap().clone();
+            timings
+                .snapshot(|view| {
+                    let phase = (status == StatusCode::OK).then_some(Duration::from_millis(3));
+                    assert_eq!(view.phases, [phase]);
+                    assert_eq!(view.headers_ready, None);
+                    assert_eq!(view.request_complete, None);
+                    assert_eq!(view.response_bytes, None);
+                })
+                .unwrap();
+        }
+        let handles = observed.lock().unwrap().clone();
+        assert_eq!(handles.len(), 4);
+        handles[0].record(0, Duration::from_millis(5)).unwrap();
+        for (timings, expected) in handles.iter().zip([Some(8), None, None, Some(3)]) {
+            assert_eq!(
+                timings.snapshot(|view| view.phases).unwrap(),
+                [expected.map(Duration::from_millis)]
+            );
+        }
+    }
+
+    #[test]
+    fn hook_and_boundary_preserve_preinstalled_handles_and_result_limits() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let router = RouterService::builder()
+            .pre_dispatch_hook(TimingHook {
+                observed: Arc::clone(&observed),
+            })
+            .middleware(TimingBoundary)
+            .middleware(RequestTimingMiddleware::<1>::new().with_excluded_paths(&["/health"]))
+            .get("/timed", success)
+            .get("/health", success)
+            .get("/error", failure)
+            .get("/stream", streaming)
+            .build();
+        for (method, uri, status, marked, phase) in [
+            (Method::GET, "/timed", StatusCode::OK, true, 10),
+            (Method::GET, "/health?check=1", StatusCode::OK, true, 10),
+            (Method::GET, "/error", StatusCode::BAD_REQUEST, true, 7),
+            (Method::GET, "/stream", StatusCode::OK, true, 7),
+            (Method::GET, "/missing", StatusCode::NOT_FOUND, false, 7),
+            (
+                Method::POST,
+                "/timed",
+                StatusCode::METHOD_NOT_ALLOWED,
+                false,
+                7,
+            ),
+        ] {
+            let timings = Handle::new();
+            timings.record(0, Duration::from_millis(7)).unwrap();
+            let before = timings.elapsed();
+            let response = block_on(router.oneshot(request(method, uri, Some(&timings)))).unwrap();
+            assert_eq!(response.status(), status);
+            if uri == "/stream" {
+                assert!(response.body().is_stream());
+            }
+            timings
+                .snapshot(|view| {
+                    assert_eq!(view.phases, [Some(Duration::from_millis(phase))]);
+                    assert_eq!(view.headers_ready.is_some(), marked);
+                    if let Some(headers_ready) = view.headers_ready {
+                        assert!(headers_ready >= before);
+                    }
+                    assert_eq!(view.request_complete, None);
+                    assert_eq!(view.response_bytes, None);
+                })
+                .unwrap();
+            // Mutation through the hook's clone proves shared identity. The origin
+            // is immutable within that handle, so neither layer can reset it.
+            let installed = observed.lock().unwrap().last().unwrap().clone();
+            installed.record(0, Duration::from_millis(2)).unwrap();
+            assert_eq!(
+                timings.snapshot(|view| view.phases).unwrap(),
+                [Some(Duration::from_millis(phase + 2))]
+            );
+        }
     }
 
     #[test]

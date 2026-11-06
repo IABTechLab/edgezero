@@ -285,7 +285,11 @@ Attachment does not finalize a request, consume a streamed body, render
 `Server-Timing`, or change cache/privacy policy. Header rendering and exposure
 remain application-owned. Unmatched routes bypass middleware, and
 `RouterService::oneshot` renders handler errors outside the chain. The available
-measurement boundary depends on the adapter:
+measurement boundary depends on the adapter. On every adapter, a
+[pre-dispatch hook](./routing#intercepting-before-dispatch) can install or reuse
+request extensions after adapter conversion but before route lookup, router state
+injection and middleware. This includes unmatched 404/405 requests. The hook
+cannot observe downstream results or mark their completion.
 
 - **Fastly:** `run_app_with_request_extensions` and
   `serve_app_with_request_extensions` can preinstall a handle. Applications that
@@ -293,21 +297,44 @@ measurement boundary depends on the adapter:
   [Fastly request extensions](./adapters/fastly.md#capturing-raw-request-signals-ja4-h2-fingerprint).
 - **Axum:** wrap `RouterService` in an application-owned tower service to retain
   the handle across dispatch, including unmatched routes and rendered errors.
-- **Cloudflare and Spin:** `run_app` and `dispatch_app` convert the platform
-  request internally and expose no request-extension injection hook. Their
-  registry-aware dispatchers are private; converting with `into_core_request`
-  and calling the router yourself does not preserve manifest store bindings
-  automatically. The outermost available boundary within standard dispatch is
-  application middleware registered before `RequestTimingMiddleware`.
+- **Cloudflare and Spin:** use `PreDispatchHook` for installation within standard
+  dispatch and application middleware for matched-route result marks. Their
+  registry-aware dispatchers remain private; manually converting and dispatching
+  a platform request does not preserve manifest store bindings automatically.
 
-For Cloudflare and Spin, this boundary reuses the `Handle` alias above and keeps
-its clone across both successful and failed downstream results:
+The following hook and boundary reuse the `Handle` alias above. A newly created
+handle starts T0 in the hook, not at socket ingress; an existing handle keeps its
+original T0. The boundary retains a clone across both successful and failed
+downstream results and also works without the hook:
+
+```mermaid
+flowchart TD
+    A[Adapter converts request] --> B[Hook installs or reuses handle]
+    B --> C{Route matches?}
+    C -->|Yes| D[Boundary and attachment middleware]
+    D --> E[Handler result]
+    E --> F[Boundary marks headers ready]
+    C -->|No| G[Router renders 404 or 405 without a mark]
+```
 
 ```rust
 use async_trait::async_trait;
 use edgezero_core::error::EdgeError;
-use edgezero_core::http::Response;
+use edgezero_core::http::{Request, Response};
 use edgezero_core::middleware::{Middleware, Next};
+use edgezero_core::router::PreDispatchHook;
+
+struct TimingHook;
+
+#[async_trait(?Send)]
+impl PreDispatchHook for TimingHook {
+    async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        let existing = request.extensions().get::<Handle>().cloned();
+        let timings = existing.unwrap_or_else(Handle::new);
+        request.extensions_mut().insert(timings);
+        Ok(None)
+    }
+}
 
 struct TimingBoundary;
 
@@ -324,24 +351,36 @@ impl Middleware for TimingBoundary {
 }
 
 let router = RouterService::builder()
+    .pre_dispatch_hook(TimingHook)
     .middleware(TimingBoundary)
     .middleware(TimingMiddleware::new())
     .build();
 ```
 
 Register application routes on that builder and add `async-trait = "0.1"` to
-compile this example. It deliberately installs a handle on **every matched path**,
-including `/health`: an exclusion on the later attachment middleware does not
-remove a handle preinstalled here. Applications that exclude paths must apply
-that policy in their boundary middleware too.
+compile this example. A router accepts only one pre-dispatch hook; incorporate
+installation into an existing hook rather than registering a second one. Keep
+collectors request-local, not in the shared hook value or router state.
+
+`app!` cannot register a hook or modify its built router. Use a hand-written
+`Hooks` implementation as shown in the
+[routing guide](./routing#intercepting-before-dispatch), preserving routes,
+middleware, state, introspection and application metadata. Point every adapter
+entry point at that implementation.
+
+This example deliberately installs a handle on **every path**, including `/health`
+and unmatched routes. An exclusion on the later attachment middleware does not
+remove a preinstalled handle. Applications that exclude paths must apply the
+same creation policy in the hook, boundary middleware and attachment middleware;
+skipping installation in only one of them is not sufficient.
 
 The mark records when the downstream result becomes available. For a handler
 error it precedes `oneshot`'s error-response rendering; it does not observe that
 final response or add its headers. Unmatched 404/405 requests bypass this boundary,
 and returning a streamed body does not measure its consumption, delivery or
 completion. Request completion must still be marked where it is actually
-observable. Cloudflare/Spin request-extension hooks are deferred beyond this
-release.
+observable. An after-dispatch hook that observes final responses remains deferred;
+pre-dispatch installation is available today.
 
 Outer layers must retain a clone of the handle they preinstall; attachment does
 not copy the handle into response extensions.

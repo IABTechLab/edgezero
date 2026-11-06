@@ -1,4 +1,4 @@
-Run the full CI gate checks locally before pushing. Run all six commands sequentially and report any failures:
+Run the full CI gate checks locally before pushing. Run the commands below sequentially and report any failures:
 
 1. `cargo fmt --all -- --check`
 2. `cargo clippy --workspace --all-targets --all-features -- -D warnings`

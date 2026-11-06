@@ -90,7 +90,7 @@ outside the state mutex, so `elapsed()` is available during contention.
 
 On [deployed Cloudflare Workers](https://developers.cloudflare.com/workers/runtime-apis/performance/),
 timers advance only after I/O and CPU-only phases may record zero. Local
-Wrangler/workerd and headless browser tests (Firefox in CI) do not reproduce that
+Wrangler/workerd and headless browser tests do not reproduce that
 restriction. A shared origin does not imply uniform CPU-time resolution across
 providers.
 
@@ -370,7 +370,7 @@ runtime clock behavior; distinguish native execution, WASM compilation, and any
 platform clock smoke tests in the implementation report. Run the shared attachment
 scenario natively as well as in all three adapter harnesses. Separate advancement
 tests use native sleep or bounded polling in Viceroy, Wasmtime and a headless
-browser (Firefox in CI), with an independent wall-clock deadline and an iteration
+browser configured in CI, with an independent wall-clock deadline and an iteration
 cap. They do not establish deployed Cloudflare CPU-time behavior.
 
 Trusted Server uses its target-matched `cargo test-fastly`, `cargo test-axum`,
@@ -439,13 +439,15 @@ These review suggestions remain outside this release's scope:
   current outer layers preinstall and retain a clone. Successful-response
   extensions alone would not cover unmatched routes, rendered errors or every
   adapter conversion. A wrapper must preserve application measurement boundaries.
-- [Cloudflare/Spin request-extension hooks](https://github.com/IABTechLab/edgezero/pull/389#discussion_r4289432139):
-  their public entrypoints convert platform requests internally and expose no
-  hook equivalent to Fastly's request-extension injection. Application middleware
-  can retain a handle across matched-route success/error results, but misses
-  unmatched routes, final error rendering and streamed-body completion. Future
-  `dispatch_app_with_request_extensions` APIs must preserve manifest store
-  registries as well as existing collector identity and measurement boundaries.
+- [After-dispatch observation](https://github.com/IABTechLab/edgezero/pull/389#discussion_r4451956407):
+  `PreDispatchHook` can now install or reuse request extensions on every adapter,
+  before route lookup, including unmatched 404/405 requests. It cannot observe
+  downstream results. Application boundary middleware can mark matched-route
+  success/error results, but misses unmatched routes, final error rendering and
+  streamed-body completion. A future after-dispatch hook must preserve manifest
+  store registries, existing collector identity and application measurement
+  boundaries. Hook and boundary installation must apply application exclusions;
+  the attachment middleware never removes a preinstalled handle.
 - [Explicit span finish/discard](https://github.com/IABTechLab/edgezero/pull/389#discussion_r4162634076):
   manual `Instant` plus `record_with` handles conditional and compound recording
   today. Do not use `mem::forget` to discard a span; it leaks the shared handle.

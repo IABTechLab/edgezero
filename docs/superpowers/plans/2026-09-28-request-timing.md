@@ -252,7 +252,7 @@ For example, the Spin check is
 Adapter test/check command shapes and runner setup come from those workflows.
 Run the shared clock/handle scenario natively and in each adapter contract suite.
 Separate advancement tests use native sleep or bounded polling only in the local
-Viceroy, Wasmtime and headless browser harnesses (Firefox in CI). Polling has an
+Viceroy, Wasmtime and the headless browser configured in CI. Polling has an
 independent wall-clock deadline and an iteration cap. Deployed Cloudflare CPU-only
 timings may be zero; a local pass is not deployed-provider proof. Keep native-only
 sleep/thread/poison tests out of unsupported WASM test paths.
