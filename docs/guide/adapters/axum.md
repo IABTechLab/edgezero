@@ -159,7 +159,8 @@ syntax may receive a bounded 400 response. Expiry or disconnect can prevent resp
 Application admission and rendering hooks do not run for raw parser rejections.
 
 `parser_buffer_bytes()` is Hyper's logical threshold `H`, **not** a hard allocation ceiling.
-The receive scratch audit pins Hyper 1.12.0, bytes 1.12.1, http 1.4.2, and Rust 1.95.0:
+The receive scratch audit pins Hyper 1.12.0, bytes 1.12.1, http 1.4.2, and Rust 1.95.0
+(not yet repeated on the workspace's Rust 1.98.1):
 
 - `parser_read_allocation_bytes()` reports the conservative requested-capacity bound `R = 4H`
   for each receive backing allocation. Adaptive reads expose spare capacity and shared-buffer
@@ -441,7 +442,8 @@ For wire cap `W`, staging reserves `5 * max(W, 32)` bytes: input growth, escaped
 decoder growth (including old/new allocation overlap), and temporary decoded key/value
 strings. A separate 4096-byte read buffer lives on the stack. The startup limit must
 cover staging; every index/payload reservation also checks residency plus staging.
-This decoder allowance is audited against pinned `serde_json 1.0.150` and Rust 1.95.0;
+This decoder allowance is audited against pinned `serde_json 1.0.150` and Rust 1.95.0
+(not yet repeated on the workspace's Rust 1.98.1);
 changing those allocation implementations requires repeating the audit.
 
 The sorted snapshot index reserves `MAX_ENTRIES * size_of::<(String, ConfigValue)>()`
@@ -473,7 +475,7 @@ this bounded local config-snapshot path does not certify every secret/provider a
 Build and deploy as a standard container:
 
 ```dockerfile
-FROM rust:1.95.0 as builder
+FROM rust:1.98.1-bookworm as builder
 WORKDIR /app
 COPY . .
 RUN cargo build -p my-app-adapter-axum --release
@@ -526,8 +528,8 @@ While Axum provides a convenient development environment, always test on actual 
 
 ## Application lifetime
 
-`dev_server::run_app` already constructs one app per server startup and serves
-clones of its router. No additional reuse option is needed. Retained application
+`dev_server::run_app` constructs one app per server startup and shares one `Arc<App>`,
+including its router and configured policies. No additional reuse option is needed. Retained application
 state must support concurrent requests; each request gets its own metadata,
 extensions, and body. Restarting the server creates a fresh app. Native Axum
 measurements are a useful ownership reference but do not establish WASM runtime

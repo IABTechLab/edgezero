@@ -148,6 +148,7 @@ impl AxumIngressConfig {
     /// Conservative requested metadata capacity per parser/cache header map.
     /// Excludes name/value bytes, the fixed map object, allocator overhead and RSS.
     /// Audited against http 1.4.2 and Rust 1.95.0, including collision-driven growth.
+    /// Not yet repeated on the workspace's Rust 1.98.1.
     #[must_use]
     #[inline]
     pub fn parser_header_map_allocation_bytes(self) -> usize {
@@ -168,6 +169,7 @@ impl AxumIngressConfig {
 
     /// Conservative capacity bound per receive backing allocation, not RSS.
     /// Audited against Hyper 1.12.0, bytes 1.12.1 and Rust 1.95.0.
+    /// Not yet repeated on the workspace's Rust 1.98.1.
     #[must_use]
     #[inline]
     pub const fn parser_read_allocation_bytes(self) -> usize {
