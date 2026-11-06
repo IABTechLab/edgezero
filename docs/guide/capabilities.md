@@ -384,7 +384,8 @@ reads at most 16 KiB; rotating slot service prevents a continuously-ready body f
 the driver. An occupied result slot backpressures only its own exchange. Cached SDK Send heads
 retain their opaque cache state and use nonblocking polling with one shared positive 1 ms pulse.
 Cold backend registration can still delay dispatch; synchronous provider work and SDK cleanup
-remain non-preemptible. This is not callback-wide scheduling or a hosted isolation guarantee.
+remain non-preemptible. Progress is cooperative, not autonomous during application CPU work,
+and does not establish hosted isolation.
 Local error-preserving readiness and bounded subsequent reads require the explicitly selected
 [Viceroy repair](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/patches/viceroy/README.md);
 stock Viceroy 0.21.0 both loses source errors and can report empty frames as ready even though
@@ -676,9 +677,13 @@ adapter failure, premature EOF, duplicate indices, and out-of-range indices retu
 index-aligned slots preserve sibling outcomes observed before the failure.
 Normal completion requires clean driver EOF after the last item, not merely the expected item
 count. Trailing driver failures and malformed events remain visible, including on empty batches.
-`elapsed` starts at the single method-entry monotonic snapshot and ends when that slot becomes
-terminal, including preflight validation, adapter setup, provider queueing, upload, headers,
-buffered body drain, and any delayed guest observation. It is not pure transport RTT.
+`elapsed` is the slot's recorded arrival minus the single method-entry monotonic snapshot.
+It includes validation, setup, queueing, upload, headers and buffered-body processing before
+arrival, not later collection. Axum, Cloudflare and Spin record at the next executor scheduling
+opportunity; Fastly records at the next EdgeZero operation that services the provider. CPU work
+that does not yield delays recording, and EdgeZero never backdates an arrival. It is not pure
+transport RTT. An earlier own-deadline timeout retains its logical deadline and elapsed value
+under the documented cutoff exception.
 Preflight failures are timed from the same batch start, and a same-tick result may be zero.
 A successful outcome is contractually terminal and on time. `elapsed` is metadata, not a second
 lateness check; callers must not sample their clock after the whole batch returns to reinterpret an
