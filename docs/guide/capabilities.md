@@ -714,6 +714,9 @@ that issued it.
 
 ## Missing Client
 
+Canonical wiring follows the shared [client-selection precedence](/guide/proxying#client-selection):
+router state on every adapter, then Fastly preparation, then the adapter default.
+
 Adapters inject `HttpClient` into request extensions. A handler obtains it with
 `RequestContext::http_client()`. The accessor returns `None` when custom/manual wiring omitted
 the client; handlers should return an explicit 501 or another application-selected fallback.

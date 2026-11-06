@@ -4,6 +4,14 @@ EdgeZero exposes one provider-neutral HTTP client to handlers. Adapters inject a
 into request extensions, while application code builds `OutboundRequest` values and receives
 typed `OutboundResponse` or `EdgeError` outcomes.
 
+## Client Selection
+
+Under canonical adapter wiring, `RequestContext::http_client()` uses this precedence:
+the `HttpClient` supplied through `RouterBuilder::with_state` wins on all four adapters;
+otherwise a client inserted by Fastly's `prepare` hook reaches the handler; otherwise the
+adapter-provided default is used. Router state therefore overrides a Fastly preparation client
+when both are supplied. Manual contexts that install none still return `None`.
+
 ## Hard-Cut Adoption
 
 Replace an application's transport layer rather than wrapping it around EdgeZero or keeping
