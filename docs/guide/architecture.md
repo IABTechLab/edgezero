@@ -101,7 +101,7 @@ Adapters translate between provider-specific types and the portable core model:
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                        Adapter                               │
-│  - into_core_request(): Provider Request → Core Request     │
+│  - Head normalization: Provider head → Core request head    │
 │  - response coordinator: Core envelope → owned delivery     │
 │  - run_app(): Canonical request and response lifecycle      │
 │  - adapter service: Optional low-level send-owning wiring    │
@@ -110,10 +110,10 @@ Adapters translate between provider-specific types and the portable core model:
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                     edgezero-core                           │
-│  - RouterService matches routes                             │
-│  - Middleware chain executes                                │
+│  - App resolves the route and runs ingress admission        │
+│  - Middleware chain executes (matched routes only)          │
 │  - Handler runs with extracted params                       │
-│  - Response built and returned                              │
+│  - Response returned in an owned egress envelope            │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
