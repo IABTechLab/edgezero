@@ -185,9 +185,10 @@ Registering two routes that conflict for the same method (for example, two route
 like `/users/{id}`) panics while the routes are registered (inside `App::build::<A>(platform)`) with
 `duplicate route definition for <path>`.
 When that happens depends on the adapter: Axum builds the router once at startup, so the conflict
-surfaces before any traffic, but the Fastly, Cloudflare, and Spin entry points call
-`App::build::<A>(platform)` per request, so a conflicting route deploys successfully and then panics on
-the first request.
+surfaces before any traffic. The default Fastly, Cloudflare and Spin `run_app` entry points call
+`App::build::<A>(platform)` per request, and Fastly's retained `serve_app` builds on the first
+request in each sandbox, so a conflicting route deploys successfully and then panics on the first
+request. With `dispatch_app`, the panic happens wherever the caller builds the app.
 Run the app under the Axum dev server before deploying to an edge target.
 
 ## Intercepting before dispatch
