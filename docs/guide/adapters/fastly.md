@@ -217,8 +217,11 @@ No capability cell or SDK/runtime pin is promoted.
 
 ## Backends
 
-Outbound HTTP uses deterministic **dynamic backends** derived from the canonical target,
-TLS identity, and provider timer budget. You do not predeclare those destinations in
+Outbound HTTP uses deterministic **dynamic backends** derived from the canonical origin,
+wire authority (including `host_authority_override`), TLS identity, connect setting, and B31
+timer class. This replaces the dynamic-backend model of the historical outbound design.
+Do not let untrusted input choose outbound hosts: every distinct origin consumes service-wide
+backend capacity. You do not predeclare those destinations in
 `fastly.toml`, but dynamic backends must be enabled on the deployed Fastly service. The local CLI
 cannot prove that service entitlement, so `outbound-http` is BestEffort. A disabled service
 returns a typed 502 with an enablement diagnostic.
