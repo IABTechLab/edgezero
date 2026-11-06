@@ -148,9 +148,20 @@ fn capture(
     success: bool,
     diagnostics: &[u8],
 ) -> Result<Value> {
-    let mut response = match parse_head(&read_bounded(header_path, MAX_HEAD)?) {
+    let raw_head = read_bounded(header_path, MAX_HEAD)?;
+    let mut response = match parse_head(&raw_head) {
         Ok(response) => response,
-        Err(error) => json!({"head_parse_error":error.to_string()}),
+        Err(error) => {
+            let mut incomplete = json!({"head_parse_error":error.to_string()});
+            if raw_head.ends_with(b"\r\n") {
+                let mut diagnostic = raw_head.clone();
+                diagnostic.extend_from_slice(b"\r\n");
+                if let Ok(partial) = parse_head(&diagnostic) {
+                    incomplete["incomplete_head"] = partial;
+                }
+            }
+            incomplete
+        }
     };
     let bytes = read_bounded(body_path, MAX_BODY)?;
     response["body"] = if head {
@@ -310,6 +321,10 @@ fn checks(adapter: &str, port: u16, run: &Path, records: &mut Records) -> Result
         json!({"event":"framing-client","adapter":adapter,"version":version,"qualification":false}),
     )?;
     let mut passed = true;
+    let mut production_cases = 0;
+    let mut sdk_controls = 0;
+    let mut sdk_failures = 0;
+    let mut expected_deviations = 0;
     for h2 in [false, true] {
         if h2 && adapter != "fastly" {
             continue;
@@ -340,6 +355,7 @@ fn checks(adapter: &str, port: u16, run: &Path, records: &mut Records) -> Result
                 .and_then(|response| validate(response, adapter, case, h2));
             records.push(json!({"event":"framing-case","adapter":adapter,"case":case,"http2":h2,"client":client.as_ref().ok(),"status":if check.is_ok(){"pass"}else{"fail"},"error":check.as_ref().err().map(ToString::to_string),"qualification":false}))?;
             passed &= check.is_ok();
+            production_cases += 1;
             if adapter == "fastly"
                 && !matches!(
                     case,
@@ -361,11 +377,22 @@ fn checks(adapter: &str, port: u16, run: &Path, records: &mut Records) -> Result
                         let client = client.as_ref().map_err(|error| error.to_string())?;
                         validate_sdk_parity(client, reference)
                     });
-                records.push(json!({"event":"framing-sdk-parity","adapter":adapter,"case":case,"http2":h2,"reference":reference.as_ref().ok(),"status":if parity.is_ok(){"pass"}else{"fail"},"error":parity.as_ref().err().map(ToString::to_string),"qualification":false}))?;
-                passed &= parity.is_ok();
+                let regression = client
+                    .as_ref()
+                    .map_err(|error| error.to_string().into())
+                    .and_then(|candidate| {
+                        let reference = reference.as_ref().map_err(|error| error.to_string())?;
+                        sdk_regression(case, h2, candidate, reference)
+                    });
+                sdk_controls += 1;
+                sdk_failures += usize::from(parity.is_err());
+                expected_deviations += usize::from(matches!(regression, Ok("expected-failure")));
+                records.push(json!({"event":"framing-sdk-parity","adapter":adapter,"case":case,"http2":h2,"reference":reference.as_ref().ok(),"status":regression.as_ref().copied().unwrap_or("fail"),"parity_status":if parity.is_ok(){"pass"}else{"fail"},"error":parity.as_ref().err().map(ToString::to_string),"regression_error":regression.as_ref().err().map(ToString::to_string),"qualification":false}))?;
+                passed &= regression.is_ok();
             }
         }
     }
+    records.push(json!({"event":"framing-regression-summary","adapter":adapter,"status":if passed {"pass"} else {"fail"},"production_cases":production_cases,"sdk_controls":sdk_controls,"expected_deviations":expected_deviations,"sdk_parity_failures":sdk_failures,"sdk_parity_status":if sdk_failures==0 {"pass"} else {"fail"},"qualification":false}))?;
     records.push(json!({"event":"framing-hosted-gates","adapter":adapter,"status":"open","qualification":false,"reason":"local runtime results do not qualify hosted compression, deployed header delivery, or consumer response parity"}))?;
     require(
         passed,
@@ -386,9 +413,202 @@ fn validate_sdk_parity(candidate: &Value, reference: &Value) -> Result<()> {
     )
 }
 
+fn sdk_regression(
+    case: &str,
+    h2: bool,
+    candidate: &Value,
+    reference: &Value,
+) -> Result<&'static str> {
+    validate(candidate, "fastly", case, h2)?;
+    let known = matches!(case, "head" | "head-explicit" | "reset-content")
+        || (h2
+            && matches!(
+                case,
+                "not-modified" | "not-modified-explicit" | "no-content"
+            ));
+    if !known {
+        validate_sdk_parity(candidate, reference)?;
+        return Ok("pass");
+    }
+    require(
+        validate_sdk_parity(candidate, reference).is_err(),
+        "SDK deviation improved; review the stale expectation",
+    )?;
+    require(
+        candidate["length"].is_null()
+            && candidate["transfer"]
+                == if case == "reset-content" && !h2 {
+                    json!("chunked")
+                } else {
+                    Value::Null
+                },
+        "suppression framing differs from the recorded deviation",
+    )?;
+    let failed_h2 = h2 && case != "reset-content";
+    require(
+        reference["curl_success"] == !failed_h2
+            && if failed_h2 {
+                matches!(reference["curl_exit"].as_u64(), Some(16 | 92))
+            } else {
+                reference["curl_exit"] == 0
+            }
+            && candidate["body_observation"]
+                == if case.starts_with("head") {
+                    json!("header-only")
+                } else {
+                    json!("captured")
+                }
+            && reference["body_observation"] == candidate["body_observation"]
+            && reference["body"]
+                == if case == "reset-content" {
+                    json!("abcdef")
+                } else {
+                    candidate["body"].clone()
+                },
+        "SDK deviation has an unexpected transfer or payload",
+    )?;
+    if h2 && case == "no-content" {
+        require(
+            reference["head_parse_error"] == "truncated framing header section"
+                && reference["incomplete_head"]["protocol"] == "HTTP/2"
+                && reference["incomplete_head"]["status"] == 204
+                && reference["incomplete_head"].get("length") == Some(&Value::Null)
+                && reference["incomplete_head"].get("transfer") == Some(&Value::Null)
+                && reference["incomplete_head"]["headers"]
+                    .as_array()
+                    .is_some_and(|fields| {
+                        fields.len() == 1
+                            && fields[0][0] == "date"
+                            && fields[0][1].as_str().is_some_and(|value| !value.is_empty())
+                    })
+                && ["protocol", "status", "length", "transfer"]
+                    .iter()
+                    .all(|field| reference.get(field).is_none()),
+            "SDK 204 deviation lacks the exact incomplete-head witness",
+        )?;
+    } else {
+        require(
+            reference.get("head_parse_error").is_none()
+                && reference["protocol"] == candidate["protocol"]
+                && reference["status"] == candidate["status"]
+                && reference["length"] == 6
+                && reference["transfer"].is_null(),
+            "SDK deviation has an unexpected head",
+        )?;
+    }
+    Ok("expected-failure")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn known_sdk_deviation(case: &str, h2: bool) -> (Value, Value) {
+        let head = case.starts_with("head");
+        let status = match case {
+            "not-modified" | "not-modified-explicit" => 304,
+            "no-content" => 204,
+            "reset-content" => 205,
+            _ => 200,
+        };
+        let candidate = json!({"protocol":if h2 {"HTTP/2"} else {"HTTP/1.1"},"status":status,
+            "curl_success":true,"curl_exit":0,"length":null,
+            "transfer":if case=="reset-content" && !h2 {json!("chunked")} else {Value::Null},
+            "body":if head {Value::Null} else {json!("")},
+            "body_observation":if head {"header-only"} else {"captured"}});
+        let mut reference = candidate.clone();
+        reference["transfer"] = Value::Null;
+        reference["length"] = json!(6);
+        if case == "reset-content" {
+            reference["body"] = json!("abcdef");
+        } else if h2 {
+            reference["curl_success"] = json!(false);
+            reference["curl_exit"] = json!(92);
+            if case == "no-content" {
+                for key in ["protocol", "status", "length", "transfer"] {
+                    reference.as_object_mut().unwrap().remove(key);
+                }
+                reference["head_parse_error"] = json!("truncated framing header section");
+                reference["incomplete_head"] = json!({"protocol":"HTTP/2","status":204,"headers":[["date","controlled date"]],"length":null,"transfer":null});
+            }
+        }
+        (candidate, reference)
+    }
+
+    #[test]
+    fn known_sdk_deviations_pass_regression_but_not_strict_parity() {
+        let mut count = 0;
+        for h2 in [false, true] {
+            for case in [
+                "head",
+                "head-explicit",
+                "not-modified",
+                "not-modified-explicit",
+                "no-content",
+                "reset-content",
+            ] {
+                if !h2
+                    && matches!(
+                        case,
+                        "not-modified" | "not-modified-explicit" | "no-content"
+                    )
+                {
+                    continue;
+                }
+                let (candidate, reference) = known_sdk_deviation(case, h2);
+                assert!(validate_sdk_parity(&candidate, &reference).is_err());
+                assert_eq!(
+                    sdk_regression(case, h2, &candidate, &reference).unwrap(),
+                    "expected-failure"
+                );
+                count += 1;
+            }
+        }
+        assert_eq!(count, 9);
+    }
+
+    #[test]
+    fn known_sdk_cases_do_not_hide_unexpected_failures_or_improvements() {
+        for (case, h2) in [
+            ("head", false),
+            ("head-explicit", true),
+            ("not-modified", true),
+            ("no-content", true),
+            ("reset-content", false),
+        ] {
+            let (candidate, reference) = known_sdk_deviation(case, h2);
+            assert!(
+                sdk_regression(case, h2, &candidate, &candidate).is_err(),
+                "review an improved reference instead of retaining stale expectations"
+            );
+            for (field, wrong) in [
+                ("curl_exit", json!(28)),
+                ("body", json!("foreign payload")),
+                ("length", json!(7)),
+                ("transfer", json!("chunked")),
+                ("protocol", json!("HTTP/3")),
+            ] {
+                let mut changed = reference.clone();
+                changed[field] = wrong;
+                assert!(
+                    sdk_regression(case, h2, &candidate, &changed).is_err(),
+                    "accepted unexpected {case}/{h2}/{field}"
+                );
+            }
+            let mut failed = candidate.clone();
+            failed["curl_success"] = json!(false);
+            failed["curl_exit"] = json!(28);
+            assert!(sdk_regression(case, h2, &failed, &reference).is_err());
+        }
+        let matching = json!({"protocol":"HTTP/1.1","status":200,"curl_success":true,"curl_exit":0,"length":6,"transfer":null,"body":"abcdef","body_observation":"captured"});
+        assert_eq!(
+            sdk_regression("buffered", false, &matching, &matching).unwrap(),
+            "pass"
+        );
+        let mut wrong = matching.clone();
+        wrong["body"] = json!("wrong");
+        assert!(sdk_regression("buffered", false, &matching, &wrong).is_err());
+    }
 
     #[test]
     fn transport_timeouts_and_failed_candidates_cannot_pass_framing_gates() {
@@ -477,11 +697,47 @@ mod tests {
         let head = capture(true, &headers, &body, true, b"").unwrap();
         assert!(head["body"].is_null());
         assert_eq!(head["body_observation"], "header-only");
+        fs::write(&headers, b"HTTP/2 204\r\ndate: incomplete\r\n").unwrap();
+        fs::write(&body, []).unwrap();
+        let incomplete = capture(false, &headers, &body, false, b"HTTP/2 stream error").unwrap();
+        assert_eq!(
+            incomplete["head_parse_error"],
+            "truncated framing header section"
+        );
+        assert_eq!(incomplete["incomplete_head"]["protocol"], "HTTP/2");
+        assert_eq!(incomplete["incomplete_head"]["status"], 204);
+        assert!(incomplete.get("status").is_none());
+        assert!(validate(&incomplete, "fastly", "no-content", true).is_err());
         fs::write(&headers, b"HTTP/1.1 304 Not Modified\r\n\r\n").unwrap();
         fs::write(&body, []).unwrap();
         let empty = capture(false, &headers, &body, true, b"").unwrap();
         assert_eq!(empty["capture_artifact"]["bytes"], 0);
         assert!(validate(&empty, "axum", "not-modified", false).is_ok());
         fs::remove_dir_all(run).unwrap();
+    }
+
+    #[test]
+    fn incomplete_sdk_204_capture_cannot_hide_unexpected_partial_headers() {
+        let run = tempfile::tempdir().unwrap();
+        let headers = run.path().join("capture.headers");
+        let body = run.path().join("capture.body");
+        fs::write(&body, []).unwrap();
+        let (candidate, _) = known_sdk_deviation("no-content", true);
+        for field in [
+            "date: controlled",
+            "content-length: 999",
+            "transfer-encoding: chunked",
+            "content-length: invalid",
+            "x-unexpected: value",
+            "malformed",
+        ] {
+            fs::write(&headers, format!("HTTP/2 204\r\n{field}\r\n")).unwrap();
+            let mut reference =
+                capture(false, &headers, &body, false, b"HTTP/2 stream error").unwrap();
+            reference["curl_exit"] = json!(92);
+            let regression = sdk_regression("no-content", true, &candidate, &reference);
+            assert_eq!(regression.is_ok(), field == "date: controlled", "{field}");
+            assert!(validate_sdk_parity(&candidate, &reference).is_err());
+        }
     }
 }

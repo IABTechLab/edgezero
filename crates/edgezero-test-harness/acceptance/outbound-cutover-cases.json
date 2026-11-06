@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
-  "source_digest": "c92d145789e5fc4f5d12e93e579450eba76760e2070b8dfe9bb40dfd437c5f29",
+  "source_digest": "fb23549f243eee5f83a9b370c627b143b48fb1373ded8063d07f0f34b0be44f1",
   "status": "Required-local acceptance reconciliation in progress. Run the existing evidence checker with --coverage for derived binding counts and explicit local, external, conditional and unpromoted follow-up scope. Readiness is not qualification or applicability approval. Mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2). Hosted and exact-candidate qualification remain separate; no EZ-25.42 adoption.",
   "external_prerequisites": [
     {

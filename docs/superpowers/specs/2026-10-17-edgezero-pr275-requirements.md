@@ -35,6 +35,15 @@ repaired build. This is not evidence for unmodified Viceroy or hosted Fastly. Or
 criteria, read-safety obligations, SDK suppression/parity requirements and qualification gates
 remain unchanged.
 
+**Strict suppression and SDK parity clarification (2026-11-06).** The requester previously chose
+"Preserve suppression; leave parity gate open" after local SDK controls transmitted a 205 payload
+or failed HTTP/2 bodyless delivery. That choice retains strict HEAD/204/205/304 suppression; it
+does not waive EZ-18.4 or the Fastly SDK-parity clause of EZ-18.6. The local regression suite may
+recognize only the recorded nine SDK-reference deviations (HTTP/1.1 HEAD/explicit HEAD and 205;
+HTTP/2 HEAD/explicit HEAD, 304/explicit 304, 204 and 205), with exact head, payload and client-error
+witnesses. It must keep their strict parity outcomes failed and qualification open. Unexpected
+failures or improvements require review. A regression exit of zero is not SDK-parity acceptance.
+
 ## Purpose
 
 Trusted Server (TS) is moving onto EdgeZero PR 275 in one hard cut. TS will use EdgeZero's

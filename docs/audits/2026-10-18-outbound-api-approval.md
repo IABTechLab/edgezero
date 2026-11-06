@@ -791,3 +791,20 @@ Refresh only the inventory's complete-document identity and its corresponding gu
 All per-criterion text/digests, acceptance identities, environment legs, applicability, approvals,
 read-safety obligations, strict suppression/parity requirements and qualification gates remain
 unchanged. Historical approval digests and negative evidence are retained, not relabeled.
+
+## Strict Suppression And SDK Deviation Record (2026-11-06)
+
+The requester's earlier reply was **"Preserve suppression; leave parity gate open"** after local
+SDK controls sent a forbidden 205 payload or failed HTTP/2 bodyless delivery. AG's approved
+40-thread review-fix plan authorizes recording that decision and making the existing framing
+regression suite useful. It does not authorize reproducing those SDK failures or weakening SDK
+parity acceptance. Only nine exact recorded reference deviations are expected failures; each
+keeps a failed strict parity result and its captures. An unexpected failure or improvement is red.
+Regression exit zero is not a parity or release-qualification pass.
+
+The append-only Scoped Amendment clarification changes the complete requirements SHA-256 from
+`c92d145789e5fc4f5d12e93e579450eba76760e2070b8dfe9bb40dfd437c5f29` to
+`fb23549f243eee5f83a9b370c627b143b48fb1373ded8063d07f0f34b0be44f1`.
+All criterion text/digests, identities, environment legs, applicability and approval decisions
+remain unchanged. Refresh only the inventory's complete-document identity. Historical captures
+and nonzero results remain historical failures, not retrospectively passing regressions.

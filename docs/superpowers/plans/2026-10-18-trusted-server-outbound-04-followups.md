@@ -831,10 +831,18 @@ behavior. Those controls remain failed; this decision does not waive EZ-18.4 or 
 
 Local characterization records 80/80 production cases: 32 on Viceroy 0.21.0 across HTTP/1.1 and
 HTTP/2, plus 16 each on local Workers, Spin 4.1.0 and Axum. Nine of 18 Fastly SDK reference controls
-fail; `--adapter fastly` and `--adapter all` intentionally return nonzero. HEAD captures report
+fail; the original `--adapter fastly` and `--adapter all` runs returned nonzero. HEAD captures report
 payload observation as unavailable. Short-source cases require concrete terminal transfer failures,
 not client timeouts. The capability remains Native on Axum and BestEffort on all serverless targets.
 See [working-tree evidence](../../audits/evidence/2026-10-23-buffered-response-framing.json).
+
+Review correction (2026-11-06): the existing suite now separates strict parity from regression
+status. Only the nine exact recorded SDK deviations are expected failures; every production
+response and other control must still pass, and unexpected reference changes fail. Events retain
+`parity_status: fail`, raw captures and `qualification: false`; the summary reports strict parity
+failures even when regression status passes. The requester approved preserving suppression and
+leaving parity open, as recorded in the requirements' Scoped Amendment and API approval log.
+EZ-18.4, the Fastly HEAD parity clause of EZ-18.6, hosted and consumer gates remain unqualified.
 
 Verification passes all five required Rust gates, 2,181 tests across 28 workspace binaries
 (823 core; one existing ignored test exercised separately by the generated-project gate), all
