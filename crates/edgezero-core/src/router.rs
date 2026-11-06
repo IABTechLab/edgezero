@@ -1309,6 +1309,60 @@ mod tests {
     }
 
     #[test]
+    fn routed_declared_caps_reject_without_reading_and_allow_a_larger_retry() {
+        use crate::context::BodyKind;
+        use bytes::Bytes;
+        use futures_util::stream;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        async fn handler(ctx: RequestContext) -> Result<String, EdgeError> {
+            let polls = ctx
+                .extensions()
+                .get::<Arc<AtomicUsize>>()
+                .expect("poll counter");
+            assert_eq!(
+                ctx.body_bytes(5).await.expect_err("caller cap").status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+            assert_eq!(ctx.body_kind(), BodyKind::Initial);
+            assert_eq!(ctx.body_bytes(10).await?.as_ref(), b"0123456789");
+            Ok("retried".to_owned())
+        }
+
+        for admitted_request in [false, true] {
+            let mut router = RouterService::builder().post("/retry", handler).build();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&polls);
+            let mut chunk = Some(Ok(Bytes::from_static(b"0123456789")));
+            let body = Body::from_stream(stream::poll_fn(move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(chunk.take())
+            }));
+            let mut request = request_builder()
+                .method(Method::POST)
+                .uri("/retry")
+                .header("content-length", "10")
+                .body(body)
+                .expect("request");
+            request.extensions_mut().insert(Arc::clone(&polls));
+            let response = if admitted_request {
+                let resolved = router.resolve(&Method::POST, "/retry");
+                let ingress = admitted_for(&resolved, Method::POST, "/retry");
+                block_on(router.dispatch_resolved(resolved, request, ingress))
+            } else {
+                block_on(router.call(request))
+            }
+            .expect("routed retry");
+            assert_eq!(
+                response.body().as_bytes().expect("buffered response"),
+                b"retried"
+            );
+            assert_eq!(polls.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[test]
     fn streams_body_through_router() {
         use bytes::Bytes;
         use futures_util::StreamExt as _;

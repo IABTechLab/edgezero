@@ -96,6 +96,7 @@ struct InputGuard {
     declared: Option<u64>,
     failure: RefCell<Option<StoredError>>,
     max: Option<usize>,
+    original_body: Cell<bool>,
     violation: Cell<Option<FixedViolation>>,
 }
 
@@ -352,7 +353,17 @@ impl RequestContext {
                     *state = BodyState::Poisoned(stored);
                     return Err(returned);
                 }
-                if self.input_guard.is_none() && declared_body_exceeds(&self.parts.headers, max) {
+                let declared = self.input_guard.as_ref().map_or_else(
+                    || declared_body_length(&self.parts.headers),
+                    |guard| {
+                        if guard.original_body.get() {
+                            guard.declared
+                        } else {
+                            None
+                        }
+                    },
+                );
+                if declared_length_exceeds(declared, max) {
                     return Err(EdgeError::payload_too_large(
                         RequestBodyOverflowOrigin::Inbound,
                     ));
@@ -652,6 +663,7 @@ impl RequestContext {
         let body = self.take_body()?;
         match body.into_stream() {
             Ok(source) => {
+                guard.original_body.set(false);
                 self.parts.headers.remove(CONTENT_LENGTH);
                 self.parts.headers.remove(TRANSFER_ENCODING);
                 *self.body.borrow_mut() =
@@ -719,6 +731,7 @@ impl RequestContext {
             declared: declared_body_length(request.headers()),
             failure: RefCell::new(None),
             max: ingress.and_then(AdmittedIngress::fallback_max_body_bytes),
+            original_body: Cell::new(true),
             violation: Cell::new(None),
         });
         let (parts, raw_body) = request.into_parts();
@@ -1052,8 +1065,8 @@ fn declared_body_length(headers: &HeaderMap) -> Option<u64> {
     text.parse::<u64>().ok()
 }
 
-fn declared_body_exceeds(headers: &HeaderMap, max: usize) -> bool {
-    declared_body_length(headers).is_some_and(|length| {
+fn declared_length_exceeds(declared: Option<u64>, max: usize) -> bool {
+    declared.is_some_and(|length| {
         usize::try_from(length).map_or(true, |native_length| native_length > max)
     })
 }

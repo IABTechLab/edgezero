@@ -440,6 +440,57 @@ mod tests {
     }
 
     #[test]
+    fn original_declared_cap_rejection_is_retryable_without_reading() {
+        for admitted_request in [false, true] {
+            let polls = Rc::new(Cell::new(0_usize));
+            let observed = Rc::clone(&polls);
+            let mut chunk = Some(Ok(Bytes::from_static(b"0123456789")));
+            let body = Body::from_stream(stream::poll_fn(move |_| {
+                observed.set(observed.get() + 1);
+                Poll::Ready(chunk.take())
+            }));
+            let mut original = request(body);
+            original
+                .headers_mut()
+                .insert("content-length", "10".parse().expect("length"));
+            let ingress = admitted_request.then(|| admitted(32, MonotonicClock::default()));
+            let mut wrapped = PreDispatchRequest::new(original, ingress.as_ref());
+            wrapped.headers_mut().clear();
+            assert_eq!(
+                block_on(wrapped.body_bytes(5))
+                    .expect_err("caller cap")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            assert_eq!(polls.get(), 0);
+            assert_eq!(wrapped.body_kind(), BodyKind::Initial);
+            assert!(wrapped.fixed_outcome().is_none());
+            assert_eq!(
+                block_on(wrapped.body_bytes(10)).expect("retry with larger cap"),
+                Bytes::from_static(b"0123456789")
+            );
+            assert_eq!(polls.get(), 2);
+        }
+    }
+
+    #[test]
+    fn mapped_stream_does_not_use_original_declared_length_for_the_output_cap() {
+        let body = Body::from_stream(stream::iter([Ok(Bytes::from_static(b"0123456789"))]));
+        let mut original = request(body);
+        original
+            .headers_mut()
+            .insert("content-length", "10".parse().expect("length"));
+        let mut wrapped = PreDispatchRequest::new(original, None);
+        wrapped
+            .map_body(2, |_| Ok(Bytes::from_static(b"ok")))
+            .expect("shrinking mapper");
+        assert_eq!(
+            block_on(wrapped.body_bytes(2)).expect("output cap applies to mapped bytes"),
+            Bytes::from_static(b"ok")
+        );
+    }
+
+    #[test]
     fn protected_read_does_not_preflight_mutated_content_length() {
         let mut wrapped = PreDispatchRequest::new(request(Body::from("ok")), None);
         wrapped
