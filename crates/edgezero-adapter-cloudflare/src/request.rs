@@ -425,22 +425,14 @@ where
             Delay::from(Duration::ZERO).await;
 
             let item = {
-                let Some(remaining) = deadline.remaining_at(clock.now()) else {
-                    return Some((
-                        Err(EdgeError::request_timeout(
-                            "inbound body read deadline exceeded",
-                        )),
-                        None,
-                    ));
-                };
-                let timer = Delay::from(remaining);
+                let timer = native_time(clock.clone()).wait_until(deadline);
                 let next = body_stream.next();
                 match select(timer, next).await {
-                    Either::Left(((), _)) => {
+                    Either::Left((result, _)) => {
                         return Some((
-                            Err(EdgeError::request_timeout(
-                                "inbound body read deadline exceeded",
-                            )),
+                            Err(result.err().unwrap_or_else(|| {
+                                EdgeError::request_timeout("inbound body read deadline exceeded")
+                            })),
                             None,
                         ));
                     }
@@ -998,8 +990,8 @@ mod tests {
     use std::array::from_fn;
     use std::cell::RefCell;
     use std::rc::{Rc, Weak};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::Poll;
     use std::time::Duration;
 
@@ -1010,6 +1002,8 @@ mod tests {
     use edgezero_core::context::{BodyKind, RequestContext};
     use edgezero_core::http::{Response, StatusCode, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
+    #[cfg(feature = "test-utils")]
+    use edgezero_core::outbound::test_support::NativeBodyWitness;
     use edgezero_core::outbound::{
         OutboundBatch, OutboundCollectedSlot, OutboundFuture, OutboundPending, OutboundRequest,
         OutboundResponse,
@@ -1021,10 +1015,10 @@ mod tests {
     use edgezero_core::router::RouterService;
     use futures::channel::oneshot;
     use futures_util::FutureExt as _;
-    use futures_util::future::join;
+    use futures_util::future::{join, pending};
     #[cfg(feature = "test-utils")]
     use futures_util::stream::empty;
-    use futures_util::stream::poll_fn;
+    use futures_util::stream::{once, poll_fn};
     use wasm_bindgen_test::wasm_bindgen_test;
     use worker::js_sys::{Function, Object, Reflect, Uint8Array};
     use worker::wasm_bindgen::JsCast as _;
@@ -1037,9 +1031,6 @@ mod tests {
         static RETAINED_UPLOAD: RefCell<Weak<()>> = const { RefCell::new(Weak::new()) };
         static RETAINED_PROGRESS: RefCell<Option<RetainedProgress>> = const { RefCell::new(None) };
     }
-
-    #[cfg(feature = "test-utils")]
-    use edgezero_core::outbound::test_support::NativeBodyWitness;
 
     struct RetainedProgress {
         batch: OutboundBatch,
@@ -1257,6 +1248,76 @@ mod tests {
             .status(StatusCode::NO_CONTENT)
             .body(Body::empty())
             .map_err(EdgeError::internal)
+    }
+
+    #[wasm_bindgen_test]
+    async fn inbound_read_expiry_releases_a_permanently_pending_source() {
+        let _timers = NumericTimeoutGuard::install();
+        let start = MonotonicInstant::now();
+        let now = Arc::new(Mutex::new(start));
+        let observed = Arc::clone(&now);
+        let clock = MonotonicClock::new(move || *observed.lock().unwrap());
+        let deadline = Deadline::at_instant(
+            start
+                .checked_add(Duration::from_micros(700))
+                .expect("deadline"),
+        );
+        let released = Arc::new(AtomicUsize::new(0));
+        let owner = DropSignal(Arc::clone(&released));
+        let upstream = once(async move {
+            let _owner = owner;
+            pending::<Result<Bytes, anyhow::Error>>().await
+        });
+        let (edgezero_core::BodyPayload::Stream(mut source), _scope) =
+            cloudflare_deadline_body(upstream, deadline, clock.clone()).into_parts()
+        else {
+            panic!("expected bounded body stream");
+        };
+        let (item, ()) = join(source.next(), async {
+            Delay::from(Duration::from_millis(2)).await;
+            *now.lock().unwrap() = deadline.instant();
+        })
+        .await;
+        assert!(deadline.is_expired_at(clock.now()));
+        assert!(matches!(item, Some(Err(EdgeError::RequestTimeout { .. }))));
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert!(source.next().await.is_none());
+        drop(source);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn inbound_read_timer_does_not_treat_an_early_wake_as_expiry() {
+        let _timers = NumericTimeoutGuard::install();
+        for nanos in [700_000_u64, 10_700_000] {
+            let start = MonotonicInstant::now();
+            let clock = MonotonicClock::new(move || start);
+            let deadline = Deadline::at_instant(
+                start
+                    .checked_add(Duration::from_nanos(nanos))
+                    .expect("deadline"),
+            );
+            let released = Arc::new(AtomicUsize::new(0));
+            let owner = DropSignal(Arc::clone(&released));
+            let upstream = once(async move {
+                let _owner = owner;
+                Delay::from(Duration::from_millis(15)).await;
+                Ok::<_, anyhow::Error>(Bytes::from_static(b"on time"))
+            });
+            let (edgezero_core::BodyPayload::Stream(mut source), _scope) =
+                cloudflare_deadline_body(upstream, deadline, clock).into_parts()
+            else {
+                panic!("expected bounded body stream");
+            };
+            let bytes = source
+                .next()
+                .await
+                .expect("body item")
+                .expect("paired clock remains before deadline");
+            assert_eq!(bytes, Bytes::from_static(b"on time"));
+            drop(source);
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[wasm_bindgen_test]
