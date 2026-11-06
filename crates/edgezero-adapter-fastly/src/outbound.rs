@@ -296,7 +296,7 @@ mod fastly_impl {
     #[cfg(test)]
     use fastly::Body as FastlyBody;
     use fastly::backend::BackendCreationError;
-    use fastly::handle::{BodyHandle, PendingRequestHandle, PollHandleResult};
+    use fastly::handle::BodyHandle;
     use fastly::http::body::StreamingBody;
     use fastly::http::request::{PendingRequest, PollResult, SendErrorCause};
     use fastly::{Backend, Request as FastlyRequest, Response as FastlyResponse};
@@ -332,9 +332,9 @@ mod fastly_impl {
         OutboundTime::new(clock, super::progress::wait_current)
     }
 
-    pub(crate) enum PendingHead {
-        Direct(PendingRequestHandle, bool),
-        Sdk(Box<PendingRequest>, bool),
+    pub(crate) struct PendingHead {
+        configured: bool,
+        sdk: Box<PendingRequest>,
     }
 
     pub(crate) struct NativeTransport;
@@ -385,11 +385,8 @@ mod fastly_impl {
             body.recorder().cloned()
         }
 
-        fn head_handle(pending: &PendingHead) -> Option<u32> {
-            match pending {
-                PendingHead::Direct(handle, _) => Some(pending_handle_id(handle)),
-                PendingHead::Sdk(_, _) => None,
-            }
+        fn head_handle(_pending: &PendingHead) -> Option<u32> {
+            None
         }
 
         #[expect(
@@ -414,34 +411,20 @@ mod fastly_impl {
 
         fn poll_head(
             &mut self,
-            pending: PendingHead,
+            mut pending: PendingHead,
             budget: DispatchBudget,
             clock: &MonotonicClock,
         ) -> HeadPoll<PendingHead, FastlyResponse> {
             #[cfg(test)]
             NATIVE_HEAD_POLLS.set(NATIVE_HEAD_POLLS.get().saturating_add(1));
-            match pending {
-                PendingHead::Direct(handle, configured) => match handle.poll() {
-                    PollHandleResult::Pending(waiting) => {
-                        HeadPoll::Pending(PendingHead::Direct(waiting, configured))
-                    }
-                    PollHandleResult::Done(result) => HeadPoll::Ready(
-                        result
-                            .map(|(head, body)| FastlyResponse::from_handles(head, body))
-                            .map_err(|cause| {
-                                map_configured_send_cause(&cause, budget, clock, configured)
-                            }),
-                    ),
-                },
-                PendingHead::Sdk(mut sdk, configured) => match (*sdk).poll() {
-                    PollResult::Pending(waiting) => {
-                        *sdk = waiting;
-                        HeadPoll::Pending(PendingHead::Sdk(sdk, configured))
-                    }
-                    PollResult::Done(result) => HeadPoll::Ready(result.map_err(|error| {
-                        map_configured_send_cause(error.root_cause(), budget, clock, configured)
-                    })),
-                },
+            match (*pending.sdk).poll() {
+                PollResult::Pending(waiting) => {
+                    *pending.sdk = waiting;
+                    HeadPoll::Pending(pending)
+                }
+                PollResult::Done(result) => HeadPoll::Ready(result.map_err(|error| {
+                    map_configured_send_cause(error.root_cause(), budget, clock, pending.configured)
+                })),
             }
         }
 
@@ -1132,17 +1115,6 @@ mod fastly_impl {
         Ok(register())
     }
 
-    #[cfg_attr(
-        not(target_env = "p1"),
-        expect(
-            deprecated,
-            reason = "Fastly exposes only the raw handle identity needed to restore select order"
-        )
-    )]
-    fn pending_handle_id(handle: &PendingRequestHandle) -> u32 {
-        handle.as_u32()
-    }
-
     fn map_backend_creation_error(error: &BackendCreationError) -> EdgeError {
         let classified = match error {
             BackendCreationError::Disallowed => EdgeError::bad_gateway_with_reason(
@@ -1523,28 +1495,11 @@ mod fastly_impl {
         let clock = context.clock();
         #[cfg(test)]
         let dispatched_backend = backend.name().to_owned();
-        let pending = if context.mode() == OutboundSendMode::Batch {
-            let (handle, optional_body) = request.into_handles();
-            let native_body = optional_body.ok_or_else(|| {
-                EdgeError::internal(anyhow::anyhow!(
-                    "Fastly buffered request did not produce a body handle"
-                ))
-            })?;
-            PendingHead::Direct(
-                handle
-                    .send_async_to_backend(native_body, &backend)
-                    .map_err(|cause| {
-                        map_configured_send_cause(&cause, budget, clock, configured)
-                    })?,
-                configured,
-            )
-        } else {
-            PendingHead::Sdk(
-                Box::new(request.send_async(backend).map_err(|error| {
-                    map_configured_send_cause(error.root_cause(), budget, clock, configured)
-                })?),
-                configured,
-            )
+        let pending = PendingHead {
+            configured,
+            sdk: Box::new(request.send_async(backend).map_err(|error| {
+                map_configured_send_cause(error.root_cause(), budget, clock, configured)
+            })?),
         };
         #[cfg(test)]
         observe_native_sdk("send", &dispatched_backend);
@@ -1577,7 +1532,10 @@ mod fastly_impl {
         })?;
         #[cfg(feature = "test-utils")]
         let queued = own_sdk_operation(
-            Some(PendingHead::Sdk(Box::new(pending), configured)),
+            Some(PendingHead {
+                configured,
+                sdk: Box::new(pending),
+            }),
             recorder,
         );
         #[cfg(not(feature = "test-utils"))]
@@ -1588,7 +1546,13 @@ mod fastly_impl {
         #[cfg(feature = "test-utils")]
         let lease = progress.head_owned(uploaded, budget);
         #[cfg(not(feature = "test-utils"))]
-        let lease = progress.head(PendingHead::Sdk(Box::new(uploaded), configured), budget);
+        let lease = progress.head(
+            PendingHead {
+                configured,
+                sdk: Box::new(uploaded),
+            },
+            budget,
+        );
         lease.receive().await
     }
 
@@ -2026,6 +1990,101 @@ mod fastly_impl {
                 cause: BudgetSource::PerCallTimeout,
                 deadline: Deadline::at_instant(start.checked_add(duration).expect("deadline")),
                 duration,
+            }
+        }
+
+        fn sdk_cache_selection(mode: OutboundSendMode, policy: OutboundCachePolicy) {
+            use edgezero_core::OutboundScopeOwner;
+
+            let trace = NativeSdkTrace::new(Duration::ZERO);
+            let time = trace.time();
+            let callback = OutboundScopeOwner::callback();
+            let scope = callback.with(super::super::scope::capture);
+            let progress = super::super::scope::native_progress(&scope, &time, trace.entered)
+                .expect("native progress");
+            let request = OutboundRequest::get("http://127.0.0.1:9/sdk-cache-selection")
+                .expect("request")
+                .cache_policy(policy)
+                .timeout(Duration::from_secs(1));
+            let dispatch = callback.with(|| match mode {
+                OutboundSendMode::Batch => testing::batch_dispatch(
+                    request,
+                    time.clone(),
+                    Deadline::at_instant(
+                        trace
+                            .entered
+                            .checked_add(Duration::from_secs(1))
+                            .expect("cutoff"),
+                    ),
+                ),
+                OutboundSendMode::Send => testing::dispatch(request, time.clone()),
+                OutboundSendMode::Begin | OutboundSendMode::Follow => {
+                    panic!("buffered dispatch modes only")
+                }
+            });
+            let prepared = FastlyOutboundClient::with_time(time)
+                .configure(dispatch)
+                .expect("registered backend");
+            let mut native = build_fastly_request(
+                &prepared.parts.method,
+                &prepared.parts.uri,
+                &prepared.parts.headers,
+                policy,
+            );
+            native.set_before_send(|_| Ok(()));
+            native.set_body(Vec::<u8>::new());
+            let outcome = progress.with_current(|| {
+                send_buffered(
+                    native,
+                    prepared.backend,
+                    &prepared.context,
+                    &progress,
+                    false,
+                )
+                .now_or_never()
+            });
+            let unsupported = Some(&ProviderFailureDetail::Fastly {
+                phase: ProviderFailurePhase::Send,
+                cause: FastlyFailureCause::HttpCacheApiUnsupported,
+            });
+            match policy {
+                OutboundCachePolicy::PlatformDefault => {
+                    let error = outcome
+                        .expect("SDK rejects unsupported guest caching")
+                        .expect_err("cache API unavailable in pinned Viceroy");
+                    assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                    assert_eq!(error.provider_failure_detail(), unsupported);
+                    assert!(!trace.events.borrow().iter().any(|event| event.0 == "send"));
+                }
+                OutboundCachePolicy::Bypass => {
+                    if let Some(Err(error)) = outcome {
+                        assert_ne!(error.provider_failure_detail(), unsupported);
+                    }
+                    assert_eq!(
+                        trace
+                            .events
+                            .borrow()
+                            .iter()
+                            .filter(|event| event.0 == "send")
+                            .count(),
+                        1
+                    );
+                }
+            }
+            callback.close();
+        }
+
+        #[test]
+        fn buffered_send_and_batch_preserve_sdk_cache_selection() {
+            for mode in [OutboundSendMode::Send, OutboundSendMode::Batch] {
+                sdk_cache_selection(mode, OutboundCachePolicy::PlatformDefault);
+            }
+        }
+
+        #[test]
+        fn buffered_send_and_batch_bypass_unsupported_guest_cache_hooks() {
+            for mode in [OutboundSendMode::Send, OutboundSendMode::Batch] {
+                sdk_cache_selection(mode, OutboundCachePolicy::Bypass);
             }
         }
 

@@ -21,21 +21,28 @@ std::thread_local! {
     static BATCH: RefCell<Option<OutboundBatchContext>> = const { RefCell::new(None) };
 }
 
+#[derive(Clone, Copy)]
+enum CaptureMode {
+    BatchContext,
+    BatchRequest,
+    Dispatch,
+}
+
 struct HeadScript {
     dispatch: Box<dyn Fn(OutboundDispatchRequest) -> OutboundFuture<OutboundHead> + Send + Sync>,
     validate: fn(&OutboundRequest, OutboundSendMode) -> Result<(), EdgeError>,
 }
 
 struct Capture {
-    record_batch: bool,
+    mode: CaptureMode,
     script: Option<HeadScript>,
     time: OutboundTime,
 }
 
 impl Capture {
-    fn new(time: OutboundTime, record_batch: bool) -> Self {
+    fn new(time: OutboundTime, mode: CaptureMode) -> Self {
         Self {
-            record_batch,
+            mode,
             script: None,
             time,
         }
@@ -62,13 +69,20 @@ impl OutboundHttpClient for Capture {
     }
 
     fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
-        let (context, _) = batch.into_slots();
-        if !self.record_batch {
-            return OutboundBatch::cutoff(context);
+        let (context, mut requests) = batch.into_slots();
+        match self.mode {
+            CaptureMode::Dispatch => return OutboundBatch::cutoff(context),
+            CaptureMode::BatchRequest => {
+                assert_eq!(requests.len(), 1, "one captured request");
+                DISPATCH
+                    .with(|saved| saved.replace(Some(requests.pop().expect("prepared request").1)));
+                return OutboundBatch::cutoff(context);
+            }
+            CaptureMode::BatchContext => {}
         }
         let cutoff = context.observation_cutoff();
         BATCH.with(|saved| saved.replace(Some(context)));
-        HttpClient::with_client(Capture::new(self.time.clone(), false))
+        HttpClient::with_client(Capture::new(self.time.clone(), CaptureMode::Dispatch))
             .start_batch_until(Vec::new(), cutoff)
     }
 
@@ -90,7 +104,8 @@ impl OutboundHttpClient for Capture {
 
 #[cfg(any(feature = "fastly", feature = "test-utils"))]
 pub(super) fn dispatch(request: OutboundRequest, time: OutboundTime) -> OutboundDispatchRequest {
-    let mut future = HttpClient::with_client(Capture::new(time, false)).send(request);
+    let mut future =
+        HttpClient::with_client(Capture::new(time, CaptureMode::Dispatch)).send(request);
     assert!(
         future
             .as_mut()
@@ -107,6 +122,43 @@ pub(super) fn dispatch(request: OutboundRequest, time: OutboundTime) -> Outbound
 
 pub(crate) fn batch_context(slot_count: usize) -> OutboundBatchContext {
     batch_context_at(slot_count, instant(), Duration::from_secs(60))
+}
+
+pub(super) fn batch_dispatch(
+    request: OutboundRequest,
+    time: OutboundTime,
+    cutoff: Deadline,
+) -> OutboundDispatchRequest {
+    drop(
+        HttpClient::with_client(Capture::new(time, CaptureMode::BatchRequest))
+            .start_batch_until(vec![request], cutoff),
+    );
+    DISPATCH.with(|saved| {
+        saved
+            .borrow_mut()
+            .take()
+            .expect("facade prepared batch request")
+    })
+}
+
+#[test]
+fn captured_batch_request_keeps_the_facade_mode_and_budget() {
+    let start = instant();
+    let time = OutboundTime::new(MonotonicClock::new(move || start), |_, _| {
+        Box::pin(pending())
+    });
+    let captured = batch_dispatch(
+        OutboundRequest::get("https://fixture.invalid/")
+            .unwrap()
+            .timeout(Duration::from_millis(250)),
+        time,
+        Deadline::at_instant(start.checked_add(Duration::from_secs(1)).unwrap()),
+    );
+    let budget = captured.budget();
+    let (_, context) = captured.into_parts();
+    assert_eq!(context.mode(), OutboundSendMode::Batch);
+    assert_eq!(budget.duration, Duration::from_millis(250));
+    assert_eq!(context.entered_at(), start);
 }
 
 pub(super) fn batch_context_at(
@@ -126,7 +178,7 @@ pub(super) fn batch_context_at(
         }),
         |_, _| Box::pin(pending()),
     );
-    let client = HttpClient::with_client(Capture::new(time, true));
+    let client = HttpClient::with_client(Capture::new(time, CaptureMode::BatchContext));
     let requests = repeat_with(|| {
         OutboundRequest::get("https://example.com/")
             .unwrap()
@@ -168,7 +220,7 @@ pub(super) fn batch_context_for_requests(
     observation_cutoff: Deadline,
 ) -> OutboundBatchContext {
     drop(
-        HttpClient::with_client(Capture::new(time, true))
+        HttpClient::with_client(Capture::new(time, CaptureMode::BatchContext))
             .start_batch_until(requests, observation_cutoff),
     );
     BATCH.with(|saved| {
@@ -181,7 +233,7 @@ pub(super) fn batch_context_for_requests(
 
 #[cfg(not(feature = "fastly"))]
 pub(crate) fn client(time: OutboundTime) -> HttpClient {
-    HttpClient::with_client(Capture::new(time, false))
+    HttpClient::with_client(Capture::new(time, CaptureMode::Dispatch))
 }
 
 pub(crate) fn owner() -> OutboundExchangeOwner {
@@ -285,7 +337,7 @@ fn image_optimizer_follow_uses_native_mapping_on_each_prepared_hop() {
     let (options, expected) = optimizer_options_fixture();
     let records = Arc::new(Mutex::new(Vec::new()));
     let observed = Arc::clone(&records);
-    let mut capture = Capture::new(time, false);
+    let mut capture = Capture::new(time, CaptureMode::Dispatch);
     capture.script = Some(HeadScript {
         validate: super::validate_supported_options,
         dispatch: Box::new(move |request| {

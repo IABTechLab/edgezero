@@ -218,6 +218,11 @@ No capability cell or SDK/runtime pin is promoted.
 
 ## Backends
 
+Buffered Send and batch slots use the same Fastly SDK `Request::send_async` cache selection
+and pending-response finalizer. `PlatformDefault` retains SDK guest caching where the host
+supports it; `Bypass` sets pass explicitly. Local Viceroy controls verify selection and pass
+behavior, not hosted guest-cache hits. Native Image Optimizer keeps its direct SDK send path.
+
 Outbound HTTP uses deterministic **dynamic backends** derived from the canonical origin,
 wire authority (including `host_authority_override`), TLS identity, connect setting, and B31
 timer class. This replaces the dynamic-backend model of the historical outbound design.
