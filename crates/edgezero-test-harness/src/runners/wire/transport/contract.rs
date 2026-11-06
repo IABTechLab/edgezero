@@ -573,6 +573,34 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn workerd_failure_causes_reject_provider_text() {
+        let valid = artifact("cloudflare");
+        let index = vectors::all()
+            .position(|case| case.name == "pair-error-head-b")
+            .unwrap();
+        for cause in [
+            "Unknown",
+            "TypeError",
+            "AbortError",
+            "Error: token=secret",
+            "TimeoutError",
+        ] {
+            let mut changed = valid.clone();
+            for mode in ["send", "begin"] {
+                changed[index]["report"]["steps"][0][mode]["outcome"]["error"]["provider"]["cause"] =
+                    json!(cause);
+            }
+            changed[index]["response"]["body_bytes"] =
+                json!(changed[index]["report"].to_string().as_bytes());
+            assert_eq!(
+                validate_artifact(&changed, "cloudflare").is_ok(),
+                matches!(cause, "Unknown" | "TypeError" | "AbortError"),
+                "{cause}"
+            );
+        }
+    }
+
+    #[test]
     fn full_paired_contract_cache_bypass_keeps_provider_specific_wire_settings() {
         for adapter in ["axum", "cloudflare", "fastly", "spin"] {
             let mut changed = artifact(adapter);

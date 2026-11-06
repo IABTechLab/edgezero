@@ -887,6 +887,94 @@ mod tests {
         #[derive(Clone)]
         struct RecordingEgressObserver(Arc<Mutex<Vec<ResponseEgressReport>>>);
 
+        #[test]
+        fn policy_decisions_preserve_closed_delivery_without_finalization() {
+            for mode in ["refuse", "admission-abort", "detached-abort"] {
+                let mut app = build_test_app();
+                let completed = Arc::new(Mutex::new(Vec::new()));
+                let completed_hook = Arc::clone(&completed);
+                let observed = Arc::new(Mutex::new(Vec::new()));
+                app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&observed)));
+                let admitted = Arc::new(AtomicUsize::new(0));
+                let admitted_hook = Arc::clone(&admitted);
+                let detached = Arc::new(AtomicUsize::new(0));
+                let detached_hook = Arc::clone(&detached);
+                app.set_ingress_admission_policy(move |_| {
+                    admitted_hook.fetch_add(1, Ordering::SeqCst);
+                    if mode != "refuse" {
+                        return AdmissionDecision::Abort;
+                    }
+                    let reports = Arc::clone(&completed_hook);
+                    AdmissionDecision::Refuse {
+                        completion: ResponseEgressCompletion::new(move |report| {
+                            reports.lock().unwrap().push(report.clone());
+                        }),
+                        response: response_builder()
+                            .status(StatusCode::FORBIDDEN)
+                            .body(Body::empty())
+                            .unwrap(),
+                    }
+                });
+                app.set_detached_response_egress_decision_factory(move |_| {
+                    detached_hook.fetch_add(1, Ordering::SeqCst);
+                    DetachedResponseEgressDecision::Abort
+                });
+                let path = if mode == "detached-abort" {
+                    format!("/{}", "a".repeat(9000))
+                } else {
+                    "/uri".to_owned()
+                };
+                let finalized = Arc::new(AtomicUsize::new(0));
+                let finalized_hook = Arc::clone(&finalized);
+                let delivered = Arc::new(AtomicUsize::new(0));
+                let delivered_hook = Arc::clone(&delivered);
+                let result = FastlyService::new(&app).run_request_with_hooks_for_test(
+                    fastly_request(FastlyMethod::GET, &path, None),
+                    |_, _| {},
+                    move |_| {
+                        finalized_hook.fetch_add(1, Ordering::SeqCst);
+                    },
+                    move |envelope| {
+                        delivered_hook.fetch_add(1, Ordering::SeqCst);
+                        let (response, report) = complete_envelope_with_report(envelope);
+                        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                        response_delivery(FastlyResponseCommitState::Committed, report, Ok(()))
+                    },
+                );
+                assert_eq!(finalized.load(Ordering::SeqCst), 0, "{mode}");
+                assert_eq!(
+                    admitted.load(Ordering::SeqCst),
+                    usize::from(mode != "detached-abort"),
+                    "{mode}"
+                );
+                assert_eq!(
+                    detached.load(Ordering::SeqCst),
+                    usize::from(mode == "detached-abort"),
+                    "{mode}"
+                );
+                assert!(!result.may_send_native_response(), "{mode}");
+                assert!(observed.lock().unwrap().is_empty(), "{mode}");
+                let reports = completed.lock().unwrap();
+                if mode == "refuse" {
+                    let FastlyRequestDelivery::Detached(delivery) = result else {
+                        panic!("detached refusal");
+                    };
+                    assert_eq!(delivered.load(Ordering::SeqCst), 1);
+                    assert_eq!(delivery.commitment(), FastlyResponseCommitState::Committed);
+                    assert_eq!(
+                        delivery.report().body_kind,
+                        edgezero_core::ResponseEgressBodyKind::Application
+                    );
+                    assert_eq!(delivery.report().outcome, ResponseEgressOutcome::Completed);
+                    assert_eq!(reports.as_slice(), &[delivery.report().clone()]);
+                } else {
+                    assert!(matches!(result, FastlyRequestDelivery::Aborted), "{mode}");
+                    assert_eq!(delivered.load(Ordering::SeqCst), 0);
+                    assert!(reports.is_empty());
+                }
+            }
+        }
+
         impl ResponseEgressObserver for RecordingEgressObserver {
             fn complete(&self, report: &ResponseEgressReport) {
                 self.0.lock().expect("reports lock").push(report.clone());

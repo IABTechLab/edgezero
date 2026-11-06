@@ -185,7 +185,7 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
                 adapter,
                 "native-contracts",
                 &mut guarded(
-                    &["batch_preflight_precedence_and_indices"],
+                    &["--inventory", "unit/cloudflare"],
                     &[
                         "test",
                         "--offline",
@@ -195,8 +195,7 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
                         "--no-default-features",
                         "--features",
                         "test-utils",
-                        "--test",
-                        "contract",
+                        "--all-targets",
                     ],
                 ),
                 &repo,
@@ -297,7 +296,7 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
                 adapter,
                 "native-contracts",
                 &mut guarded(
-                    &["batch_preflight_rejects_streamed_slots_without_poisoning_siblings"],
+                    &["--inventory", "unit/fastly"],
                     &[
                         "test",
                         "--offline",
@@ -307,8 +306,7 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
                         "--no-default-features",
                         "--features",
                         "test-utils",
-                        "--test",
-                        "contract",
+                        "--all-targets",
                     ],
                 ),
                 &repo,
@@ -318,7 +316,7 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
             let viceroy = executable("VICEROY_BIN", "viceroy").ok_or("Viceroy is not installed")?;
             let runner = format!("{} run", viceroy.display());
             phase(adapter, "sdk-tests", guarded(
-                &["dispatch_runs_router_and_returns_response\nclosed_lifecycle_orders_hooks_and_returns_state_after_delivery"],
+                &["dispatch_runs_router_and_returns_response\nclosed_lifecycle_orders_hooks_and_returns_state_after_delivery\ntests::ingress_contract::policy_decisions_preserve_closed_delivery_without_finalization"],
                 &["test", "--offline", "--locked", "-p", "edgezero-adapter-fastly", "--no-default-features", "--features", "fastly,test-utils", "--target", "wasm32-wasip1", "--test", "contract"],
             ).env("CARGO_TARGET_WASM32_WASIP1_RUNNER", &runner), &repo, output, records)?;
             phase(

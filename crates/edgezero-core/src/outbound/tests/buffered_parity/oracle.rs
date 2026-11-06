@@ -418,9 +418,13 @@ pub fn validate(case: Case, adapter: &str, token: &str, capture: &Value) -> Resu
                             .all(|field| value.contains_key(*field))
                 }) && detail["adapter"] == platform
                     && detail["phase"] == phase
-                    && detail["cause"]
-                        .as_str()
-                        .is_some_and(|value| !value.is_empty() && value.len() <= 256),
+                    && detail["cause"].as_str().is_some_and(|value| {
+                        if adapter == "cloudflare" {
+                            matches!(value, "Unknown" | "TypeError" | "AbortError")
+                        } else {
+                            !value.is_empty() && value.len() <= 256
+                        }
+                    }),
                 "lost paired typed provider detail",
             )?;
         } else {

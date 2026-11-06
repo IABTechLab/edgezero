@@ -170,7 +170,7 @@ const localCloseoutKeys = new Set([
 const localCloseoutKeyDigest =
   "d57706880e4a496a4a23d4a7ca02026a2c2ba3b52528ef4c4f92adad2e5f0dec";
 const localCloseoutUnchangedDigest =
-  "ab8c1077a128754bcedf1dd74c2267253c528550f7788c8fb14b204f84f6b1e0";
+  "b0268e3a032de0781432c2d4ea39b66ba1916c094c6e3b86796f4a1981d9fc70";
 const localCloseoutScopeDigest =
   "fb3bf7503c46a6f3987f9063964a23c306a3c6cc65bff8c7e44383e7fec9ffb1";
 const localCloseoutArtifacts = new Map([
@@ -822,6 +822,49 @@ function caseKey(row) {
   return `${row.case_id}@${row.environment}`;
 }
 
+test("shipped follow-ups have real local bindings and separately pending presence decisions", () => {
+  const { manifest, spec } = closeoutInputs();
+  const followups = manifest.cases.filter((row) => /^EZ-(16|17|18|19|20|21|22)\//.test(row.case_id));
+  const local = followups.filter((row) => !/^(hosted-|consumer-)/.test(row.environment));
+  assert.equal(local.length, 57);
+  const gaps = new Set([
+    "EZ-16/acceptance/04@viceroy",
+    "EZ-17/acceptance/06@viceroy",
+    "EZ-22/acceptance/07@workerd/retained-instance",
+    "EZ-22/acceptance/07@spin/retained-instance",
+  ]);
+  for (const row of local) {
+    assert.equal(row.implementation, gaps.has(caseKey(row)) ? "planned" : "ready", caseKey(row));
+    if (gaps.has(caseKey(row))) assert.ok(row.binding_gap.length > 20, caseKey(row));
+    assert.doesNotMatch(row.command, /--suite outbound-cutover|--case /, caseKey(row));
+    assert.doesNotMatch(row.sentinel, /^ez_(16|17|18|19|20|21|22)_acceptance_/, caseKey(row));
+    assert.match(row.artifact_path, /\.(log|jsonl)$/, caseKey(row));
+  }
+  const originalDecisions = new Map(manifest.decisions.map((entry) => [entry.id, entry]));
+  for (const section of [16, 17, 18, 19, 20, 21, 22]) {
+    const id = `EZ-${section} present@shipped-base`;
+    const decision = originalDecisions.get(id);
+    const base = followups.filter((row) => row.case_id.startsWith(`EZ-${section}/`) && row.condition === null);
+    assert.ok(decision, id);
+    assert.deepEqual(new Set(decision.scope), new Set(base.map(caseKey)));
+    assert.equal(decision.status, "pending");
+    assert.equal(decision.action, "present");
+    assert.equal(decision.changelog, "CHANGELOG.md");
+    for (const field of ["edgezero_approver", "consumer_approver", "date", "evidence", "ci_owner"])
+      assert.equal(decision[field], null, `${id}: ${field}`);
+    for (const row of base) assert.equal(row.approval, id);
+  }
+  const pending = checker.inventoryCoverage(manifest, spec);
+  for (const decision of manifest.decisions.filter((entry) => /present@shipped-base$/.test(entry.id)))
+    Object.assign(decision, { status: "approved", edgezero_approver: "fixture-owner", consumer_approver: "fixture-consumer", date: "2026-11-06", evidence: "fixture-confirmation", ci_owner: "existing-test-owners" });
+  const confirmed = checker.inventoryCoverage(manifest, spec);
+  assert.equal(confirmed.summary["required-local"].ready - pending.summary["required-local"].ready, 44);
+  assert.equal(confirmed.summary["required-local"].planned - pending.summary["required-local"].planned, 4);
+  assert.ok(confirmed.summary["required-external"].planned > pending.summary["required-external"].planned);
+  assert.deepEqual(confirmed.summary["conditional-pending"], pending.summary["conditional-pending"]);
+  assert.equal(confirmed.qualified, false);
+});
+
 function canonicalCloseout(value) {
   if (Array.isArray(value)) return value.map(canonicalCloseout);
   if (value && typeof value === "object")
@@ -912,7 +955,7 @@ function assertLocalCloseout(manifest, spec, workflow) {
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 265,
+    planned: 212,
   });
   const report = checker.inventoryCoverage(manifest, spec);
   assert.equal(report.qualified, false);
@@ -921,13 +964,13 @@ function assertLocalCloseout(manifest, spec, workflow) {
   assert.deepEqual(report.summary, {
     "required-local": { ready: 217, planned: 0 },
     "required-external": { ready: 0, planned: 44 },
-    "conditional-pending": { ready: 0, planned: 50 },
-    "follow-up-not-promoted": { ready: 29, planned: 171 },
+    "conditional-pending": { ready: 9, planned: 41 },
+    "follow-up-not-promoted": { ready: 73, planned: 127 },
     "approved-deferred": { ready: 0, planned: 0 },
   });
   assert.equal(
     manifest.cases.filter((row) => row.implementation === "ready").length,
-    246,
+    299,
   );
   assert.ok(
     manifest.decisions.every((decision) => decision.status === "pending"),
@@ -2308,7 +2351,7 @@ test("redirect core criteria bind every required test before one library executi
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 265,
+    planned: 212,
   });
   const command =
     "scripts/run_test_nonzero.sh --inventory unit/core cargo test --offline --locked -p edgezero-core --features test-utils --lib";
@@ -2508,7 +2551,7 @@ test("batch bindings require exact runtime and core identity proofs", () => {
   assert.equal(core.artifact_path, "outbound/unit/core/raw.log");
   assert.deepEqual([core.sentinel, ...core.additional_sentinels], names);
   const selected = checker.readySentinels(manifest, "unit/core", core.command);
-  assert.equal(selected.length, 90);
+  assert.equal(selected.length, 101);
   for (const name of names) assert.ok(selected.includes(name));
   const bindings = [
     [
@@ -3043,7 +3086,7 @@ test("approved TLS baseline keeps configurable verification deferred and binds n
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 265,
+    planned: 212,
   });
   for (const entry of manifest.cases.filter((entry) =>
     entry.case_id.startsWith("EZ-12/"),
@@ -3102,7 +3145,7 @@ test("approved focus wording separates numeric errors from compile-time invarian
   assert.deepEqual(validateManifest(manifest, spec), {
     criteria: 255,
     legs: 511,
-    planned: 265,
+    planned: 212,
   });
   const stale = structuredClone(manifest);
   stale.source_digest =
@@ -3771,12 +3814,12 @@ test("local reader and fallback acceptance reuse their complete owning commands"
   const readyCore = manifest.cases.filter(
     (c) => c.environment === "unit/core" && c.implementation === "ready",
   );
-  assert.equal(readyCore.length, 34);
+  assert.equal(readyCore.length, 44);
   const libraryCore = readyCore.filter((c) => c.command === coreCommand);
-  assert.equal(libraryCore.length, 33);
+  assert.equal(libraryCore.length, 42);
   assert.deepEqual(
     readyCore.filter((c) => c.command !== coreCommand).map((c) => c.case_id),
-    ["EZ-8/acceptance/01"],
+    ["EZ-8/acceptance/01", "EZ-22/acceptance/08"],
   );
   assert.deepEqual(
     checker.readySentinels(manifest, "unit/core", coreCommand).sort(),
@@ -3975,15 +4018,16 @@ test("redirect runtime bindings retain exact output paths and leave unproved leg
     }
   }
   const ready = manifest.cases.filter((c) => c.implementation === "ready");
-  assert.equal(ready.length, 246);
+  assert.equal(ready.length, 299);
   assert.equal(
     manifest.cases.filter((c) => c.implementation === "planned").length,
-    265,
+    212,
   );
   assert.ok(
     ready.every(
       (c) =>
         localCloseoutKeys.has(caseKey(c)) ||
+        (/^EZ-(16|17|18|19|20|21|22)\//.test(c.case_id) && !/^(hosted-|consumer-)/.test(c.environment)) ||
         c.case_id.startsWith("EZ-9/acceptance/") ||
         (c.case_id === "EZ-1/acceptance/06" &&
           c.environment === "axum/http1-chunked") ||

@@ -87,7 +87,12 @@ fn validate_markers(
             Some("EZ-5/acceptance/09") => async_log,
             Some("EZ-5/acceptance/10") => wire_log,
             Some("EZ-5/acceptance/11") => wire_log,
-            Some("EZ-6/acceptance/21") => native_log,
+            Some(
+                "EZ-6/acceptance/21"
+                | "EZ-19/acceptance/04"
+                | "EZ-19/acceptance/08"
+                | "EZ-21/acceptance/01",
+            ) => native_log,
             _ => return Err("ready Spin criterion has no implemented CI phase".into()),
         };
         let mut names = vec![case["sentinel"].as_str().ok_or("missing Spin sentinel")?];
@@ -122,8 +127,15 @@ fn validate_markers(
             let (log, expected) = match (case["case_id"].as_str(), name) {
                 (
                     Some(
-                        "EZ-2/acceptance/01" | "EZ-3/acceptance/08" | "EZ-4/acceptance/01"
-                        | "EZ-4/acceptance/02" | "EZ-8/acceptance/03" | "EZ-6/acceptance/21",
+                        "EZ-2/acceptance/01"
+                        | "EZ-3/acceptance/08"
+                        | "EZ-4/acceptance/01"
+                        | "EZ-4/acceptance/02"
+                        | "EZ-8/acceptance/03"
+                        | "EZ-6/acceptance/21"
+                        | "EZ-19/acceptance/04"
+                        | "EZ-19/acceptance/08"
+                        | "EZ-21/acceptance/01",
                     ),
                     _,
                 ) => (log, format!("test {name} ... ok")),
@@ -568,6 +580,34 @@ mod tests {
             ("", "", "ez_4_acceptance_03_unit_spin: failed\n", ""),
         ] {
             assert!(validate_markers(&inventory, native, sdk, asynchronous, wire).is_err());
+        }
+    }
+
+    #[test]
+    fn followup_converter_proofs_require_the_native_phase() {
+        for criterion in [
+            "EZ-19/acceptance/04",
+            "EZ-19/acceptance/08",
+            "EZ-21/acceptance/01",
+        ] {
+            let inventory = json!({"cases":[{"case_id":criterion,"environment":"unit/spin","implementation":"ready",
+                "sentinel":"response::tests::owned_headers_and_overflow_retry_precedence"}]});
+            let passed =
+                "test response::tests::owned_headers_and_overflow_retry_precedence ... ok\n";
+            validate_markers(&inventory, passed, "", "", "").unwrap();
+            for (native, sdk, asynchronous, wire) in [
+                ("", passed, "", ""),
+                ("", "", passed, ""),
+                ("", "", "", passed),
+                (
+                    "test response::tests::owned_headers_and_overflow_retry_precedence ... ignored\n",
+                    "",
+                    "",
+                    "",
+                ),
+            ] {
+                assert!(validate_markers(&inventory, native, sdk, asynchronous, wire).is_err());
+            }
         }
     }
 

@@ -249,6 +249,11 @@ pub fn synthesized_error_fixture(error: EdgeError) -> Result<ResponseEgressEnvel
         HeaderValue::from_static("configured"),
     );
     headers.insert("retry-after", HeaderValue::from_static("180"));
+    headers.insert("allow", HeaderValue::from_static("PUT"));
+    headers.insert(
+        "cache-control",
+        HeaderValue::from_static("public, max-age=3600"),
+    );
     app.set_synthesized_response_headers(headers)
         .map_err(EdgeError::internal)?;
     app.set_error_response_renderer(|_| {
@@ -256,6 +261,10 @@ pub fn synthesized_error_fixture(error: EdgeError) -> Result<ResponseEgressEnvel
         response
             .headers_mut()
             .insert("retry-after", HeaderValue::from_static("240"));
+        response.headers_mut().insert(
+            "cache-control",
+            HeaderValue::from_static("private, no-store"),
+        );
         response
     });
     let request = Request::new(Body::empty());
@@ -271,6 +280,52 @@ pub fn synthesized_error_fixture(error: EdgeError) -> Result<ResponseEgressEnvel
         )));
     };
     Ok(app.admitted_error_egress(prepared, error))
+}
+
+#[action]
+async fn upstream_413_response() -> Result<Response, EdgeError> {
+    response_builder()
+        .status(StatusCode::PAYLOAD_TOO_LARGE)
+        .header("retry-after", "120")
+        .header("cache-control", "private, no-store")
+        .body(Body::from("upstream overload"))
+        .map_err(EdgeError::internal)
+}
+
+/// Dispatches an ordinary upstream-style 413 without a typed framework-overflow marker.
+///
+/// # Errors
+/// Returns a fixture-construction error if canonical dispatch cannot return an envelope.
+#[inline]
+pub async fn ordinary_413_fixture() -> Result<ResponseEgressEnvelope, EdgeError> {
+    let mut app = App::new(
+        RouterService::builder()
+            .get("/", upstream_413_response)
+            .build(),
+    );
+    let mut fields = HeaderMap::new();
+    fields.insert("retry-after", HeaderValue::from_static("180"));
+    fields.insert(
+        "cache-control",
+        HeaderValue::from_static("public, max-age=3600"),
+    );
+    app.set_synthesized_response_headers(fields)
+        .map_err(EdgeError::internal)?;
+    let request = Request::new(Body::empty());
+    match app
+        .dispatch_ingress(
+            request,
+            app.monotonic_now(),
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        )
+        .await?
+    {
+        IngressDispatchOutcome::Response(envelope) => Ok(*envelope),
+        IngressDispatchOutcome::Aborted => Err(EdgeError::internal(anyhow::anyhow!(
+            "ordinary response fixture was aborted"
+        ))),
+    }
 }
 
 /// Verifies every configured value in the maximum-size fixture, ignoring converter-owned fields.

@@ -906,27 +906,78 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn generated_overflow_retry_after_precedes_synthesized_headers() {
+    async fn owned_headers_and_overflow_retry_precedence() {
         use edgezero_core::RequestBodyOverflowOrigin;
-        use edgezero_core::response_egress_framing::test_support::synthesized_error_fixture;
+        use edgezero_core::response_egress_framing::test_support::{
+            ordinary_413_fixture, synthesized_error_fixture,
+        };
         for (error, retry) in [
             (
-                EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound),
+                Some(EdgeError::payload_too_large(
+                    RequestBodyOverflowOrigin::Inbound,
+                )),
                 None,
             ),
             (
-                EdgeError::payload_too_large(RequestBodyOverflowOrigin::OutboundUpload),
+                Some(EdgeError::payload_too_large(
+                    RequestBodyOverflowOrigin::OutboundUpload,
+                )),
                 None,
             ),
             (
-                EdgeError::config_out_of_date("private", "field"),
+                Some(EdgeError::config_out_of_date("private", "field")),
                 Some("60"),
             ),
+            (
+                Some(EdgeError::method_not_allowed(
+                    &Method::POST,
+                    &[Method::GET, Method::HEAD],
+                )),
+                Some("240"),
+            ),
+            (None, Some("120")),
         ] {
-            let envelope = synthesized_error_fixture(error).expect("fixture");
+            let ordinary = error.is_none();
+            let expected_status = error
+                .as_ref()
+                .map_or(StatusCode::PAYLOAD_TOO_LARGE, EdgeError::status);
+            let method_not_allowed = error
+                .as_ref()
+                .is_some_and(|value| value.status() == StatusCode::METHOD_NOT_ALLOWED);
+            let envelope = match error {
+                Some(value) => synthesized_error_fixture(value).expect("fixture"),
+                None => ordinary_413_fixture().await.expect("ordinary response"),
+            };
             let connection = EgressConnection::default();
             let response = super::prepare_egress_response(envelope, &connection).await;
-            assert_eq!(response.headers()["x-synthesized-fixture"], "configured");
+            assert_eq!(response.status(), expected_status);
+            let headers = response.headers();
+            assert_eq!(
+                headers
+                    .get("x-synthesized-fixture")
+                    .map(|value| value.to_str().expect("text")),
+                (!ordinary).then_some("configured")
+            );
+            assert_eq!(
+                headers.get_all("allow").iter().count(),
+                usize::from(!ordinary)
+            );
+            assert_eq!(
+                headers
+                    .get("allow")
+                    .map(|value| value.to_str().expect("text")),
+                (!ordinary).then_some(if method_not_allowed {
+                    "GET, HEAD"
+                } else {
+                    "PUT"
+                })
+            );
+            assert_eq!(headers.get_all("cache-control").iter().count(), 1);
+            assert_eq!(headers["cache-control"], "private, no-store");
+            assert_eq!(
+                headers.get_all("retry-after").iter().count(),
+                usize::from(retry.is_some())
+            );
             assert_eq!(
                 response
                     .headers()

@@ -2470,27 +2470,56 @@ mod tests {
     }
 
     #[test]
-    fn generated_overflow_retry_after_precedes_synthesized_headers() {
+    fn owned_headers_and_overflow_retry_precedence() {
         use edgezero_core::RequestBodyOverflowOrigin;
-        use edgezero_core::response_egress_framing::test_support::synthesized_error_fixture;
+        use edgezero_core::response_egress_framing::test_support::{
+            ordinary_413_fixture, synthesized_error_fixture,
+        };
         for (error, retry) in [
             (
-                EdgeError::payload_too_large(RequestBodyOverflowOrigin::Inbound),
+                Some(EdgeError::payload_too_large(
+                    RequestBodyOverflowOrigin::Inbound,
+                )),
                 None,
             ),
             (
-                EdgeError::payload_too_large(RequestBodyOverflowOrigin::OutboundUpload),
+                Some(EdgeError::payload_too_large(
+                    RequestBodyOverflowOrigin::OutboundUpload,
+                )),
                 None,
             ),
             (
-                EdgeError::config_out_of_date("private", "field"),
+                Some(EdgeError::config_out_of_date("private", "field")),
                 Some("60"),
             ),
+            (
+                Some(EdgeError::method_not_allowed(
+                    &Method::POST,
+                    &[Method::GET, Method::HEAD],
+                )),
+                Some("240"),
+            ),
+            (None, Some("120")),
         ] {
-            let fixture_envelope = synthesized_error_fixture(error).expect("fixture");
+            let ordinary = error.is_none();
+            let expected_status = error
+                .as_ref()
+                .map_or(StatusCode::PAYLOAD_TOO_LARGE, EdgeError::status);
+            let method_not_allowed = error
+                .as_ref()
+                .is_some_and(|value| value.status() == StatusCode::METHOD_NOT_ALLOWED);
+            let fixture_envelope = match error {
+                Some(value) => synthesized_error_fixture(value).expect("fixture"),
+                None => executor::block_on(ordinary_413_fixture()).expect("ordinary response"),
+            };
             let mut replacement = HeaderMap::new();
             replacement.insert("x-synthesized-fixture", "request".parse().expect("field"));
             replacement.insert("retry-after", "360".parse().expect("retry"));
+            replacement.insert("allow", "DELETE".parse().expect("allow"));
+            replacement.insert(
+                "cache-control",
+                "public, max-age=7200".parse().expect("cache"),
+            );
             let envelope = fixture_envelope.with_synthesized_response_headers(
                 edgezero_core::SynthesizedResponseHeaders::new(replacement)
                     .expect("request policy"),
@@ -2500,7 +2529,33 @@ mod tests {
             assert_eq!(send_egress_with(envelope, &mut committer).error(), None);
             let snapshot = state.borrow();
             let headers = &snapshot.commits[0].1;
-            assert_eq!(headers["x-synthesized-fixture"], "request");
+            assert_eq!(snapshot.commits[0].0, expected_status);
+            assert_eq!(
+                headers
+                    .get("x-synthesized-fixture")
+                    .map(|value| value.to_str().expect("text")),
+                (!ordinary).then_some("request")
+            );
+            assert_eq!(
+                headers.get_all("allow").iter().count(),
+                usize::from(!ordinary)
+            );
+            assert_eq!(
+                headers
+                    .get("allow")
+                    .map(|value| value.to_str().expect("text")),
+                (!ordinary).then_some(if method_not_allowed {
+                    "GET, HEAD"
+                } else {
+                    "DELETE"
+                })
+            );
+            assert_eq!(headers.get_all("cache-control").iter().count(), 1);
+            assert_eq!(headers["cache-control"], "private, no-store");
+            assert_eq!(
+                headers.get_all("retry-after").iter().count(),
+                usize::from(retry.is_some())
+            );
             assert_eq!(
                 headers
                     .get("retry-after")
