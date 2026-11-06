@@ -440,7 +440,7 @@ concrete array indices — e.g. `integrations.datadome.server_side_key` or
   **leaf** may be optional, via `#[secret] field: Option<String>`.)
 - **Required intermediates:** only the leaf's own `Option<String>` is
   skippable. A missing or `null` intermediate object/array in the stored
-  blob (e.g. the whole `partners` array) is a `ConfigOutOfDate` error, not
+  blob (e.g. the whole `partners` array) is a `config_out_of_date` error, not
   a silent skip — both `config validate` and the runtime reject it.
 - **Hand-written optional paths:** the derive does not emit optional
   intermediates, but a hand-written `AppConfigMeta` implementation can mark
@@ -544,7 +544,7 @@ Logging can be configured per adapter under `[adapters.<name>.logging]` or via a
 | ------------- | ------------ | ----------------------------------------------------------- |
 | `endpoint`    | Fastly       | Log endpoint name                                           |
 | `level`       | All          | Log level: `trace`, `debug`, `info`, `warn`, `error`, `off` |
-| `echo_stdout` | Fastly, Axum | Mirror logs to stdout                                       |
+| `echo_stdout` | Fastly | Mirror logs to stdout. The Axum runner ignores it                  |
 
 Manifest logging settings and runtime `EDGEZERO__LOGGING__*` overrides are separate; consult
 the adapter guide for which source its runner consumes. Cloudflare and Spin do not install a
@@ -701,6 +701,7 @@ Arguments:
 | App identifier | positional (optional)   | Name for the generated struct instead of `App`; must come immediately after the path, before any keyword argument     |
 | `owns_logging` | `owns_logging = <bool>` | Sets `Hooks::owns_logging()`. Defaults to `false`                                                                     |
 | `state`        | `state = <expr>`        | Registers the expression's state value. Use `state = load_state()?` to propagate a typed failure before configuration |
+| `configure`    | `configure = <expr>`    | Fallible `Hooks::configure` callback, invoked after routes and state are assembled                                      |
 
 ```rust
 edgezero_core::app!(

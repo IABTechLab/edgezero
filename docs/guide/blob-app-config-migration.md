@@ -188,7 +188,7 @@ non-zero on a non-TTY (per spec §8.3's four-branch UX).
 
 2. Pre-populate `[stores.secrets]`. Push doesn't write secret values
    into the config store — your handlers will fail with
-   `ConfigOutOfDate` at runtime if the operator-supplied key name
+   a `config_out_of_date` error at runtime if the operator-supplied key name
    doesn't resolve.
 
    ```sh
@@ -374,7 +374,7 @@ delete chunk keys no live pointer references.
 
 ## Troubleshooting
 
-### `ConfigOutOfDate` at runtime
+### `config_out_of_date` at runtime
 
 The runtime read either:
 
