@@ -1,0 +1,733 @@
+{
+  "schema": 1,
+  "execution_date": "2026-10-23",
+  "status": "Local runtime repair verified; full G2 remains open",
+  "qualification": false,
+  "edgezero_base_revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+  "source_state": "working-tree runtime repair characterization; not a frozen qualification record",
+  "upstream": {
+    "repository": "https://github.com/fastly/Viceroy",
+    "revision": "a69d982d1d95e13c0fc9f92683b9118639bb4b04",
+    "tag": "v0.21.0",
+    "lockfile_sha256": "d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a",
+    "original_body_sha256": "df2134af7ebf5d404b1ad41fcc744737325c7d0d929908f8d8742f50a93f4ee5",
+    "repaired_body_sha256": "1c56533d85a5c26390f9224e102425cbecc0fe4a280513e00095e7117d6722f7"
+  },
+  "patch": {
+    "path": "patches/viceroy/0.21.0-body-readiness.patch",
+    "sha256": "8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759"
+  },
+  "build": {
+    "repaired_compiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "repaired_profile": "dev; debug=0; incremental=0; upstream opt-level=1",
+    "stock_build": {
+      "unknown": "prebuilt executable compiler/profile not independently established"
+    },
+    "sdk": "fastly 0.13.1",
+    "runtime_version": "viceroy 0.21.0; repaired binary is not unmodified 0.21.0",
+    "stock_host_binary_sha256": "751ff2c1a83063b109bc212b95be5f52e5ab6284b9027fa03aa229087eba3f30",
+    "repaired_host_binary_sha256": "98ea0536478ce2e641f093b2619b7ac7c6c237402f140e5792d854575abc7100",
+    "command": "RUSTUP_TOOLCHAIN=1.98.1 ASDF_RUST_VERSION=1.98.1 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo build --offline --locked -p viceroy"
+  },
+  "tests": {
+    "unmodified_behavior_with_new_tests": {
+      "passed": 1,
+      "failed": 9,
+      "ignored": 0,
+      "log_sha256": "d941055af8a1b45ef66fbeb34a6ee60149562c57b29708c2e9704204fed6c450"
+    },
+    "repaired_readiness": {
+      "passed": 10,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "ff1386a71ba1a0e87c0f75feeb0c9da481778ac1617f7b8ff639e2141b3f5074"
+    },
+    "repaired_body_and_collector": {
+      "passed": 24,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "e9745d620a7116cafdeced167e320e79a33e99db395ff320a87b68d900b00e10"
+    },
+    "repaired_full_library": {
+      "passed": 135,
+      "failed": 0,
+      "ignored": 0,
+      "log_sha256": "233359937452a70db23d2d69c9af3faaf454932ddc625b3666be25e9890f214f"
+    },
+    "strict_upstream_clippy": {
+      "status": "fails identically on stock and repaired source under Rust 1.98.1",
+      "reported_library_errors": 7,
+      "reported_test_errors": 25,
+      "rendered_diagnostic_count": 26,
+      "stock_log_sha256": "975277256e08f29e43676a1df1f5659c5b3592dffb5437ec78e7c3cd527f8881",
+      "repaired_log_sha256": "479ea66af1c3a660fb6b25a444d2fe6233cf911df266c4fde609db7f8ac7796a",
+      "diagnostics": [
+        "error: constants have by default a `'static` lifetime",
+        "error: enclosing `Ok` and `?` operator are unneeded",
+        "error: explicit call to `.into_iter()` in function argument accepting `IntoIterator`",
+        "error: large size difference between variants",
+        "error: length comparison to zero",
+        "error: redundant closure",
+        "error: redundant reference in `format!` argument",
+        "error: redundant reference in `format!` argument",
+        "error: slow zero-filling initialization",
+        "error: slow zero-filling initialization",
+        "error: the `Err`-variant returned from this function is very large",
+        "error: this `match` expression can be replaced with `?`",
+        "error: this can be `std::io::Error::other(_)`",
+        "error: unneeded late initialization",
+        "error: useless conversion to the same type: `error::Error`",
+        "error: useless conversion to the same type: `error::Error`",
+        "error: useless conversion to the same type: `error::Error`",
+        "error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`",
+        "error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`",
+        "error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`",
+        "error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`",
+        "error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`",
+        "error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`",
+        "error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`",
+        "error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`",
+        "error: you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`"
+      ]
+    }
+  },
+  "command": "VICEROY_BIN=<explicit stock or repaired executable> scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness --output <new empty directory>",
+  "stock": {
+    "exit_code": 1,
+    "origin_requests_checked": 6,
+    "comparisons": 3,
+    "comparison_status": "fail",
+    "guest_revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+    "guest_sha256": "ffc3dc8ca82f34433d48b1d9b28a43e73b4494ebbb0cb348b37bfbaf1de0b4dc",
+    "events_sha256": "3b51fae4552a2e3a62539d7e6b8469a7fed3fd9cd8614d9d438ae1170801dc93",
+    "events": [
+      {
+        "construction_rounds": 0,
+        "event": "run",
+        "max_requests": 10,
+        "seed": 856,
+        "suite": "outbound-readiness"
+      },
+      {
+        "event": "build_environment",
+        "host_arch": "aarch64",
+        "host_os": "macos",
+        "lockfile": {
+          "bytes": 84127,
+          "fnv1a64": "10d93fc12c84db43",
+          "path": "/private/tmp/edgezero-fastly-readiness-stock-20261023-01/Cargo.lock",
+          "purpose": "non-security build identity"
+        },
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"
+      },
+      {
+        "adapter": "fastly",
+        "event": "runtime",
+        "executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+        "expected": "0.21.0",
+        "version": "viceroy 0.21.0"
+      },
+      {
+        "artifact": {
+          "bytes": 737829,
+          "fnv1a64": "dda314302b98af87",
+          "path": "/private/tmp/edgezero-fastly-readiness-stock-20261023-01/artifacts/fixture-fastly-outbound-readiness.wasm",
+          "purpose": "non-security build identity"
+        },
+        "event": "readiness-build",
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "sdk": "0.13.1",
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "direct",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 0,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 3744,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 960,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "bytes": 1,
+            "end_us": 4091,
+            "operation": "read",
+            "start_us": 3769
+          },
+          {
+            "end_us": 54182,
+            "error": "UnexpectedEof",
+            "operation": "read",
+            "start_us": 4095
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "selected",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 0,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 571,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 23,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "end_us": 578,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 575,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 499
+          },
+          {
+            "bytes": 1,
+            "end_us": 594,
+            "operation": "read",
+            "start_us": 579
+          },
+          {
+            "end_us": 53639,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 594,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 499
+          },
+          {
+            "bytes": 0,
+            "end_us": 53696,
+            "operation": "read",
+            "start_us": 53642
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "direct",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 1,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 10186,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 26,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "bytes": 1,
+            "end_us": 10210,
+            "operation": "read",
+            "start_us": 10189
+          },
+          {
+            "end_us": 64121,
+            "error": "UnexpectedEof",
+            "operation": "read",
+            "start_us": 10211
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "selected",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 1,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 580,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 18,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "end_us": 589,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 586,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 499
+          },
+          {
+            "bytes": 1,
+            "end_us": 608,
+            "operation": "read",
+            "start_us": 590
+          },
+          {
+            "end_us": 55127,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 609,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 499
+          },
+          {
+            "bytes": 0,
+            "end_us": 55185,
+            "operation": "read",
+            "start_us": 55129
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "direct",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 2,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 1365,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 34,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "bytes": 1,
+            "end_us": 1408,
+            "operation": "read",
+            "start_us": 1372
+          },
+          {
+            "end_us": 55442,
+            "error": "UnexpectedEof",
+            "operation": "read",
+            "start_us": 1409
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "selected",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 2,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 9026,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 32,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "end_us": 9037,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 9031,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 490
+          },
+          {
+            "bytes": 1,
+            "end_us": 9073,
+            "operation": "read",
+            "start_us": 9038
+          },
+          {
+            "end_us": 61778,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 9075,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 490
+          },
+          {
+            "bytes": 0,
+            "end_us": 61825,
+            "operation": "read",
+            "start_us": 61780
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "direct": "UnexpectedEof",
+        "event": "readiness-error-preservation",
+        "qualification": false,
+        "selected": null,
+        "status": "fail"
+      },
+      {
+        "direct": "UnexpectedEof",
+        "event": "readiness-error-preservation",
+        "qualification": false,
+        "selected": null,
+        "status": "fail"
+      },
+      {
+        "direct": "UnexpectedEof",
+        "event": "readiness-error-preservation",
+        "qualification": false,
+        "selected": null,
+        "status": "fail"
+      },
+      {
+        "adapter": "fastly",
+        "error": "pinned Viceroy body readiness consumed the source error; Fastly G2 fails",
+        "status": "fail"
+      }
+    ]
+  },
+  "repaired": {
+    "exit_code": 2,
+    "origin_requests_checked": 6,
+    "comparisons": 3,
+    "comparison_status": "pass",
+    "guest_revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+    "guest_sha256": "ffc3dc8ca82f34433d48b1d9b28a43e73b4494ebbb0cb348b37bfbaf1de0b4dc",
+    "events_sha256": "708ecb3c0d98535d9bc5df7e682e8e130a238b41311e0fb01add72671c125eb4",
+    "events": [
+      {
+        "construction_rounds": 0,
+        "event": "run",
+        "max_requests": 10,
+        "seed": 856,
+        "suite": "outbound-readiness"
+      },
+      {
+        "event": "build_environment",
+        "host_arch": "aarch64",
+        "host_os": "macos",
+        "lockfile": {
+          "bytes": 84127,
+          "fnv1a64": "10d93fc12c84db43",
+          "path": "/private/tmp/edgezero-fastly-readiness-repaired-20261023-01/Cargo.lock",
+          "purpose": "non-security build identity"
+        },
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"
+      },
+      {
+        "adapter": "fastly",
+        "event": "runtime",
+        "executable": "/private/tmp/edgezero-viceroy-0.21.0-readiness-20261023/target/debug/viceroy",
+        "expected": "0.21.0",
+        "version": "viceroy 0.21.0"
+      },
+      {
+        "artifact": {
+          "bytes": 737829,
+          "fnv1a64": "dda314302b98af87",
+          "path": "/private/tmp/edgezero-fastly-readiness-repaired-20261023-01/artifacts/fixture-fastly-outbound-readiness.wasm",
+          "purpose": "non-security build identity"
+        },
+        "event": "readiness-build",
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "sdk": "0.13.1",
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "direct",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 0,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 9243,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 207,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "bytes": 1,
+            "end_us": 9486,
+            "operation": "read",
+            "start_us": 9300
+          },
+          {
+            "end_us": 61230,
+            "error": "UnexpectedEof",
+            "operation": "read",
+            "start_us": 9488
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "selected",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 0,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 4697,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 66,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "end_us": 4714,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 4705,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 495
+          },
+          {
+            "bytes": 1,
+            "end_us": 4757,
+            "operation": "read",
+            "start_us": 4715
+          },
+          {
+            "end_us": 59163,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 4758,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 495
+          },
+          {
+            "end_us": 59217,
+            "error": "UnexpectedEof",
+            "operation": "read",
+            "start_us": 59164
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "direct",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 1,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 10403,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 29,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "bytes": 1,
+            "end_us": 10456,
+            "operation": "read",
+            "start_us": 10410
+          },
+          {
+            "end_us": 61740,
+            "error": "UnexpectedEof",
+            "operation": "read",
+            "start_us": 10458
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "selected",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 1,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 1209,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 30,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "end_us": 1221,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 1215,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 498
+          },
+          {
+            "bytes": 1,
+            "end_us": 1258,
+            "operation": "read",
+            "start_us": 1223
+          },
+          {
+            "end_us": 51397,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 1259,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 498
+          },
+          {
+            "end_us": 51447,
+            "error": "UnexpectedEof",
+            "operation": "read",
+            "start_us": 51399
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "direct",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 2,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 4569,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 22,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "bytes": 1,
+            "end_us": 4618,
+            "operation": "read",
+            "start_us": 4579
+          },
+          {
+            "end_us": 59585,
+            "error": "UnexpectedEof",
+            "operation": "read",
+            "start_us": 4620
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "case": "truncated",
+        "deadline_us": 500000,
+        "mode": "selected",
+        "qualification": false,
+        "read_limit": 1,
+        "repetition": 2,
+        "revision": "ff60e5ac9d6d673648ca5e06b1bdddfaab68083a",
+        "samples": [
+          {
+            "end_us": 8737,
+            "operation": "head-select",
+            "selected": 0,
+            "start_us": 27,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 500
+          },
+          {
+            "end_us": 8760,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 8747,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 491
+          },
+          {
+            "bytes": 1,
+            "end_us": 8795,
+            "operation": "read",
+            "start_us": 8762
+          },
+          {
+            "end_us": 63720,
+            "operation": "body-select",
+            "selected": 0,
+            "start_us": 8796,
+            "status": "FastlyStatus::OK",
+            "timeout_ms": 491
+          },
+          {
+            "end_us": 63771,
+            "error": "UnexpectedEof",
+            "operation": "read",
+            "start_us": 63722
+          }
+        ],
+        "source_state": "working-tree-characterization"
+      },
+      {
+        "direct": "UnexpectedEof",
+        "event": "readiness-error-preservation",
+        "qualification": false,
+        "selected": "UnexpectedEof",
+        "status": "pass"
+      },
+      {
+        "direct": "UnexpectedEof",
+        "event": "readiness-error-preservation",
+        "qualification": false,
+        "selected": "UnexpectedEof",
+        "status": "pass"
+      },
+      {
+        "direct": "UnexpectedEof",
+        "event": "readiness-error-preservation",
+        "qualification": false,
+        "selected": "UnexpectedEof",
+        "status": "pass"
+      },
+      {
+        "qualification": false,
+        "reason": "paired error control passed; remaining G2 timed-read scenarios are still pending",
+        "status": "unverified"
+      }
+    ]
+  },
+  "limitations": [
+    "Both probe runs use the same guest binary; the host runtime is the changed boundary.",
+    "Only three paired truncated-body controls ran through the actual guest ABI. Full G2 stalled/trickle/sibling/EOF/framing/buffered/streamed cases remain open.",
+    "Unit tests complement but do not replace the full G2 ABI or hosted suite.",
+    "The original pinned unmodified runtime remains a failed control; no SDK/runtime pin or installed executable was replaced.",
+    "No backend B, optimizer H(K), capability promotion, source freeze, hosted execution or production approval.",
+    "Raw probe events are retained here; binary and test/build/lint logs are hash-identified, not durable release assets."
+  ]
+}

@@ -1,0 +1,443 @@
+{
+  "checkpoint": "F7a buffered response framing",
+  "recorded_on": "2026-10-23",
+  "base_revision": "fe0fd4c968c0a1024e49ce9bb1625a106b2c4303",
+  "source_state": "working-tree characterization",
+  "qualification": false,
+  "command": "scripts/smoke_test_reusable_app.sh --adapter all --suite response-framing",
+  "exit_code": 1,
+  "raw_evidence": {
+    "path": "/private/tmp/edgezero-f7a-framing-verified/events.jsonl",
+    "sha256": "2119d10957cf4ddebc8765d30c4372e04e5587cd3bb7385bea301a5e98a80c37"
+  },
+  "production": {
+    "passed": 80,
+    "failed": 0,
+    "adapters": [
+      {
+        "adapter": "fastly",
+        "passed": 32,
+        "failed": 0
+      },
+      {
+        "adapter": "cloudflare",
+        "passed": 16,
+        "failed": 0
+      },
+      {
+        "adapter": "spin",
+        "passed": 16,
+        "failed": 0
+      },
+      {
+        "adapter": "axum",
+        "passed": 16,
+        "failed": 0
+      }
+    ]
+  },
+  "sdk_parity": {
+    "passed": 9,
+    "failed": 9,
+    "failed_cases": [
+      {
+        "case": "head",
+        "http2": false,
+        "error": "Fastly SDK automatic framing parity mismatch",
+        "reference_curl_exit": 0,
+        "reference_length": 6,
+        "diagnostic_artifact": {
+          "bytes": 0,
+          "fnv1a64": "cbf29ce484222325",
+          "path": "/private/tmp/edgezero-f7a-framing-verified/framing-fastly/18e11845e12fcb80-109b4-e.curl-stderr",
+          "purpose": "non-security build identity"
+        }
+      },
+      {
+        "case": "head-explicit",
+        "http2": false,
+        "error": "Fastly SDK automatic framing parity mismatch",
+        "reference_curl_exit": 0,
+        "reference_length": 6,
+        "diagnostic_artifact": {
+          "bytes": 0,
+          "fnv1a64": "cbf29ce484222325",
+          "path": "/private/tmp/edgezero-f7a-framing-verified/framing-fastly/18e11845e25ca320-109b4-10.curl-stderr",
+          "purpose": "non-security build identity"
+        }
+      },
+      {
+        "case": "reset-content",
+        "http2": false,
+        "error": "Fastly SDK automatic framing parity mismatch",
+        "reference_curl_exit": 0,
+        "reference_length": 6,
+        "diagnostic_artifact": {
+          "bytes": 0,
+          "fnv1a64": "cbf29ce484222325",
+          "path": "/private/tmp/edgezero-f7a-framing-verified/framing-fastly/18e11845e6f8c850-109b4-18.curl-stderr",
+          "purpose": "non-security build identity"
+        }
+      },
+      {
+        "case": "head",
+        "http2": true,
+        "error": "Fastly SDK automatic framing parity mismatch",
+        "reference_curl_exit": 16,
+        "reference_length": 6,
+        "diagnostic_artifact": {
+          "bytes": 44,
+          "fnv1a64": "a98ff98535bff32c",
+          "path": "/private/tmp/edgezero-f7a-framing-verified/framing-fastly/18e11845ef6d4d80-109b4-27.curl-stderr",
+          "purpose": "non-security build identity"
+        }
+      },
+      {
+        "case": "head-explicit",
+        "http2": true,
+        "error": "Fastly SDK automatic framing parity mismatch",
+        "reference_curl_exit": 16,
+        "reference_length": 6,
+        "diagnostic_artifact": {
+          "bytes": 44,
+          "fnv1a64": "a98ff98535bff32c",
+          "path": "/private/tmp/edgezero-f7a-framing-verified/framing-fastly/18e11845f0769f60-109b4-29.curl-stderr",
+          "purpose": "non-security build identity"
+        }
+      },
+      {
+        "case": "not-modified",
+        "http2": true,
+        "error": "Fastly SDK automatic framing parity mismatch",
+        "reference_curl_exit": 16,
+        "reference_length": 6,
+        "diagnostic_artifact": {
+          "bytes": 44,
+          "fnv1a64": "a98ff98535bff32c",
+          "path": "/private/tmp/edgezero-f7a-framing-verified/framing-fastly/18e11845f3e93c98-109b4-2b.curl-stderr",
+          "purpose": "non-security build identity"
+        }
+      },
+      {
+        "case": "not-modified-explicit",
+        "http2": true,
+        "error": "Fastly SDK automatic framing parity mismatch",
+        "reference_curl_exit": 16,
+        "reference_length": 6,
+        "diagnostic_artifact": {
+          "bytes": 44,
+          "fnv1a64": "a98ff98535bff32c",
+          "path": "/private/tmp/edgezero-f7a-framing-verified/framing-fastly/18e11845f4e0d750-109b4-2d.curl-stderr",
+          "purpose": "non-security build identity"
+        }
+      },
+      {
+        "case": "no-content",
+        "http2": true,
+        "error": "Fastly SDK automatic framing parity mismatch",
+        "reference_curl_exit": 16,
+        "diagnostic_artifact": {
+          "bytes": 112,
+          "fnv1a64": "4c3a290fc2778fae",
+          "path": "/private/tmp/edgezero-f7a-framing-verified/framing-fastly/18e11845f5d2c8d0-109b4-2f.curl-stderr",
+          "purpose": "non-security build identity"
+        }
+      },
+      {
+        "case": "reset-content",
+        "http2": true,
+        "error": "Fastly SDK automatic framing parity mismatch",
+        "reference_curl_exit": 0,
+        "reference_length": 6,
+        "diagnostic_artifact": {
+          "bytes": 0,
+          "fnv1a64": "cbf29ce484222325",
+          "path": "/private/tmp/edgezero-f7a-framing-verified/framing-fastly/18e11845f6b83b18-109b4-31.curl-stderr",
+          "purpose": "non-security build identity"
+        }
+      }
+    ]
+  },
+  "runtime": [
+    {
+      "adapter": "fastly",
+      "event": "progress-runtime",
+      "executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+      "revision": "fe0fd4c968c0a1024e49ce9bb1625a106b2c4303",
+      "source_state": "working-tree-characterization",
+      "version": "viceroy 0.21.0"
+    },
+    {
+      "adapter": "cloudflare",
+      "event": "progress-runtime",
+      "executable": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/bin/wrangler.js",
+      "revision": "fe0fd4c968c0a1024e49ce9bb1625a106b2c4303",
+      "source_state": "working-tree-characterization",
+      "version": "4.131.0"
+    },
+    {
+      "adapter": "spin",
+      "event": "progress-runtime",
+      "executable": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+      "revision": "fe0fd4c968c0a1024e49ce9bb1625a106b2c4303",
+      "source_state": "working-tree-characterization",
+      "version": "spin 4.1.0 (c0b3726 2026-08-25)"
+    },
+    {
+      "adapter": "axum",
+      "event": "progress-runtime",
+      "executable": "/Users/ag/.asdf/installs/rust/1.98.1/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo",
+      "revision": "fe0fd4c968c0a1024e49ce9bb1625a106b2c4303",
+      "source_state": "working-tree-characterization",
+      "version": "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+    }
+  ],
+  "artifacts": [
+    {
+      "adapter": "fastly",
+      "variant": "fastly-outbound-progress",
+      "artifact": {
+        "bytes": 2311917,
+        "fnv1a64": "27b82af5967f419d",
+        "path": "/private/tmp/edgezero-f7a-framing-verified/framing-fastly/artifacts/fixture-fastly-outbound-progress.wasm",
+        "purpose": "non-security build identity"
+      },
+      "sha256": "83c92f15047d2da4edd84767da9a90b88aed84acb8c34a7f32676aea2b31ce40"
+    },
+    {
+      "adapter": "cloudflare",
+      "variant": "cloudflare-outbound-progress",
+      "artifact": {
+        "bytes": 1917775,
+        "fnv1a64": "f8ea89ea510aaa52",
+        "path": "/private/tmp/edgezero-f7a-framing-verified/framing-cloudflare/artifacts/build/index_bg.wasm",
+        "purpose": "non-security build identity"
+      },
+      "sha256": "9e48c4b0e3f22884053073e4ed81d4e2b7556d03b21e71a71d2b76065827b89b"
+    },
+    {
+      "adapter": "spin",
+      "variant": "spin-outbound-progress",
+      "artifact": {
+        "bytes": 2576158,
+        "fnv1a64": "3879a9ee0b36da50",
+        "path": "/private/tmp/edgezero-f7a-framing-verified/framing-spin/artifacts/fixture_spin.wasm",
+        "purpose": "non-security build identity"
+      },
+      "sha256": "259535839d96427815f1f03e18684d75f21fa58855667befa2f272c490eed6d2"
+    },
+    {
+      "adapter": "axum",
+      "variant": "axum-outbound-progress",
+      "artifact": {
+        "bytes": 9021728,
+        "fnv1a64": "bb168795de791e9e",
+        "path": "/private/tmp/edgezero-f7a-framing-verified/framing-axum/artifacts/fixture-axum-outbound-progress",
+        "purpose": "non-security build identity"
+      },
+      "sha256": "cc88df47be29736979f96d380d4e931f457f9a4294612a7490e7d31732cd0ab4"
+    }
+  ],
+  "decision": {
+    "preserve_strict_suppression": true,
+    "restore_head_payload": false,
+    "qualification_waiver": false
+  },
+  "open_gates": [
+    "Fastly bodyless SDK parity",
+    "Hosted Fastly HTTP/1.1 and HTTP/2 buffered and declared-stream compression",
+    "Deployed Workers header delivery",
+    "Frozen pinned-runtime Spin evidence",
+    "Consumer response-diff acceptance",
+    "Fastly G2 remains FAILED and full P1 is not complete"
+  ],
+  "source_fingerprints": [
+    {
+      "path": "crates/edgezero-adapter-axum/src/cli.rs",
+      "sha256": "dae042013c33bad529cef28c85832a9b66c976b864e94245e4596215e8ef5015"
+    },
+    {
+      "path": "crates/edgezero-adapter-axum/src/response.rs",
+      "sha256": "4c8ed4c2f8690c35156f4aaeb7575bf5d4099ed1d560682b3f3b10c7692dd608"
+    },
+    {
+      "path": "crates/edgezero-adapter-axum/src/service.rs",
+      "sha256": "865c46136c92fe5e09d32604c38b2ee485b47ad88ee4dd292a39d04f21ba0814"
+    },
+    {
+      "path": "crates/edgezero-adapter-cloudflare/src/cli.rs",
+      "sha256": "2beeae2c258941e0495c0da1543ee0706027eb8de6d9bb3cdcc48f783025ff97"
+    },
+    {
+      "path": "crates/edgezero-adapter-cloudflare/src/response.rs",
+      "sha256": "8ff523e39363b924d4cc26f4dcbc65f9bfdda5808e09ea5ed4c28d64cd9901ed"
+    },
+    {
+      "path": "crates/edgezero-adapter-cloudflare/tests/contract.rs",
+      "sha256": "fd08f8aed3ed4bd17c5b772c175096443d1994a326136fe01e3247e0a662b4d5"
+    },
+    {
+      "path": "crates/edgezero-adapter-fastly/src/cli.rs",
+      "sha256": "87bb75efa4bc557df6c2bf66978b030eff7f54d39e9b5e45678e430f31eabf4d"
+    },
+    {
+      "path": "crates/edgezero-adapter-fastly/src/fastly_response_abi.rs",
+      "sha256": "e3689aac15e16fc055907f358db5ba707563115bd9d7d07e245a73c3b1b7f1b2"
+    },
+    {
+      "path": "crates/edgezero-adapter-fastly/src/request.rs",
+      "sha256": "e427f8a0ca339b5a14a87c49da4d6c47d91751a57cbe0da7b3d445b819100df8"
+    },
+    {
+      "path": "crates/edgezero-adapter-fastly/src/response.rs",
+      "sha256": "2ccfe4bf52996ac192f0c61857677caf4e0dd84e5868c773b834f6a8964a7696"
+    },
+    {
+      "path": "crates/edgezero-adapter-fastly/tests/contract.rs",
+      "sha256": "bab3d2aa4de9fd87e7729e081c6eab3400305dcd868cc504b26e7c8a79e947b2"
+    },
+    {
+      "path": "crates/edgezero-adapter-spin/src/cli.rs",
+      "sha256": "525e7072fdd9249e88791dd1c51a26bfd0319aee0ecc8f649373891bbd1dcc77"
+    },
+    {
+      "path": "crates/edgezero-adapter-spin/src/response.rs",
+      "sha256": "14aa933a57554808233d0d2b6ced976a99f7bca9a5afd984bedc28394d5d800f"
+    },
+    {
+      "path": "crates/edgezero-adapter-spin/tests/contract.rs",
+      "sha256": "cbe54b7776a73f80a6912155bb3392e5a10f196762fac6604647c400a87527ec"
+    },
+    {
+      "path": "crates/edgezero-cli/src/templates/core/src/lib.rs.hbs",
+      "sha256": "9c7389870a1b284bd84ada1195dcf492c5cb1aa88c1df0fff1afcacc71128fb3"
+    },
+    {
+      "path": "crates/edgezero-core/src/app.rs",
+      "sha256": "4cc0548b2ae25b46db0ae6f795df91d51b0de3195952c2476f44c82c7d00549a"
+    },
+    {
+      "path": "crates/edgezero-core/src/manifest.rs",
+      "sha256": "389432c2539f9c32070f7d88cc991738ebfaa660777d70526ece56971aadb52c"
+    },
+    {
+      "path": "crates/edgezero-core/src/response_egress.rs",
+      "sha256": "e10d4b2688760717dafa0508911f5e8d07979ac1ae2cf6b8e60ae553dd1b531f"
+    },
+    {
+      "path": "crates/edgezero-core/src/response_egress_framing.rs",
+      "sha256": "caf36acc8e69999f138c48e1aad607a74e0cbee09c51c83ab57a1532a4afada0"
+    },
+    {
+      "path": "crates/edgezero-core/tests/assembly_failure_logging.rs",
+      "sha256": "e2b4f29fae7e44dbd24ec308460e31e6818840e7ac67a040e096afe125c40351"
+    },
+    {
+      "path": "crates/edgezero-macros/tests/app_macro.rs",
+      "sha256": "e7982630de7e7d73254dd84b128622aca631d7dd4ca561f217d02fa8f47c54f2"
+    },
+    {
+      "path": "examples/app-demo/crates/app-demo-core/src/lib.rs",
+      "sha256": "67c8a9a1f6b42a0389c62271d109b48f34cc13c8925219a067abe33fe7d72f85"
+    },
+    {
+      "path": "scripts/check_outbound_docs_contract.mjs",
+      "sha256": "d6c0284081e738cdc49a336302afb9f4bdb5d75b4e89c7d1bf0e07f58ef3baef"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-core/src/qualification.rs",
+      "sha256": "96370f686597c5d7e6d2ce47cc5c8e142d108f9638ca3d3d1eb0689dac3c54bc"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-core/src/qualification/framing.rs",
+      "sha256": "92201a7f6667c54967b47e2aa972cdf0a5f8ac4828db52d119f3fdfa6a3139d1"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-core/src/qualification/progress.rs",
+      "sha256": "e808041e3019594d69300d4ee85da041ee46d975541d238f17b2f546c303352f"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_progress.rs",
+      "sha256": "c19350247d13fd52db74db8c3235f5eb71a4dd0f1323a790f8220f2720cfadd5"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/main.rs",
+      "sha256": "576c6eb279c8934c3f60ba770cf27c4c58a606dbe9430625494d9e57775cdc43"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/runners.rs",
+      "sha256": "d1d96ccbf12c5c42ad01787f8c6c89d0361cc879ea96de2bf2424a0b1bd6db7a"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/framing.rs",
+      "sha256": "56c570c8b206c51f6aa9fe282cf6a0adcdd28f19836dd52dd12d4c1bfc47418d"
+    }
+  ],
+  "runtime_settings": {
+    "cloudflare": {
+      "worker_sdk": "0.8.5",
+      "workerd": "2026-09-10",
+      "compatibility_date": "2026-04-22",
+      "compatibility_flags": ["enable_request_signal", "enable_weak_ref"],
+      "deployment": "local"
+    },
+    "fastly": {
+      "sdk": "0.13.1",
+      "viceroy": "0.21.0",
+      "deployment": "local"
+    },
+    "spin": {
+      "sdk": "7.0.0",
+      "runtime": "4.1.0",
+      "deployment": "local"
+    }
+  },
+  "verification": {
+    "required_rust_gates": {
+      "fmt": 0,
+      "clippy": 0,
+      "workspace_tests": 0,
+      "workspace_features": 0,
+      "spin_wasm_check": 0
+    },
+    "workspace_tests": {
+      "passed": 2181,
+      "failed": 0,
+      "binaries": 28,
+      "core": 823,
+      "ignored": 1,
+      "ignored_generated_project_test_run_separately": true
+    },
+    "feature_compilation": {
+      "passed": 56,
+      "failed": 0
+    },
+    "wasm_clippy_variants": {
+      "passed": 8,
+      "failed": 0
+    },
+    "demo_and_generated_apps": "passed",
+    "docs_format_lint_build": "passed",
+    "additional_build_review": {
+      "default_native": 0,
+      "fastly_wasm": 0,
+      "cloudflare_wasm": 0,
+      "spin_wasm": 0,
+      "native_all_features": 101,
+      "baseline_native_all_features": {
+        "revision": "fe0fd4c968c0a1024e49ce9bb1625a106b2c4303",
+        "exit_code": 101,
+        "log": "/private/tmp/edgezero-f7a-native-baseline-build.log",
+        "sha256": "5d1e61caa81e39d7e41b00e26e14a021f18218d55883f1db71f5ca8e190a751d"
+      },
+      "current_native_all_features": {
+        "exit_code": 101,
+        "log": "/private/tmp/edgezero-f7a-build-validator-native-all-features.log",
+        "sha256": "78ef251ea1bc7d33c898191f8cfd7c1de9867981729711bee3221301c435327a"
+      },
+      "undefined_symbols": 83,
+      "identical_to_baseline": true,
+      "classification": "pre-existing Fastly hostcall native-link failure; not a passing check"
+    }
+  }
+}
