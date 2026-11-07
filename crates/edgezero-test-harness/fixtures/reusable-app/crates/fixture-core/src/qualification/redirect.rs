@@ -5,7 +5,7 @@ use edgezero_core::{
     OutboundRedirectStopReason, OutboundRequest, OutboundResponse, action,
 };
 use serde_json::{Value, json};
-use std::{cell::Cell, convert::Infallible, rc::Rc, time::Duration};
+use std::{cell::Cell, rc::Rc, time::Duration};
 
 struct Probe {
     uri: Uri,
@@ -139,9 +139,15 @@ pub(super) async fn probe(ctx: RequestContext) -> Result<Response, EdgeError> {
         let stop = probe.mode == "stop";
         let limit = OutboundRedirectLimit::new(if probe.mode == "limit" { 1 } else { 4 })?;
         client
-            .follow(request, limit, move |_| {
+            .follow(request, limit, move |prepared| {
                 observed.set(observed.get().saturating_add(1));
-                Ok::<_, Infallible>(if stop {
+                if prepared
+                    .prepared_request()
+                    .is_some_and(|request| !super::origins::allows(request.uri()))
+                {
+                    return Err(invalid());
+                }
+                Ok::<_, EdgeError>(if stop {
                     OutboundRedirectAction::Stop
                 } else {
                     OutboundRedirectAction::FollowPrepared
@@ -151,7 +157,10 @@ pub(super) async fn probe(ctx: RequestContext) -> Result<Response, EdgeError> {
             .map(edgezero_core::OutboundFollowResult::into_parts)
             .map_err(|failure| match failure {
                 OutboundFollowFailure::Hop { index, error } => (index, error),
-                OutboundFollowFailure::Policy { error, .. } => match error {},
+                OutboundFollowFailure::Policy {
+                    redirect_number,
+                    error,
+                } => (redirect_number, error),
             })
     };
     let report = match exchange {

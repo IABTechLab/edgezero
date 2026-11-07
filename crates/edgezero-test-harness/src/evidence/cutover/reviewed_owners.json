@@ -13,7 +13,7 @@
   "src/runners/lifetimes.rs:run": "e3474c931a66cc3608edcd23dc878bf5d1ee4d16e971483a987874fd0a5fd196",
   "src/runners/wire.rs:finish_wire": "ec855f6ff4c36f51dd3f50a2703fe13070be8b7b069e81017a5d2947e59cfc24",
   "src/runners/wire.rs:progress_suite": "d1e53fe63ab0253375c977b9df2c9c7caa7f45b0718a9d60f1dc7bdd77c75d8e",
-  "src/runners/wire.rs:progress_wire": "d5515de012c785d06fd2ba57f84b89a4e6ab7cac4230c7006df4ac77e3a1026b",
+  "src/runners/wire.rs:progress_wire": "1df9d7bb954ba2077049864d016d3e4e85fb5ac1b5b3055280ef45fdf3cef082",
   "src/runners/wire.rs:qualify_budgets": "26211fef305be669d839d6b72dcde750f2ff4eff7c045b08484f6c72ff571d16",
   "src/runners/wire.rs:run": "3a78e1bd603ae1017b9925ac02adf48c90c10e72a5f74adcba9fca2f207025ba"
 }

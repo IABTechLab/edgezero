@@ -2,7 +2,9 @@
 
 pub mod forwarding;
 pub mod framing;
+pub mod hosted;
 mod lifetimes;
+pub mod origins;
 mod overflow;
 pub mod progress;
 mod redirect;
@@ -79,13 +81,7 @@ struct ProbeSource {
 
 impl Hooks for QualificationApp {
     fn configure(app: &mut App) -> Result<(), EdgeError> {
-        let revision = option_env!("EDGEZERO_QUALIFICATION_REVISION").unwrap_or("");
-        let artifact = option_env!("EDGEZERO_QUALIFICATION_ARTIFACT").unwrap_or("");
-        if !hex_identity(revision, 40) || !hex_identity(artifact, 64) {
-            return Err(EdgeError::internal(std::io::Error::other(
-                "qualification build identity is absent",
-            )));
-        }
+        let (revision, artifact) = build_identity()?;
         app.set_name("lifecycle-qualification");
         app.set_ingress_admission_policy(move |head| {
             let token = |name| head.headers().get(name).and_then(|value| value.to_str().ok())
@@ -123,6 +119,18 @@ impl Hooks for QualificationApp {
             .route("/qualification/{case}", Method::HEAD, response_probe)
             .build())
     }
+}
+
+pub fn build_identity() -> Result<(&'static str, &'static str), EdgeError> {
+    origins::validate_configuration()?;
+    let revision = option_env!("EDGEZERO_QUALIFICATION_REVISION").unwrap_or("");
+    let artifact = option_env!("EDGEZERO_QUALIFICATION_ARTIFACT").unwrap_or("");
+    if !hex_identity(revision, 40) || !hex_identity(artifact, 64) {
+        return Err(EdgeError::internal(std::io::Error::other(
+            "qualification build identity is absent",
+        )));
+    }
+    Ok((revision, artifact))
 }
 
 impl ProbeTrace {

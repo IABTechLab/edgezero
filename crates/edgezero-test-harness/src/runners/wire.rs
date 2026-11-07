@@ -6,6 +6,7 @@ mod batch_recovery;
 mod budgets;
 mod encoding;
 mod forwarding;
+mod hosted;
 mod marker;
 mod normalization;
 mod transport;
@@ -1012,6 +1013,9 @@ fn progress_wire(name: &'static str, run: &Path, records: &mut Records) -> Resul
         run,
         records,
         |port, origins, records| {
+            if name == "fastly" {
+                hosted::run(port, records)?;
+            }
             let mut matrix = Matrix {
                 adapter: name,
                 endpoint: "/progress/redirect",

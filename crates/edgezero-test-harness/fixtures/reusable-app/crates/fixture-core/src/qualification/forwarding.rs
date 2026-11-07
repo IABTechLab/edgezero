@@ -1,6 +1,5 @@
 //! Real-ingress forwarding controls; the adapter supplies the original request and client.
 
-use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -83,6 +82,8 @@ pub fn application(platform: PlatformMetadata, signal: Value) -> App {
         grant: IngressGrant::empty(),
         read_deadline: head.read_deadline_after(if head.target().path().ends_with("/late") {
             Duration::ZERO
+        } else if head.target().path().ends_with("/inbound-deadline") {
+            Duration::from_millis(100)
         } else {
             Duration::from_secs(5)
         }),
@@ -121,7 +122,7 @@ async fn forward(ctx: RequestContext, State(signal): State<Value>) -> Result<Res
         .ok_or_else(failure)?
         .parse()
         .map_err(|_| failure())?;
-    if !crate::is_loopback_http(&target) || target.port_u16().is_none() {
+    if !super::origins::allows(&target) {
         return Err(failure());
     }
     if ![
@@ -133,6 +134,8 @@ async fn forward(ctx: RequestContext, State(signal): State<Value>) -> Result<Res
         "unsupported",
         "follow",
         "late",
+        "outbound-deadline",
+        "inbound-deadline",
     ]
     .contains(&case.as_str())
         || target.query().is_some()
@@ -149,6 +152,7 @@ async fn forward(ctx: RequestContext, State(signal): State<Value>) -> Result<Res
         return Err(failure());
     }
     let client = ctx.http_client().ok_or_else(failure)?;
+    let entered = edgezero_core::MonotonicInstant::now();
     let before = format!("{:?}", ctx.body_kind());
     let cached = if case == "batch" {
         if !ctx.body_bytes(8).await?.is_empty() || ctx.body_kind() != (BodyKind::Cached { len: 0 })
@@ -171,7 +175,13 @@ async fn forward(ctx: RequestContext, State(signal): State<Value>) -> Result<Res
         Err(buffered) => buffered,
     };
     let mut request = OutboundRequest::from_request(incoming, target.clone())?
-        .timeout(Duration::from_secs(3))
+        .timeout(
+            if matches!(case.as_str(), "outbound-deadline" | "inbound-deadline") {
+                Duration::from_millis(200)
+            } else {
+                Duration::from_secs(3)
+            },
+        )
         .max_request_body_bytes(8)
         .max_encoded_response_bytes(64)
         .max_decoded_response_bytes(64)
@@ -191,7 +201,8 @@ async fn forward(ctx: RequestContext, State(signal): State<Value>) -> Result<Res
                 Ok(pending) => {
                     begun = true;
                     let confirm = format!(
-                        "http://{}/forward/confirm/{token}",
+                        "{}://{}/forward/confirm/{token}",
+                        target.scheme_str().ok_or_else(failure)?,
                         target.authority().ok_or_else(failure)?
                     );
                     let receipt = client
@@ -227,8 +238,15 @@ async fn forward(ctx: RequestContext, State(signal): State<Value>) -> Result<Res
             }
         }
         "follow" => match client
-            .follow(request, OutboundRedirectLimit::new(2)?, |_| {
-                Ok::<_, Infallible>(OutboundRedirectAction::FollowPrepared)
+            .follow(request, OutboundRedirectLimit::new(2)?, |hop| {
+                if hop
+                    .prepared_request()
+                    .is_some_and(|request| super::origins::allows(request.uri()))
+                {
+                    Ok(OutboundRedirectAction::FollowPrepared)
+                } else {
+                    Err(failure())
+                }
             })
             .await
         {
@@ -237,7 +255,7 @@ async fn forward(ctx: RequestContext, State(signal): State<Value>) -> Result<Res
                 Ok(result.into_parts().0)
             }
             Err(edgezero_core::OutboundFollowFailure::Hop { error, .. }) => Err(error),
-            Err(edgezero_core::OutboundFollowFailure::Policy { error, .. }) => match error {},
+            Err(edgezero_core::OutboundFollowFailure::Policy { error, .. }) => Err(error),
         },
         _ => client.send(request).await,
     };
@@ -264,6 +282,7 @@ async fn forward(ctx: RequestContext, State(signal): State<Value>) -> Result<Res
     let report = json!({"case":case,"token":token,"before":before,"cached":cached,
         "streamed":streamed,"source":{"polls":counts.polls,"bytes":counts.bytes,"eofs":counts.eofs,"drops":counts.drops,"nonempty":counts.nonempty},
         "begun":begun,"redirects":redirects,"error":error,"rejection":rejection,"host_signal":signal,
+        "observed_elapsed_us":entered.elapsed().as_micros(),
         "backend_before":backend_before,"backend_after":backend_snapshot.map(|snapshot| (snapshot.0)()),"qualification":false});
     let report = report.to_string();
     if report.len() > 2048 {

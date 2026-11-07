@@ -353,7 +353,16 @@ fn fastly_progress_variant(suite: &str) -> &'static str {
     match suite {
         "outbound-callback-run" => "custom-a",
         "outbound-callback-serve" => "custom-b",
+        "outbound-wire" | "outbound-lifetimes" => "qualification",
         _ => "outbound-progress",
+    }
+}
+
+fn progress_feature(name: &str, suite: &str) -> &'static str {
+    if name == "fastly" && fastly_progress_variant(suite) == "qualification" {
+        "qualification"
+    } else {
+        "progress"
     }
 }
 
@@ -423,10 +432,13 @@ pub(super) fn build(
                 "-p",
                 &format!("fixture-{name}"),
                 "--features",
-                "progress",
+                progress_feature(name, suite),
             ])
             .env("EDGEZERO_QUALIFICATION_REVISION", revision)
             .env("EDGEZERO_QUALIFICATION_SUITE", suite);
+        if progress_feature(name, suite) == "qualification" {
+            command.env("EDGEZERO_QUALIFICATION_ARTIFACT", startup::build_id()?);
+        }
         if name == "spin" {
             command.args(["--target", "wasm32-wasip2"]);
         } else if name == "fastly" {
@@ -1306,9 +1318,21 @@ mod tests {
             fastly_progress_variant("outbound-callback-serve"),
             "custom-b"
         );
+        for suite in ["outbound-wire", "outbound-lifetimes"] {
+            assert_eq!(fastly_progress_variant(suite), "qualification");
+            for name in ["fastly", "cloudflare", "spin", "axum"] {
+                assert_eq!(
+                    progress_feature(name, suite),
+                    if name == "fastly" {
+                        "qualification"
+                    } else {
+                        "progress"
+                    }
+                );
+            }
+        }
         for suite in [
             "outbound-progress",
-            "outbound-lifetimes",
             "response-framing",
             "synthesized-headers",
         ] {

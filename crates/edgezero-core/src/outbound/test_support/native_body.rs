@@ -108,6 +108,7 @@ pub struct NativeBodySnapshot {
     pub ready_waits: u64,
     pub source_acquisitions: u64,
     pub source_releases: u64,
+    pub synchronous_call: Option<(MonotonicInstant, MonotonicInstant)>,
     pub waits: u64,
 }
 
@@ -362,6 +363,28 @@ impl NativeBodyRecorder {
         let result = read();
         self.read_observed(started, self.clock.now(), false);
         result
+    }
+
+    /// Times the original synchronous SDK call without reading or transforming its result.
+    #[inline]
+    pub fn observe_synchronous_call<Call, Output>(&self, call: Call) -> Output
+    where
+        Call: FnOnce() -> Output,
+    {
+        let entered_at = self.clock.now();
+        let output = call();
+        let returned_at = self.clock.now();
+        let mut state = self.witness.lock();
+        state.sample(entered_at);
+        state.sample(returned_at);
+        if state.snapshot.synchronous_call.is_some() {
+            state.snapshot.invalid = true;
+        }
+        state
+            .snapshot
+            .synchronous_call
+            .get_or_insert((entered_at, returned_at));
+        output
     }
 
     fn operation_acquired(&self) {
@@ -699,6 +722,44 @@ mod tests {
             &"http://example.test/a".parse().expect("target"),
         );
         (witness, recorder, now)
+    }
+
+    #[test]
+    fn synchronous_sdk_observation_preserves_result_and_records_only_the_actual_call() {
+        let (witness, recorder, now) = prepared();
+        let entered = *now.lock().expect("clock");
+        let returned = entered
+            .checked_add(Duration::from_millis(25))
+            .expect("return instant");
+        let result = recorder.observe_synchronous_call(|| {
+            assert!(witness.snapshot().synchronous_call.is_none());
+            *now.lock().expect("clock") = returned;
+            Err::<(), _>("native failure")
+        });
+        assert_eq!(result, Err("native failure"));
+        let snapshot = witness.snapshot();
+        assert_eq!(snapshot.synchronous_call, Some((entered, returned)));
+        assert_eq!(snapshot.reads, 0);
+        assert_eq!(snapshot.operation_polls, 0);
+        assert!(!snapshot.invalid);
+    }
+
+    #[test]
+    fn synchronous_sdk_observation_retains_first_call_and_rejects_reuse_or_backwards_time() {
+        let (witness, recorder, _) = prepared();
+        recorder.observe_synchronous_call(|| ());
+        let original = witness.snapshot().synchronous_call;
+        recorder.observe_synchronous_call(|| ());
+        assert!(witness.snapshot().invalid);
+        assert_eq!(witness.snapshot().synchronous_call, original);
+        let (backwards_witness, backwards_recorder, now) = prepared();
+        backwards_recorder.observe_synchronous_call(|| {
+            let previous = *now.lock().expect("clock");
+            *now.lock().expect("clock") = previous
+                .checked_sub(Duration::from_millis(1))
+                .expect("earlier");
+        });
+        assert!(backwards_witness.snapshot().invalid);
     }
 
     #[test]

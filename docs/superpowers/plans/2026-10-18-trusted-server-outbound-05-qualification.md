@@ -331,6 +331,30 @@ not execution readiness, candidate freeze, hosted acceptance or a waiver of fail
 
 ## Task Q3: Evidence Preparation, Candidate Freeze and Local Acceptance
 
+### Review 5798502238 Thread 5: Qualification Package Implementation
+
+- [x] Replace the Fastly lifecycle-only qualification entrypoint with a single-request
+      `run_custom` dispatcher shared with existing progress probes; retain native Send/Follow,
+      strict body suppression and the same lifetime controllers, not another transport.
+- [x] Embed bounded, exact controlled-origin configuration and implement hosted head/body,
+      90 s, connect, cache-pair, SDK-only reuse and typed native Image Optimizer profiles.
+      Retain original deadlines and observe the actual optimizer SDK call only in test-utils.
+- [x] Execute the actual qualification binary through the existing wire/lifetime runners;
+      other adapters retain their progress feature selection. Update the external runbook with
+      real routes/settings and the implemented Rust frozen exporter, not fabricated commands.
+- [ ] Qualify the independently frozen candidate with hosted/operator results and all existing
+      measurement approvals. Implementation completion is not Q3/Q4/Q5 completion.
+
+Local review verification: the complete Fastly wire run passed, including eight new profile
+controls and zero-dispatch malformed/duplicate controls. The strict lifetime run retained a
+failure: cold origin Begin measured 8548 us against 2000 +/- 5000 us. No acceptance window,
+capability, SDK/runtime pin, inventory identity, manual hosted checkbox or historical failure
+was changed. The repaired local Viceroy is not stock-runtime or hosted qualification.
+
+This checkpoint supersedes the earlier Q2 statement that the full Fastly qualification build
+is unimplemented. Exact per-leg external execution bindings, source freeze, independent receipt
+review, hosted evidence and package acceptance remain open.
+
 **Files:** Extend G1's inventory/checker, fixture harness `net.rs`, `runners.rs`, `evidence.rs`,
 `main.rs`, fixture-core qualification, and adapter fixtures. No consumer production code is owned
 by this plan.

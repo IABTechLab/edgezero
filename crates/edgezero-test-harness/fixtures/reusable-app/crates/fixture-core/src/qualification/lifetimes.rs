@@ -138,8 +138,7 @@ impl Probe {
             return Err(invalid());
         }
         let base: Uri = target.parse().map_err(|_| invalid())?;
-        if !crate::is_loopback_http(&base)
-            || !base.port_u16().is_some_and(|port| port != 0)
+        if !super::origins::allows(&base)
             || base
                 .authority()
                 .is_some_and(|authority| authority.as_str().contains('@'))
@@ -1241,7 +1240,9 @@ impl BatchWitness {
 }
 
 pub(super) fn configure_admission(app: &mut edgezero_core::app::App) {
-    if option_env!("EDGEZERO_QUALIFICATION_SUITE") != Some("outbound-lifetimes") {
+    if option_env!("EDGEZERO_QUALIFICATION_SUITE") != Some("outbound-lifetimes")
+        && super::build_identity().is_err()
+    {
         return;
     }
     install_batch_admission(app);

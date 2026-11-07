@@ -21,9 +21,10 @@ measured qualification target with unchanged tests; the synchronous optimizer bl
 is explicitly **UNKNOWN** until provider evidence. Original deadlines/sources and late-result
 rejection remain. No old failure becomes a pass, and no numerical horizon is approved here.
 
-The existing trait, ordinary SDK send branch, B/backend policy, timers, slack and resource
-constraints remain unchanged. Typed body errors and fresh-readiness/read safety remain required.
-Full EZ-1 settlement, Follow, engine and atomic head-first/full-trait migration remain open.
+The shared head-first pipeline, explicit Follow, B31 timers, original deadlines and resource
+constraints are implemented. The preceding approvals describe historical sequencing, not a
+second implementation or a compatibility path. Typed body errors and fresh-readiness/read safety
+remain required. The fixed dispatch-slack guard has been retired under the approval above.
 The external numerical-policy/H(K), hosted evidence and performance-comparison gates below
 still block qualification; an unknown horizon cannot satisfy their finite-bound assertions.
 
@@ -32,8 +33,8 @@ still block qualification; an unknown horizon cannot satisfy their finite-bound 
   sentinels, owners and applicability decisions. Its 255 criteria / 511 planned legs are a
   coverage domain, **not 511 passing tests**.
 - [G2 feasibility](../../../docs/audits/2026-10-18-outbound-feasibility.md) remains failed.
-  Fastly timed readiness loses body errors in pinned Viceroy. The atomic outbound migration
-  remains blocked; no blocking-read fallback, compatibility path or pin change is authorized.
+  Stock pinned Viceroy timed readiness loses body errors. No blocking-read fallback,
+  compatibility path or pin change is authorized by this runbook.
   A separately identified [local runtime repair](../../../patches/viceroy/README.md) fixes the
   measured error loss in a patched executable. It does not qualify stock 0.21.0, the full G2
   scenario set or hosted Fastly; remaining exact-version/policy review stays open.
@@ -49,8 +50,8 @@ still block qualification; an unknown horizon cannot satisfy their finite-bound 
 - [Qualification plan](../../../docs/superpowers/plans/2026-10-18-trusted-server-outbound-05-qualification.md)
   owns Q2 source preparation, Q3 freeze/local acceptance, Q4a package acceptance, Q4b execution
   and Q5 publication. No candidate has been frozen or package accepted by this template.
-- Full outbound case execution and frozen-candidate export are not implemented. Existing
-  response-egress probes do not replace them. Recorded Fastly SDK framing/bodyless parity
+- The single-request Fastly qualification build and frozen-candidate exporter are implemented
+  below. Actual frozen/hosted execution and qualification remain open. Recorded Fastly SDK framing/bodyless parity
   failures and Cloudflare front-proxy overflow-recovery failures are not waived.
 
 Do not start qualification until all prerequisite implementation, feasibility, policy and
@@ -111,7 +112,7 @@ cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo
 scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml outbound_evidence_assembly_retains_case_counts_and_hashes
 ```
 
-Expected: nonzero Node test listings with zero failures, exactly one passing non-ignored
+Expected: nonzero Rust test listings with zero failures, exactly one passing non-ignored
 forwarding doctest, exactly one passing named Rust sentinel, and inventory totals of
 255 criteria / 511 planned legs / `qualified:false`. Record actual test counts for the frozen
 candidate. A manifest pass deliberately permits pending decisions and planned commands.
@@ -130,16 +131,18 @@ historical paths. Local fixture runners accept `VICEROY_BIN`, `SPIN_BIN`, `WRANG
 `ESBUILD_BIN` and `WASM_OPT_BIN`. Preserve `WRANGLER_SEND_METRICS=false` and a scoped
 `WRANGLER_LOG_PATH`. See the [suite reference](../SUITES.md) for runtime preflight and limitations.
 
-## Existing Response-Egress Fixture Only
+## Qualification Builds
 
-The following builds select the implemented lifecycle fixture, **not the planned full
-outbound qualification package**. These commands may be checked locally before freeze using
+Fastly selects the single-request `run_custom` qualification package, including the existing
+wire/lifetime controllers and the hosted profiles below. Other targets select their existing
+response-egress fixture, not this Fastly outbound package. These commands may be checked locally before freeze using
 explicit characterization identities; those builds cannot be relabelled frozen evidence.
 For accepted execution use only the Q3 sheet's clean candidate and reviewed build inputs.
 
 ```sh
 export EDGEZERO_QUALIFICATION_REVISION="$CANDIDATE_SHA"
 export EDGEZERO_QUALIFICATION_ARTIFACT="$BUILD_INPUT_SHA256"
+export EDGEZERO_QUALIFICATION_ORIGINS='["https://controlled-origin.example","http://controlled-drop.example:8080"]'
 cargo build --offline --locked --release --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml -p fixture-cloudflare --features qualification --target wasm32-unknown-unknown
 cargo build --offline --locked --release --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml -p fixture-fastly --features qualification --bin fixture-fastly-qualification --target wasm32-wasip1
 cargo build --offline --locked --release --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml -p fixture-spin --features qualification --target wasm32-wasip2
@@ -163,7 +166,7 @@ Use the README's strict target JSON shape with actual allowlisted HTTPS origin, 
 compatibility, candidate, artifact and deployment facts. Thirteen scheduled scenarios plus
 thirteen healthy recovery requests produce **26 client observations**; a complete fixture run
 requires four lifecycle events per request, **104 events**. These are not the 511 G1 legs or
-measurement sample counts. No outbound backend is contacted by this fixture.
+measurement sample counts. No outbound backend is contacted by the `/qualification/*` routes.
 
 Collection intentionally exits **2**, not a qualification pass. Export complete unsampled
 events independently; only an independently confirmed complete export permits setting
@@ -174,13 +177,96 @@ transport/parser/allocation evidence remains separate. Fastly requires an indepe
 host execution ceiling of 1..60000 ms; client budget is 1000..10000 ms and the fixture server
 response budget is 500 ms. Before/after checks cannot interrupt a blocking host call.
 
-## Full Outbound Execution Bindings: Not Implemented
+## Fastly Outbound Qualification Package
 
 G1 strings containing `outbound-cutover`, `--case`, `hosted-runbook` or `consumer-runbook`
 are planned recipes, not commands to copy into a terminal. Q3/Q4a must replace them with
-owner-confirmed runnable invocations before a leg is ready. The full outbound qualification
-build remains open at this checkpoint. Frozen-record export below is implemented, but requires
+owner-confirmed runnable invocations before a leg is ready. The Fastly package below supplies
+the outbound implementation; it does not invent those external bindings. Frozen-record export requires
 an independently frozen candidate, reviewed build attestations and new frozen-run captures.
+
+### Build And Origin Safety
+
+Replace the sample origin list above with independently controlled origins before building.
+`EDGEZERO_QUALIFICATION_ORIGINS` is an embedded JSON array of at most 16 exact HTTP(S)
+scheme/authority pairs (16 KiB total, 2048 bytes per entry). Credentials, wildcard hosts,
+paths, queries, fragments, zero/invalid ports and duplicates are rejected. An absent list
+permits only HTTP `localhost`/`127.0.0.1` with explicit positive ports. No request can extend
+the list. The fixture checks initial and prepared redirect targets; HTTPS retains certificate
+verification and URI-host SNI. Keep this diagnostic build isolated, not on production traffic.
+
+`qualification` includes the existing `progress` feature. Both Fastly binaries share one
+dispatcher; the qualification binary uses `run_custom` for one request, not reusable
+`serve_app`. The existing wire and lifetime harness suites build and execute this actual binary:
+
+```sh
+scripts/test_integration.sh --adapter fastly --suite outbound-wire --output NEW_WIRE_DIRECTORY
+scripts/test_integration.sh --adapter fastly --suite outbound-lifetimes --output NEW_LIFETIME_DIRECTORY
+```
+
+Local runs embed the actual source revision and harness build-input identity; they are labelled
+working-tree characterization, not clean frozen-candidate evidence. The wire suite additionally
+checks eight hosted-profile routing/settings controls and zero-I/O invalid/duplicate inputs.
+It does not pretend the local no-store origin proves hosted cache hits, TLS pooling or an 80 s delay.
+
+### Hosted Profiles
+
+After independent packaging and staging authorization, invoke
+`/hosted/candidate/PROFILE` with `x-request-token` (1..64 ASCII alphanumeric/hyphen) and
+`x-qualification-target` (allowlisted URI, at most 2048 bytes). Image profiles additionally
+require `x-qualification-region` (the typed SDK region token). GET and HEAD are accepted;
+duplicates, invalid controls and unknown profiles return a fixed 400 without dispatch or input echo.
+Only the explicit token/target/region/Accept controls are consumed, not arbitrary inbound headers.
+
+| Profile                                       | Actual Request Policy                                                               | Independently Controlled Origin / Required Observation                                                                                        |
+| --------------------------------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `head-timeout`                                | 100 ms timeout                                                                      | Delay head 500 ms; preserve the 100..105 ms measured target and any failure.                                                                  |
+| `body-buffered`, `body-streamed`              | 500 ms total timeout, corresponding response mode                                   | Immediate head, one byte per 300 ms; retain actual terminal time and typed cause.                                                             |
+| `long-budget`                                 | 90 s configured timeout                                                             | Head at 80 s; local immediate-origin routing is not this proof.                                                                               |
+| `connect`                                     | 200 ms connect, 2 s total                                                           | Enforced silent-drop endpoint with independent capture, not a documentation IP.                                                               |
+| `connect-default`                             | No connect override, 2 s total                                                      | Same silent-drop endpoint; distinguish aggregate and phase observations.                                                                      |
+| `refused`                                     | 200 ms connect, 2 s total                                                           | Separate reachable refused port; require typed `Unreachable`.                                                                                 |
+| `cache-send`, `cache-batch`                   | Two sequential Send requests or two real one-slot buffered batches; 1 s per request | Identical URL/headers within a pair; distinct cold keys between profiles. Require one origin receipt per pair plus actual cache-hit evidence. |
+| `reuse`                                       | One request per execution, cache bypass, 1 s                                        | Persistent HTTPS origin with independently recorded TCP/TLS and connection IDs; repeat fresh executions for both roles.                       |
+| `image`                                       | Typed native width 100 / WebP / region, streamed response, 1 s                      | Actual optimized GET and HEAD, source-copy/host-call counts and matched native control. Also exercise timely head with pending body.          |
+| `image-query-on`, `image-query-off`           | Same typed options; preserve-query true / false                                     | Target must have no query; fixture adds only `width=100&unrelated=qualification`. Verify the origin URI independently.                        |
+| `image-short-deadline`                        | 1 s configured timeout and original 250 ms absolute deadline                        | Silent/delayed head and pending body; actual host-call entry is required, not merely pre-dispatch expiry.                                     |
+| `image-deadline-1ms`, `image-deadline-1025ms` | Deadline-only, no configured timeout; original 1 / 1025 ms deadline                 | Exercise ladder boundaries with actual host entry where feasible; report preflight expiry honestly.                                           |
+
+The candidate returns bounded JSON for ordinary probes: effective settings, input/build identity,
+preparation/original deadline and cause, head/terminal times, typed outcome, body length/digest
+and registration counts. Selected header evidence is at most 16 fields; values over 256 bytes
+or invalid UTF-8 are unknown (`null`), not rewritten authoritative headers. Images are streamed
+directly with `x-qualification-report` plus terminal lifecycle telemetry; no extra fetch, image
+hash/collection or serialized optimizer options are introduced. A successful HEAD has no payload.
+The test-only native witness measures the actual synchronous optimizer SDK call, before/after
+that call, using its prepared clock; an unavailable timestamp is unknown, never fabricated.
+
+`/hosted/native/reuse` and `/hosted/native/IMAGE_PROFILE` are independent, direct SDK-only
+controls with matched authority, strict TLS/SNI, phase/connect/cache policy, negotiation and
+typed image options. They send exactly once; no EdgeZero outbound transport is used. Their SDK
+call timings are not a promise of portable logical-deadline enforcement. For 14b run one request
+per fresh execution for each role with the same independently controlled persistent TLS origin;
+the fixture cannot manufacture provider connection identity or certify pooling from registrations.
+For cache 14a use the candidate pairs above, not this non-caching local SDK control.
+
+The same package retains `/progress/forward/{send,late,outbound-deadline,inbound-deadline}`
+for EZ-1: `x-origin` is the allowlisted `/forward/send/TOKEN` target. The last two set a
+200 ms outbound timeout; `inbound-deadline` also admits a 100 ms body-read budget, while
+`late` admits an already expired read deadline. Use real absent/CL:0/chunked-empty bodies,
+never-ready chunked GETs and actual HTTP/1/2 (and HTTP/3 only where applicable) clients;
+the report retains observed duration without upgrading Fastly's non-preemptible read semantics.
+All original forwarding checks remain in the wire runner.
+
+EZ-6 uses the same existing `/progress/lifetimes/{slow-origin,fast-origin,body-read-arrivals,trickling-slot,send-during-batch,batch-write-deadline}`
+controllers and independent `/lifetimes/TOKEN/CASE` origins as the lifetime suite. Admission
+observations are enabled by valid qualification build identity, not a different suite-only
+compile flag. Preserve their original schedules, slot sets, receipts and assertions; the package
+does not substitute a simpler implementation. Use separate old/new builds and retain build /
+registration identities for EZ-2.13b. S3 preflight remains application owned.
+
+No profile supplies an approved finite H(K), product threshold, provider entitlement, frozen
+record or hosted result. Preserve all negative observations and the UNKNOWN blocking horizon.
 
 For every applicable leg, the accepted external package must bind: case/environment/source
 digest, unique sentinel, command/cwd, owner, candidate/build identity, expected assertions and

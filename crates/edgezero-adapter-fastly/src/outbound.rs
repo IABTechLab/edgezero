@@ -746,7 +746,15 @@ mod fastly_impl {
                         super::synchronous_send_until(budget, time.clock(), || {
                             #[cfg(test)]
                             observe_native_sdk("optimizer-send", backend.name());
-                            request.send(backend).map_err(|error| {
+                            let send = || request.send(backend);
+                            #[cfg(feature = "test-utils")]
+                            let result = match native_body_recorder(&context) {
+                                Some(recorder) => recorder.observe_synchronous_call(send),
+                                None => send(),
+                            };
+                            #[cfg(not(feature = "test-utils"))]
+                            let result = send();
+                            result.map_err(|error| {
                                 map_configured_send_cause(
                                     error.root_cause(),
                                     budget,
