@@ -1,14 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::future::Future;
+#[cfg(any(test, feature = "test-utils"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 #[cfg(feature = "test-utils")]
-use std::{
-    io,
-    sync::atomic::{AtomicUsize, Ordering},
-    task::Poll,
-};
+use std::{io, task::Poll};
 
 #[cfg(feature = "test-utils")]
 use bytes::Bytes;
@@ -282,10 +280,10 @@ pub(crate) struct RegistryInputs<'env> {
     pub secret_meta: Option<StoreMetadata>,
 }
 
-#[cfg(feature = "test-utils")]
+#[cfg(any(test, feature = "test-utils"))]
 struct DropSignal(Arc<AtomicUsize>);
 
-#[cfg(feature = "test-utils")]
+#[cfg(any(test, feature = "test-utils"))]
 #[expect(
     clippy::missing_trait_methods,
     reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
