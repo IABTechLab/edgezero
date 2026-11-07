@@ -1,5 +1,5 @@
 use crate::evidence::{Result, require};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -25,6 +25,7 @@ pub(super) fn fence(line: &str) -> Option<(char, usize, &str)> {
 
 #[derive(Debug, PartialEq)]
 pub(super) struct Artifact {
+    pub(super) async_trait: Option<PathBuf>,
     pub(super) library: PathBuf,
     pub(super) dependencies: PathBuf,
     pub(super) edition: String,
@@ -80,6 +81,23 @@ pub(super) fn core_artifact(output: &str, root: &Path) -> Result<Artifact> {
         ["2015", "2018", "2021", "2024"].contains(&edition),
         "Cargo artifact has unsupported edition",
     )?;
+    let macros = records
+        .iter()
+        .filter(|record| {
+            record["reason"] == "compiler-artifact"
+                && record["target"]["name"] == "async_trait"
+                && record["target"]["kind"]
+                    .as_array()
+                    .is_some_and(|kinds| kinds.contains(&json!("proc-macro")))
+        })
+        .flat_map(|record| record["filenames"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    require(
+        macros.len() <= 1 && macros.iter().all(|path| path.is_absolute()),
+        "ambiguous async_trait compiler artifact",
+    )?;
     let library = PathBuf::from(libraries[0]);
     let directory = library
         .parent()
@@ -90,6 +108,7 @@ pub(super) fn core_artifact(output: &str, root: &Path) -> Result<Artifact> {
         directory.join("deps")
     };
     Ok(Artifact {
+        async_trait: macros.into_iter().next(),
         library,
         dependencies,
         edition: edition.into(),
@@ -186,6 +205,11 @@ pub(super) fn run_markdown(
             .arg("-L")
             .arg(format!("dependency={}", artifact.dependencies.display()))
             .arg("--test-args=--color=never");
+        if let Some(path) = &artifact.async_trait {
+            command
+                .arg("--extern")
+                .arg(format!("async_trait={}", path.display()));
+        }
         command
     };
     let listing = super::output(command().arg("--test-args=--list"), 32 * 1024 * 1024)?;

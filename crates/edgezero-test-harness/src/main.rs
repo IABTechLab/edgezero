@@ -707,6 +707,12 @@ fn rustc() -> PathBuf {
 fn run(arguments: Vec<String>) -> Result<i32> {
     if arguments
         .first()
+        .is_some_and(|argument| argument == "response-egress")
+    {
+        return evidence::response_egress::run(&arguments[1..]);
+    }
+    if arguments
+        .first()
         .is_some_and(|argument| argument == "acceptance")
     {
         ctrlc::set_handler(request_cancellation)?;

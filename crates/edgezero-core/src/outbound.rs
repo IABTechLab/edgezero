@@ -48,8 +48,8 @@ use crate::http::header::{
     PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use crate::http::{
-    Authority, HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode, Uri,
-    response_builder,
+    Authority, HeaderMap, HeaderName, HeaderValue, MAX_CONNECTION_EMPTY_MEMBERS, Method, Request,
+    Response, StatusCode, Uri, response_builder,
 };
 use crate::time::{
     DEADLINE_FAR_FUTURE, Deadline, DispatchBudget, MonotonicClock, MonotonicInstant,
@@ -875,6 +875,10 @@ impl OutboundResponse {
 
     /// Collects the body under a final response-buffer limit and cooperative deadline.
     ///
+    /// A pending source read is not interrupted by this helper. It may remain pending beyond
+    /// this deadline; expiry wins when the source next yields a chunk, error or EOF. Configure
+    /// the request deadline to apply the adapter's transport-deadline policy to stalled I/O.
+    ///
     /// # Errors
     /// Returns 504 when the deadline is observed expired, otherwise a typed source or
     /// `BufferedBody` response-limit error.
@@ -983,6 +987,7 @@ impl OutboundResponse {
     }
 
     /// Collects and deserializes an upstream body under a cooperative deadline.
+    /// Pending source reads can outlive this deadline; see [`Self::into_bytes_bounded_until`].
     ///
     /// # Errors
     /// Returns 504 on observed expiry, typed source/limit failures, or decode 502 for malformed
@@ -1755,6 +1760,7 @@ fn normalize_response_headers(
 ) -> Result<ResponseHeadNormalization, EdgeError> {
     let original_provenance = original_content_type_provenance(headers);
     let nominated = connection_nominations(headers, true)?;
+    let had_transfer_encoding = headers.contains_key(TRANSFER_ENCODING);
     retain_utf8_header_values(headers, true);
     strip_hop_by_hop(headers, nominated, false);
 
@@ -1774,6 +1780,15 @@ fn normalize_response_headers(
         parse_content_length(headers)?;
         ResponseBodyDisposition::FramingBodyless
     } else {
+        if status != StatusCode::RESET_CONTENT
+            && had_transfer_encoding
+            && headers.contains_key(CONTENT_LENGTH)
+        {
+            return Err(EdgeError::bad_gateway_with_reason(
+                "upstream response has ambiguous payload framing",
+                BadGatewayReason::Protocol,
+            ));
+        }
         let content_length = parse_content_length(headers)?;
         if status == StatusCode::RESET_CONTENT {
             headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
@@ -2082,6 +2097,7 @@ fn connection_nominations(
     response: bool,
 ) -> Result<Vec<HeaderName>, EdgeError> {
     let mut nominated = Vec::new();
+    let mut empty_members = 0_usize;
     for header_value in headers.get_all(CONNECTION) {
         let raw_value = str::from_utf8(header_value.as_bytes()).map_err(|_error| {
             malformed_connection(response, "connection header value is not valid UTF-8")
@@ -2089,10 +2105,14 @@ fn connection_nominations(
         for raw_token in raw_value.split(',') {
             let token = raw_token.trim_matches([' ', '\t']);
             if token.is_empty() {
-                return Err(malformed_connection(
-                    response,
-                    "connection header contains an empty nomination",
-                ));
+                empty_members = empty_members.saturating_add(1);
+                if empty_members > MAX_CONNECTION_EMPTY_MEMBERS {
+                    return Err(malformed_connection(
+                        response,
+                        "connection header contains too many empty nominations",
+                    ));
+                }
+                continue;
             }
             let name = HeaderName::from_bytes(token.as_bytes()).map_err(|_error| {
                 malformed_connection(response, "connection header contains an invalid nomination")
@@ -2220,6 +2240,7 @@ fn strip_hop_by_hop(
         CONNECTION,
         HeaderName::from_static("keep-alive"),
         HeaderName::from_static("proxy-connection"),
+        HeaderName::from_static("http2-settings"),
         PROXY_AUTHENTICATE,
         PROXY_AUTHORIZATION,
         TE,

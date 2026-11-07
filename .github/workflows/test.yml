@@ -145,6 +145,7 @@ jobs:
           scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml outbound_evidence_assembly_retains_case_counts_and_hashes
           cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
           cargo test --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml -p fixture-core --features qualification
+          # Only hosted target/collector safety remains in Node; evidence validation runs above in Rust.
           node --test scripts/qualify_response_egress.test.mjs
 
       - name: Shared outbound policy contracts

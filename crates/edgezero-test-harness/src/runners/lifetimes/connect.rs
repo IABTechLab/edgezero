@@ -158,7 +158,9 @@ fn validate_samples(
         let socket = &sample["socket"];
         let at = number(sample, "at_us")?;
         let read_started = number(sample, "read_started_us")?;
-        let inode = number(socket, "inode")?;
+        let inode = socket["inode"]
+            .as_u64()
+            .ok_or("missing unsigned socket inode")?;
         let local = socket["local"]
             .as_str()
             .ok_or("missing native source endpoint")?;
@@ -499,6 +501,21 @@ mod tests {
         let valid = vec![sample(1000, 2), sample(1_999_000, 2), sample(2_000_000, 7)];
         validate_samples(&valid, 73, 99, target, "PerCallTimeout").unwrap();
         validate_samples(&valid, 73, 99, target, "ConnectTimeout").unwrap();
+        for inode in [30_000_001, u64::MAX] {
+            let mut large = valid.clone();
+            for observation in &mut large {
+                observation["socket"]["inode"] = json!(inode);
+            }
+            validate_samples(&large, 73, 99, target, "PerCallTimeout")
+                .expect("socket identity is not a bounded duration");
+        }
+        for inode in [json!(0), json!(-1), json!(1.5), json!("17")] {
+            let mut invalid = valid.clone();
+            for observation in &mut invalid {
+                observation["socket"]["inode"] = inode.clone();
+            }
+            assert!(validate_samples(&invalid, 73, 99, target, "PerCallTimeout").is_err());
+        }
         for field in ["pid", "start_ticks"] {
             let mut changed = valid.clone();
             changed[0][field] = json!(74);

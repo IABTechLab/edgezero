@@ -44,6 +44,21 @@ be loaded by the runtime.
 If `Hooks::configure` fails, `run_app` returns the source-preserving
 `application configuration failed` error before binding the listener.
 
+### Native I/O Boundaries
+
+The outbound client retains reqwest's environment-proxy behavior, including
+`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY`. A configured proxy changes
+the network peer; the request URI remains the application-selected destination.
+Provider failure details do not prove which network hop failed. Tests that disable
+proxies to isolate an origin do not establish a direct-egress production policy.
+
+The persistent development KV backend uses synchronous redb operations, including
+write commits and expired-entry cleanup. These run on the server's current-thread
+runtime and can delay unrelated connections and timer observation. Async trait
+signatures do not make disk I/O preemptible. Do not treat this backend as certified
+deadline-isolated storage; offloading requires bounded admission and explicit
+cancellation/shutdown ownership for writes that have already started.
+
 ## Development Server
 
 Run your project locally on the Axum adapter:

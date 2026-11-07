@@ -34,7 +34,7 @@ section() {
 
 section "CI Tooling Contracts"
 run npm ci --prefix scripts --ignore-scripts --no-audit --no-fund
-run node --test scripts/ci_tooling.test.mjs
+run node --test scripts/ci_tooling.test.mjs scripts/qualify_response_egress.test.mjs
 
 section "Workspace Tests"
 run cargo test --workspace --all-targets

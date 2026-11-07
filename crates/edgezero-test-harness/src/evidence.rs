@@ -2,6 +2,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub mod cutover;
+pub mod response_egress;
 
 mod readiness;
 pub use readiness::{

@@ -531,6 +531,12 @@ consume `response.into_body()` while its absolute request deadline is still acti
 `into_bytes_bounded`, `into_bytes_bounded_until`, or `json_bounded_until` when application code
 performs an additional collection step.
 
+The `*_bounded_until` collection helpers are cooperative: they check expiry before a read
+and after it produces a chunk, error or EOF, but do not interrupt a pending source read.
+A stalled source can therefore outlive the helper's deadline. Set the original request
+deadline to apply the adapter's transport-deadline policy; that remains capability-scoped,
+not a universal promise that a blocked provider call can be cancelled.
+
 Each adapter checks its selected absolute budget again before returning a successful response,
 including bodyless responses and streamed response heads. Equality is expired: setup and
 normalization cannot hand off a late success or restart the budget. This check does not read a

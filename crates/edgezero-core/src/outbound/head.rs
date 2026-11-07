@@ -1088,6 +1088,62 @@ mod tests {
     }
 
     #[test]
+    fn head_rejects_te_cl_before_payload_caps_and_source_poll() {
+        for decoding in [ResponseDecoding::Decode, ResponseDecoding::Original] {
+            for mode in [
+                ResponseMode::Buffered { max_bytes: 0 },
+                ResponseMode::Streamed,
+            ] {
+                for header_cap in [None, Some(0)] {
+                    let mut captured = context(mode);
+                    captured.body_policy.response_decoding = decoding;
+                    captured.body_policy.max_encoded_response_bytes = Some(0);
+                    captured.body_policy.max_decoded_response_bytes = Some(0);
+                    captured.max_response_header_count = header_cap;
+                    let mut headers = HeaderMap::new();
+                    headers.insert("content-length", HeaderValue::from_static("100"));
+                    headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+                    let source_drops = Rc::new(Cell::new(0));
+                    let lease = SourceLease(Rc::clone(&source_drops));
+                    let body = stream::poll_fn(move |_| {
+                        let _lease = &lease;
+                        panic!("framing rejection precedes payload polling");
+                    })
+                    .boxed_local();
+                    let releases = Rc::new(Cell::new(0));
+                    let error = OutboundHead::new(
+                        StatusCode::OK,
+                        input(headers),
+                        body,
+                        captured,
+                        owner(&releases),
+                    )
+                    .expect_err("ambiguous payload head");
+                    if header_cap.is_some() {
+                        assert!(matches!(
+                            error,
+                            EdgeError::ResponseTooLarge {
+                                reason: ResponseLimitReason::HeaderCount,
+                                ..
+                            }
+                        ));
+                    } else {
+                        assert!(matches!(
+                            error,
+                            EdgeError::BadGateway {
+                                reason: crate::BadGatewayReason::Protocol,
+                                ..
+                            }
+                        ));
+                    }
+                    assert_eq!(source_drops.get(), 1);
+                    assert_eq!(releases.get(), 1);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn final_head_applies_declared_payload_limits_without_polling() {
         let polls = Rc::new(Cell::new(0_usize));
         let counted = Rc::clone(&polls);
@@ -1431,6 +1487,7 @@ mod tests {
                     captured.body_policy.max_decoder_bytes = 0;
                     let mut headers = HeaderMap::new();
                     headers.insert("content-length", HeaderValue::from_static("1073741824"));
+                    headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
                     headers.insert("content-encoding", HeaderValue::from_static("br"));
                     let source_drops = Rc::new(Cell::new(0));
                     let lease = SourceLease(Rc::clone(&source_drops));
@@ -1495,6 +1552,7 @@ mod tests {
                     if let Some(value) = length {
                         headers.insert("content-length", HeaderValue::from_static(value));
                     }
+                    headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
                     headers.insert("content-encoding", HeaderValue::from_static("br"));
                     let polls = Rc::new(Cell::new(0_usize));
                     let counted = Rc::clone(&polls);

@@ -1056,13 +1056,15 @@ chunk on crossing). No outbound backend is contacted.
 
 ```sh
 node scripts/qualify_response_egress.mjs --execute-hosted TARGET.json CLIENTS.json
-node scripts/qualify_response_egress.mjs --validate CLIENTS.json EVENTS.json
+scripts/test_integration.sh response-egress --validate CLIENTS.json EVENTS.json
 ```
 
 Client collection intentionally exits 2: it is not qualification by itself. Export the complete
 unsampled events as a JSON array in `EVENTS.json`, preserving all records/sequences and excluding
 other runs; independently confirm completeness before setting the recorded manifest's
-`telemetry_complete` to true. Missing/duplicate/conflicting records remain unverified. Evidence
+`telemetry_complete` to true. The Rust validator requires the canonical 26 client observations
+and 104 lifecycle events, including every recovery probe; a coherently trimmed bundle cannot
+qualify. It is the sole evidence-validation owner. Missing/duplicate/conflicting records remain unverified. Evidence
 files are capped at 4 MiB and output uses private file permissions. The validator does not
 authenticate fabricated telemetry or prove the supplied deployment identity.
 

@@ -31,9 +31,6 @@
 #[doc(hidden)]
 pub mod test_support;
 
-#[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
-use std::time::Duration;
-
 use edgezero_core::error::EdgeError;
 
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
@@ -582,7 +579,7 @@ mod spin_impl {
     use edgezero_core::error_detail::{
         ProviderFailureDetail, ProviderFailurePhase, SpinFailureCause, SpinTimeoutOption,
     };
-    use edgezero_core::http::header::ACCEPT_ENCODING;
+    use edgezero_core::http::header::{ACCEPT_ENCODING, CONTENT_LENGTH};
     use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
     #[cfg(feature = "test-utils")]
     use edgezero_core::outbound::test_support::{
@@ -740,8 +737,9 @@ mod spin_impl {
                 headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
             }
 
-            let fields = request_fields(&headers)?;
-            let options = request_options(budget, &time, connect_timeout)?;
+            let fields = request_fields(&method, &body, &mut headers)?;
+            let (options, accepted_explicit_connect) =
+                request_options(budget, &time, connect_timeout)?;
             let PreparedRequestBody {
                 writer,
                 contents,
@@ -780,7 +778,7 @@ mod spin_impl {
                         budget.cause,
                         exchange_time.clock().now(),
                         phase,
-                        connect_timeout,
+                        accepted_explicit_connect,
                     )
                 })
                 .await
@@ -899,9 +897,23 @@ mod spin_impl {
         }
     }
 
-    fn request_fields(headers: &HeaderMap) -> Result<Fields, EdgeError> {
+    fn request_fields(
+        method: &Method,
+        body: &Body,
+        headers: &mut HeaderMap,
+    ) -> Result<Fields, EdgeError> {
+        if !matches!(*method, Method::GET | Method::HEAD)
+            && let Some(bytes) = body.as_bytes()
+        {
+            let length = HeaderValue::from_str(&bytes.len().to_string()).map_err(|_error| {
+                EdgeError::internal(anyhow::anyhow!(
+                    "buffered request length is not a valid header"
+                ))
+            })?;
+            headers.insert(CONTENT_LENGTH, length);
+        }
         let fields = Fields::new();
-        for (name, value) in headers {
+        for (name, value) in headers.iter() {
             fields
                 .append(name.as_str(), value.as_bytes())
                 .map_err(|error| map_spin_preparation_header(&error))?;
@@ -913,31 +925,36 @@ mod spin_impl {
         budget: DispatchBudget,
         time: &OutboundTime,
         connect_timeout: Option<Duration>,
-    ) -> Result<RequestOptions, EdgeError> {
+    ) -> Result<(RequestOptions, bool), EdgeError> {
         let options = RequestOptions::new();
         let remaining = budget_remaining(budget, time)?;
         let timeouts = super::request_timeouts(remaining, connect_timeout);
-        apply_timeout_settings(timeouts, |option, value| match option {
+        let accepted_connect = apply_timeout_settings(timeouts, |option, value| match option {
             SpinTimeoutOption::Connect => options.set_connect_timeout(Some(value)),
             SpinTimeoutOption::FirstByte => options.set_first_byte_timeout(Some(value)),
             SpinTimeoutOption::BetweenBytes => options.set_between_bytes_timeout(Some(value)),
             _ => Err(RequestOptionsError::Other(None)),
         })?;
-        Ok(options)
+        Ok((options, connect_timeout.is_some() && accepted_connect))
     }
 
     fn apply_timeout_settings(
         timeouts: super::exchange::RequestTimeouts,
         mut setter: impl FnMut(SpinTimeoutOption, u64) -> Result<(), RequestOptionsError>,
-    ) -> Result<(), EdgeError> {
+    ) -> Result<bool, EdgeError> {
+        let mut accepted_connect = false;
         for (option, value) in [
             (SpinTimeoutOption::Connect, timeouts.connect()),
             (SpinTimeoutOption::FirstByte, timeouts.first_byte()),
             (SpinTimeoutOption::BetweenBytes, timeouts.between_bytes()),
         ] {
-            set_timeout_option(option, &setter(option, value))?;
+            let outcome = setter(option, value);
+            if option == SpinTimeoutOption::Connect {
+                accepted_connect = outcome.is_ok();
+            }
+            set_timeout_option(option, &outcome)?;
         }
-        Ok(())
+        Ok(accepted_connect)
     }
 
     fn set_timeout_option(
@@ -1320,9 +1337,9 @@ fn map_spin_dispatch_error(
     cause: BudgetSource,
     observed_at: edgezero_core::MonotonicInstant,
     phase: ProviderFailurePhase,
-    connect_timeout: Option<Duration>,
+    accepted_explicit_connect: bool,
 ) -> EdgeError {
-    if connect_timeout.is_some()
+    if accepted_explicit_connect
         && phase == ProviderFailurePhase::Send
         && matches!(error, ErrorCode::ConnectionTimeout)
         && !deadline.is_expired_at(observed_at)

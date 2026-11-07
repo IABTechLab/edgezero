@@ -661,6 +661,12 @@ pub(super) fn validate_artifact(events: &[Value], adapter: &str) -> Result<()> {
             let encodings = receipt["transfer_encoding"]
                 .as_array()
                 .ok_or("missing native encoding")?;
+            if adapter == "spin" && case == "parity-post" {
+                require(
+                    lengths == &vec![json!("3")] && encodings.is_empty(),
+                    "buffered Spin upload lost its trusted content length",
+                )?;
+            }
             require(
                 lengths.len() <= 1
                     && encodings.len() <= 1

@@ -500,6 +500,8 @@ function fixture(t) {
   writeFileSync(join(upstream, "src/body.rs"), "stock body\n");
   const git = (...args) => command("git", ["-C", upstream, ...args]);
   git("init", "-q");
+  git("config", "--local", "commit.gpgSign", "false");
+  git("config", "--local", "tag.gpgSign", "false");
   git("add", ".");
   git(
     "-c",

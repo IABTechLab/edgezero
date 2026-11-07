@@ -19,6 +19,8 @@ use http::uri::Authority as HttpAuthority;
 use crate::body::Body;
 use crate::error::EdgeError;
 
+pub(crate) const MAX_CONNECTION_EMPTY_MEMBERS: usize = 32;
+
 // CLAUDE.md mandates that application code never imports from the `http`
 // crate directly — every HTTP type must come through `edgezero_core::http`.
 // `Builder` types are exposed via `pub type` aliases (not `pub use`) so

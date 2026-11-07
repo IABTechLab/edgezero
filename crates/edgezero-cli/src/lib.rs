@@ -62,7 +62,7 @@ use args::{
 };
 #[cfg(feature = "cli")]
 use edgezero_adapter::registry::{AdapterDeployContext, AdapterExecutionTarget, DeployStoreIds};
-#[cfg(any(test, feature = "demo-example"))]
+#[cfg(all(feature = "cli", any(test, feature = "demo-example")))]
 use edgezero_core::app::Hooks;
 #[cfg(feature = "cli")]
 use edgezero_core::manifest::{Manifest, ManifestLoader, StoreDeclaration};
@@ -511,7 +511,7 @@ pub fn run_demo() -> Result<(), String> {
     demo_server::run_demo()
 }
 
-#[cfg(any(test, feature = "demo-example"))]
+#[cfg(all(feature = "cli", any(test, feature = "demo-example")))]
 fn demo_capability_gate<Application>() -> Result<(), String>
 where
     Application: Hooks,

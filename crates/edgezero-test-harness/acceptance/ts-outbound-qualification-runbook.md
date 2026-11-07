@@ -159,7 +159,7 @@ Only after accepted target configuration and explicit staging authorization:
 
 ```sh
 node scripts/qualify_response_egress.mjs --execute-hosted TARGET.json CLIENTS.json
-node scripts/qualify_response_egress.mjs --validate CLIENTS.json EVENTS.json
+scripts/test_integration.sh response-egress --validate CLIENTS.json EVENTS.json
 ```
 
 Use the README's strict target JSON shape with actual allowlisted HTTPS origin, SDK/runtime,

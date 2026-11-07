@@ -67,7 +67,7 @@ pub fn request_options(
     time: &OutboundTime,
     connect_timeout: Option<Duration>,
 ) -> Result<RequestOptions, EdgeError> {
-    super::request_options(budget, time, connect_timeout)
+    super::request_options(budget, time, connect_timeout).map(|(options, _accepted)| options)
 }
 
 #[doc(hidden)]
@@ -123,7 +123,7 @@ pub fn request_timeout_settings<Setter>(
     remaining: Duration,
     configured_connect: Option<Duration>,
     setter: Setter,
-) -> Result<(), EdgeError>
+) -> Result<bool, EdgeError>
 where
     Setter: FnMut(SpinTimeoutOption, u64) -> Result<(), RequestOptionsError>,
 {
@@ -131,6 +131,7 @@ where
         super::super::request_timeouts(remaining, configured_connect),
         setter,
     )
+    .map(|accepted| configured_connect.is_some() && accepted)
 }
 
 #[doc(hidden)]
@@ -142,8 +143,12 @@ pub fn map_spin_preparation_header(error: &HeaderError) -> EdgeError {
 
 #[doc(hidden)]
 #[inline]
-pub fn request_fields(headers: &HeaderMap) -> Result<(), EdgeError> {
-    super::request_fields(headers).map(|_fields| ())
+pub fn request_fields(
+    method: &Method,
+    body: &Body,
+    headers: &mut HeaderMap,
+) -> Result<Fields, EdgeError> {
+    super::request_fields(method, body, headers)
 }
 
 #[doc(hidden)]

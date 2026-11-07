@@ -1392,6 +1392,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn malformed_chunked_upload_preserves_the_typed_host_read_error_policy() {
+        #[edgezero_core::action]
+        async fn consume(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+            ctx.body_bytes(32).await?;
+            Ok("accepted")
+        }
+        for body in ["xyz\r\nclient-secret-token\r\n", "1\r\naXX"] {
+            let app = App::new(RouterService::builder().post("/", consume).build());
+            let request = format!(
+                "POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{body}"
+            );
+            let (wire, _exit) = exchange_with_wire(app, request).await;
+            assert!(wire.starts_with("HTTP/1.1 500"), "{wire}");
+            assert!(wire.contains("internal"), "{wire}");
+            assert!(!wire.contains("client-secret-token"));
+            assert!(!wire.contains("InvalidChunk"));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn chunked_overflow_keeps_pipelined_request_boundaries_and_error_policy() {
         use edgezero_core::extractor::State;
 

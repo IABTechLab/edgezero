@@ -239,7 +239,7 @@ const scopeSnapshot = execFileSync('git', ['show', `2be1dd8704553395ef4f85f914fb
 assert.equal(digest(scopeSnapshot), '10776c6db1bfacaecca91a32c9ad955ad13f696ef8d078312e5b566b43f6205b');
 const preFocus = execFileSync('git', ['show', `fc973719c1c4840e3eca7fec235924998a0d9d5b:${requirementsPath}`]);
 assert.equal(digest(preFocus), 'a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70');
-assert.equal(digest(readFileSync(requirementsPath)), 'd434beb87106405004315a016b5d5787ec07c3adc25080504f2cb4264a4a11c2');
+assert.equal(digest(readFileSync(requirementsPath)), 'fb23549f243eee5f83a9b370c627b143b48fb1373ded8063d07f0f34b0be44f1');
 console.log('Historical and scoped-amendment identities match; authorization remains separately scoped.');
 JS
 ```
@@ -808,3 +808,19 @@ The append-only Scoped Amendment clarification changes the complete requirements
 All criterion text/digests, identities, environment legs, applicability and approval decisions
 remain unchanged. Refresh only the inventory's complete-document identity. Historical captures
 and nonzero results remain historical failures, not retrospectively passing regressions.
+
+## Bounded Connection List Standards Correction (2026-11-07)
+
+The requester approved both remaining reviewers' repair scope and the bounded empty-Connection
+correction in the conversation: **"Approve scoped repairs and standards correction"**.
+Following RFC 9110 section 5.6.1, request, upstream-response and response-egress normalization
+ignore at most 32 empty list members across all Connection field lines in one pass. The 33rd
+empty member and every invalid nonempty nomination still fail closed. HTTP optional whitespace
+is limited to SP and HTAB. Nominations remain case-insensitive and are applied before framing.
+
+This explicitly amends only the empty-member rejection expectations previously frozen by
+EZ-5 acceptance 11 and the corresponding request/egress controls. Preserve all acceptance IDs,
+header/byte limits, strict comma-Content-Length policy, body suppression, deadlines, batch EOF
+rules and ownership. No historical approval, failed capture, hosted gate or provider capability
+is promoted. The immutable requirements document and its current digest remain unchanged;
+this attributed correction records the narrow exception rather than silently rewriting history.

@@ -670,19 +670,30 @@ not from a remote auth provider.
 
 The CLI respects these environment variables:
 
-| Variable            | Description                                                                                                                                                                                                                                                                                                                  |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `EDGEZERO_MANIFEST` | Path to manifest (default: `edgezero.toml`). Honoured by `build`, `deploy`, `serve`, and `auth` (which has no `--manifest` flag, so this is its only manifest selector); `provision` and the `config` subcommands take `--manifest` instead; `active-version`, `healthcheck`, and `rollback` load no manifest and ignore it. |
-| `FASTLY_API_TOKEN`  | Fastly API token. Required by the Fastly lifecycle commands (`deploy`, `active-version`, `rollback`, and a **staging** `healthcheck`); they fail closed without it.                                                                                                                                                          |
-| `FASTLY_SERVICE_ID` | Default Fastly service id, used when `--service-id` is not passed. Only `deploy` makes the flag optional; `active-version`, `healthcheck`, and `rollback` require it.                                                                                                                                                        |
+| Variable            | Description                                                                                                                                                                                                                                                                                     |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `EDGEZERO_MANIFEST` | Explicit manifest path. Without it, `build`, `deploy`, and `serve` use the discovery rules below; `auth` has a separate discovery path and no `--manifest` flag. `provision` and the `config` subcommands take `--manifest` instead; `active-version`, `healthcheck`, and `rollback` ignore it. |
+| `FASTLY_API_TOKEN`  | Fastly API token. Required by the Fastly lifecycle commands (`deploy`, `active-version`, `rollback`, and a **staging** `healthcheck`); they fail closed without it.                                                                                                                             |
+| `FASTLY_SERVICE_ID` | Default Fastly service id, used when `--service-id` is not passed. Only `deploy` makes the flag optional; `active-version`, `healthcheck`, and `rollback` require it.                                                                                                                           |
 
 ## Working Directory
 
-Manifest-driven commands expect to run from the project root where `edgezero.toml` is located. If
-the file is missing, `build`, `deploy`, `serve`, and `auth` fall back to built-in adapters (when
-compiled in) instead of manifest-driven commands; `provision` and the `config` subcommands error
-instead. `active-version`, `healthcheck`, and `rollback` load no manifest at all and can run from
-any directory.
+For `build`, `deploy`, and `serve`, an explicit `EDGEZERO_MANIFEST` selects the contract.
+Without it, discovery checks ancestors and then application candidates under the workspace;
+a unique sibling application can therefore be selected. Use an explicit manifest when working
+in a multi-application workspace rather than assuming a local handwritten platform manifest
+wins. The selected contract and execution target stay paired, and ambiguous or escaping
+selections fail before launch. Genuine manifestless targets can use built-in adapters.
+`auth` retains its separate discovery path. `provision` and the `config` subcommands require
+their own manifest selection. `active-version`, `healthcheck`, and `rollback` load no manifest
+and can run from any directory.
+
+Spin's native serve/deploy invocation receives the exact selected file through `--from`.
+Fastly serve supports `fastly.toml` and `fastly.<environment>.toml`, selecting the latter with
+native `--env`; other filenames fail before launch instead of silently using a sibling file.
+Pinned invocations reject native source/directory/environment overrides and combined short
+options that could hide such an override. Pass other short options separately or use their
+long spellings. Declared application shell commands retain their selected manifest root.
 
 ## Adapter Discovery
 

@@ -106,6 +106,9 @@ pub enum OutboundBatchCheck {
 /// Raw terminal observations of work already scheduled by the producer.
 #[derive(Debug)]
 pub enum OutboundBatchDriverEvent {
+    /// Explicitly ends observation at the cutoff, including when every remaining observation
+    /// was discarded as late. Late items never authorize premature driver EOF. Retain terminal
+    /// outcomes governed by earlier per-request deadlines before emitting this event.
     Cutoff,
     Failed(EdgeError),
     Item {
@@ -538,6 +541,8 @@ impl OutboundBatch {
 
     /// Takes ownership of an already-scheduled driver and its task-group cancellation guard.
     /// Ready observations are drained and ordered before delivery or terminal error reporting.
+    /// Clean EOF means every slot resolved. A driver with unresolved slots must emit `Cutoff`
+    /// explicitly; even seeing late observations for all of them does not change that obligation.
     #[must_use]
     #[inline]
     pub fn from_driver<S>(
@@ -1656,6 +1661,40 @@ mod tests {
             batch.check().expect("all preflight resolved"),
             OutboundBatchCheck::Finished(OutboundBatchTermination::Completed)
         ));
+    }
+
+    #[test]
+    fn late_observation_requires_explicit_cutoff_instead_of_eof() {
+        for observed in [100, 110] {
+            for explicit_cutoff in [false, true] {
+                let fixture = Fixture::new();
+                fixture.advance(150);
+                let mut events = vec![fixture.event(0, 10), fixture.event(1, observed)];
+                if explicit_cutoff {
+                    events.push(OutboundBatchDriverEvent::Cutoff);
+                }
+                let outcome = block_on(fixture.batch(2, events).collect());
+                let slots = if explicit_cutoff {
+                    let result = outcome.expect("explicit cutoff");
+                    assert_eq!(result.termination(), OutboundBatchTermination::Cutoff);
+                    result.into_parts().0
+                } else {
+                    let failure = outcome.expect_err("late observation cannot conceal driver EOF");
+                    assert!(
+                        failure
+                            .error()
+                            .to_string()
+                            .contains("ended before every slot resolved")
+                    );
+                    failure.into_parts().1
+                };
+                assert_resolved(slots.first().expect("retained earlier slot"), 10);
+                assert!(matches!(
+                    slots.get(1),
+                    Some(OutboundCollectedSlot::Unresolved)
+                ));
+            }
+        }
     }
 
     #[test]

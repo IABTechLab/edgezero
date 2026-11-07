@@ -5,6 +5,10 @@ use crate::evidence::{Result, require};
 use std::{fs, path::Path};
 
 fn extract(markdown: &str) -> Result<String> {
+    extract_section(markdown, "Forward An Inbound Request", 2)
+}
+
+fn extract_section(markdown: &str, wanted: &str, wanted_level: usize) -> Result<String> {
     let lines = markdown.split('\n').collect::<Vec<_>>();
     let mut active = None;
     let mut selected = false;
@@ -34,9 +38,9 @@ fn extract(markdown: &str) -> Result<String> {
             .chars()
             .take_while(|character| *character == '#')
             .count();
-        if (1..=2).contains(&level) && line[level..].starts_with(char::is_whitespace) {
+        if (1..=wanted_level).contains(&level) && line[level..].starts_with(char::is_whitespace) {
             let heading = line[level..].trim().trim_end_matches('#').trim_end();
-            selected = level == 2 && heading == "Forward An Inbound Request";
+            selected = level == wanted_level && heading == wanted;
             sections += usize::from(selected);
         }
     }
@@ -52,8 +56,18 @@ fn extract(markdown: &str) -> Result<String> {
 
 pub(super) fn run(root: &Path) -> Result<()> {
     let code = extract(&fs::read_to_string(root.join("docs/guide/proxying.md"))?)?;
-    run_doctest(&code, &build_core(root)?, root)?;
+    let artifact = build_core(root)?;
+    run_doctest(&code, &artifact, root)?;
+    let handlers = fs::read_to_string(root.join("docs/guide/handlers.md"))?;
+    for (section, level) in [("Request Context", 3), ("Custom Extractors", 2)] {
+        run_doctest(
+            &extract_section(&handlers, section, level)?,
+            &artifact,
+            root,
+        )?;
+    }
     println!("forwarding example: one doctest passed; network handler not invoked");
+    println!("handler examples: two doctests passed; handlers not invoked");
     Ok(())
 }
 
@@ -63,6 +77,18 @@ mod tests {
 
     fn section(code: &str, language: &str) -> String {
         format!("## Forward An Inbound Request\n\n```{language}\n{code}\n```\n")
+    }
+
+    #[test]
+    fn both_context_handler_examples_are_selected_from_the_actual_guide() {
+        let guide =
+            fs::read_to_string(crate::repository_root().join("docs/guide/handlers.md")).unwrap();
+        let context = extract_section(&guide, "Request Context", 3).unwrap();
+        let custom = extract_section(&guide, "Custom Extractors", 2).unwrap();
+        assert!(context.contains("ctx.method()"));
+        assert!(custom.contains("ctx.headers()"));
+        assert!(!context.contains("ctx.request()"));
+        assert!(!custom.contains("ctx.request()"));
     }
 
     #[test]
@@ -139,12 +165,28 @@ mod tests {
     }
 
     #[test]
+    fn documentation_uses_the_async_trait_artifact_from_the_same_cargo_graph() {
+        let mut records = records();
+        let macro_record = serde_json::json!({"reason":"compiler-artifact", "target":{"name":"async_trait","kind":["proc-macro"]},"filenames":["/custom target/debug/deps/libasync_trait.dylib"]});
+        records.push(macro_record.clone());
+        assert_eq!(
+            core_artifact(&cargo_output(&records), &crate::repository_root())
+                .unwrap()
+                .async_trait,
+            Some("/custom target/debug/deps/libasync_trait.dylib".into())
+        );
+        records.push(macro_record);
+        assert!(core_artifact(&cargo_output(&records), &crate::repository_root()).is_err());
+    }
+
+    #[test]
     fn cargo_artifacts_support_fresh_builds_and_custom_target_directories() {
         let root = crate::repository_root();
         let mut records = records();
         assert_eq!(
             core_artifact(&cargo_output(&records), &root).unwrap(),
             Artifact {
+                async_trait: None,
                 library: "/custom target/debug/libedgezero_core.rlib".into(),
                 dependencies: "/custom target/debug/deps".into(),
                 edition: "2024".into(),

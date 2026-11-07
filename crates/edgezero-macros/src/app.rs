@@ -144,8 +144,8 @@ fn build_configure_tokens(callback: Option<&syn::Expr>) -> TokenStream2 {
             quote! {
                 fn configure(
                     _app: &mut edgezero_core::app::App,
-                ) -> Result<(), edgezero_core::error::EdgeError> {
-                    Ok(())
+                ) -> ::core::result::Result<(), edgezero_core::error::EdgeError> {
+                    ::core::result::Result::Ok(())
                 }
             }
         },
@@ -153,7 +153,7 @@ fn build_configure_tokens(callback: Option<&syn::Expr>) -> TokenStream2 {
             quote! {
                 fn configure(
                     app: &mut edgezero_core::app::App,
-                ) -> Result<(), edgezero_core::error::EdgeError> {
+                ) -> ::core::result::Result<(), edgezero_core::error::EdgeError> {
                     (#configure)(app)
                 }
             }
@@ -266,7 +266,7 @@ fn build_hooks_tokens(
         pub struct #app_ident;
 
         impl edgezero_core::app::Hooks for #app_ident {
-            fn routes() -> Result<edgezero_core::router::RouterService, edgezero_core::error::EdgeError> {
+            fn routes() -> ::core::result::Result<edgezero_core::router::RouterService, edgezero_core::error::EdgeError> {
                 build_router()
             }
 
@@ -374,13 +374,13 @@ pub fn expand_app(input: TokenStream) -> TokenStream {
 
         #hooks_tokens
 
-        pub fn build_router() -> Result<edgezero_core::router::RouterService, edgezero_core::error::EdgeError> {
+        pub fn build_router() -> ::core::result::Result<edgezero_core::router::RouterService, edgezero_core::error::EdgeError> {
             let mut builder = edgezero_core::router::RouterService::builder();
             builder = builder.with_manifest_json(#manifest_json_lit);
             #state_call
             #(#middleware_tokens)*
             #(#route_tokens)*
-            Ok(builder.build())
+            ::core::result::Result::Ok(builder.build())
         }
     };
 

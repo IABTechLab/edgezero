@@ -186,12 +186,13 @@ For full request access, handlers can receive `RequestContext` directly (no `#[a
 
 ```rust
 use edgezero_core::context::RequestContext;
-use edgezero_core::error::EdgeError;
+use edgezero_core::response::Text;
+use edgezero_core::EdgeError;
 
 async fn inspect(ctx: RequestContext) -> Result<Text<String>, EdgeError> {
-    let method = ctx.request().method();
-    let path = ctx.request().uri().path();
-    let user_agent = ctx.request().headers()
+    let method = ctx.method();
+    let path = ctx.uri().path();
+    let user_agent = ctx.headers()
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
@@ -201,6 +202,12 @@ async fn inspect(ctx: RequestContext) -> Result<Text<String>, EdgeError> {
 ```
 
 `RequestContext` provides these methods:
+
+`Json<T>` and `ValidatedJson<T>` default to an 8 MiB body cap; `Form<T>` and
+`ValidatedForm<T>` default to 1 MiB. Exceeding the cap returns 413. Use
+`ValidatedJsonWithin<T, MAX_BYTES>` or `ValidatedFormWithin<T, MAX_BYTES>` for
+explicit validated-extractor limits. For unvalidated data, use
+`ctx.json_within::<T>(max).await` or `ctx.form_within::<T>(max).await`.
 
 | Method                        | Returns                                                      |
 | ----------------------------- | ------------------------------------------------------------ |
@@ -704,16 +711,17 @@ Implement the `FromRequest` trait to create custom extractors:
 
 ```rust
 use async_trait::async_trait;
-use edgezero_core::context::RequestContext;
-use edgezero_core::error::EdgeError;
 use edgezero_core::extractor::FromRequest;
+use edgezero_core::context::RequestContext;
+use edgezero_core::response::Text;
+use edgezero_core::{action, EdgeError};
 
 pub struct BearerToken(pub String);
 
 #[async_trait(?Send)]
 impl FromRequest for BearerToken {
     async fn from_request(ctx: &RequestContext) -> Result<Self, EdgeError> {
-        let header = ctx.request().headers()
+        let header = ctx.headers()
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| EdgeError::bad_request("Missing Authorization header"))?;
@@ -728,8 +736,8 @@ impl FromRequest for BearerToken {
 
 // Use in handlers:
 #[action]
-async fn protected(BearerToken(token): BearerToken) -> Text<String> {
-    Text::new(format!("Authenticated with token: {}...", &token[..8]))
+async fn protected(BearerToken(_token): BearerToken) -> Text<&'static str> {
+    Text::new("Authenticated")
 }
 ```
 

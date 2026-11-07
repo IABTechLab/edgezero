@@ -13,7 +13,9 @@ use crate::http::header::{
     CONNECTION, CONTENT_LENGTH, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER,
     TRANSFER_ENCODING, UPGRADE,
 };
-use crate::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
+use crate::http::{
+    HeaderMap, HeaderName, HeaderValue, MAX_CONNECTION_EMPTY_MEMBERS, Method, Response, StatusCode,
+};
 use futures_util::StreamExt as _;
 use futures_util::stream::unfold;
 
@@ -317,12 +319,21 @@ fn parse_content_length(headers: &HeaderMap) -> Result<Option<u64>, ResponseEgre
 
 fn strip_connection_fields(headers: &mut HeaderMap) -> Result<bool, ResponseEgressFramingError> {
     let mut nominated = Vec::new();
+    let mut empty_members = 0_usize;
     for header_value in headers.get_all(CONNECTION) {
         let text = header_value
             .to_str()
             .map_err(|_error| ResponseEgressFramingError::InvalidConnectionHeader)?;
-        for token in text.split(',') {
-            let name = HeaderName::from_bytes(token.trim().as_bytes())
+        for raw_token in text.split(',') {
+            let token = raw_token.trim_matches([' ', '\t']);
+            if token.is_empty() {
+                empty_members = empty_members.saturating_add(1);
+                if empty_members > MAX_CONNECTION_EMPTY_MEMBERS {
+                    return Err(ResponseEgressFramingError::InvalidConnectionHeader);
+                }
+                continue;
+            }
+            let name = HeaderName::from_bytes(token.as_bytes())
                 .map_err(|_error| ResponseEgressFramingError::InvalidConnectionHeader)?;
             nominated.push(name);
         }
@@ -344,6 +355,7 @@ fn strip_connection_fields(headers: &mut HeaderMap) -> Result<bool, ResponseEgre
     }
     headers.remove("keep-alive");
     headers.remove("proxy-connection");
+    headers.remove("http2-settings");
     Ok(content_length_was_nominated)
 }
 
@@ -362,7 +374,7 @@ mod tests {
     use crate::body::{Body, BodyPayload};
     use crate::error::{BadGatewayDecodeReason, BadGatewayReason, EdgeError};
     use crate::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
-    use crate::http::{HeaderValue, Method, Response, StatusCode, response_builder};
+    use crate::http::{HeaderMap, HeaderValue, Method, Response, StatusCode, response_builder};
     use crate::outbound::OutboundScopeOwner;
     use crate::response::IntoResponse as _;
 
@@ -382,6 +394,55 @@ mod tests {
         fn drop(&mut self) {
             self.0.set(self.0.get().saturating_add(1));
         }
+    }
+
+    #[test]
+    fn connection_empty_members_are_ignored_with_a_bounded_total() {
+        for (value, valid) in [
+            ("close,", true),
+            (", close", true),
+            ("close, , x-private", true),
+            ("bad name", false),
+            ("\u{a0}x-private", false),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("connection", HeaderValue::from_str(value).unwrap());
+            headers.insert("x-private", HeaderValue::from_static("removed"));
+            assert_eq!(super::strip_connection_fields(&mut headers).is_ok(), valid);
+            if valid && value.contains("x-private") {
+                assert!(!headers.contains_key("x-private"));
+            }
+        }
+        for empties in [32, 33] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "connection",
+                HeaderValue::from_str(&",".repeat(empties - 1)).unwrap(),
+            );
+            let mut response = Response::new(Body::empty());
+            *response.headers_mut() = headers.clone();
+            assert_eq!(
+                prepare_response_egress(
+                    ResponseEgressFramingMode::ExplicitBufferedLength,
+                    &Method::GET,
+                    response
+                )
+                .is_ok(),
+                empties == 32
+            );
+            assert_eq!(
+                super::strip_connection_fields(&mut headers).is_ok(),
+                empties == 32
+            );
+        }
+    }
+
+    #[test]
+    fn http2_settings_are_removed_before_response_conversion() {
+        let mut headers = HeaderMap::new();
+        headers.insert("http2-settings", HeaderValue::from_static("settings"));
+        super::strip_connection_fields(&mut headers).unwrap();
+        assert!(!headers.contains_key("http2-settings"));
     }
 
     #[test]

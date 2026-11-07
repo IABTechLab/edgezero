@@ -4260,7 +4260,7 @@ The mapping is total and centralized in `EdgeError::{status_code, kind, response
 | --- | --- | --- | --- |
 | `BackendUnavailable`, `DeadlineExceeded`, `SecretBackendUnavailable` | 503 / `service_unavailable` | absent | optional only for a secret field |
 | `Deserialization`, `MissingBlob`, `MissingSecret`, `Validation` | 503 / `config_out_of_date` | `60` | optional for typed-data/validation/secret failures; absent for a missing root blob |
-| `InvalidKey` | 400 / `bad_request` | absent | absent |
+| `InvalidKey` | 400 / `bad_request` | absent | absent for an invalid root key; optional safe schema field path for a secret reference |
 | `BackendFailure`, `IntegrityMismatch`, `InvalidSecretValue`, `MalformedEnvelope`, `MissingRegistry`, `StructuralLimit`, `UnknownStore`, `UnsupportedVersion`, `ValueTooLarge` | 500 / `internal` | absent | optional only when a typed field selected the store/value |
 
 `ValueTooLarge` covers any per-blob, per-secret, or cumulative extraction byte cap from

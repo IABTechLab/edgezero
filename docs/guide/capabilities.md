@@ -371,6 +371,14 @@ successful registrations across clients and refuses unknown name collisions. The
 not a bound on arbitrary origins, registrations,
 memory or abandoned host work. Hosted pooling, resource lifetime and cancellation remain unqualified.
 
+Fastly's service-wide dynamic-backend quota is a hard operator constraint, not a per-client
+or per-sandbox budget. Its [documented quota behavior](https://www.fastly.com/documentation/reference/compute/errors/#dynamic-backends-limit)
+blocks registration while waiting for another active sandbox to release capacity. The verified
+registry prevents duplicate local registrations but cannot reserve service-wide slots or interrupt
+that synchronous host call. A local registration cap alone would not establish availability.
+Budget origins, authorities, timer rungs and simultaneously active sandboxes against the service
+quota; if availability cannot be established, do not claim bounded registration or deadline isolation.
+
 ² Fastly checks the absolute deadline between streamed upload chunks, but it cannot preempt a
 stalled source pull or host write.
 
@@ -384,6 +392,9 @@ bodies within that operation. Each raw body read requires fresh matching timed r
 reads at most 16 KiB; rotating slot service prevents a continuously-ready body from monopolizing
 the driver. An occupied result slot backpressures only its own exchange. Cached SDK Send heads
 retain their opaque cache state and use nonblocking polling with one shared positive 1 ms pulse.
+That pulse has a CPU cost during a long pending cached head. It is shared across slots, not one
+timer per request. Backoff would change ready-observation latency; replacing the SDK head would
+change cache ownership. Neither change is made without a separate measured policy decision.
 Cold backend registration can still delay dispatch; synchronous provider work and SDK cleanup
 remain non-preemptible. Progress is cooperative, not autonomous during application CPU work,
 and does not establish hosted isolation.

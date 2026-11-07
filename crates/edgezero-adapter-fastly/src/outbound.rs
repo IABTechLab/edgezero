@@ -1025,6 +1025,8 @@ mod fastly_impl {
         reason = "versioned backend identity uses a fixed byte order independent of the host architecture"
     )]
     fn backend_name(identity: &BackendIdentity) -> String {
+        // Timer derivation, ladder or canonical-key changes require a new identity version
+        // and matching golden/readback evidence; never reuse b31v1 for a changed policy.
         let mut hasher = Sha256::new();
         for field in [&identity.scheme, &identity.host, &identity.wire_authority] {
             hasher.update(field.as_bytes());

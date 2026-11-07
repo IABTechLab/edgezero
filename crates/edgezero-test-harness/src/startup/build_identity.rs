@@ -223,7 +223,12 @@ fn capture(
     for (index, path) in local_configs.iter().chain(configs).enumerate() {
         field(&mut hash, format!("cargo-config-{index}").as_bytes());
         match fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.is_file() => {
+            Ok(metadata) if metadata.is_file() || metadata.is_symlink() => {
+                if !fs::metadata(path)?.is_file() {
+                    return Err(io::Error::other(
+                        "Cargo config target must be a regular file",
+                    ));
+                }
                 field(&mut hash, b"file");
                 file_field(&mut hash, path)?;
             }
@@ -243,6 +248,33 @@ fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_cargo_config_symlinks_hash_their_regular_target_and_fail_closed() {
+        let root = fixture();
+        let external = tempfile::tempdir().unwrap();
+        let target = external.path().join("config.toml");
+        let selected = root.path().join("selected-config");
+        fs::write(&target, b"[net]\noffline = true\n").unwrap();
+        std::os::unix::fs::symlink(&target, &selected).unwrap();
+        let capture_config = || {
+            capture(
+                root.path(),
+                b"rustc fixture",
+                b"cargo fixture",
+                &BTreeMap::new(),
+                std::slice::from_ref(&selected),
+            )
+        };
+        let first = capture_config().expect("regular config target");
+        fs::write(&target, b"[net]\noffline = false\n").unwrap();
+        assert_ne!(first, capture_config().expect("changed target"));
+        fs::remove_file(&target).unwrap();
+        assert!(capture_config().is_err(), "dangling config is not absent");
+        fs::create_dir(&target).unwrap();
+        assert!(capture_config().is_err(), "config target must be regular");
+    }
 
     const FILES: &[&str] = &[
         "Cargo.toml",

@@ -9,8 +9,10 @@ mod tests {
     use std::collections::VecDeque;
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
+    use std::task::Poll;
     use std::time::Duration;
 
+    use bytes::Bytes;
     use edgezero_adapter_spin::outbound::SpinOutboundClient;
     use edgezero_adapter_spin::outbound::test_support::{
         map_spin_dispatch_error, map_spin_host_error, map_spin_preparation_header, request_fields,
@@ -26,10 +28,11 @@ mod tests {
         HttpClient, IndependentOutboundProgress, OutboundBatch, OutboundBatchTermination,
         OutboundCollectedSlot, OutboundDispatchRequest, OutboundFuture, OutboundHead,
         OutboundHttpClient, OutboundPending, OutboundPreparedBatch, OutboundProgressRuntime,
-        OutboundRequest, OutboundSendMode, OutboundTime,
+        OutboundRequest, OutboundSendMode, OutboundTime, normalize_for_dispatch,
     };
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant, dispatch_budget};
     use futures::executor::block_on;
+    use futures::stream::poll_fn;
     use spin_sdk::wasip3::http::types::{
         DnsErrorPayload, ErrorCode, FieldSizePayload, Fields, HeaderError, Request, RequestOptions,
         RequestOptionsError, Response, TlsAlertReceivedPayload,
@@ -486,7 +489,8 @@ mod tests {
     fn provider_diagnostics_preserve_actual_preparation_header_rejection() {
         let mut headers = HeaderMap::new();
         headers.insert("connection", HeaderValue::from_static("close"));
-        let error = request_fields(&headers).expect_err("host forbids connection");
+        let error = request_fields(&Method::GET, &edgezero_core::Body::empty(), &mut headers)
+            .expect_err("host forbids connection");
         assert_eq!(
             error.provider_failure_detail(),
             Some(&ProviderFailureDetail::Spin {
@@ -500,7 +504,112 @@ mod tests {
         );
         headers.clear();
         headers.insert("x-test", HeaderValue::from_static("valid"));
-        request_fields(&headers).expect("accepted field");
+        request_fields(&Method::GET, &edgezero_core::Body::empty(), &mut headers)
+            .expect("accepted field");
+    }
+
+    #[test]
+    fn buffered_length_is_derived_after_normalization_without_polling_streams() {
+        use edgezero_core::Body;
+        for method in [Method::GET, Method::HEAD, Method::POST, Method::PUT] {
+            for payload in ["", "abc"] {
+                if matches!(method, Method::GET | Method::HEAD) && !payload.is_empty() {
+                    continue;
+                }
+                let mut headers = HeaderMap::new();
+                let fields = request_fields(&method, &Body::from(payload), &mut headers).unwrap();
+                let expected = if matches!(method, Method::GET | Method::HEAD) {
+                    vec![]
+                } else {
+                    vec![payload.len().to_string().into_bytes()]
+                };
+                assert_eq!(fields.get("content-length"), expected);
+            }
+        }
+        let stream = poll_fn(|_| -> Poll<Option<Result<Bytes, EdgeError>>> {
+            panic!("header preparation cannot prebuffer an upload stream");
+        });
+        let fields = request_fields(
+            &Method::POST,
+            &Body::from_stream(stream),
+            &mut HeaderMap::new(),
+        )
+        .unwrap();
+        assert!(fields.get("content-length").is_empty());
+    }
+
+    #[test]
+    fn buffered_length_replaces_stale_caller_framing_after_core_normalization() {
+        let mut request =
+            OutboundRequest::new(Method::POST, "http://example.com/".parse().unwrap())
+                .unwrap()
+                .body(edgezero_core::Body::from("abc"))
+                .header("content-length", "999")
+                .unwrap()
+                .header("transfer-encoding", "chunked")
+                .unwrap();
+        normalize_for_dispatch(&mut request).unwrap();
+        let mut parts = request.into_parts();
+        assert!(!parts.headers.contains_key("content-length"));
+        assert!(!parts.headers.contains_key("transfer-encoding"));
+        let fields = request_fields(&parts.method, &parts.body, &mut parts.headers).unwrap();
+        assert_eq!(fields.get("content-length"), vec![b"3".to_vec()]);
+        assert!(fields.get("transfer-encoding").is_empty());
+    }
+
+    #[test]
+    fn refused_connect_settings_do_not_claim_connect_timeout_provenance() {
+        let start = MonotonicInstant::now();
+        let deadline = Deadline::at_instant(start + Duration::from_secs(10));
+        for outcome in [
+            Ok(()),
+            Err(RequestOptionsError::NotSupported),
+            Err(RequestOptionsError::Immutable),
+            Err(RequestOptionsError::Other(None)),
+            Err(RequestOptionsError::Other(Some(
+                "provider-secret-token".into(),
+            ))),
+        ] {
+            let accepted = outcome.is_ok();
+            let mut calls = 0_usize;
+            let installed = request_timeout_settings(
+                Duration::from_secs(10),
+                Some(Duration::from_secs(1)),
+                |option, _| {
+                    if option == SpinTimeoutOption::Connect {
+                        calls += 1;
+                        outcome.clone()
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .expect("advisory connect refusal");
+            assert_eq!(calls, 1);
+            assert_eq!(installed, accepted);
+            for observed in [start, deadline.instant()] {
+                let error = map_spin_dispatch_error(
+                    &ErrorCode::ConnectionTimeout,
+                    deadline,
+                    BudgetSource::PerCallTimeout,
+                    observed,
+                    ProviderFailurePhase::Send,
+                    installed,
+                );
+                let expected = if deadline.is_expired_at(observed) {
+                    BudgetSource::PerCallTimeout
+                } else if accepted {
+                    BudgetSource::ConnectTimeout
+                } else {
+                    BudgetSource::Unspecified
+                };
+                assert!(
+                    matches!(error, EdgeError::GatewayTimeout { cause, .. } if cause == expected),
+                    "{error:?}"
+                );
+                assert!(error.provider_failure_detail().is_some());
+            }
+        }
     }
 
     #[test]
@@ -849,7 +958,7 @@ mod tests {
                     BudgetSource::Default,
                     now,
                     ProviderFailurePhase::Send,
-                    connect,
+                    connect.is_some(),
                 );
                 if connect.is_some() && matches!(&code, ErrorCode::ConnectionTimeout) {
                     assert!(matches!(
@@ -1088,7 +1197,7 @@ mod tests {
                             selected,
                             observed,
                             phase,
-                            parts.connect_timeout,
+                            parts.connect_timeout.is_some(),
                         );
                         assert!(
                             matches!(&error, EdgeError::GatewayTimeout { cause, .. } if *cause == expected)

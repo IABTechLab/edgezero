@@ -2120,9 +2120,6 @@ impl Adapter for FastlyCliAdapter {
         args: &[String],
     ) -> Result<(), String> {
         let manifest = target_manifest(target)?;
-        let manifest_dir = manifest
-            .parent()
-            .ok_or_else(|| "pinned fastly manifest has no parent directory".to_owned())?;
         match action {
             AdapterAction::Build => {
                 let artifact = build_from_manifest(&manifest, args)?;
@@ -2132,7 +2129,7 @@ impl Adapter for FastlyCliAdapter {
             AdapterAction::Deploy | AdapterAction::DeployStaging => {
                 Err("Fastly deployment requires a typed deployment context".to_owned())
             }
-            AdapterAction::Serve => serve_from_dir(manifest_dir, args),
+            AdapterAction::Serve => serve_from_manifest(&manifest, args),
             AdapterAction::AuthLogin
             | AdapterAction::AuthLogout
             | AdapterAction::AuthStatus
@@ -5552,15 +5549,46 @@ fn register_ctor() {
 pub fn serve(extra_args: &[String]) -> Result<(), String> {
     let manifest =
         find_fastly_manifest(env::current_dir().map_err(|err| err.to_string())?.as_path())?;
+    serve_from_manifest(&manifest, extra_args)
+}
+
+fn serve_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), String> {
+    if extra_args.iter().any(|arg| {
+        ["--dir", "--env", "--file"].iter().any(|flag| {
+            arg == flag
+                || arg
+                    .strip_prefix(flag)
+                    .is_some_and(|suffix| suffix.starts_with('='))
+        }) || arg == "-C"
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2)
+    }) {
+        return Err(
+            "pinned Fastly serve forbids source overrides and combined short options".to_owned(),
+        );
+    }
     let manifest_dir = manifest
         .parent()
         .ok_or_else(|| "fastly manifest has no parent directory".to_owned())?;
-    serve_from_dir(manifest_dir, extra_args)
-}
-
-fn serve_from_dir(manifest_dir: &Path, extra_args: &[String]) -> Result<(), String> {
-    let status = Command::new("fastly")
-        .args(["compute", "serve"])
+    let filename = manifest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("invalid Fastly manifest filename")?;
+    let mut command = Command::new("fastly");
+    command.args(["compute", "serve"]);
+    if filename != "fastly.toml" {
+        let environment = filename
+            .strip_prefix("fastly.")
+            .and_then(|name| name.strip_suffix(".toml"))
+            .filter(|name| {
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+            .ok_or("Fastly serve supports only fastly.toml or fastly.<environment>.toml")?;
+        command.args(["--env", environment]);
+    }
+    let status = command
         .args(extra_args)
         .current_dir(manifest_dir)
         .status()
@@ -13305,6 +13333,57 @@ echo 'unexpected' >&2; exit 1
         perms.set_mode(0o755);
         fs::set_permissions(&script_path, perms).expect("chmod +x");
         (dir, record)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_serve_preserves_native_manifest_selection_and_refuses_other_sources() {
+        let _lock = path_mutation_guard().lock().unwrap();
+        let (fake, record) = fake_fastly_cwd_recorder();
+        let _path = PathPrepend::new(fake.path());
+        let app = tempdir().unwrap();
+        let root = app.path().canonicalize().unwrap();
+        for (name, expected) in [
+            ("fastly.toml", "compute serve"),
+            ("fastly.staging.toml", "compute serve --env staging"),
+        ] {
+            let manifest = root.join(name);
+            fs::write(&manifest, "name = \"selected\"\n").unwrap();
+            let target = AdapterExecutionTarget::new(root.clone(), None, Some(manifest));
+            FastlyCliAdapter
+                .execute_target(AdapterAction::Serve, &target, &[])
+                .unwrap();
+            let recorded = fs::read_to_string(&record).unwrap();
+            assert_eq!(
+                recorded.trim_end(),
+                format!("{}\t{expected}", root.display())
+            );
+            fs::remove_file(&record).unwrap();
+            for selector in [
+                "--env",
+                "--env=other",
+                "--dir",
+                "--dir=other",
+                "-C",
+                "-Cother",
+            ] {
+                assert!(
+                    FastlyCliAdapter
+                        .execute_target(AdapterAction::Serve, &target, &[selector.into()])
+                        .is_err()
+                );
+                assert!(!record.exists());
+            }
+        }
+        let manifest = root.join("selected-fastly.toml");
+        fs::write(&manifest, "name = \"unsupported\"\n").unwrap();
+        let target = AdapterExecutionTarget::new(root, None, Some(manifest));
+        assert!(
+            FastlyCliAdapter
+                .execute_target(AdapterAction::Serve, &target, &[])
+                .is_err()
+        );
+        assert!(!record.exists());
     }
 
     #[cfg(unix)]

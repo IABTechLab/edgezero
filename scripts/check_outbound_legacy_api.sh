@@ -1099,7 +1099,6 @@ active_surfaces=(
   docs/.vitepress
   docs/guide
   docs/index.md
-  docs/specs
   docs/superpowers/specs
   docs/superpowers/plans/2026-09-26-platform-memory-ceiling.md
   docs/superpowers/plans/2026-09-28-platform-resource-metadata.md

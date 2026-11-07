@@ -44,6 +44,47 @@ mod tests {
 }
 
 #[cfg(test)]
+mod caller_shadowing {
+    mod configured {
+        use super::{App, Result};
+        use core::result::Result::Err as Ok;
+        use edgezero_core::config_store::ConfigExtractionLimits;
+        fn configure(app: &mut App) -> Result<()> {
+            app.set_config_extraction_limits(ConfigExtractionLimits::default())
+        }
+        edgezero_core::app!(
+            "tests/fixtures/owns_logging.toml",
+            ConfiguredShadowedApp,
+            configure = configure
+        );
+
+        #[test]
+        fn caller_ok_name_is_deliberately_an_error_variant() {
+            assert!(matches!(Ok::<(), _>(42_u8), Err(42_u8)));
+        }
+    }
+
+    use core::result::Result as StandardResult;
+    use core::result::Result::Err as Ok;
+    use edgezero_core::EdgeError;
+    use edgezero_core::app::{App, Hooks as _};
+
+    type Result<T> = StandardResult<T, EdgeError>;
+
+    edgezero_core::app!("tests/fixtures/owns_logging.toml", ShadowedApp);
+
+    #[test]
+    fn generated_signatures_and_constructors_ignore_caller_names() {
+        assert!(matches!(Ok::<(), _>(42_u8), Err(42_u8)));
+        let result: Result<_> = ShadowedApp::routes();
+        result.unwrap();
+        App::build::<ShadowedApp>(edgezero_core::PlatformMetadata::default()).unwrap();
+        App::build::<configured::ConfiguredShadowedApp>(edgezero_core::PlatformMetadata::default())
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
 mod configured_app {
     use edgezero_core::app::App;
     use edgezero_core::body::Body;

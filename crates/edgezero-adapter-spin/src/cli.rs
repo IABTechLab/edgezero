@@ -1169,18 +1169,39 @@ pub fn deploy(extra_args: &[String]) -> Result<(), String> {
 }
 
 fn deploy_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), String> {
+    run_manifest_command("deploy", manifest, extra_args)
+}
+
+fn run_manifest_command(verb: &str, manifest: &Path, extra_args: &[String]) -> Result<(), String> {
+    if extra_args.iter().any(|arg| {
+        ["--from", "--from-file", "--file", "--from-registry"]
+            .iter()
+            .any(|selector| {
+                arg == selector
+                    || arg
+                        .strip_prefix(selector)
+                        .is_some_and(|suffix| suffix.starts_with('='))
+            })
+            || arg == "-f"
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2)
+    }) {
+        return Err(
+            "pinned Spin execution forbids source overrides and combined short options".to_owned(),
+        );
+    }
     let manifest_dir = manifest
         .parent()
         .ok_or_else(|| "spin manifest has no parent directory".to_owned())?;
 
     let status = Command::new("spin")
-        .args(["deploy"])
+        .args([verb, "--from"])
+        .arg(manifest)
         .args(extra_args)
         .current_dir(manifest_dir)
         .status()
         .map_err(|err| format!("failed to run spin CLI: {err}"))?;
     if !status.success() {
-        return Err(format!("spin deploy failed with status {status}"));
+        return Err(format!("spin {verb} failed with status {status}"));
     }
 
     Ok(())
@@ -1293,21 +1314,7 @@ pub fn serve(extra_args: &[String]) -> Result<(), String> {
 }
 
 fn serve_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), String> {
-    let manifest_dir = manifest
-        .parent()
-        .ok_or_else(|| "spin manifest has no parent directory".to_owned())?;
-
-    let status = Command::new("spin")
-        .args(["up"])
-        .args(extra_args)
-        .current_dir(manifest_dir)
-        .status()
-        .map_err(|err| format!("failed to run spin CLI: {err}"))?;
-    if !status.success() {
-        return Err(format!("spin up failed with status {status}"));
-    }
-
-    Ok(())
+    run_manifest_command("up", manifest, extra_args)
 }
 
 #[cfg(test)]
@@ -1315,6 +1322,73 @@ mod tests {
     use super::*;
     use std::num::NonZeroU32;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_commands_preserve_selected_manifest_and_reject_source_override() {
+        use edgezero_core::test_env::{PathPrepend, env_lock};
+        use std::os::unix::fs::PermissionsExt as _;
+        let _lock = env_lock().lock().unwrap();
+        let fake = tempdir().unwrap();
+        let record = fake.path().join("argv.log");
+        let program = fake.path().join("spin");
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > '{}'\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let _path = PathPrepend::new(fake.path());
+        let app = tempdir().unwrap();
+        let root = app.path().canonicalize().unwrap();
+        let manifest = root.join("selected-spin.toml");
+        fs::write(&manifest, "spin_manifest_version = 2\n").unwrap();
+        fs::write(root.join("spin.toml"), "wrong manifest\n").unwrap();
+        let target = AdapterExecutionTarget::new(root.clone(), None, Some(manifest.clone()));
+        for (action, verb) in [
+            (AdapterAction::Serve, "up"),
+            (AdapterAction::Deploy, "deploy"),
+        ] {
+            SpinCliAdapter.execute_target(action, &target, &[]).unwrap();
+            let argv = fs::read_to_string(&record).unwrap();
+            assert_eq!(
+                argv.lines().collect::<Vec<_>>(),
+                [
+                    root.to_str().unwrap(),
+                    verb,
+                    "--from",
+                    manifest.to_str().unwrap()
+                ]
+            );
+            for selector in [
+                "--from",
+                "--from=other.toml",
+                "--from-file",
+                "--from-file=other.toml",
+                "--file",
+                "--file=other.toml",
+                "--from-registry",
+                "--from-registry=registry.invalid/app",
+                "-f",
+                "-fother.toml",
+            ] {
+                fs::remove_file(&record).unwrap();
+                assert!(
+                    SpinCliAdapter
+                        .execute_target(action, &target, &[selector.into()])
+                        .is_err()
+                );
+                assert!(
+                    !record.exists(),
+                    "conflicting target must not launch provider"
+                );
+                fs::write(&record, "").unwrap();
+            }
+        }
+    }
 
     // Shared fixture names. Pinning these as consts (instead of
     // inline `"sessions"` / `"app_config"` / `"demo"` per call site)

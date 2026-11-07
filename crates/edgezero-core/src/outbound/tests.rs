@@ -1383,6 +1383,54 @@ fn provider_diagnostics_survive_response_body_policy_and_collection() {
 }
 
 #[test]
+fn caller_collection_deadline_waits_for_a_pending_source_to_resume() {
+    let start = MonotonicInstant::now();
+    let end = start.checked_add(Duration::from_secs(1)).unwrap();
+    let time = TestTime::new(start);
+    let (sender, receiver) = oneshot::channel();
+    let drops = Rc::new(Cell::new(0));
+    let lease = BodyDropSignal(Rc::clone(&drops));
+    let source = stream::once(async move {
+        let _lease = lease;
+        receiver.await.expect("source resumed")
+    });
+    let response = OutboundResponse::new(
+        Method::GET,
+        StatusCode::OK,
+        HeaderMap::new(),
+        Body::from_stream(source),
+        time.pair().clock().clone(),
+        super::ContentTypeProvenance::Unknown,
+    );
+    let mut collection = Box::pin(response.into_bytes_bounded_until(32, Deadline::at_instant(end)));
+    assert!(
+        collection
+            .as_mut()
+            .poll(&mut Context::from_waker(noop_waker_ref()))
+            .is_pending()
+    );
+    time.advance_to(end);
+    assert!(
+        collection
+            .as_mut()
+            .poll(&mut Context::from_waker(noop_waker_ref()))
+            .is_pending(),
+        "the helper does not arm an interrupting timer"
+    );
+    sender.send(Ok(Bytes::from_static(b"late"))).unwrap();
+    let error = block_on(collection).expect_err("observed caller expiry beats the resumed data");
+    assert!(matches!(
+        error,
+        EdgeError::GatewayTimeout {
+            cause: BudgetSource::Unspecified,
+            ..
+        }
+    ));
+    assert_eq!(drops.get(), 1);
+    assert!(time.waiters.lock().unwrap().is_empty());
+}
+
+#[test]
 fn provider_diagnostics_survive_bounded_collection_deadline() {
     use crate::error_detail::{FastlyFailureCause, ProviderFailureDetail, ProviderFailurePhase};
 
@@ -3031,6 +3079,92 @@ fn response_content_type_provenance_survives_ownership_without_upgrades() {
 }
 
 #[test]
+fn response_normalization_rejects_payload_te_and_cl_before_caps() {
+    for method in [Method::GET, Method::POST] {
+        for length in ["0", "5", "100", "malformed"] {
+            let mut headers = HeaderMap::new();
+            headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+            headers.insert("content-length", HeaderValue::from_str(length).unwrap());
+            let error = normalize_response_headers(&method, StatusCode::OK, &mut headers)
+                .expect_err("ambiguous payload framing");
+            assert!(matches!(
+                error,
+                EdgeError::BadGateway {
+                    reason: BadGatewayReason::Protocol,
+                    ..
+                }
+            ));
+        }
+    }
+    for (method, status) in [
+        (Method::HEAD, StatusCode::OK),
+        (Method::GET, StatusCode::NO_CONTENT),
+        (Method::GET, StatusCode::NOT_MODIFIED),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+        headers.insert("content-length", HeaderValue::from_static("5"));
+        normalize_response_headers(&method, status, &mut headers).expect("bodyless precedence");
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
+    headers.insert("content-length", HeaderValue::from_static("100"));
+    headers.insert("connection", HeaderValue::from_static("content-length"));
+    normalize_response_headers(&Method::GET, StatusCode::OK, &mut headers)
+        .expect("nominated framing is removed first");
+    assert!(!headers.contains_key("content-length"));
+}
+
+#[test]
+fn connection_empty_members_are_ignored_with_a_bounded_total() {
+    for value in ["close,", ", close", "close, , x-private", "", " ,\t "] {
+        let mut headers = HeaderMap::new();
+        headers.insert("connection", HeaderValue::from_str(value).unwrap());
+        headers.insert("x-private", HeaderValue::from_static("removed"));
+        normalize_response_headers(&Method::GET, StatusCode::OK, &mut headers)
+            .expect("reasonable empty list members");
+        assert!(!headers.contains_key("connection"));
+        if value.contains("x-private") {
+            assert!(!headers.contains_key("x-private"));
+        }
+        let mut request = OutboundRequest::get("https://example.com").unwrap();
+        request
+            .headers_mut()
+            .insert("connection", HeaderValue::from_str(value).unwrap());
+        normalize_for_dispatch(&mut request).expect("request list parsing");
+    }
+    for empties in [32, 33] {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            "connection",
+            HeaderValue::from_str(&",".repeat(15)).unwrap(),
+        );
+        headers.append(
+            "connection",
+            HeaderValue::from_str(&",".repeat(empties - 17)).unwrap(),
+        );
+        assert_eq!(
+            normalize_response_headers(&Method::GET, StatusCode::OK, &mut headers).is_ok(),
+            empties == 32
+        );
+    }
+}
+
+#[test]
+fn http2_settings_are_removed_at_request_and_response_boundaries() {
+    let mut request = OutboundRequest::get("https://example.com").unwrap();
+    request
+        .headers_mut()
+        .insert("http2-settings", HeaderValue::from_static("settings"));
+    normalize_for_dispatch(&mut request).unwrap();
+    assert!(!request.headers().contains_key("http2-settings"));
+    let mut headers = HeaderMap::new();
+    headers.insert("http2-settings", HeaderValue::from_static("settings"));
+    normalize_response_headers(&Method::GET, StatusCode::OK, &mut headers).unwrap();
+    assert!(!headers.contains_key("http2-settings"));
+}
+
+#[test]
 fn response_normalization_precedence_table() {
     let mut nominated = HeaderMap::new();
     nominated.append(
@@ -3070,7 +3204,7 @@ fn response_normalization_precedence_table() {
         2
     );
 
-    for malformed in ["x-good,,x-other", "bad name", ",x-good", "x-good,"] {
+    for malformed in ["bad name", "x-good,bad name", "x-good,\u{a0}x-other"] {
         let mut headers = HeaderMap::new();
         headers.append(
             "connection",
@@ -3508,7 +3642,7 @@ fn request_normalization_strips_connection_nominations() {
 
 #[test]
 fn request_normalization_rejects_malformed_connection() {
-    for value in ["x-valid,,x-other", "bad name", ",x-valid", "x-valid,"] {
+    for value in ["bad name", "x-valid,bad name", "x-valid,\u{a0}x-other"] {
         let mut request = OutboundRequest::get("https://example.com").expect("request");
         request.headers_mut().append(
             "connection",

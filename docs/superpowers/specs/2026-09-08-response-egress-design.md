@@ -959,8 +959,12 @@ on a cap crossing; input files are read in 16 KiB chunks and rejected before ret
 4 MiB. Each evidence-input read can additionally hold one 16 KiB chunk and a final concatenation
 copy. These are client-driver budgets, not provider allocation guarantees.
 
-`--validate` requires complete unsampled telemetry and exactly one terminal/source/resource/final
-record for every scheduled probe, with matching build identities and ordered sequence numbers.
+`scripts/test_integration.sh response-egress --validate CLIENTS.json EVENTS.json` uses the
+single Rust evidence validator. It requires the exact canonical 26-probe schedule, complete
+unsampled telemetry, and 104 events: exactly one terminal/source/resource/final record per probe,
+with matching build identities and ordered sequence numbers. A consistently trimmed manifest,
+client log and telemetry bundle cannot qualify. The hosted collector consumes the same schedule
+but has no evidence-validation mode.
 It rejects duplicates, missing records, unexpected scenarios, post-terminal source polls,
 misclassified failures and unsuccessful normal/bodyless/recovery observations. Its successful
 result is only `qualified-ownership` for those scheduled probes, never general delivery or

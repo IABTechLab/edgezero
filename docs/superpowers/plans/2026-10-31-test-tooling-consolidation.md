@@ -68,7 +68,7 @@ candidate freeze or hosted qualification. Task 3 and the remaining review fixes 
 
 ## Task 3: Remaining Guards
 
-- [ ] Move pure response-egress evidence validation, keeping the existing hosted HTTPS client until its interruption semantics are ported and verified.
+- [x] Move pure response-egress evidence validation, keeping the existing hosted HTTPS client until its interruption semantics are ported and verified. The Rust owner requires the canonical 26 probes and 104 lifecycle events; the collector shares that fixed schedule and no longer validates evidence.
 - [ ] Migrate documentation/legacy/CI guards in focused checkpoints, preserving scanner failures, duplicate-YAML-key rejection, subprocess behavior and negative controls rather than replacing them with source-presence checks.
 - [ ] Remove obsolete tooling package/dependencies only once no remaining caller needs them.
 

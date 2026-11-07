@@ -13,6 +13,18 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Repair exact selected-manifest execution for Spin and Fastly serve; reject native source
+  overrides before launch. Fix macro name hygiene and CLI-only demo feature gates.
+- Reject ambiguous upstream payload TE+CL framing before body-limit decisions, preserve
+  bodyless precedence, ignore at most 32 empty Connection members, and remove HTTP2-Settings
+  at shared normalization boundaries.
+- Retain actual Spin connect-setting acceptance for timeout provenance; advisory refusals do
+  not become a later ConnectTimeout cause, and expired aggregate budgets remain authoritative.
+- Consolidate response-egress evidence validation in the Rust harness with the exact canonical
+  26-probe/104-event schedule. Remove the collector's validation mode without changing its hosted
+  interruption behavior or promoting qualification.
+- Document JSON/ValidatedJson body defaults of 8 MiB and Form/ValidatedForm defaults of 1 MiB,
+  typed 413 overflow, explicit validated-extractor limits, and bounded context alternatives.
 - Consolidate acceptance inventory, coverage, sentinel selection, draft assembly, frozen export
   and release reporting in the existing Rust test harness. Delete the JavaScript checker/tests
   and migrate CI, guards and active instructions without a compatibility command. Inventory
@@ -1274,6 +1286,9 @@ errors remain visible on stderr regardless of runtime logging level.
   `AdapterExecutionTarget` / `execute_target`, including manifest-defined shell commands. Reject
   ambiguous or escaping manifest selection instead of checking one project and executing another.
   Fastly deployment honors the selected manifest path.
+  **Breaking for external adapters:** implement `Adapter::execute_target` and populate
+  `AdapterDeployContext.execution_target`; the default refuses runtime operations instead of
+  rediscovering a target through `execute`. Preserve the supplied manifest/component identity.
 - Migrate checked-in demos and generated applications to the new client, buffered fanout,
   passthrough classification, response limits, clocks, ingress policy, and fallible assembly.
   Include explicit missing-client 501 behavior and partial-result/failure examples.

@@ -1,7 +1,7 @@
 //! Narrow access to production boundaries for external test owners.
 
 #[cfg(all(feature = "spin", feature = "test-utils"))]
-use super::{BudgetSource, Deadline, Duration, ErrorCode, ProviderFailurePhase};
+use super::{BudgetSource, Deadline, ErrorCode, ProviderFailurePhase};
 use super::{EdgeError, OutboundRequest, OutboundSendMode};
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 use std::future::Future;
@@ -81,7 +81,7 @@ pub fn map_spin_host_error(
     super::map_spin_host_error(error, deadline, cause, observed_at, phase)
 }
 
-/// Exercises the dispatch-boundary classifier with the retained per-request connect setting.
+/// Exercises classification with actual explicit connect-setting acceptance.
 #[cfg(all(feature = "spin", feature = "test-utils"))]
 #[must_use]
 #[inline]
@@ -91,7 +91,14 @@ pub fn map_spin_dispatch_error(
     cause: BudgetSource,
     observed_at: edgezero_core::MonotonicInstant,
     phase: ProviderFailurePhase,
-    connect_timeout: Option<Duration>,
+    accepted_explicit_connect: bool,
 ) -> EdgeError {
-    super::map_spin_dispatch_error(error, deadline, cause, observed_at, phase, connect_timeout)
+    super::map_spin_dispatch_error(
+        error,
+        deadline,
+        cause,
+        observed_at,
+        phase,
+        accepted_explicit_connect,
+    )
 }

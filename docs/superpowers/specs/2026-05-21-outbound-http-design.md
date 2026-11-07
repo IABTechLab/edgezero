@@ -1829,9 +1829,16 @@ still-visible, valid `Content-Length` declared a positive length **after** nomin
 stripping but **before** the helper rewrites the downstream value to `0`. This lets an
 adapter abort immediately without consulting a header the normalizer has already changed.
 
-For response `connection`, each comma-delimited nomination across every field line must be
-a non-empty RFC field-name token after optional whitespace. A non-UTF-8 value (where raw
-bytes are available), empty member, forbidden byte, or invalid token rejects the whole
+For ordinary payload responses, a still-visible `Content-Length` together with an original
+`Transfer-Encoding` is rejected as Protocol 502 before declared-length or body-cap decisions.
+Connection nominations are applied first; informational/204, HEAD/304 metadata, and 205
+suppression/settlement retain their existing precedence. Stripping TE must never leave a stale
+CL to be trusted as the framing of a decoded transport body.
+
+For response `connection`, each nonempty comma-delimited nomination across every field line must be
+an RFC field-name token after HTTP optional whitespace. Up to 32 empty members across all
+field lines are ignored; the 33rd is rejected. A non-UTF-8 value (where raw
+bytes are available), excess empty member, forbidden byte, or invalid token rejects the whole
 upstream response as `bad_gateway` reason `Protocol` (502); valid prefixes are not
 partially honored.
 Cloudflare enforces the same visible-token rule on post-workerd strings but cannot detect a
@@ -1852,7 +1859,8 @@ rules end-to-end:
    (`Connection: x-private,<invalid>` would otherwise forward `X-Private`). This is the
    one header where the lossy drop below is a security hole, so it fails closed instead.
    Parse each comma-delimited nomination after optional whitespace as an RFC field-name
-   token. An empty item, forbidden byte, or otherwise invalid token rejects the request as
+   token. Ignore up to 32 empty items across all field lines; an excess empty item,
+   forbidden byte, or otherwise invalid token rejects the request as
    `bad_request`; do not strip only a valid prefix and continue. Header-name comparison and
    removal are case-insensitive, and nominations are accumulated across repeated
    `connection` field lines before any nominated field is removed.
@@ -1866,7 +1874,7 @@ rules end-to-end:
    pre-validated-map paths are lossy (don't fail an otherwise-good forward over an
    exotic header). The `warn!` makes the drop observable in either case. **The
    `connection` header is exempt — it was already resolved fail-closed in step 1.**
-3. Strip hop-by-hop headers (`connection`, `keep-alive`, `proxy-connection`, `proxy-authenticate`,
+3. Strip hop-by-hop headers (`connection`, `keep-alive`, `proxy-connection`, `http2-settings`, `proxy-authenticate`,
    `proxy-authorization`, `te`, `trailer`, `transfer-encoding`, `upgrade`, plus every
    header named in any `connection` header value — parsed and validated from the
    now-guaranteed-UTF-8 values per step 1). Idempotent for `from_request`

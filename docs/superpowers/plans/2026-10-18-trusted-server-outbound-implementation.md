@@ -4899,9 +4899,7 @@ cargo check --workspace --all-targets --features "fastly cloudflare spin"
 cargo check -p edgezero-adapter-spin --target wasm32-wasip2 --features spin
 node scripts/check_outbound_docs_contract.mjs
 bash scripts/check_outbound_legacy_api.sh
-node scripts/check_brotli_dependency_contract.mjs
-node scripts/check_flate_dependency_contract.mjs
-node scripts/check_serde_json_map_contract.mjs
+CARGO_NET_OFFLINE=true scripts/test_integration.sh check dependencies
 ```
 
 Q2 adds the existing target feature matrices, real SDK execution sentinels, fixture workspace,
@@ -4928,7 +4926,7 @@ cargo clippy -p edgezero-core --all-targets --all-features -- -D warnings
 ```
 
 For an adapter task replace the package with the changed adapter package and run its native and
-WASM commands in plan 03/Q2. For fixture changes use `--manifest-path tests/fixtures/reusable-app/Cargo.toml`;
+WASM commands in plan 03/Q2. For fixture changes use `--manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml`;
 format and lint that excluded workspace separately. Demo changes similarly use its own manifest.
 Do not commit a public trait cut until every affected implementation and generated fixture builds.
 

@@ -12,6 +12,9 @@ workspace = true
 
 [dependencies]
 edgezero-macros = { path = "../edgezero-macros" }
+# These allocator/checksum edges intentionally anchor the audited decoder graph in
+# downstream resolution. A library's Cargo.lock does not enforce those source pins.
+# See docs/audits/*-decoder-memory-accounting.md and the Rust dependency contract.
 alloc-no-stdlib = { workspace = true }
 alloc-stdlib = { workspace = true }
 adler2 = { workspace = true }
