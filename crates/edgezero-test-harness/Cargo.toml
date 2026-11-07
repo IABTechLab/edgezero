@@ -17,6 +17,11 @@ socket2 = "=0.6.4"
 tempfile = "=3.27.0"
 toml = "=1.1.2"
 
+[dev-dependencies]
+quote = "1"
+serde_yaml_ng = "=0.10.0"
+syn = { version = "2", features = ["full", "visit"] }
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "=0.31.3", default-features = false, features = ["signal"] }
 

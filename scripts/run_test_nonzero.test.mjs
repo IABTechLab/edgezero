@@ -589,6 +589,24 @@ const inventory = JSON.parse(
     "utf8",
   ),
 );
+
+test("inventory selection requires the prebuilt harness before starting Cargo", () => {
+  const result = run(null, [], 0, ["--inventory", "unit/core"], {
+    env: { ...process.env, EDGEZERO_TEST_HARNESS_BIN: "" },
+  });
+  assert.equal(result.status, 2, result.stderr);
+  assert.match(
+    result.stderr,
+    /requires an executable EDGEZERO_TEST_HARNESS_BIN/,
+  );
+  assert.doesNotMatch(result.stdout, /executed/);
+  const guard = readFileSync(script, "utf8");
+  assert.match(guard, /"\$EDGEZERO_TEST_HARNESS_BIN" acceptance --sentinels/);
+  assert.doesNotMatch(
+    guard,
+    /check_outbound_cutover_evidence|test_integration\.sh|cargo run/,
+  );
+});
 for (const [environment, mode] of [
   [
     "axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked",

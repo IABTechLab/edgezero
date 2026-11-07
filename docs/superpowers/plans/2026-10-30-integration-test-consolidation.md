@@ -76,7 +76,7 @@ Run from the repository root using `.tool-versions` pins. Cargo operations are l
 
 ```sh
 cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
-node --test scripts/ci_tooling.test.mjs scripts/run_test_nonzero.test.mjs scripts/check_outbound_cutover_evidence.test.mjs
+node --test scripts/ci_tooling.test.mjs scripts/run_test_nonzero.test.mjs
 cargo fmt --all -- --check
 cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings
 cargo test --offline --locked --workspace --all-targets

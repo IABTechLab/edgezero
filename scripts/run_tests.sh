@@ -39,6 +39,18 @@ run node --test scripts/ci_tooling.test.mjs
 section "Workspace Tests"
 run cargo test --workspace --all-targets
 
+section "Native Test Harness"
+harness_target="${CARGO_TARGET_DIR:-$ROOT_DIR/crates/edgezero-test-harness/target}"
+case "$harness_target" in
+  /*) ;;
+  *) harness_target="$ROOT_DIR/$harness_target" ;;
+esac
+run cargo build --locked --manifest-path crates/edgezero-test-harness/Cargo.toml --target-dir "$harness_target"
+export EDGEZERO_TEST_HARNESS_BIN="$harness_target/debug/edgezero-test-harness"
+run cargo test --locked --manifest-path crates/edgezero-test-harness/Cargo.toml --target-dir "$harness_target"
+run "$EDGEZERO_TEST_HARNESS_BIN" acceptance --manifest
+run "$EDGEZERO_TEST_HARNESS_BIN" acceptance --coverage
+
 section "Repository Dependency And Forwarding Checks"
 run scripts/test_integration.sh check
 

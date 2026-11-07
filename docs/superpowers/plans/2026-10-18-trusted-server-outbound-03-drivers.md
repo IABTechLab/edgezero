@@ -13,7 +13,7 @@
 ## Current Status Authority (2026-11-02)
 
 Use the master plan's [required-local closeout](2026-10-18-trusted-server-outbound-implementation.md#required-local-acceptance-closeout-2026-11-02)
-and `node scripts/check_outbound_cutover_evidence.mjs --coverage` for current implementation
+and `scripts/test_integration.sh acceptance --coverage` for current implementation
 coverage and remaining scope. The head-first API and four adapter integrations are implemented;
 older references to a proposed or unchanged trait describe their dated checkpoints, not a second
 current transport or compatibility path. Earlier counts, failures and implementation stops remain

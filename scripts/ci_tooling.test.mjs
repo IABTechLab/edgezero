@@ -121,6 +121,47 @@ const toolingInstall =
   "npm ci --prefix scripts --ignore-scripts --no-audit --no-fund";
 const toolingTest = "node --test scripts/ci_tooling.test.mjs";
 
+test("acceptance guards reuse one native harness built before workspace and CLI consumers", () => {
+  const buildAt = host.steps.findIndex(
+    (step) => step.name === "Build native test harness",
+  );
+  assert.ok(buildAt >= 0);
+  const build = host.steps[buildAt];
+  assert.equal(
+    build.if,
+    "matrix.suite == 'workspace' || matrix.suite == 'cli'",
+  );
+  assert.match(
+    build.run,
+    /cargo build --offline --locked --manifest-path crates\/edgezero-test-harness\/Cargo\.toml --target-dir "\$target"/,
+  );
+  assert.match(
+    build.run,
+    /EDGEZERO_TEST_HARNESS_BIN=\$target\/debug\/edgezero-test-harness/,
+  );
+  for (const name of [
+    "Outbound evidence tool contracts",
+    "Shared outbound policy contracts",
+    "Bundled demo logging and fallback TCP contracts",
+  ]) {
+    const at = host.steps.findIndex((step) => step.name === name);
+    assert.ok(at >= 0, name);
+    assert.ok(buildAt < at, name);
+  }
+  const evidence = host.steps.find(
+    (step) => step.name === "Outbound evidence tool contracts",
+  );
+  assert.match(
+    evidence.run,
+    /"\$EDGEZERO_TEST_HARNESS_BIN" acceptance --manifest/,
+  );
+  assert.match(
+    evidence.run,
+    /"\$EDGEZERO_TEST_HARNESS_BIN" acceptance --coverage/,
+  );
+  assert.doesNotMatch(evidence.run, /\bnode\b|cargo run/);
+});
+
 test("tooling dependencies are locked and installed before CI and local guards", () => {
   const owners = Object.values(tests.jobs).flatMap((job) =>
     job.steps.filter((step) => step.run?.includes(toolingInstall)),

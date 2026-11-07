@@ -123,9 +123,9 @@ The checker's reviewed leg-set digest also rejects deleted environment/split leg
 template/demo checks cite normative EZ-24.12 directly rather than reusing a consumer assertion.
 
 ```sh
-node --test scripts/check_outbound_cutover_evidence.test.mjs
-node scripts/check_outbound_cutover_evidence.mjs --manifest
-node scripts/check_outbound_cutover_evidence.mjs --help
+cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml evidence::cutover
+scripts/test_integration.sh acceptance --manifest
+scripts/test_integration.sh acceptance --help
 ```
 
 Run these commands from the repository root. Manifest validation accepts pending decisions and
@@ -133,6 +133,27 @@ planned commands; it is not qualification. Per-case sentinels and `outbound-cuto
 implementation targets, not existing passing tests. `consumer-runbook` and `hosted-runbook` denote
 external execution recipes whose owners must replace them with exact runnable commands before
 setting a leg to `ready`. No staging deployment or approval is inferred from this inventory.
+
+Acceptance policy, sentinel selection, draft assembly, frozen export and report/release validation
+have one owner: `src/evidence/cutover/`. The former JavaScript checker and tests are removed; there
+is no old-command wrapper. `scripts/test_integration.sh acceptance` is the normal Cargo launcher.
+Every mode uses the same explicit `--inventory FILE` override; positional inventory arguments
+are removed rather than retained as a second spelling.
+CI builds the native harness once and shares `EDGEZERO_TEST_HARNESS_BIN` with inventory guards;
+guards never invoke Cargo to obtain sentinels. Explicit-sentinel guards do not need that variable.
+
+The colocated tests retain the migration's 223 captured parser/policy/selection scenarios and
+140 original test titles in `reviewed_cases.json.gz` (bounded to 8 MiB when expanded). This is
+immutable regression data, not an executable second validator or qualification evidence. Its
+source/inventory hashes intentionally require review when the inventory changes. Native tests
+separately exercise assembly, release mutations, safe integers, file limits, FIFO/symlink
+rejection, authenticated bytes, dirty/hidden-index sources and exclusive output. Parsed Rust
+ASTs and YAML bind executable selectors, paired guard arguments and canonical CI owners;
+reviewed definition fingerprints include signatures, registration attributes and enclosing
+owners, not comment text. Changes to those fingerprints require explicit review, not automatic
+regeneration. The existing supervised Rust subprocess helper covers the public command without
+provider tools or fixture initialization. No acceptance identity, pending approval or hosted gate
+is promoted by this tooling migration.
 
 Specifically, `implementation: planned | ready` means the declared leg's command/sentinel is
 planned or implemented and executable with its full assertions. It does not mean the corresponding
@@ -507,7 +528,7 @@ actual TS ownership acknowledgement, staging authorization and package acceptanc
 Release validation is a different, fail-closed command:
 
 ```sh
-node scripts/check_outbound_cutover_evidence.mjs --release \
+scripts/test_integration.sh acceptance --release \
   --candidate <40-character-source-SHA> --record RECORD.json --artifacts EVIDENCE_DIRECTORY
 ```
 
@@ -558,10 +579,10 @@ GET/HEAD/POST behavior tests and provider/consumer qualification remain separate
 Q3 preparation uses the existing checker rather than a second exporter:
 
 ```sh
-node scripts/check_outbound_cutover_evidence.mjs --assemble \
+scripts/test_integration.sh acceptance --assemble \
   --candidate SOURCE_SHA --input OBSERVATIONS.json --artifacts EVIDENCE_DIRECTORY \
   --output NEW_DRAFT.json
-node scripts/check_outbound_cutover_evidence.mjs --report \
+scripts/test_integration.sh acceptance --report \
   --candidate SOURCE_SHA --record NEW_DRAFT.json --artifacts EVIDENCE_DIRECTORY
 scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml outbound_evidence_assembly_retains_case_counts_and_hashes
 ```

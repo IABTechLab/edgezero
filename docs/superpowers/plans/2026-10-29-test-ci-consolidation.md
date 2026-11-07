@@ -251,8 +251,8 @@ cargo check --offline --locked -p edgezero-adapter-spin --target wasm32-wasip2 -
 cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
 cargo fmt --manifest-path tests/fixtures/reusable-app/Cargo.toml --all -- --check
 cargo fmt --manifest-path crates/edgezero-test-harness/Cargo.toml --all -- --check
-node --test scripts/run_test_nonzero.test.mjs scripts/check_outbound_cutover_evidence.test.mjs
-node scripts/check_outbound_cutover_evidence.mjs --manifest
+node --test scripts/run_test_nonzero.test.mjs
+scripts/test_integration.sh acceptance --manifest
 actionlint .github/workflows/test.yml .github/workflows/format.yml
 ```
 

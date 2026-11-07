@@ -80,6 +80,13 @@ jobs:
         if: matrix.suite == 'workspace'
         run: ./scripts/check_no_placeholder_pins.sh
 
+      - name: Build native test harness
+        if: matrix.suite == 'workspace' || matrix.suite == 'cli'
+        run: |
+          target="$GITHUB_WORKSPACE/crates/edgezero-test-harness/target"
+          cargo build --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml --target-dir "$target"
+          echo "EDGEZERO_TEST_HARNESS_BIN=$target/debug/edgezero-test-harness" >> "$GITHUB_ENV"
+
       - name: No legacy typed reads
         if: matrix.suite == 'workspace'
         run: ./scripts/check_no_legacy_typed_reads.sh
@@ -107,9 +114,8 @@ jobs:
       - name: Outbound evidence tool contracts
         if: matrix.suite == 'workspace'
         run: |
-          node --test scripts/check_outbound_cutover_evidence.test.mjs
-          node scripts/check_outbound_cutover_evidence.mjs --manifest
-          node scripts/check_outbound_cutover_evidence.mjs --coverage
+          "$EDGEZERO_TEST_HARNESS_BIN" acceptance --manifest
+          "$EDGEZERO_TEST_HARNESS_BIN" acceptance --coverage
 
       - name: Build strict public API documentation
         if: matrix.suite == 'workspace'

@@ -104,8 +104,8 @@ not exact-candidate acceptance. Install the worktree's `.tool-versions` and fetc
 locked Cargo workspaces as described in Q2 before offline checks.
 
 ```sh
-node --test scripts/check_outbound_cutover_evidence.test.mjs
-node scripts/check_outbound_cutover_evidence.mjs --manifest
+cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml evidence::cutover
+scripts/test_integration.sh acceptance --manifest
 scripts/test_integration.sh check
 cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml checks::forwarding::
 scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_hashes cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml outbound_evidence_assembly_retains_case_counts_and_hashes
@@ -178,8 +178,9 @@ response budget is 500 ms. Before/after checks cannot interrupt a blocking host 
 
 G1 strings containing `outbound-cutover`, `--case`, `hosted-runbook` or `consumer-runbook`
 are planned recipes, not commands to copy into a terminal. Q3/Q4a must replace them with
-owner-confirmed runnable invocations before a leg is ready. No full outbound probe or
-frozen-record export invocation is available at this checkpoint.
+owner-confirmed runnable invocations before a leg is ready. The full outbound qualification
+build remains open at this checkpoint. Frozen-record export below is implemented, but requires
+an independently frozen candidate, reviewed build attestations and new frozen-run captures.
 
 For every applicable leg, the accepted external package must bind: case/environment/source
 digest, unique sentinel, command/cwd, owner, candidate/build identity, expected assertions and
@@ -221,26 +222,78 @@ Preserve these distinct measurement obligations from the requirements and Q4b:
   pre-dispatch expiry is not a host-call proof. Validate both original-entry and host-entry
   inequalities; never select a horizon or inflate thresholds after seeing results.
 
-## Draft Assembly, Validation and Release
+## Draft And Frozen Records
 
 The existing tool consumes explicit observations, not generic smoke JSONL/FNV summaries:
 
 ```sh
-node scripts/check_outbound_cutover_evidence.mjs --assemble --candidate "$CANDIDATE_SHA" --input OBSERVATIONS.json --artifacts EVIDENCE_DIRECTORY --output NEW_DRAFT.json
-node scripts/check_outbound_cutover_evidence.mjs --report --candidate "$CANDIDATE_SHA" --record NEW_DRAFT.json --artifacts EVIDENCE_DIRECTORY
-node scripts/check_outbound_cutover_evidence.mjs --release --candidate "$CANDIDATE_SHA" --record FROZEN_RECORD.json --artifacts EVIDENCE_DIRECTORY
+scripts/test_integration.sh acceptance --assemble --candidate "$CANDIDATE_SHA" --input OBSERVATIONS.json --artifacts EVIDENCE_DIRECTORY --output NEW_DRAFT.json
+scripts/test_integration.sh acceptance --report --candidate "$CANDIDATE_SHA" --record NEW_DRAFT.json --artifacts EVIDENCE_DIRECTORY
 ```
 
 `--assemble` preserves supplied counts/outcomes and verifies linked build/raw-artifact SHA-256;
 it writes a new `stage:"pre-freeze", qualified:false` draft and exits nonzero for open gates.
+The draft report is blocked, even if every supplied observation passed. A draft cannot be
+promoted by changing its stage. After Q3 and separately authorized capture, the build/capture
+producer supplies `stage:"frozen-capture", source_state:"clean"` observations and a receipt:
+
+```json
+{
+  "schema": 1,
+  "freeze_ref": "UNSET: independent Q3 approval",
+  "capture_ref": "UNSET: frozen execution identity",
+  "candidate_sha": "UNSET: 40 lowercase hexadecimal characters",
+  "candidate_tree": "UNSET: candidate Git tree",
+  "source_digest": "UNSET: requirements byte SHA-256",
+  "inventory_sha256": "UNSET: committed inventory byte SHA-256",
+  "observations": {
+    "artifact_path": "observations.json",
+    "artifact_sha256": "UNSET: producer capture byte SHA-256"
+  },
+  "builds": [
+    {
+      "build_id": "UNSET: binary SHA-256",
+      "source_tree": "UNSET: candidate Git tree",
+      "recipe_path": "build/recipe.json",
+      "recipe_sha256": "UNSET: reviewed build-input byte SHA-256"
+    }
+  ]
+}
+```
+
+Each recipe is JSON with `schema:1`, `candidate_sha`, `source_tree`, the exact build `argv`
+array and its explicit non-secret `env` object. Bind every binary, dependency/configuration input
+and capture to the independent freeze sheet; do not mint a receipt to legitimize historical logs.
+Each observation already supplies its binary id and raw artifact SHA-256. The receipt binds the
+complete observation bytes, including failures, pending results, measurements and applicability.
+Missing results remain missing. The **reviewed receipt hash must come from independent review**,
+not from a record or an exporter-generated approval.
+
+```sh
+scripts/test_integration.sh acceptance --export-frozen --candidate "$CANDIDATE_SHA" --candidate-root CLEAN_CHECKOUT --provenance provenance.json --provenance-sha256 "$REVIEWED_RECEIPT_SHA256" --input EVIDENCE_DIRECTORY/observations.json --artifacts EVIDENCE_DIRECTORY --output NEW_FROZEN_RECORD.json
+scripts/test_integration.sh acceptance --report --candidate "$CANDIDATE_SHA" --candidate-root CLEAN_CHECKOUT --provenance provenance.json --provenance-sha256 "$REVIEWED_RECEIPT_SHA256" --record NEW_FROZEN_RECORD.json --artifacts EVIDENCE_DIRECTORY
+scripts/test_integration.sh acceptance --release --candidate "$CANDIDATE_SHA" --candidate-root CLEAN_CHECKOUT --provenance provenance.json --provenance-sha256 "$REVIEWED_RECEIPT_SHA256" --record NEW_FROZEN_RECORD.json --artifacts EVIDENCE_DIRECTORY
+```
+
+Provenance paths are relative to the evidence directory. Use a clean candidate-root checkout,
+not a subdirectory, with exact `HEAD`/tree and matching tracked requirements/inventory. Staged,
+unstaged or untracked changes, hidden-index flags and changed submodules are rejected. Git checks
+disable fsmonitor and optional index updates. Store capture/output files outside that checkout.
+The exporter validates the source/build/capture chain and writes only a new record. It performs
+no build, freeze, deployment, signing, publication or approval. Report/release revalidate the same
+receipt and exact exported content; a modified record cannot retain credit from that receipt.
+Valid provenance with failed, missing or pending legs still writes a **blocked** record and exits
+nonzero. Invalid provenance writes nothing. Neither mode clears characterization flags or marks
+`qualified:true`; empty frozen captures remain blocked rather than inventing observations.
+
 `--report` and `--release` share release rules. A successful check does **not** authenticate
-telemetry/approvers, prove source-to-binary provenance, authorize execution/publication, establish
-criterion-specific H(K)/pooling thresholds, or independently grant qualification. Their output's
-`qualified:false` is not changed by success. Frozen-candidate export/mapping remains unimplemented;
-changing a draft label does not perform freeze, execution, approval or export.
+telemetry, approvers or attestation producers, independently reproduce a binary, authorize
+execution/publication, establish criterion-specific H(K)/pooling thresholds, or grant qualification.
+Their output's `qualified:false` is not changed by success.
 
 Use stable sanitized file snapshots: checker JSON is capped at 16 MiB; raw artifacts at 256 MiB,
-hashed with 64 KiB scratch. The checker rejects artifact symlink/path escapes and refuses output
+hashed with 64 KiB scratch. Provenance JSON is parsed from the same bounded bytes whose hash is
+verified, not from a later read. The checker rejects artifact symlink/path escapes and refuses output
 overwrites. The separate hosted-egress tool caps evidence inputs at 4 MiB and also refuses existing
 output files; use operator-controlled paths. Exclude credentials, signing material, raw application
 payloads and diagnostic URLs. The tools do not protect against fabricated telemetry or authenticate

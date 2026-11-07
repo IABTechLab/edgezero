@@ -10,10 +10,34 @@
 
 ---
 
+## Acceptance Tooling Ownership Hard Cut (2026-11-06)
+
+The requester approved moving the complete acceptance/evidence pipeline into the existing
+`edgezero-test-harness` before continuing the remaining review fixes. One Rust implementation
+owns inventory validation, coverage, sentinel selection, draft assembly, frozen export and
+report/release validation. Delete the JavaScript checker and its tests after verification;
+do not retain a compatibility wrapper, another validator or a second execution engine.
+
+- [x] Capture reviewed checker outcomes as one-time regression data and map every existing test
+      intent to colocated Rust tests. Preserve the 255 criteria, 511 identities, command owners,
+      companion rules, pending approvals and all negative qualification evidence.
+- [x] Implement `acceptance` in the existing harness with focused inventory, record/provenance
+      and CLI modules. Reuse its SHA-256, bounded process and file infrastructure. Port the
+      uncommitted frozen-export invariants instead of publishing another Node implementation.
+- [x] Add the one `acceptance` entrypoint; migrate CI, sentinel selection, direct harness calls
+      and active documentation. Avoid recursive Cargo invocations while a harness is running.
+- [x] Remove the superseded JavaScript implementation/tests, verify regression parity and
+      malformed/missing/duplicate/forged/dirty/oversized evidence rejection, then run the full
+      harness and all five root gates before pushing. This migration does not freeze a candidate,
+      qualify hosted behavior or resolve reviewer-owned threads.
+
+Verification and the remaining tooling scope are tracked in
+[test-tooling consolidation, Task 2](2026-10-31-test-tooling-consolidation.md#task-2-evidence-validation).
+
 ## Current Status Authority (2026-11-02)
 
 Use the master plan's [required-local closeout](2026-10-18-trusted-server-outbound-implementation.md#required-local-acceptance-closeout-2026-11-02)
-and `node scripts/check_outbound_cutover_evidence.mjs --coverage` for current implementation
+and `scripts/test_integration.sh acceptance --coverage` for current implementation
 coverage and remaining scope. The head-first API and four adapter integrations are implemented;
 older references to a proposed or unchanged trait describe their dated checkpoints, not a second
 current transport or compatibility path. Earlier counts, failures and implementation stops remain
@@ -299,7 +323,9 @@ for Q4a. Qualification binaries/tooling remain owned by G2/Q3, not duplicated he
 - [ ] Complete the full-outbound probe/export implementation and exact runnable command/sentinel/
       expected-count bindings before closing the Q2 runbook task or accepting Q4a's external copy.
 
-The template explicitly marks planned commands and frozen export as unimplemented. Existing
+The template explicitly marks the full outbound qualification build as unimplemented. Frozen
+export now requires a clean candidate checkout and an independently reviewed source/build/capture
+receipt; it does not create a freeze or authorize execution. Existing
 lifecycle-egress probes are not the full outbound package. It is a source-preparation checkpoint,
 not execution readiness, candidate freeze, hosted acceptance or a waiver of failed G2.
 
@@ -329,7 +355,7 @@ checkpoint, Q3/Q4 collect evidence externally without editing candidate source.
       results into explicit per-leg pass/fail/approved-deferred status with artifact hashes. Include
       confirmed-present follow-up mapping from CHANGELOG plus consumer confirmation. A missing
       blocking part is a failure, not an applicability exception.
-- [ ] Run `node --test scripts/check_outbound_cutover_evidence.test.mjs` with synthetic records
+- [ ] Run `cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml evidence::cutover` with synthetic records
       proving wrong-SHA, missing-leg, wrong-environment, wrong-version, empty measurement, failing
       threshold and unapproved-deferral records are rejected. Provide human-readable output with
       the exact missing gates. Map new normalization, callback-boundary and combined overflow/
@@ -355,7 +381,8 @@ checkpoint, Q3/Q4 collect evidence externally without editing candidate source.
 
 ### Q3 Pre-Freeze Assembly Checkpoint (2026-10-23)
 
-- [x] Keep assembly and artifact validation in the existing Node checker. Add `--assemble` for
+- [x] Keep assembly and artifact validation in the existing evidence owner (Rust harness after
+      the approved 2026-11-06 hard cut). Add `--assemble` for
       explicit per-leg observations and `--report` for all independently evaluable release gates.
       The fixture Rust sentinel exercises that actual CLI; no duplicate Rust validator or JSONL
       conversion is added.

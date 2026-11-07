@@ -183,7 +183,10 @@ fn phase_with_exit(
     let log = run.join(format!("{name}.log"));
     let start = Instant::now();
     eprintln!("{adapter} CI: {name}");
-    command.current_dir(repo).stdin(Stdio::null());
+    command
+        .current_dir(repo)
+        .stdin(Stdio::null())
+        .env("EDGEZERO_TEST_HARNESS_BIN", std::env::current_exe()?);
     let outcome = Process::spawn(command, &log)?.wait_exit_code(expected_exit);
     records.push(json!({"event":"ci-phase","adapter":adapter,"phase":name,
         "status":if outcome.is_ok() {"pass"} else {"fail"},"elapsed_ms":start.elapsed().as_millis(),

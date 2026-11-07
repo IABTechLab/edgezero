@@ -22,7 +22,11 @@ if [ "$1" = --inventory ]; then
         echo "inventory mode needs an environment and command" >&2
         exit 2
     fi
-    sentinels=$(node "$(dirname "$0")/check_outbound_cutover_evidence.mjs" --sentinels "$2" --command "$declared_command")
+    if [ -z "${EDGEZERO_TEST_HARNESS_BIN:-}" ] || [ ! -x "$EDGEZERO_TEST_HARNESS_BIN" ]; then
+        echo "inventory mode requires an executable EDGEZERO_TEST_HARNESS_BIN; build the native test harness first" >&2
+        exit 2
+    fi
+    sentinels=$("$EDGEZERO_TEST_HARNESS_BIN" acceptance --sentinels "$2" --command "$declared_command")
     exact=1
     shift 2
 else

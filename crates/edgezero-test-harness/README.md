@@ -60,8 +60,13 @@ or qualify hosted behavior. Obtain current coverage from the checked inventory r
 copying readiness totals into this guide:
 
 ```sh
-node scripts/check_outbound_cutover_evidence.mjs --coverage
+scripts/test_integration.sh acceptance --coverage
 ```
+
+The same `acceptance` command owns manifest/sentinel validation, draft assembly, frozen export
+and release reporting. It does not start provider runtimes. Tests live with that Rust code;
+there is no parallel JavaScript evidence checker. CI supplies the already-built harness through
+`EDGEZERO_TEST_HARNESS_BIN` when selecting inventory-bound tests.
 
 The report accounts for every reviewed leg exactly once. It separates required-local bindings
 from external evidence, unconfirmed conditional scope, unpromoted follow-ups and explicitly

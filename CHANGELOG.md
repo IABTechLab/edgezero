@@ -13,6 +13,12 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Consolidate acceptance inventory, coverage, sentinel selection, draft assembly, frozen export
+  and release reporting in the existing Rust test harness. Delete the JavaScript checker/tests
+  and migrate CI, guards and active instructions without a compatibility command. Inventory
+  guards reuse the prebuilt binary rather than starting nested Cargo. Preserve captured negative
+  cases and authenticated source/build/artifact provenance; reject empty approval identities
+  without promoting pending, failed, pre-freeze or hosted evidence.
 - Let Fastly nonblocking readiness observations service ready heads and demanded body reads
   through the existing scheduler, without entering a native wait. Record original arrivals,
   preserve cached outcomes and paired deadlines, and retain the 16 KiB raw-read bound.

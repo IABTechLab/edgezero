@@ -707,6 +707,13 @@ fn rustc() -> PathBuf {
 fn run(arguments: Vec<String>) -> Result<i32> {
     if arguments
         .first()
+        .is_some_and(|argument| argument == "acceptance")
+    {
+        ctrlc::set_handler(request_cancellation)?;
+        return evidence::cutover::run(&arguments[1..]);
+    }
+    if arguments
+        .first()
         .is_some_and(|argument| argument == "check")
     {
         ctrlc::set_handler(request_cancellation)?;
@@ -1167,6 +1174,128 @@ mod process_tests {
     }
 
     #[test]
+    fn acceptance_cli_runs_without_provider_tools_or_fixture_output() {
+        let fixture = Fixture::new();
+        let before = fixture_runs();
+        for mode in ["--help", "--manifest", "--coverage"] {
+            let mut command = static_check_command(&fixture, "--help");
+            command.env(
+                "EDGEZERO_STATIC_CHECK_ARGS",
+                json!(["acceptance", mode]).to_string(),
+            );
+            let output = checks::output_until(
+                &mut command,
+                1024 * 1024,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .unwrap();
+            if mode == "--help" {
+                assert!(output.contains("qualified remains false"));
+            } else {
+                let report = output
+                    .lines()
+                    .find_map(|line| {
+                        serde_json::from_str::<Value>(
+                            line.strip_prefix(
+                                "test process_tests::outbound_wire_process_helper ... ",
+                            )
+                            .unwrap_or(line),
+                        )
+                        .ok()
+                    })
+                    .expect("CLI JSON report");
+                assert_eq!(report["qualified"], false);
+            }
+        }
+        let mut command = static_check_command(&fixture, "--help");
+        command.env(
+            "EDGEZERO_STATIC_CHECK_ARGS",
+            json!(["acceptance", "--unknown"]).to_string(),
+        );
+        let error = checks::output_until(
+            &mut command,
+            64 * 1024,
+            Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("choose --manifest"), "{error}");
+        assert_eq!(fixture_runs(), before);
+        assert!(fs::read_dir(&fixture.0).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn acceptance_cancellation_reaps_blocked_git_without_exporting() {
+        use std::os::unix::fs::PermissionsExt;
+        for signal in [Signal::SIGINT, Signal::SIGTERM] {
+            let fixture = Fixture::new();
+            let wrapper = fixture.0.join("git");
+            fs::write(&wrapper,"#!/bin/sh\nexport EDGEZERO_PROCESS_TEST_MODE=acceptance-blocked-git\nexec \"$EDGEZERO_TEST_HELPER\" --ignored --exact process_tests::outbound_wire_process_helper --nocapture --test-threads=1\n").unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+            let input = fixture.0.join("observations.json");
+            fs::write(
+                &input,
+                serde_json::to_vec(&json!({"stage":"frozen-capture","source_state":"clean"}))
+                    .unwrap(),
+            )
+            .unwrap();
+            let output = fixture.0.join("record.json");
+            let args = json!([
+                "acceptance",
+                "--export-frozen",
+                "--candidate",
+                "a".repeat(40),
+                "--input",
+                input,
+                "--artifacts",
+                fixture.0,
+                "--output",
+                output,
+                "--candidate-root",
+                fixture.0,
+                "--provenance",
+                "provenance.json",
+                "--provenance-sha256",
+                "b".repeat(64)
+            ]);
+            let mut command = static_check_command(&fixture, "--help");
+            command
+                .env("EDGEZERO_STATIC_CHECK_ARGS", args.to_string())
+                .env("EDGEZERO_TEST_HELPER", std::env::current_exe().unwrap())
+                .env("PATH", &fixture.0);
+            let mut controller =
+                Process::spawn(&mut command, &fixture.0.join("controller.log")).unwrap();
+            until(|| fixture.0.join("git-started").is_file());
+            let git = fs::read_to_string(fixture.0.join("git-started"))
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+            let mut cleanup = GroupCleanup(Some(git));
+            signal_target(
+                SignalTarget::Pid(controller.0.id()),
+                Some(signal),
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+            let result = controller.wait_exit_code(1);
+            let observed = signal_target(
+                SignalTarget::Pid(git),
+                None,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .unwrap();
+            cleanup.finish().unwrap();
+            assert!(result.is_ok(), "{signal}: {result:?}");
+            assert_eq!(
+                observed,
+                SignalOutcome::Absent,
+                "{signal}: Git survived cancellation"
+            );
+            assert!(!output.exists());
+        }
+    }
+
+    #[test]
     fn unknown_static_check_fails_without_starting_a_runtime() {
         let fixture = Fixture::new();
         let before = fixture_runs();
@@ -1248,6 +1377,11 @@ mod process_tests {
                 serde_json::from_str(&std::env::var("EDGEZERO_STATIC_CHECK_ARGS").unwrap())
                     .unwrap();
             exit_result(run(arguments));
+        }
+        if mode == "acceptance-blocked-git" {
+            fs::write(path.join("git-started"), std::process::id().to_string()).unwrap();
+            thread::sleep(Duration::from_secs(30));
+            return;
         }
         if mode == "checked-controller" {
             ctrlc::set_handler(request_cancellation).unwrap();

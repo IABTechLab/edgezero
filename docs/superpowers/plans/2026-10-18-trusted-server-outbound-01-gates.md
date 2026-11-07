@@ -13,7 +13,7 @@
 ## Current Status Authority (2026-11-02)
 
 Use the master plan's [required-local closeout](2026-10-18-trusted-server-outbound-implementation.md#required-local-acceptance-closeout-2026-11-02)
-and `node scripts/check_outbound_cutover_evidence.mjs --coverage` for current implementation
+and `scripts/test_integration.sh acceptance --coverage` for current implementation
 coverage and remaining scope. The head-first API and four adapter integrations are implemented;
 older references to a proposed or unchanged trait describe their dated checkpoints, not a second
 current transport or compatibility path. Earlier counts, failures and implementation stops remain
@@ -70,14 +70,14 @@ or constructors. The response-egress fix itself did not approve the new begin AP
 
 ## Task G1: Acceptance Inventory and Scope Lock
 
-**Files:** Create `tests/fixtures/reusable-app/outbound-cutover-cases.json` and
-`scripts/check_outbound_cutover_evidence.mjs`; test in
-`scripts/check_outbound_cutover_evidence.test.mjs`; document the invocation in
-`tests/fixtures/reusable-app/README.md`.
+**Current owner:** `crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json` and
+`crates/edgezero-test-harness/src/evidence/cutover/`, with colocated Rust tests and instructions
+in the harness README/SUITES. The original Node implementation was retired by the approved
+2026-11-06 hard cut; earlier execution results remain historical.
 
-- [x] Write Node tests rejecting a missing blocking leg, wrong candidate SHA, zero samples,
+- [x] Write regression tests rejecting a missing blocking leg, wrong candidate SHA, zero samples,
       expired-only artifact, wrong environment, failed measurement, and unjustified deferral.
-      Run `node --test scripts/check_outbound_cutover_evidence.test.mjs`; demonstrate failure.
+      Run `cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml evidence::cutover`; demonstrate failure.
 - [ ] Inventory every acceptance criterion of EZ-1-EZ-25 and EZ-Q1, including unnumbered EZ-9
       cases. Give each an immutable case ID such as `EZ-9/acceptance/09`, source-text digest, and
       separate environment legs. JSON fields are `case_id`, `requirement_ids`, `source_digest`,
@@ -108,7 +108,7 @@ or constructors. The response-egress fix itself did not approve the new begin AP
   | EZ-25.42                      | Q1                              | Snippet checker, Node tests and compile invocation in Rust-capable CI                  |
   | EZ-25.43                      | Q1                              | Existing docs-checker drift regressions and CI execution                               |
 
-- [x] Run the Node tests and `node scripts/check_outbound_cutover_evidence.mjs --help`.
+- [x] Run the checker tests and `scripts/test_integration.sh acceptance --help`.
       Add a manifest-validation mode that passes with pending results and a separate release mode
       that fails until all applicable results pass. Review the inventory against EZ-Q1.1-Q1.8.
       Suggested commit: `test: define outbound cutover evidence inventory`.
@@ -354,7 +354,7 @@ if its approval is absent or stale. This is the owning task for the index's API 
 
 ## Phase Exit
 
-- [ ] Run `node --test scripts/check_outbound_cutover_evidence.test.mjs` and the checker's
+- [ ] Run `cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml evidence::cutover` and the checker's
       manifest-validation invocation documented by G1; Expected: nonzero passing tests and a valid
       case/owner/command inventory, with pending external results still visibly pending. Use G2/G3's
       exact fixture commands above for feasibility. Command success does not supply G4 approval.

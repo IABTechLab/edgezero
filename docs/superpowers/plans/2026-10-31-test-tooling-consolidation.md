@@ -43,14 +43,28 @@ Tasks 2 and 3 remain pending; this checkpoint does not claim complete script con
 
 ## Task 2: Evidence Validation
 
-**Files:** existing `scripts/check_outbound_cutover_evidence{,.test}.mjs`, `crates/edgezero-test-harness/src/evidence.rs`, new focused harness evidence modules, existing shell test guard and tests, CI and active runbooks.
+**Files:** `crates/edgezero-test-harness/src/evidence/cutover/` and its parent module,
+existing shell test guard/tests, CI and active runbooks. Delete the former JavaScript
+checker/tests rather than retaining a compatibility entrypoint.
 
-- [ ] Characterize current checker outputs and all mutation/negative controls before deletion; explicitly test JavaScript-compatible safe integers and canonical serialization used in hashes.
-- [ ] Port manifest/sentinel, assembly, report and release validation into one Rust owner. Keep runtime observations separate from independent release validation.
-- [ ] Preserve the existing case IDs, frozen source bytes/digests and leg-set policy; migrate command bindings only where invocation changes require it.
-- [ ] Replace the Rust-to-Node assembly test with direct Rust validation and end-to-end binary tests.
-- [ ] Migrate the shell guard to the already-built harness binary, avoiding recursive Cargo or a second sentinel implementation.
-- [ ] Delete the checker and JS tests with the caller cutover. Keep pre-freeze drafts unqualified and open gates blocked.
+- [x] Characterize current checker outputs and all mutation/negative controls before deletion; explicitly test JavaScript-compatible safe integers and canonical serialization used in hashes.
+- [x] Port manifest/sentinel, assembly, frozen export, report and release validation into one Rust owner. Keep runtime observations separate from independent release validation.
+- [x] Preserve the existing case IDs, frozen source bytes/digests and leg-set policy; migrate command bindings only where invocation changes require it.
+- [x] Replace the Rust-to-Node assembly test with direct Rust validation and end-to-end binary tests.
+- [x] Migrate the shell guard to the already-built harness binary, avoiding recursive Cargo or a second sentinel implementation.
+- [x] Delete the checker and JS tests with the caller cutover. Keep pre-freeze drafts unqualified and open gates blocked.
+
+Task 2 verification (2026-11-06): 624 harness tests pass, two existing ignored; the
+223 captured catalog scenarios retain 140 original test titles. Native tests also cover
+provenance/release mutations, bounded files, dirty/hidden-index candidates, duplicate YAML,
+executable AST ownership and SIGINT/SIGTERM reaping of a blocked Git subprocess before output.
+The five root gates pass: 2,679 workspace tests across 33 binaries, one existing ignored;
+strict harness Clippy passes. Remaining guard/CI tests pass 127/35. Inventory identities,
+digests, 299-ready/212-planned bindings, pending decisions and qualification gates are unchanged.
+One earlier concurrent harness run failed a released-port connection assertion; its isolated
+run and the final unchanged full-suite run pass. No retries, assertions or limits were weakened.
+The frozen exporter verifies independently reviewed provenance; this is tooling, not an actual
+candidate freeze or hosted qualification. Task 3 and the remaining review fixes stay separate.
 
 ## Task 3: Remaining Guards
 
