@@ -31,6 +31,11 @@ leg; this consolidation does not silently activate or qualify it in CI. Fastly c
 progress must retain its existing unqualified exit and exact 12/23-probe inventories.
 Neither passing a local runtime suite nor green CI establishes hosted qualification.
 
+Fastly's existing wire and lifetime commands execute the single-request qualification binary,
+including its shared progress controllers. The [qualification runbook](acceptance/ts-outbound-qualification-runbook.md)
+documents embedded origin bounds, hosted profiles and direct SDK-only controls. Local profile
+checks establish routing/settings only, not hosted delay/cache/pooling or Image Optimizer parity.
+
 Spin's full adapter library test binary imports provider KV resources that plain Wasmtime
 does not implement. Preserve its WASM compile/Clippy coverage without claiming execution;
 the SDK phase runs the existing executable contract/resource targets, and the separate

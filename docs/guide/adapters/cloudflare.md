@@ -254,7 +254,8 @@ id      = "abc123…"
 The binding name comes from `EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME`
 (defaulting to the logical id `app_config` when unset). Populate the
 namespace via `wrangler kv key put`. Missing bindings log a one-time
-warning and the id is dropped from the registry. See
+warning; the declared id retains a failing handle whose reads return
+`ConfigStoreError::Unavailable`, rather than becoming an absent binding. See
 [the migration guide](../manifest-store-migration.md) if you are coming
 from the pre-rewrite `[vars]`-backed JSON-string form.
 

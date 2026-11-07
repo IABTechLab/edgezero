@@ -320,13 +320,13 @@ for Q4a. Qualification binaries/tooling remain owned by G2/Q3, not duplicated he
       separate freeze, ownership, authorization, entitlement and package-acceptance records.
 - [x] Correct G1's stale G4 prerequisite description to acknowledge API-only AG approval without
       approving Fastly primitive/policy, B, H(K), applicability or measurements. No leg changes.
-- [ ] Complete the full-outbound probe/export implementation and exact runnable command/sentinel/
-      expected-count bindings before closing the Q2 runbook task or accepting Q4a's external copy.
+- [ ] Complete exact external command/sentinel/expected-count bindings and independent execution
+      ownership before closing the Q2 runbook task or accepting Q4a's external copy.
 
-The template explicitly marks the full outbound qualification build as unimplemented. Frozen
-export now requires a clean candidate checkout and an independently reviewed source/build/capture
-receipt; it does not create a freeze or authorize execution. Existing
-lifecycle-egress probes are not the full outbound package. It is a source-preparation checkpoint,
+The original template was lifecycle-only. The thread-5 implementation checkpoint below
+supersedes that limitation with the single-request Fastly outbound package and Rust exporter.
+Frozen export requires a clean candidate checkout and an independently reviewed source/build/
+capture receipt; it does not create a freeze or authorize execution. Package implementation is
 not execution readiness, candidate freeze, hosted acceptance or a waiver of failed G2.
 
 ## Task Q3: Evidence Preparation, Candidate Freeze and Local Acceptance
@@ -418,12 +418,14 @@ checkpoint, Q3/Q4 collect evidence externally without editing candidate source.
       entries do not erase unrelated evidence. Accepted totals exclude invalid artifacts/deferrals;
       planned-command and comparison gates are evaluated even when results are missing.
 - [x] Activate Node regressions and the nonzero Rust sentinel in the existing workspace CI leg.
-- [ ] Finish controlled origins, frozen-candidate export/mapping, approved H(K)/pooling validation,
-      the runbook, candidate freeze and all local/hosted/consumer qualification before closing Q3.
+- [x] Implement controlled-origin profiles, the Rust frozen-candidate exporter and runbook source;
+      retain independently reviewed provenance and all failed/pending outcomes.
+- [ ] Finish exact per-leg mapping, approved H(K)/pooling validation, candidate freeze and all
+      local/hosted/consumer qualification before closing Q3.
 
 This is preparatory tooling only. Its synthetic tests do not establish runtime measurements,
-source-to-build provenance, maintainer approvals or hosted delivery. The full record-writer/export
-step above remains open for frozen-candidate integration. The reviewed 511-leg set, frozen APIs,
+source-to-build provenance, maintainer approvals or hosted delivery. Record-writer/export tooling
+is implemented; authoritative frozen-candidate integration/execution remains open. The reviewed 511-leg set, frozen APIs,
 transport behavior and failed Fastly G2 are unchanged.
 
 ## Q4: Hosted Qualification Handoff Task Group

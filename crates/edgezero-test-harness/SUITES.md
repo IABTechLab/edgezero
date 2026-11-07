@@ -798,8 +798,11 @@ includes the repeated header matrix and final request-correlated assembly eviden
 Consumer-owned header integration remains open. Neither suite reruns nor waives the failed
 Fastly SDK parity controls or G2, and does not establish Cloudflare overflow recovery.
 
-The default-off `progress` feature selects fixture-only SDK probes, independent of the hosted
-`qualification` application. Smoke also builds and runs these probes after its existing cases;
+The default-off `progress` feature selects fixture-only SDK probes. Fastly's `qualification`
+feature includes these probes in its single-request package; its existing `outbound-wire` and
+`outbound-lifetimes` suites launch that qualification binary. Other adapters retain their
+separate progress builds. See the [qualification runbook](acceptance/ts-outbound-qualification-runbook.md)
+for controlled-origin profiles and SDK-only controls. Smoke also builds and runs progress probes after its existing cases;
 their artifacts are staged separately. Eager single/batch SDK starts are compared with the
 existing lazy public single/batch APIs during a measured 100 ms unrelated wait. Origin-local
 receipt timestamps and consumer poll counts are checked without comparing guest/host clock

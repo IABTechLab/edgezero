@@ -1535,6 +1535,144 @@ function runLiveOutboundContractSelfTests() {
   }
 }
 
+const migrationGuideRules = [
+  [
+    'docs/guide/adapters/cloudflare.md',
+    ['retains a failing handle', 'ConfigStoreError::Unavailable'],
+    ['the id is dropped from the registry'],
+  ],
+  [
+    'docs/guide/adapters/overview.md',
+    ['`app!` `state = <expr>`'],
+    ['`configure` or `app_state`'],
+  ],
+  [
+    'docs/guide/manifest-store-migration.md',
+    [
+      'request::send_with_registries_and_hooks',
+      'request::send_request_with_registries_and_hooks',
+      'StoresMetadata',
+      'FastlyRequestDelivery',
+    ],
+    ['request::dispatch_with_registries'],
+  ],
+  [
+    'docs/guide/cli-reference.md',
+    ['(#edgezero-config-gc)', '.edgezero/kv-<slug>-<hash>.redb'],
+    ['(#config-gc)', 'KV in-memory'],
+  ],
+  [
+    'docs/guide/deploy-action-adoption.md',
+    ['(./adapters/fastly.md#entrypoint)'],
+    ['#migrating-a-custom-entrypoint'],
+  ],
+  [
+    'docs/guide/cli-walkthrough.md',
+    ['.edgezero/kv-<slug>-<hash>.redb'],
+    ['KV is in-memory'],
+  ],
+]
+const scaffoldGuidePath = 'docs/guide/getting-started.md'
+
+function scaffoldTree(source, adapter) {
+  const marker = `my-app-adapter-${adapter}/`
+  const start = source.indexOf(marker)
+  if (start === -1) return ''
+  const following = source.indexOf('my-app-adapter-', start + marker.length)
+  const fence = source.indexOf('```', start)
+  return source.slice(
+    start,
+    following === -1 ? fence : Math.min(following, fence)
+  )
+}
+
+function migrationGuideContractError(sources) {
+  const cloudflare = scaffoldTree(
+    sources[scaffoldGuidePath] ?? '',
+    'cloudflare'
+  )
+  const spin = scaffoldTree(sources[scaffoldGuidePath] ?? '', 'spin')
+  if (
+    ![
+      'src/lib.rs',
+      'src/main.rs',
+      'Workers entrypoint',
+      'Host-only stub',
+    ].every((text) => cloudflare.includes(text))
+  )
+    return 'Cloudflare scaffold must distinguish the Workers entrypoint and host stub'
+  if (
+    !['src/lib.rs', 'runtime-config.toml'].every((text) =>
+      spin.includes(text)
+    ) ||
+    spin.includes('src/main.rs')
+  )
+    return 'Spin scaffold must show its library entrypoint and runtime config'
+  for (const [path, required, removed] of migrationGuideRules) {
+    const source = sources[path] ?? ''
+    if (
+      !required.every((text) => source.includes(text)) ||
+      removed.some((text) => source.includes(text))
+    )
+      return `${path} has stale migration guidance`
+  }
+  return null
+}
+
+function runMigrationGuideContractSelfTests() {
+  const valid = Object.fromEntries(
+    migrationGuideRules.map(([path, required]) => [path, required.join('\n')])
+  )
+  valid[scaffoldGuidePath] =
+    'my-app-adapter-cloudflare/\nsrc/lib.rs Workers entrypoint\nsrc/main.rs Host-only stub\nmy-app-adapter-axum/\nsrc/main.rs\nmy-app-adapter-spin/\nruntime-config.toml\nsrc/lib.rs\n```'
+  if (migrationGuideContractError(valid) !== null)
+    fail('valid migration guide fixture rejected')
+  for (const [path, required, removed] of migrationGuideRules) {
+    for (const text of required) {
+      if (
+        migrationGuideContractError({
+          ...valid,
+          [path]: valid[path].replace(text, 'removed'),
+        }) === null
+      )
+        fail(`migration guide checker accepted missing ${text}`)
+    }
+    for (const text of removed) {
+      if (
+        migrationGuideContractError({
+          ...valid,
+          [path]: `${valid[path]}\n${text}`,
+        }) === null
+      )
+        fail(`migration guide checker accepted stale ${text}`)
+    }
+  }
+  for (const adapter of ['cloudflare', 'spin']) {
+    const source = valid[scaffoldGuidePath]
+    const tree = scaffoldTree(source, adapter)
+    const mutated = source.replace(
+      tree,
+      tree.replace('src/lib.rs', 'src/main.rs')
+    )
+    if (
+      migrationGuideContractError({
+        ...valid,
+        [scaffoldGuidePath]: mutated,
+      }) === null
+    )
+      fail(`migration guide checker accepted stale ${adapter} entrypoint`)
+  }
+}
+
+runMigrationGuideContractSelfTests()
+const migrationGuideSources = Object.fromEntries(
+  [scaffoldGuidePath, ...migrationGuideRules.map(([path]) => path)].map(
+    (path) => [path, readFileSync(path, 'utf8')]
+  )
+)
+const migrationGuideError = migrationGuideContractError(migrationGuideSources)
+if (migrationGuideError !== null) fail(migrationGuideError)
+
 runObservationCutoffContractSelfTests()
 runHeaderNormalizationContractSelfTests()
 runLiveOutboundContractSelfTests()

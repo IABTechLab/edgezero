@@ -247,7 +247,7 @@ impl Adapter for AxumCliAdapter {
         for store in stores.kv {
             let logical = store.logical.as_str();
             out.push(format!(
-                "axum KV store `{logical}` is in-memory; nothing to provision"
+                "axum KV store `{logical}` persists in `.edgezero/kv-<slug>-<hash>.redb`; nothing to provision"
             ));
         }
         for store in stores.config {
@@ -818,6 +818,41 @@ mod tests {
     use edgezero_adapter::cli_support::find_manifest_upwards;
     use std::net::Ipv6Addr;
     use tempfile::tempdir;
+
+    #[test]
+    fn provision_notes_describe_persistent_kv_without_creating_files() {
+        let directory = tempdir().unwrap();
+        let kv = [ResolvedStoreId::new("session", "remote-session")];
+        let config = [ResolvedStoreId::from_logical("app_config")];
+        let secrets = [ResolvedStoreId::from_logical("default")];
+        let stores = ProvisionStores {
+            kv: &kv,
+            config: &config,
+            secrets: &secrets,
+        };
+        let notes = AXUM_ADAPTER
+            .provision(directory.path(), None, None, &stores, false)
+            .unwrap();
+        assert_eq!(
+            notes,
+            AXUM_ADAPTER
+                .provision(directory.path(), None, None, &stores, true)
+                .unwrap()
+        );
+        assert_eq!(notes.len(), 3);
+        assert_eq!(
+            notes[0],
+            "axum KV store `session` persists in `.edgezero/kv-<slug>-<hash>.redb`; nothing to provision"
+        );
+        assert!(notes[1].contains("app_config"));
+        assert!(notes[2].contains("default"));
+        assert!(
+            notes
+                .iter()
+                .all(|note| !note.contains("in-memory") && !note.contains("remote-session"))
+        );
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn cargo_commands_preserve_ingress_defaults_and_bind_precedence() {

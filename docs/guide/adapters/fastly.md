@@ -462,7 +462,7 @@ fn main() -> Result<(), fastly::Error> {
 `FnMut(&mut edgezero_core::http::Response) -> State`. Preparation runs before admission;
 an inserted `HttpClient` follows the shared [client-selection precedence](/guide/proxying#client-selection)
 and is overridden by a router-state client when both are present.
-finalization runs only for routed responses, before egress policy and framing.
+Finalization runs only for routed responses, before egress policy and framing.
 Detached admission responses skip finalization. The retained helper discards the
 finalizer's state after delivery; use the request-level send helper in a custom
 callback when post-send work needs that state.

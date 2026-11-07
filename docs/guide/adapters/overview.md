@@ -289,7 +289,7 @@ perform canonical adapter admission.
 ## Opt-in application retention
 
 Use retention when measurements show that constructing the app is expensive.
-Keep per-request construction when `configure` or `app_state` reads values that
+Keep per-request construction when `configure` or the `app!` `state = <expr>` expression reads values that
 can change and no refresh policy has been defined.
 
 Application ownership and request scheduling are separate. An `App` can be
