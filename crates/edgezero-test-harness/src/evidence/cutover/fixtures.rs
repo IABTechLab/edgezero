@@ -34,7 +34,7 @@ impl Fixture {
         )
     }
 
-    fn with_catalog(source: String, manifest: Value) -> Self {
+    pub(super) fn with_catalog(source: String, manifest: Value) -> Self {
         let artifacts = tempfile::tempdir().unwrap();
         let candidate = tempfile::tempdir().unwrap();
         fs::create_dir_all(candidate.path().join(SPEC).parent().unwrap()).unwrap();

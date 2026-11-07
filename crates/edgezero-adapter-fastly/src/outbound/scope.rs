@@ -6,9 +6,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::mem;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
-use super::progress::{Progress, Transport};
+use super::progress::{Progress, SourceWake, Transport};
 use edgezero_core::{
     EdgeError, MonotonicInstant, OutboundBatchDriverEvent, OutboundExchangeOwner, OutboundFuture,
     OutboundPending, OutboundProgressRuntime, OutboundResponse, OutboundScope, OutboundTime,
@@ -295,22 +297,34 @@ where
     let driver = progress.clone();
     let captured = scope.clone();
     let paired = time.clone();
+    let requested = Arc::new(AtomicBool::new(false));
     let polling = poll_fn(move |cx| {
         let next = pending.next();
         futures_util::pin_mut!(next);
+        let source_waker = SourceWake::waker(cx.waker(), &requested);
+        let mut source_cx = Context::from_waker(&source_waker);
         driver.with_current(|| {
-            let mut observed = captured.poll(&paired, entered, cx, next.as_mut());
-            if observed.is_pending() {
-                if let Err(error) = captured.with(|| driver.observe_ready()).and_then(identity) {
-                    return Poll::Ready(Some(OutboundBatchDriverEvent::Failed(error)));
+            loop {
+                requested.store(false, Ordering::Relaxed);
+                if let Poll::Ready(result) =
+                    captured.poll(&paired, entered, &mut source_cx, next.as_mut())
+                {
+                    return Poll::Ready(match result {
+                        Ok(event) => event,
+                        Err(error) => Some(OutboundBatchDriverEvent::Failed(error)),
+                    });
                 }
-                // Record this turn before another slot's provider call can advance its clock.
-                observed = captured.poll(&paired, entered, cx, next.as_mut());
+                let progressed = match captured.with(|| driver.observe_ready()).and_then(identity) {
+                    Ok(progressed) => progressed,
+                    Err(error) => {
+                        return Poll::Ready(Some(OutboundBatchDriverEvent::Failed(error)));
+                    }
+                };
+                // Finalize this turn before another provider call can advance the clock.
+                if !progressed && !requested.load(Ordering::Relaxed) {
+                    return Poll::Pending;
+                }
             }
-            observed.map(|result| match result {
-                Ok(event) => event,
-                Err(error) => Some(OutboundBatchDriverEvent::Failed(error)),
-            })
         })
     });
     let mut receiver = bind_batch(scope, polling);

@@ -89,8 +89,11 @@ The old private Fastly lifetime registry is removed, not used alongside core own
 Adapter implementers that spawn local work use the core `OutboundTask::new` runner/owner pair.
 Registration is fallible before spawning. Dropping either side releases the producer even if
 the other handle is retained; adapters supply only their provider spawn and abort operations.
-Completion receivers observe already-scheduled work. `is_ready` and batch `check` do not drive
-the SDK, create timers or read transport bodies.
+Completion receivers observe already-scheduled work. On Fastly, `is_ready` and batch `check`
+poll ready SDK heads and buffered-body pipelines until quiescent, checking fresh readiness before
+each raw read of at most 16 KiB. They never call blocking host waits or selection, or add
+observation-specific timers; the pipeline retains its original deadline timer.
+On the other adapters, these checks only observe work scheduled on the provider executor.
 
 Successful streamed collection transfers transport ownership into the outbound body's lifetime;
 callback exit cannot abort that handed-off body. Downstream response egress has its own body scope
@@ -239,8 +242,8 @@ Every hop uses the same supplied client and shared preparation/head-finalization
 including custom clients. A followed response body is discarded unread: it is not decoded,
 buffered, delivered or drained for reuse, and its declared length or source failure cannot fail
 the chain. Response-header caps and body-independent validation still apply to every head.
-The final response, including stopped or limit-reached 3xx, uses ordinary decoding, caps, body
-mode and idle policy. Thus a final body may still fail; a stop reason never bypasses body policy.
+The final response, including stopped or limit-reached 3xx, uses ordinary decoding, caps and body
+mode. Thus a final body may still fail; a stop reason never bypasses body policy.
 With no redirect, `follow` has the same response and limit behavior as `send`.
 
 `OutboundFollowResult` exposes `response()`, `final_uri()`, `redirects_followed()` and

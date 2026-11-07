@@ -417,7 +417,7 @@ const redirectGuideFragments = [
   'synchronous policy cannot be preempted',
   'followed response body is discarded unread',
   'Response-header caps and body-independent validation still apply to every head',
-  'final response, including stopped or limit-reached 3xx, uses ordinary decoding, caps, body mode and idle policy',
+  'final response, including stopped or limit-reached 3xx, uses ordinary decoding, caps and body mode',
   'Neither the policy nor its error needs `Send` or `Clone`',
   'zero-based hop index (initial request = 0)',
   'one-based redirect number, unchanged',
@@ -2083,6 +2083,9 @@ for (const requiredFragment of [
   'OutboundBatchTermination::Cutoff',
   'OutboundBatchFailure',
   'send_all_until(requests, observation_cutoff)',
+  'poll ready SDK heads and buffered-body pipelines until quiescent',
+  'each raw read of at most 16 KiB',
+  'observation-specific timers; the pipeline retains its original deadline timer',
 ]) {
   if (!hardCutSurfaces[2][1].includes(requiredFragment)) {
     fail(

@@ -1363,6 +1363,86 @@ mod tests {
     }
 
     #[test]
+    fn routed_expired_deadline_wins_over_declared_overflow_without_polling() {
+        use crate::context::BodyKind;
+        use crate::{AdmissionDecision, IngressGrant, MonotonicClock, ResponseEgressCompletion};
+        use bytes::Bytes;
+        use futures_util::stream;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        async fn handler(ctx: RequestContext) -> Result<String, EdgeError> {
+            let polls = ctx
+                .extensions()
+                .get::<Arc<AtomicUsize>>()
+                .expect("poll counter");
+            for cap in [5, 10] {
+                assert_eq!(
+                    ctx.body_bytes(cap)
+                        .await
+                        .expect_err("expired deadline")
+                        .status(),
+                    StatusCode::REQUEST_TIMEOUT
+                );
+                assert_eq!(ctx.body_kind(), BodyKind::Poisoned);
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+            }
+            Ok("deadline checked by routed handler".to_owned())
+        }
+
+        let router = RouterService::builder().post("/expired", handler).build();
+        let mut app = App::new(router.clone());
+        let start = MonotonicInstant::now();
+        let now = Arc::new(Mutex::new(start));
+        let sampled = Arc::clone(&now);
+        app.set_monotonic_clock(MonotonicClock::new(move || *sampled.lock().unwrap()));
+        app.set_ingress_admission_policy(|head| AdmissionDecision::Admit {
+            completion: ResponseEgressCompletion::empty(),
+            grant: IngressGrant::empty(),
+            read_deadline: head.read_deadline_after(Duration::from_millis(1)),
+        });
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&polls);
+        let mut chunk = Some(Ok(Bytes::from_static(b"0123456789")));
+        let body = Body::from_stream(stream::poll_fn(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(chunk.take())
+        }));
+        let mut request = request_builder()
+            .method(Method::POST)
+            .uri("/expired")
+            .header("content-length", "10")
+            .body(body)
+            .expect("request");
+        request.extensions_mut().insert(Arc::clone(&polls));
+        let resolved = router.resolve(&Method::POST, "/expired");
+        let head = IngressHead::from_request(
+            &request,
+            start,
+            resolved.resolution().clone(),
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+        let IngressAdmissionOutcome::Admitted {
+            completion,
+            ingress,
+        } = app.admit_ingress(&head).expect("admitted before expiry")
+        else {
+            panic!("expected admission");
+        };
+        *now.lock().unwrap() = start + Duration::from_millis(1);
+        let response =
+            block_on(router.dispatch_resolved(resolved, request, ingress)).expect("routed handler");
+        assert_eq!(
+            response.body().as_bytes().unwrap(),
+            b"deadline checked by routed handler"
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        drop(completion);
+    }
+
+    #[test]
     fn streams_body_through_router() {
         use bytes::Bytes;
         use futures_util::StreamExt as _;

@@ -40,6 +40,38 @@ fn frozen_export_verifies_independent_provenance_without_qualifying_or_mutating(
 }
 
 #[test]
+fn coverage_generated_unpromoted_follow_up_is_accepted_as_deferred() {
+    let source = "### EZ-10. Bounded bodies\n- **EZ-10.1** bounded\n#### Acceptance criteria\n\n1. A proof.\n\n#### Out of scope\n";
+    let criterion = catalog::acceptance_criteria(source).unwrap()[0].clone();
+    let rows = [("axum", "blocking"), ("workerd", "follow-up")].into_iter().map(|(environment, applicability)| json!({"case_id":criterion["case_id"],"source_id":criterion["case_id"],"source_digest":criterion["source_digest"],"requirement_ids":["EZ-10.1"],"environment":environment,"applicability":applicability,"approval":null,"condition":null,"owner":"EdgeZero","task":"P2","substep":"fixture","sentinel":"proof","command":"fixture proof","expected":criterion["text"],"artifact_path":format!("raw/{environment}.json"),"implementation":"ready"})).collect::<Vec<_>>();
+    let manifest = json!({"schema":1,"source_digest":hash(source),"decisions":[],"cases":rows});
+    let mut fixture = Fixture::with_catalog(source.into(), manifest);
+    let coverage =
+        catalog::coverage(&fixture.manifest, source, &fixture.context.reviewed_legs).unwrap();
+    fixture.input["applicability"] = json!(coverage["legs"].as_array().unwrap().iter().map(|leg| {
+        let (case_id, environment) = text(&leg["id"]).split_once('@').unwrap();
+        json!({"case_id":case_id,"environment":environment,"disposition":if leg["category"] == "required-local" {"required"} else {"deferred"},"condition":leg["condition"]})
+    }).collect::<Vec<_>>());
+    fixture.input["results"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|result| result["environment"] == "axum");
+    fixture.reseal();
+    let record = fixture.export().unwrap();
+    let report = record::validate_release(&fixture.manifest, &record, &fixture.context).unwrap();
+    assert_eq!(report["status"], "passed");
+    assert_eq!(report["passed"], 1);
+    assert_eq!(report["deferred"], 1);
+    assert_eq!(report["qualified"], false);
+
+    fixture.input["applicability"][1]["condition"] = json!("invented deferral");
+    fixture.reseal();
+    let invalid = fixture.export().unwrap();
+    assert!(finding(&fixture.report(&invalid), "deferral"));
+    assert!(record::validate_release(&fixture.manifest, &invalid, &fixture.context).is_err());
+}
+
+#[test]
 fn reconstructed_record_accepts_equivalent_decimal_json_numbers() {
     let fixture = Fixture::new();
     let mut record = fixture.export().unwrap();

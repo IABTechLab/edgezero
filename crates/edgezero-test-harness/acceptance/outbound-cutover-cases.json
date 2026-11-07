@@ -12071,7 +12071,10 @@
       "comparison": false,
       "additional_sentinels": [
         "context::tests::expired_deadline_wins_over_declared_overflow_without_polling",
-        "context::tests::padded_declared_length_rejects_without_consuming_the_body"
+        "context::tests::padded_declared_length_rejects_without_consuming_the_body",
+        "router::tests::routed_declared_caps_reject_without_reading_and_allow_a_larger_retry",
+        "pre_dispatch::tests::original_declared_cap_rejection_is_retryable_without_reading",
+        "router::tests::routed_expired_deadline_wins_over_declared_overflow_without_polling"
       ]
     },
     {
