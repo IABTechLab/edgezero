@@ -145,3 +145,17 @@ No hosted qualification or review acceptance is claimed. Final per-thread replie
 must distinguish substantive fixes, intentionally retained behavior, and findings
 already satisfied by the existing implementation. The reviewer alone resolves
 threads. Pushing the checkpoint and recording those replies remain outstanding.
+
+### Clean-Commit Logging Isolation Repair
+
+The clean-commit full-suite rerun at `e65394a1` caught a Fastly test race: the
+SDK's native capture helper set the process-wide facade maximum to `Off`, so
+the concurrent registration-warning test could miss its unchanged 50 ms warning.
+A deterministic facade-level assertion reproduced `Off` instead of `Trace`.
+
+Reuse the existing registration test logger as the sole facade owner before
+installing the SDK capture, and give that capture a real endpoint with a Trace
+ceiling. Each production backend's Off-through-Trace filter matrix and all
+threshold, redaction and release assertions remain unchanged. This is test-only
+state isolation, not a production logging or timing-policy change. Retain the
+failed run separately and rerun the complete suite on the final clean commit.

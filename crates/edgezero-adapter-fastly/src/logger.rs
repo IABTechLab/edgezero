@@ -64,6 +64,7 @@ pub fn init_logger(
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
+    use crate::context::tests::init_registration_logger;
     use edgezero_core::logging::{BOOT_LOG_LEVEL, BOOT_LOG_TARGET};
     use log::{Level, LevelFilter, Log as _, Metadata, Record};
 
@@ -86,12 +87,16 @@ mod tests {
 
     #[test]
     fn production_filters_preserve_boot_warnings_and_runtime_level() {
+        // Share the facade owner with registration tests; backend filtering stays local.
+        init_registration_logger();
         let guard = log_fastly::reset_logger(
             log_fastly::Logger::builder()
-                .max_level(LevelFilter::Off)
+                .default_endpoint("logging-test")
+                .max_level(LevelFilter::Trace)
                 .build()
                 .expect("isolated SDK capture"),
         );
+        assert_eq!(log::max_level(), LevelFilter::Trace);
 
         for runtime_level in [
             LevelFilter::Off,

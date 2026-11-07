@@ -331,7 +331,7 @@ pub(crate) mod tests {
         (output, REGISTRATION_LOGS.with(RefCell::take))
     }
 
-    fn init_registration_logger() {
+    pub(crate) fn init_registration_logger() {
         static LOGGER: RegistrationLogger = RegistrationLogger;
         static INITIALIZED: Once = Once::new();
         INITIALIZED.call_once(|| {
