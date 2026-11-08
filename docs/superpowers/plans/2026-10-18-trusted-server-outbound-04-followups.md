@@ -771,6 +771,13 @@ remain open; the approved Interfaces and frozen policies remain unchanged.
 
 ### Task F7a: Buffered Response Framing
 
+**Current scope amendment (2026-11-08):** AG approved content-bearing buffered SDK parity and
+strict HEAD/204/205/304 suppression instead of bodiless SDK parity. The historical checkpoints
+below retain their original failures and decisions. Current execution separates six parity
+comparisons from twelve bodiless reference observations, retains the nine exact reference
+differences, and adds clean-EOF HTTP/1 HEAD checks. Hosted zero-payload/completion proof and
+content-bearing compression/parity qualification remain open; no historical failure is relabeled.
+
 **Files:** Core `src/response_egress.rs`, `response_egress_framing.rs`; four adapter
 `src/response.rs`; Fastly `src/fastly_response_abi.rs`; fixture response cases.
 
@@ -779,7 +786,8 @@ Independent of F7b and D1b-D1d.
 
 - [ ] Add exact Content-Length cases for buffered data, explicit values, HEAD/304, mismatched
       streamed length, suppressed bodies, and platform compression. Compare Fastly SDK Automatic
-      framing on HTTP/1.1 and HTTP/2 rather than assuming raw guest length is transformed wire length.
+      framing for content-bearing buffered responses on HTTP/1.1 and HTTP/2; require strict
+      bodiless suppression and never infer transformed wire length from guest length.
 - [ ] Derive a length only for eligible buffered untransformed payloads. Preserve representation
       lengths on bodyless responses and actual-body gating of manual framing. Host transforms may
       recompute/omit length; never force a pretransform count. Verify declared-length compressed

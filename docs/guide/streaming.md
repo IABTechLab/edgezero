@@ -173,9 +173,11 @@ async fn dynamic_content() -> Response {
 Untransformed transmitted buffered bodies carry an exact `Content-Length`, including zero for an
 empty body. This includes framework errors and bounded fallbacks. A supplied buffered length must
 match the source or conversion fails before commitment. HEAD/204/205/304 do not gain a core-derived
-length. Fastly still delegates framing to Automatic, but does not restore suppressed HEAD bytes:
-doing so causes HTTP/2 protocol failures in the pinned local runtime. Exact known-buffer HEAD/205
-SDK parity remains an open gate; strict body suppression takes precedence.
+length. Fastly delegates framing to Automatic, but never restores suppressed bytes or polls a
+suppressed stream. HEAD/204/205/304 follow strict suppression rather than SDK parity; only
+buffered responses that can transmit content have the SDK-parity obligation. Valid supplied
+HEAD/304 representation lengths reach the host unchanged, which may omit them on the wire.
+Local bodiless SDK controls remain reference observations, not proof of hosted behavior.
 
 Streams remain progressive: without a declared length the provider chooses transfer framing;
 with a declared length EdgeZero enforces the source byte count and aborts a short or long stream.

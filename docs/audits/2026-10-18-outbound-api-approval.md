@@ -239,7 +239,7 @@ const scopeSnapshot = execFileSync('git', ['show', `2be1dd8704553395ef4f85f914fb
 assert.equal(digest(scopeSnapshot), '10776c6db1bfacaecca91a32c9ad955ad13f696ef8d078312e5b566b43f6205b');
 const preFocus = execFileSync('git', ['show', `fc973719c1c4840e3eca7fec235924998a0d9d5b:${requirementsPath}`]);
 assert.equal(digest(preFocus), 'a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70');
-assert.equal(digest(readFileSync(requirementsPath)), 'fb23549f243eee5f83a9b370c627b143b48fb1373ded8063d07f0f34b0be44f1');
+assert.equal(digest(readFileSync(requirementsPath)), '7212a3baeedf32598b1bd7eedf019554e2f7749334689c0202ef237af9843bff');
 console.log('Historical and scoped-amendment identities match; authorization remains separately scoped.');
 JS
 ```
@@ -824,3 +824,48 @@ header/byte limits, strict comma-Content-Length policy, body suppression, deadli
 rules and ownership. No historical approval, failed capture, hosted gate or provider capability
 is promoted. The immutable requirements document and its current digest remain unchanged;
 this attributed correction records the narrow exception rather than silently rewriting history.
+
+## Adapter HTTP3 And Strict Bodiless Qualification Amendments (2026-11-08)
+
+**Approved by AG, scoped requirements only.** The requester directly answered
+**"Approve both scoped amendments"** to the conversation question covering adapter/deployment
+HTTP/3 qualification and strict Fastly HEAD/204/205/304 suppression rather than bodiless SDK
+parity. The approval includes affected requirements, inventory and tests, with historical
+deviations preserved and hosted qualification open.
+
+- EZ-1 criterion 2 retains its original Fastly staging HTTP/1.1 and HTTP/2 legs. HTTP/3 is
+  assessed independently for each selected adapter/deployment. Preserve all 511 existing leg
+  identities and append Axum, Cloudflare and Spin HTTP/3 legs: 255 criteria, 514 legs total.
+  All four HTTP/3 dispositions are required while unresolved. A supported deployment needs
+  negotiated HTTP/3 execution evidence. Only a separately attributed, evidenced, single-leg
+  `requirement-change` decision can approve unsupported N/A; unknown support, disabled
+  configuration, inaccessible deployments or missing clients cannot do so. This approval does
+  not itself approve any deployment's N/A decision.
+- EZ-18.4 now requires SDK parity only for buffered responses that can transmit content.
+  EZ-18.6 and criteria 3/6 require strict bodiless suppression instead: no transmitted payload,
+  no synthesized length, unchanged valid supplied HEAD/304 length on host handoff, and existing
+  status-specific 204/205 validation. Distinguish host handoff from client-visible length.
+  All twelve local bodiless SDK controls become current reference observations, while six
+  content-bearing controls retain strict parity. Preserve the nine historical failed control
+  outcomes and captures; do not relabel or overwrite those records. Unexpected reference
+  changes remain regression failures. HEAD header-only captures are not zero-payload proof;
+  reuse the existing bounded clean-EOF wire capture.
+
+This supersedes only the bodiless parity obligation in the historical 2026-11-06 clarification
+and the consumer-staging dependency of HTTP/3 applicability. It changes no production transport,
+signature, pin, limit, deadline, batch contract, capability declaration or suppression behavior.
+No deployment, source freeze, hosted/candidate qualification or merge is authorized. Historical
+approval identities remain intact; the verification command above tracks the current complete
+requirements identity separately from its historical digests.
+
+| Current Subject                        | SHA-256                                                            |
+| -------------------------------------- | ------------------------------------------------------------------ |
+| Requirements before the two amendments | `fb23549f243eee5f83a9b370c627b143b48fb1373ded8063d07f0f34b0be44f1` |
+| Amended requirements                   | `7212a3baeedf32598b1bd7eedf019554e2f7749334689c0202ef237af9843bff` |
+| Reviewed 514-leg identity set          | `4c2ca209d21e88c30ca11317ef5d39b81423ea06788c3199a5a36dceec3acae4` |
+
+Only EZ-1 acceptance 02 and EZ-18 acceptance 03/06 change criterion text/digests. Their
+existing sibling rows share the full criterion identity, including the compression-only 03b
+rows whose assertion scope remains unchanged. The regression snapshot retains all original
+140 test titles and 223 scenarios; only current identities, affected text and derived coverage
+expectations change. No historical capture or failed evidence file is edited.

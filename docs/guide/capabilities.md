@@ -241,6 +241,27 @@ every caller to choose target metadata explicitly and propagates the configurati
 successful configuration, core rejects changed platform facts, provenance, or unknown reasons
 rather than silently restoring them. Axum also completes assembly before binding its listener.
 
+## Receive Protocol Qualification
+
+Receive protocols are facts about the selected listener or deployment, not another declarable
+capability. Record the adapter, SDK/runtime/build, deployment identity and effective protocol
+configuration together; do not infer support from an application's staging environment or the
+guest's normalized request version.
+
+| Boundary                 | HTTP/3 Receive Fact                                | Qualification Scope                                                                                                                 |
+| ------------------------ | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Axum's built-in listener | Unsupported: the owned listener serves HTTP/1 only | A separately selected HTTP/3 reverse-proxy deployment needs its own evidence; it does not make the adapter listener HTTP/3-capable. |
+| Cloudflare deployment    | Unverified for the selected deployment             | Local workerd HTTP/1 captures do not establish the deployed edge protocol.                                                          |
+| Fastly deployment        | Unverified for the selected service/configuration  | Local Viceroy HTTP/1.1 and HTTP/2 captures are not hosted HTTP/3 evidence.                                                          |
+| Spin deployment          | Unverified for the selected runtime/front door     | Generic Spin and any hosted front end must be distinguished explicitly.                                                             |
+
+The cutover inventory requires an HTTP/3 disposition for all four adapter/deployment slots.
+Where supported, use a real HTTP/3 client and retain negotiated-protocol proof and the original
+body/origin/deadline assertions. Where unsupported, an independently attributed, evidenced
+requirement-change decision may defer only that scoped leg as N/A, not count it as passed.
+Unknown support, disabled configuration, inaccessible deployment or missing client remains
+unresolved. See the [qualification runbook](https://github.com/IABTechLab/edgezero/blob/main/crates/edgezero-test-harness/acceptance/ts-outbound-qualification-runbook.md).
+
 ## Response Egress Matrix
 
 | Capability                         | Axum       | Cloudflare | Fastly     | Spin       |
@@ -255,9 +276,11 @@ rather than silently restoring them. Axum also completes assembly before binding
 empty and framework-generated bodies. Core derives their exact length on Axum, Cloudflare and
 Spin; Fastly stages the complete native buffer before its SDK-equivalent Automatic handoff.
 HEAD/204/205/304 do not gain a core-derived length. Suppressed buffers are dropped and streams
-are never polled. Exact Fastly known-buffer HEAD/205 SDK parity remains unqualified: local SDK
-controls expose forbidden payload delivery and HTTP/2 protocol failures. The requester approved
-preserving strict suppression rather than restoring a HEAD body merely to reproduce SDK framing.
+are never polled. Under the approved qualification amendment, Fastly SDK parity applies only to
+buffered responses that can transmit content. HEAD/204/205/304 must satisfy strict suppression,
+not reproduce SDK framing; local SDK controls remain reference observations, including their
+recorded forbidden payload delivery and HTTP/2 failures. Valid supplied HEAD/304 representation
+lengths reach the host unchanged, but the host may omit them on the wire.
 Host transformations may recompute or omit the wire length. Serverless cells remain `BestEffort`
 pending frozen qualifying evidence: hosted Fastly HTTP/1.1 and HTTP/2 compression/parity, deployed
 Workers header delivery, and the pinned Spin runtime check. Local characterization alone is not

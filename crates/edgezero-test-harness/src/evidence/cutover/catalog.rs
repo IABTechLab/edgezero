@@ -226,8 +226,6 @@ fn baseline(row: &Value) -> &str {
         "EZ-9/acceptance/16b",
     ]
     .contains(&text(&row["case_id"]))
-        || (row["source_id"] == "EZ-1/acceptance/02"
-            && text(&row["environment"]).ends_with("/http3"))
     {
         return "conditional";
     }
@@ -510,6 +508,17 @@ pub(super) fn validate_manifest(
                 format!("{id}: missing or incorrectly scoped approval"),
             )?;
         }
+        if row["source_id"] == "EZ-1/acceptance/02"
+            && text(&row["environment"]).ends_with("/http3")
+            && let Some(decision) = decision_for(row, &decisions)
+            && decision["status"] == "approved"
+            && decision["action"] == "requirement-change"
+        {
+            require(
+                decision["scope"] == json!([id]),
+                format!("{id}: HTTP/3 N/A requires a single adapter/deployment scope"),
+            )?;
+        }
         covered.insert(text(&row["source_id"]));
     }
     for id in criteria.keys() {
@@ -688,6 +697,106 @@ pub(super) fn sentinels(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http3_dispositions_are_required_for_each_adapter_deployment() {
+        let fixture = super::super::fixtures::Fixture::actual();
+        let decisions = unique(fixture.manifest["decisions"].as_array().unwrap(), |row| {
+            text(&row["id"]).to_owned()
+        })
+        .unwrap();
+        for adapter in ["axum", "cloudflare", "fastly", "spin"] {
+            let environment = format!("hosted-{adapter}/http3");
+            let row = fixture.manifest["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| {
+                    row["source_id"] == "EZ-1/acceptance/02" && row["environment"] == environment
+                })
+                .expect("missing adapter/deployment HTTP3 disposition");
+            assert_eq!(row["applicability"], "blocking", "{environment}");
+            assert_eq!(baseline(row), "blocking", "{environment}");
+            assert_eq!(disposition(row, &decisions).unwrap(), "required");
+        }
+    }
+
+    #[test]
+    fn unsupported_http3_requires_evidenced_single_deployment_requirement_change() {
+        let fixture = super::super::fixtures::Fixture::actual();
+        let mut manifest = fixture.manifest.clone();
+        let row = manifest["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["environment"] == "hosted-fastly/http3")
+            .unwrap()
+            .clone();
+        assert_eq!(row["applicability"], "blocking");
+        let decision = manifest["decisions"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|decision| decision["id"] == row["approval"])
+            .unwrap();
+        *decision = json!({"id":row["approval"],"status":"approved","action":"requirement-change",
+            "scope":[key(&row)],"edgezero_approver":"fixture","consumer_approver":"fixture",
+            "date":"2026-11-08","evidence":"fixture: exact deployment/runtime/configuration proves unsupported",
+            "owner":"fixture","ci_owner":"fixture"});
+        validate_approval(decision).unwrap();
+        let scoped = decision.clone();
+        let decisions = unique(manifest["decisions"].as_array().unwrap(), |row| {
+            text(&row["id"]).to_owned()
+        })
+        .unwrap();
+        assert_eq!(disposition(&row, &decisions).unwrap(), "deferred");
+        for sibling in manifest["cases"].as_array().unwrap().iter().filter(|row| {
+            row["source_id"] == "EZ-1/acceptance/02" && row["environment"] != "hosted-fastly/http3"
+        }) {
+            assert_eq!(
+                disposition(sibling, &decisions).unwrap(),
+                "required",
+                "{}",
+                key(sibling)
+            );
+        }
+        validate_manifest(
+            &manifest,
+            &fixture.context.source,
+            &fixture.context.reviewed_legs,
+        )
+        .unwrap();
+        let mut combined = manifest.clone();
+        let sibling = combined["cases"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|row| row["environment"] == "hosted-cloudflare/http3")
+            .unwrap();
+        sibling["approval"] = row["approval"].clone();
+        let sibling_key = key(sibling);
+        combined["decisions"][0]["scope"] = json!([key(&row), sibling_key]);
+        assert!(
+            validate_manifest(
+                &combined,
+                &fixture.context.source,
+                &fixture.context.reviewed_legs
+            )
+            .is_err(),
+            "one deployment's N/A must not waive a sibling deployment"
+        );
+        for mutation in ["defer", "missing-evidence"] {
+            let mut invalid = scoped.clone();
+            if mutation == "defer" {
+                invalid["action"] = json!("defer");
+                let decisions = HashMap::from([(text(&row["approval"]).to_owned(), &invalid)]);
+                assert!(disposition(&row, &decisions).is_err());
+            } else {
+                invalid["evidence"] = Value::Null;
+                assert!(validate_approval(&invalid).is_err());
+            }
+        }
+    }
 
     #[test]
     fn empty_or_nonstring_approval_ids_cannot_waive_unrelated_blocking_legs() {

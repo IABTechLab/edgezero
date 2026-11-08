@@ -13,6 +13,13 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Qualify HTTP/3 per adapter/deployment, retaining the original Fastly HTTP/1.1/HTTP/2 legs.
+  Add three HTTP/3 disposition legs without dropping any existing identity; unknown support,
+  disabled deployments and missing clients cannot silently become N/A.
+- Apply Fastly SDK parity to content-bearing buffered responses and strict suppression to
+  HEAD/204/205/304. Separate six local parity comparisons from twelve bodiless reference
+  observations; retain historical failures and add bounded clean-EOF HTTP/1 HEAD checks.
+  Hosted qualification remains open; no production behavior or capability is promoted.
 - Repair exact selected-manifest execution for Spin and Fastly serve; reject native source
   overrides before launch. Fix macro name hygiene and CLI-only demo feature gates.
 - Reject ambiguous upstream payload TE+CL framing before body-limit decisions, preserve

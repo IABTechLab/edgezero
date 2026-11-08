@@ -322,9 +322,11 @@ fn checks(adapter: &str, port: u16, run: &Path, records: &mut Records) -> Result
     )?;
     let mut passed = true;
     let mut production_cases = 0;
-    let mut sdk_controls = 0;
+    let mut sdk_parity_cases = 0;
+    let mut sdk_references = 0;
     let mut sdk_failures = 0;
-    let mut expected_deviations = 0;
+    let mut reference_differences = 0;
+    let mut head_wire_cases = 0;
     for h2 in [false, true] {
         if h2 && adapter != "fastly" {
             continue;
@@ -356,6 +358,28 @@ fn checks(adapter: &str, port: u16, run: &Path, records: &mut Records) -> Result
             records.push(json!({"event":"framing-case","adapter":adapter,"case":case,"http2":h2,"client":client.as_ref().ok(),"status":if check.is_ok(){"pass"}else{"fail"},"error":check.as_ref().err().map(ToString::to_string),"qualification":false}))?;
             passed &= check.is_ok();
             production_cases += 1;
+            if head && !h2 {
+                let wire = super::response_headers::assembly_request(
+                    port,
+                    &format!("/progress/framing/{case}"),
+                    true,
+                    run,
+                    adapter == "cloudflare",
+                );
+                let check = wire
+                    .as_ref()
+                    .map_err(|error| error.to_string().into())
+                    .and_then(|response| {
+                        super::response_headers::validate_wire(response, true, 200, None)
+                    });
+                records.push(
+                    json!({"event":"framing-head-wire","adapter":adapter,"case":case,
+                    "client":wire.as_ref().ok(),"status":if check.is_ok(){"pass"}else{"fail"},
+                    "error":check.as_ref().err().map(ToString::to_string),"qualification":false}),
+                )?;
+                passed &= check.is_ok();
+                head_wire_cases += 1;
+            }
             if adapter == "fastly"
                 && !matches!(
                     case,
@@ -384,20 +408,38 @@ fn checks(adapter: &str, port: u16, run: &Path, records: &mut Records) -> Result
                         let reference = reference.as_ref().map_err(|error| error.to_string())?;
                         sdk_regression(case, h2, candidate, reference)
                     });
-                sdk_controls += 1;
-                sdk_failures += usize::from(parity.is_err());
-                expected_deviations += usize::from(matches!(regression, Ok("expected-failure")));
-                records.push(json!({"event":"framing-sdk-parity","adapter":adapter,"case":case,"http2":h2,"reference":reference.as_ref().ok(),"status":regression.as_ref().copied().unwrap_or("fail"),"parity_status":if parity.is_ok(){"pass"}else{"fail"},"error":parity.as_ref().err().map(ToString::to_string),"regression_error":regression.as_ref().err().map(ToString::to_string),"qualification":false}))?;
+                let parity_applies = sdk_parity_applies(case);
+                if parity_applies {
+                    sdk_parity_cases += 1;
+                    sdk_failures += usize::from(parity.is_err());
+                } else {
+                    sdk_references += 1;
+                    reference_differences +=
+                        usize::from(matches!(regression, Ok("expected-failure")));
+                }
+                records.push(json!({"event":if parity_applies {"framing-sdk-parity"}else{"framing-sdk-reference"},
+                    "adapter":adapter,"case":case,"http2":h2,"reference":reference.as_ref().ok(),
+                    "status":if regression.is_ok(){"pass"}else{"fail"},"parity_applicable":parity_applies,
+                    "matches_reference":parity.is_ok(),"reference_difference":parity.as_ref().err().map(ToString::to_string),
+                    "regression_error":regression.as_ref().err().map(ToString::to_string),"qualification":false}))?;
                 passed &= regression.is_ok();
             }
         }
     }
-    records.push(json!({"event":"framing-regression-summary","adapter":adapter,"status":if passed {"pass"} else {"fail"},"production_cases":production_cases,"sdk_controls":sdk_controls,"expected_deviations":expected_deviations,"sdk_parity_failures":sdk_failures,"sdk_parity_status":if sdk_failures==0 {"pass"} else {"fail"},"qualification":false}))?;
+    records.push(json!({"event":"framing-regression-summary","adapter":adapter,"status":if passed {"pass"} else {"fail"},
+        "production_cases":production_cases,"head_wire_cases":head_wire_cases,
+        "sdk_parity_cases":sdk_parity_cases,"sdk_reference_observations":sdk_references,
+        "sdk_reference_differences":reference_differences,"sdk_parity_failures":sdk_failures,
+        "sdk_parity_status":if sdk_failures==0 {"pass"} else {"fail"},"qualification":false}))?;
     records.push(json!({"event":"framing-hosted-gates","adapter":adapter,"status":"open","qualification":false,"reason":"local runtime results do not qualify hosted compression, deployed header delivery, or consumer response parity"}))?;
     require(
         passed,
         "one or more independent response-framing cases failed",
     )
+}
+
+fn sdk_parity_applies(case: &str) -> bool {
+    matches!(case, "buffered" | "empty" | "explicit")
 }
 
 fn validate_sdk_parity(candidate: &Value, reference: &Value) -> Result<()> {
@@ -502,6 +544,63 @@ fn sdk_regression(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sdk_parity_scope_excludes_all_twelve_bodiless_reference_observations() {
+        let mut parity = 0;
+        let mut references = 0;
+        for h2 in [false, true] {
+            for case in [
+                "buffered",
+                "empty",
+                "explicit",
+                "head",
+                "head-explicit",
+                "not-modified",
+                "not-modified-explicit",
+                "no-content",
+                "reset-content",
+            ] {
+                if sdk_parity_applies(case) {
+                    assert!(matches!(case, "buffered" | "empty" | "explicit"));
+                    parity += 1;
+                } else {
+                    let (candidate, mut reference) = known_sdk_deviation(case, h2);
+                    if !h2
+                        && matches!(
+                            case,
+                            "not-modified" | "not-modified-explicit" | "no-content"
+                        )
+                    {
+                        reference = candidate.clone();
+                    }
+                    assert!(sdk_regression(case, h2, &candidate, &reference).is_ok());
+                    references += 1;
+                }
+            }
+        }
+        assert_eq!((parity, references), (6, 12));
+    }
+
+    #[test]
+    fn framing_head_wire_requires_clean_eof_not_a_header_only_observation() {
+        let valid = json!({"protocol":"HTTP/1.1","status":200,"headers":[],
+            "body":"","eof":true,"capture_error":null});
+        super::super::response_headers::validate_wire(&valid, true, 200, None).unwrap();
+        for (field, wrong) in [
+            ("body", json!("x")),
+            ("body", Value::Null),
+            ("eof", json!(false)),
+            ("eof", Value::Null),
+            ("capture_error", json!("deadline")),
+        ] {
+            let mut changed = valid.clone();
+            changed[field] = wrong;
+            assert!(
+                super::super::response_headers::validate_wire(&changed, true, 200, None).is_err()
+            );
+        }
+    }
 
     fn known_sdk_deviation(case: &str, h2: bool) -> (Value, Value) {
         let head = case.starts_with("head");

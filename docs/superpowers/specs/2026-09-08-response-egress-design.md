@@ -617,9 +617,10 @@ validates the final response head before commit, and applies this precedence ord
    an explicitly supplied representation `Content-Length`; that value is not compared with the
    unsent body. Suppressed buffers and streams are dropped immediately and are never restored.
    Local Fastly SDK controls expose forbidden 205 payload delivery and HTTP/2 failures when a HEAD
-   body is restored for size inference. The requester approved preserving suppression and leaving
-   exact HEAD/205 SDK parity unqualified pending hosted evidence, rather than reproducing invalid
-   protocol behavior. This does not waive that parity gate or claim full EZ-18 acceptance.
+   body is restored for size inference. AG's 2026-11-08 amendment requires strict bodiless
+   suppression instead of SDK parity; content-bearing buffered parity remains required.
+   Historical failed controls remain unchanged. Hosted suppression/completion evidence and
+   full EZ-18 acceptance remain open.
 5. Only responses whose payload will be transmitted enter body-length validation.
 
 After suppression is resolved, every adapter applies these common field rules:
@@ -779,7 +780,8 @@ Suppressed HEAD/204/205/304 responses instead use an empty streaming handoff. Th
 buffer or stream is already dropped without polling; no representation bytes are restored or
 staged. This prevents the local HTTP/2 host from mistaking a known zero-byte suppressed payload
 for a representation `Content-Length: 0`. Explicit representation lengths still reach the host,
-whose Automatic framing may omit them. Exact bodyless SDK parity remains unqualified.
+whose Automatic framing may omit them. Bodiless SDK controls are reference observations under
+the approved amendment, not parity acceptance; actual zero-payload/completion proof remains required.
 
 Actual streams use `stream_to_client`, obtaining an unbuffered `StreamingBodyHandle`. Manual
 framing is restricted to a transmitted declared-length stream without any `x-compress-hint` field.

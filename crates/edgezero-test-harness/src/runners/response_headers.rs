@@ -496,7 +496,12 @@ fn values<'a>(response: &'a Value, name: &str) -> Result<Vec<&'a str>> {
         .collect()
 }
 
-fn validate_wire(response: &Value, head: bool, status: u16, source: Option<&str>) -> Result<()> {
+pub(super) fn validate_wire(
+    response: &Value,
+    head: bool,
+    status: u16,
+    source: Option<&str>,
+) -> Result<()> {
     require(
         response["protocol"] == "HTTP/1.1"
             && response["status"] == status

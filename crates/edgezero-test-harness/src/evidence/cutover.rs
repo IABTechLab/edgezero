@@ -17,7 +17,7 @@ mod reviewed_tests;
 
 const SPEC: &str = "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md";
 const INVENTORY: &str = "crates/edgezero-test-harness/acceptance/outbound-cutover-cases.json";
-const REVIEWED_LEGS: &str = "5ad5ad13cb3a0ea9d96307f1ec150649a21357490b4b9b26ae59027e0e539ec9";
+const REVIEWED_LEGS: &str = "4c2ca209d21e88c30ca11317ef5d39b81423ea06788c3199a5a36dceec3acae4";
 
 pub fn run(arguments: &[String]) -> Result<i32> {
     let (exit, output) = cli::execute(arguments, &crate::repository_root())?;

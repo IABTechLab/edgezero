@@ -57,6 +57,18 @@ gates open; loading a valid native manifest does not establish a timing or capab
 
 ## Outbound Cutover Gates
 
+### Qualification Scope Amendment (2026-11-08)
+
+AG approved HTTP/3 qualification per selected adapter/deployment and strict Fastly bodiless
+suppression instead of bodiless SDK parity. The current inventory has 255 criteria / 514 legs:
+all 511 original identities plus three HTTP/3 legs. All four HTTP/3 dispositions remain required
+while unresolved; only an evidenced single-leg requirement-change may approve unsupported N/A.
+Unknown support, disabled configuration or missing clients cannot waive a leg. See the
+[runbook](acceptance/ts-outbound-qualification-runbook.md#per-adapter-http3-receive-qualification).
+The framing suite separates six buffered parity comparisons from twelve bodiless reference
+observations. Historical counts, hashes and failed captures below retain their original meaning;
+neither this scope amendment nor a passing regression qualifies hosted behavior.
+
 ### Dispatch-Slack Retirement (2026-10-27)
 
 The requester authorized removing the fixed 25 ms dispatch-slack guard and its test injection
@@ -570,7 +582,7 @@ audited expectations. Static checks bypass runtime initialization and fixture-ru
 Their Rust tests replace the removed JavaScript checkers and forwarding tests; the existing
 full harness test command owns the regression coverage. Evidence tooling migration is separate.
 
-This CI prerequisite is outside the reviewed 511 environment legs. It grants no runtime
+This CI prerequisite is outside the reviewed 514 environment legs. It grants no runtime
 forwarding acceptance and does not adopt optional EZ-25.42's broader guide checker. P2's real
 GET/HEAD/POST behavior tests and provider/consumer qualification remain separate requirements.
 
@@ -617,7 +629,7 @@ paired native-path record and independent review; arbitrary measurement names do
 `--report` lists independently evaluable blockers by leg/rule using the same checks as
 `--release`, which still fails closed. Invalid or ambiguous entries receive no acceptance credit
 without hiding unrelated observations. Assembly does not interpret generic smoke JSONL as
-qualification results or substitute FNV fingerprints for SHA-256. All 511 reviewed inventory
+qualification results or substitute FNV fingerprints for SHA-256. All 514 reviewed inventory
 legs retain their existing state. No source freeze or hosted qualification is performed here.
 
 Use stable artifact snapshots: the tool rejects absolute/traversing paths, symlink escapes,
@@ -741,18 +753,25 @@ This separate suite reuses the progress artifacts and production entrypoints wit
 the outbound scheduling/coding case counts. It requires curl; Fastly additionally requires an
 HTTP/2-enabled build for prior-knowledge h2c. Bounded captures record protocol, headers and body
 artifacts for literal buffered, empty, explicit-length, stream, suppressed and fallback sources.
-Fastly compares framing against a direct pinned-SDK Automatic reference for the same buffered
-sources over HTTP/1.1 and HTTP/2. The expired case uses a response-owned absolute deadline.
+Fastly requires six content-bearing buffered framing comparisons against a direct pinned-SDK
+Automatic reference over HTTP/1.1 and HTTP/2. Twelve bodiless controls are reference observations,
+not SDK-parity acceptance. The expired case uses a response-owned absolute deadline.
 Each case is attempted independently; a failed case does not hide later observations.
-HEAD captures are header-only and report payload observation as unavailable, not a measured empty
-body. Failed curl requests retain bounded diagnostics and partial capture artifacts. Short sources
+The curl HEAD captures are header-only and report payload observation as unavailable, not a
+measured empty body. Two additional HTTP/1 HEAD/explicit-HEAD cases reuse the bounded wire
+capture and require clean EOF with zero actual post-header octets. HTTP/2 header-only captures
+do not prove zero DATA bytes; that hosted proof remains open. Failed curl requests retain
+bounded diagnostics and partial capture artifacts. Short sources
 require a terminal HTTP/1 partial-transfer/empty-reply or HTTP/2 stream-error witness; a client
 timeout is not a passing abort. Both transfers must succeed before an SDK parity case can pass.
 
-The pinned local SDK's bodyless controls currently fail: restoring a known HEAD body breaks
-HTTP/2, forbidden-status SDK payloads are not consistently suppressed, and representation framing
-differs from strict suppression. Fastly and `--adapter all` therefore remain nonzero. These failed
-controls are retained as open parity gates, not normalized away or inferred to be hosted behavior.
+The pinned local SDK's bodiless controls include nine recorded differences: known HEAD bodies
+break HTTP/2, forbidden-status payloads are not consistently suppressed, and framing differs
+from strict suppression. The approved 2026-11-08 amendment makes all twelve bodiless controls
+reference-only; exact known differences and the three matching controls are still checked, and
+unexpected changes fail. The summary counts six parity comparisons separately from twelve
+reference observations and their nine differences. Historical failed runs/captures are unchanged;
+a passing current regression does not relabel them or qualify hosted suppression/compression.
 
 These are working-tree local characterization runs. They do not qualify hosted Fastly compression,
 deployed Workers header delivery, consumer response parity, or Fastly outbound G2/P1. Hosted

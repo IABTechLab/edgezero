@@ -6,6 +6,14 @@ editing this source after freeze. This document changes no outbound contract or 
 
 ## Authorities and Entry Gates
 
+**Qualification amendment, 2026-11-08:** AG approved adapter/deployment-specific HTTP/3
+qualification and strict bodiless suppression instead of Fastly bodiless SDK parity. Keep all
+511 existing leg identities and three appended HTTP/3 legs, for 255 criteria / 514 legs. These
+are coverage identities, not passing executions. The nine historical SDK-reference failures
+remain unchanged; all twelve current bodiless SDK controls are reference observations. Six
+content-bearing comparisons retain strict parity. Hosted suppression/completion, compression
+and consumer content-bearing parity remain open.
+
 **Dispatch-slack retirement, 2026-10-27:** the requester authorized removing the fixed 25 ms
 dispatch-slack guard and its test injection helper. This supersedes older statements below that
 slack remains unchanged. Original absolute deadlines, timeout causes, late-result rejection, B31
@@ -30,8 +38,8 @@ still block qualification; an unknown horizon cannot satisfy their finite-bound 
 
 - [Requirements](../../../docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md)
   define acceptance; [G1 inventory](outbound-cutover-cases.json) maps criteria to environments,
-  sentinels, owners and applicability decisions. Its 255 criteria / 511 planned legs are a
-  coverage domain, **not 511 passing tests**.
+  sentinels, owners and applicability decisions. Its 255 criteria / 514 legs are a
+  coverage domain, **not 514 passing tests**. Use `acceptance --coverage` for current readiness.
 - [G2 feasibility](../../../docs/audits/2026-10-18-outbound-feasibility.md) remains failed.
   Stock pinned Viceroy timed readiness loses body errors. No blocking-read fallback,
   compatibility path or pin change is authorized by this runbook.
@@ -51,8 +59,9 @@ still block qualification; an unknown horizon cannot satisfy their finite-bound 
   owns Q2 source preparation, Q3 freeze/local acceptance, Q4a package acceptance, Q4b execution
   and Q5 publication. No candidate has been frozen or package accepted by this template.
 - The single-request Fastly qualification build and frozen-candidate exporter are implemented
-  below. Actual frozen/hosted execution and qualification remain open. Recorded Fastly SDK framing/bodyless parity
-  failures and Cloudflare front-proxy overflow-recovery failures are not waived.
+  below. Actual frozen/hosted execution and qualification remain open. Historical SDK bodyless
+  failures are not relabeled; their current obligation is strict suppression under the approved
+  amendment. Cloudflare front-proxy overflow-recovery failures are not waived.
 
 Do not start qualification until all prerequisite implementation, feasibility, policy and
 source-producing work is complete. Deployment additionally requires the actual execution
@@ -114,7 +123,7 @@ scripts/run_test_nonzero.sh outbound_evidence_assembly_retains_case_counts_and_h
 
 Expected: nonzero Rust test listings with zero failures, exactly one passing non-ignored
 forwarding doctest, exactly one passing named Rust sentinel, and inventory totals of
-255 criteria / 511 planned legs / `qualified:false`. Record actual test counts for the frozen
+255 criteria / 514 legs / `qualified:false`. Record actual test counts for the frozen
 candidate. A manifest pass deliberately permits pending decisions and planned commands.
 
 Also run Q2's five primary Rust gates, excluded demo/generated/fixture checks, seven adapter
@@ -165,7 +174,7 @@ scripts/test_integration.sh response-egress --validate CLIENTS.json EVENTS.json
 Use the README's strict target JSON shape with actual allowlisted HTTPS origin, SDK/runtime,
 compatibility, candidate, artifact and deployment facts. Thirteen scheduled scenarios plus
 thirteen healthy recovery requests produce **26 client observations**; a complete fixture run
-requires four lifecycle events per request, **104 events**. These are not the 511 G1 legs or
+requires four lifecycle events per request, **104 events**. These are not the 514 G1 legs or
 measurement sample counts. No outbound backend is contacted by the `/qualification/*` routes.
 
 Collection intentionally exits **2**, not a qualification pass. Export complete unsampled
@@ -254,9 +263,44 @@ The same package retains `/progress/forward/{send,late,outbound-deadline,inbound
 for EZ-1: `x-origin` is the allowlisted `/forward/send/TOKEN` target. The last two set a
 200 ms outbound timeout; `inbound-deadline` also admits a 100 ms body-read budget, while
 `late` admits an already expired read deadline. Use real absent/CL:0/chunked-empty bodies,
-never-ready chunked GETs and actual HTTP/1/2 (and HTTP/3 only where applicable) clients;
+never-ready chunked GETs and actual HTTP/1/2 clients;
 the report retains observed duration without upgrading Fastly's non-preemptible read semantics.
 All original forwarding checks remain in the wire runner.
+
+### Per-Adapter HTTP/3 Receive Qualification
+
+EZ-1 acceptance 02 keeps the original Fastly staging HTTP/1.1 and HTTP/2 legs. Its four
+HTTP/3 slots are `hosted-{axum,cloudflare,fastly,spin}/http3`, each bound to one explicitly
+selected deployment/runtime/configuration, not to a consumer's staging setup. All four
+pending dispositions are required. The direct Axum listener is HTTP/1-only; selecting a
+reverse proxy means naming and qualifying that separate receive boundary. Local workerd,
+Viceroy and Spin HTTP/1 fixtures do not prove hosted HTTP/3 support or lack of support.
+
+For a supported selected deployment, record a real client's negotiated HTTP/3 version,
+adapter/SDK/runtime/build/service/configuration identities, the existing bodiless GET/HEAD
+and chunked-empty-equivalent assertions, token-correlated origin receipts and original
+read/outbound deadline observations. For example, an HTTP/3-enabled curl can record the
+actual version without silently falling back:
+
+```sh
+curl --http3-only --silent --show-error --max-time 5 --dump-header get.headers --output get.body --write-out '%{http_version}\n' "$QUALIFICATION_URL/progress/forward/send"
+curl --http3-only --silent --show-error --max-time 5 --head --dump-header head.headers --output head.headers-only --write-out '%{http_version}\n' "$QUALIFICATION_URL/progress/forward/late"
+```
+
+These are client invocation examples, not complete passing acceptance commands: supply the
+existing allowlisted origin/token inputs and deadline scenarios, verify the recorded version
+is HTTP/3, and retain server-side receive/host reports where available. A HEAD `--head` capture
+alone does not prove zero DATA bytes. Use a protocol-aware full-stream capture for that proof.
+The Node HTTPS egress collector, a proxy's upstream HTTP version and the guest's normalized
+version are not HTTP/3 receive proof.
+
+For proved unsupported deployments, retain the exact boundary/configuration, reason and
+evidence in a separately attributed `requirement-change` decision with a scope containing
+only that leg. Its `approved-deferred` mapping records N/A, not a passed execution. The
+requirements amendment does not approve these four decisions in advance. Unknown support,
+a disabled service option, inaccessible deployment or unavailable HTTP/3 client is unresolved,
+not unsupported; ordinary `defer` cannot waive these blocking dispositions. Qualifying a
+different deployment requires fresh applicability and execution evidence.
 
 EZ-6 uses the same existing `/progress/lifetimes/{slow-origin,fast-origin,body-read-arrivals,trickling-slot,send-during-batch,batch-write-deadline}`
 controllers and independent `/lifetimes/TOKEN/CASE` origins as the lifetime suite. Admission

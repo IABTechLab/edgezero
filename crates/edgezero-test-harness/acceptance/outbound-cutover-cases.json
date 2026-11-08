@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
-  "source_digest": "fb23549f243eee5f83a9b370c627b143b48fb1373ded8063d07f0f34b0be44f1",
+  "source_digest": "7212a3baeedf32598b1bd7eedf019554e2f7749334689c0202ef237af9843bff",
   "status": "Required-local acceptance reconciliation in progress. Run the existing evidence checker with --coverage for derived binding counts and explicit local, external, conditional and unpromoted follow-up scope. Readiness is not qualification or applicability approval. Mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2). Hosted and exact-candidate qualification remain separate; no EZ-25.42 adoption.",
   "external_prerequisites": [
     {
@@ -22,7 +22,7 @@
   ],
   "decisions": [
     {
-      "id": "hosted HTTP3 enabled@hosted-fastly/http3",
+      "id": "HTTP3 receive support@hosted-fastly/http3",
       "status": "pending",
       "scope": [
         "EZ-1/acceptance/02@hosted-fastly/http3"
@@ -712,6 +712,45 @@
       "consumer_approver": null,
       "date": null,
       "evidence": null
+    },
+    {
+      "id": "HTTP3 receive support@hosted-axum/http3",
+      "status": "pending",
+      "scope": [
+        "EZ-1/acceptance/02@hosted-axum/http3"
+      ],
+      "owner": "P2",
+      "ci_owner": null,
+      "edgezero_approver": null,
+      "consumer_approver": null,
+      "date": null,
+      "evidence": null
+    },
+    {
+      "id": "HTTP3 receive support@hosted-cloudflare/http3",
+      "status": "pending",
+      "scope": [
+        "EZ-1/acceptance/02@hosted-cloudflare/http3"
+      ],
+      "owner": "P2",
+      "ci_owner": null,
+      "edgezero_approver": null,
+      "consumer_approver": null,
+      "date": null,
+      "evidence": null
+    },
+    {
+      "id": "HTTP3 receive support@hosted-spin/http3",
+      "status": "pending",
+      "scope": [
+        "EZ-1/acceptance/02@hosted-spin/http3"
+      ],
+      "owner": "P2",
+      "ci_owner": null,
+      "edgezero_approver": null,
+      "consumer_approver": null,
+      "date": null,
+      "evidence": null
     }
   ],
   "cases": [
@@ -857,7 +896,7 @@
     {
       "case_id": "EZ-1/acceptance/02",
       "source_id": "EZ-1/acceptance/02",
-      "source_digest": "34cf488bc053f6cb7567e6c21e40760153b8216628e482adab65b510c971aad3",
+      "source_digest": "14eaed2885507ca5f996318487cd764a2e75c23d62a8c6f19541ee8025dd507e",
       "requirement_ids": [
         "EZ-1.1",
         "EZ-1.2",
@@ -883,7 +922,7 @@
       "substep": "EZ-1-acceptance-02-hosted-fastly-http1",
       "sentinel": "ez_1_acceptance_02_hosted_fastly_http1",
       "command": "hosted-runbook EZ-1/acceptance/02 --environment hosted-fastly/http1 --sentinel ez_1_acceptance_02_hosted_fastly_http1",
-      "expected": "Environment is hosted Fastly, Trusted Server staging. Repeat criterion 1 with HTTP/1.1 and HTTP/2 clients that send no `content-length`. Repeat it with an HTTP/3 client where the staging service has HTTP/3 enabled. Whether a Fastly Compute service serves HTTP/3 to clients is **Unverified**. Where it does not, the record states that HTTP/3 was not available and marks the HTTP/3 leg not applicable. Record per protocol whether a bodiless forward still succeeds after the inbound read deadline has passed, which shows whether EZ-1.2 held.",
+      "expected": "Environment is hosted Fastly, Trusted Server staging, for the original HTTP/1.1 and HTTP/2 legs: repeat criterion 1 with clients that send no `content-length`. Separately qualify HTTP/3 receive behavior for each selected Axum, Cloudflare, Fastly and Spin adapter/deployment, without depending on a consuming application's staging setup. Where the selected deployment supports HTTP/3, repeat criterion 1 with a real HTTP/3 client and retain negotiated-protocol proof, adapter/runtime/build/deployment/configuration identities, origin receipts and the original deadline checks. Where it cannot support HTTP/3, record the reason and evidence through an attributed requirement-change decision scoped only to that adapter/deployment leg; report approved N/A, not a passed execution. Unknown support, disabled service configuration, inaccessible deployment or unavailable client remains unresolved, not N/A. A normalized guest HTTP version is not receive-protocol proof. Record per protocol whether a bodiless forward still succeeds after the inbound read deadline has passed, which shows whether EZ-1.2 held.",
       "artifact_path": "outbound/EZ-1/acceptance/02/hosted-fastly/http1.json",
       "implementation": "planned",
       "comparison": false
@@ -891,7 +930,7 @@
     {
       "case_id": "EZ-1/acceptance/02",
       "source_id": "EZ-1/acceptance/02",
-      "source_digest": "34cf488bc053f6cb7567e6c21e40760153b8216628e482adab65b510c971aad3",
+      "source_digest": "14eaed2885507ca5f996318487cd764a2e75c23d62a8c6f19541ee8025dd507e",
       "requirement_ids": [
         "EZ-1.1",
         "EZ-1.2",
@@ -917,7 +956,7 @@
       "substep": "EZ-1-acceptance-02-hosted-fastly-http2",
       "sentinel": "ez_1_acceptance_02_hosted_fastly_http2",
       "command": "hosted-runbook EZ-1/acceptance/02 --environment hosted-fastly/http2 --sentinel ez_1_acceptance_02_hosted_fastly_http2",
-      "expected": "Environment is hosted Fastly, Trusted Server staging. Repeat criterion 1 with HTTP/1.1 and HTTP/2 clients that send no `content-length`. Repeat it with an HTTP/3 client where the staging service has HTTP/3 enabled. Whether a Fastly Compute service serves HTTP/3 to clients is **Unverified**. Where it does not, the record states that HTTP/3 was not available and marks the HTTP/3 leg not applicable. Record per protocol whether a bodiless forward still succeeds after the inbound read deadline has passed, which shows whether EZ-1.2 held.",
+      "expected": "Environment is hosted Fastly, Trusted Server staging, for the original HTTP/1.1 and HTTP/2 legs: repeat criterion 1 with clients that send no `content-length`. Separately qualify HTTP/3 receive behavior for each selected Axum, Cloudflare, Fastly and Spin adapter/deployment, without depending on a consuming application's staging setup. Where the selected deployment supports HTTP/3, repeat criterion 1 with a real HTTP/3 client and retain negotiated-protocol proof, adapter/runtime/build/deployment/configuration identities, origin receipts and the original deadline checks. Where it cannot support HTTP/3, record the reason and evidence through an attributed requirement-change decision scoped only to that adapter/deployment leg; report approved N/A, not a passed execution. Unknown support, disabled service configuration, inaccessible deployment or unavailable client remains unresolved, not N/A. A normalized guest HTTP version is not receive-protocol proof. Record per protocol whether a bodiless forward still succeeds after the inbound read deadline has passed, which shows whether EZ-1.2 held.",
       "artifact_path": "outbound/EZ-1/acceptance/02/hosted-fastly/http2.json",
       "implementation": "planned",
       "comparison": false
@@ -925,7 +964,7 @@
     {
       "case_id": "EZ-1/acceptance/02",
       "source_id": "EZ-1/acceptance/02",
-      "source_digest": "34cf488bc053f6cb7567e6c21e40760153b8216628e482adab65b510c971aad3",
+      "source_digest": "14eaed2885507ca5f996318487cd764a2e75c23d62a8c6f19541ee8025dd507e",
       "requirement_ids": [
         "EZ-1.1",
         "EZ-1.2",
@@ -943,15 +982,15 @@
         "EZ-1.14"
       ],
       "environment": "hosted-fastly/http3",
-      "applicability": "conditional",
-      "approval": "hosted HTTP3 enabled@hosted-fastly/http3",
-      "condition": "hosted HTTP3 enabled",
+      "applicability": "blocking",
+      "approval": "HTTP3 receive support@hosted-fastly/http3",
+      "condition": "HTTP3 receive applicability requires adapter/deployment evidence",
       "owner": "EdgeZero",
       "task": "P2",
       "substep": "EZ-1-acceptance-02-hosted-fastly-http3",
       "sentinel": "ez_1_acceptance_02_hosted_fastly_http3",
       "command": "hosted-runbook EZ-1/acceptance/02 --environment hosted-fastly/http3 --sentinel ez_1_acceptance_02_hosted_fastly_http3",
-      "expected": "Environment is hosted Fastly, Trusted Server staging. Repeat criterion 1 with HTTP/1.1 and HTTP/2 clients that send no `content-length`. Repeat it with an HTTP/3 client where the staging service has HTTP/3 enabled. Whether a Fastly Compute service serves HTTP/3 to clients is **Unverified**. Where it does not, the record states that HTTP/3 was not available and marks the HTTP/3 leg not applicable. Record per protocol whether a bodiless forward still succeeds after the inbound read deadline has passed, which shows whether EZ-1.2 held.",
+      "expected": "Environment is hosted Fastly, Trusted Server staging, for the original HTTP/1.1 and HTTP/2 legs: repeat criterion 1 with clients that send no `content-length`. Separately qualify HTTP/3 receive behavior for each selected Axum, Cloudflare, Fastly and Spin adapter/deployment, without depending on a consuming application's staging setup. Where the selected deployment supports HTTP/3, repeat criterion 1 with a real HTTP/3 client and retain negotiated-protocol proof, adapter/runtime/build/deployment/configuration identities, origin receipts and the original deadline checks. Where it cannot support HTTP/3, record the reason and evidence through an attributed requirement-change decision scoped only to that adapter/deployment leg; report approved N/A, not a passed execution. Unknown support, disabled service configuration, inaccessible deployment or unavailable client remains unresolved, not N/A. A normalized guest HTTP version is not receive-protocol proof. Record per protocol whether a bodiless forward still succeeds after the inbound read deadline has passed, which shows whether EZ-1.2 held.",
       "artifact_path": "outbound/EZ-1/acceptance/02/hosted-fastly/http3.json",
       "implementation": "planned",
       "comparison": false
@@ -15180,7 +15219,7 @@
     {
       "case_id": "EZ-18/acceptance/03",
       "source_id": "EZ-18/acceptance/03",
-      "source_digest": "b0f560193d9b89adddeda14327d46ad84a504177aece21342e9b7396533406d8",
+      "source_digest": "2f0a4cd2f6f42d052f06bed19693ff78d3185ceb3681ed4ba7d0da1a8b344dc1",
       "requirement_ids": [
         "EZ-18.1",
         "EZ-18.2",
@@ -15200,16 +15239,16 @@
       "substep": "EZ-18-acceptance-03-hosted-fastly-http1",
       "sentinel": "ez_18_acceptance_03_hosted_fastly_http1",
       "command": "hosted-runbook EZ-18/acceptance/03 --environment hosted-fastly/http1 --sentinel ez_18_acceptance_03_hosted_fastly_http1",
-      "expected": "Hosted Fastly, HTTP/1.1 and HTTP/2, on TS's staging service. For a buffered 200, a buffered 200 with `x-compress-hint: on` requested with `Accept-Encoding: gzip`, HEAD and conditional-GET 304 of a buffered route, and a 204, the framing equals that of TS's pre-cut build. The compressed body decompresses to the expected SHA-256. Also exercise a streamed compressible response with its source `Content-Length` declared and `x-compress-hint: on`, requested with gzip: verify the host-compressed body decompresses to the source SHA-256 and has valid framing. Record the source length, transmitted byte count, coding, and any client-visible length; that length, when present, equals the transmitted count, not the source count.",
+      "expected": "Hosted Fastly, HTTP/1.1 and HTTP/2, on TS's staging service. For a buffered 200 and a buffered 200 with `x-compress-hint: on` requested with `Accept-Encoding: gzip`, the framing equals that of TS's pre-cut build. The compressed body decompresses to the expected SHA-256. HEAD and conditional-GET 304 of a buffered route, 204 and 205 instead satisfy EZ-18.6 strict suppression, not pre-cut SDK framing parity: retain actual zero-payload/clean-completion proof, no synthesized length, and separate guest handoff/client-visible observations for supplied HEAD/304 lengths. SDK controls for these bodiless cases are reference observations only. Also exercise a streamed compressible response with its source `Content-Length` declared and `x-compress-hint: on`, requested with gzip: verify the host-compressed body decompresses to the source SHA-256 and has valid framing. Record the source length, transmitted byte count, coding, and any client-visible length; that length, when present, equals the transmitted count, not the source count.",
       "artifact_path": "outbound/EZ-18/acceptance/03/hosted-fastly/http1.json",
       "implementation": "planned",
       "comparison": false,
-      "assertion_scope": "Buffered and bodyless parity only"
+      "assertion_scope": "Content-bearing buffered parity and strict bodiless suppression only"
     },
     {
       "case_id": "EZ-18/acceptance/03",
       "source_id": "EZ-18/acceptance/03",
-      "source_digest": "b0f560193d9b89adddeda14327d46ad84a504177aece21342e9b7396533406d8",
+      "source_digest": "2f0a4cd2f6f42d052f06bed19693ff78d3185ceb3681ed4ba7d0da1a8b344dc1",
       "requirement_ids": [
         "EZ-18.1",
         "EZ-18.2",
@@ -15229,11 +15268,11 @@
       "substep": "EZ-18-acceptance-03-hosted-fastly-http2",
       "sentinel": "ez_18_acceptance_03_hosted_fastly_http2",
       "command": "hosted-runbook EZ-18/acceptance/03 --environment hosted-fastly/http2 --sentinel ez_18_acceptance_03_hosted_fastly_http2",
-      "expected": "Hosted Fastly, HTTP/1.1 and HTTP/2, on TS's staging service. For a buffered 200, a buffered 200 with `x-compress-hint: on` requested with `Accept-Encoding: gzip`, HEAD and conditional-GET 304 of a buffered route, and a 204, the framing equals that of TS's pre-cut build. The compressed body decompresses to the expected SHA-256. Also exercise a streamed compressible response with its source `Content-Length` declared and `x-compress-hint: on`, requested with gzip: verify the host-compressed body decompresses to the source SHA-256 and has valid framing. Record the source length, transmitted byte count, coding, and any client-visible length; that length, when present, equals the transmitted count, not the source count.",
+      "expected": "Hosted Fastly, HTTP/1.1 and HTTP/2, on TS's staging service. For a buffered 200 and a buffered 200 with `x-compress-hint: on` requested with `Accept-Encoding: gzip`, the framing equals that of TS's pre-cut build. The compressed body decompresses to the expected SHA-256. HEAD and conditional-GET 304 of a buffered route, 204 and 205 instead satisfy EZ-18.6 strict suppression, not pre-cut SDK framing parity: retain actual zero-payload/clean-completion proof, no synthesized length, and separate guest handoff/client-visible observations for supplied HEAD/304 lengths. SDK controls for these bodiless cases are reference observations only. Also exercise a streamed compressible response with its source `Content-Length` declared and `x-compress-hint: on`, requested with gzip: verify the host-compressed body decompresses to the source SHA-256 and has valid framing. Record the source length, transmitted byte count, coding, and any client-visible length; that length, when present, equals the transmitted count, not the source count.",
       "artifact_path": "outbound/EZ-18/acceptance/03/hosted-fastly/http2.json",
       "implementation": "planned",
       "comparison": false,
-      "assertion_scope": "Buffered and bodyless parity only"
+      "assertion_scope": "Content-bearing buffered parity and strict bodiless suppression only"
     },
     {
       "case_id": "EZ-18/acceptance/04",
@@ -15350,7 +15389,7 @@
     {
       "case_id": "EZ-18/acceptance/06",
       "source_id": "EZ-18/acceptance/06",
-      "source_digest": "e9ec6d77ffb42e8cffba348fc410814737d5d9981198fec67a969e12860661f8",
+      "source_digest": "bde6cfb5dfc8a0820bff049e1dd3ca8b4f0262612e65c199fde2acb01937a287",
       "requirement_ids": [
         "EZ-18.1",
         "EZ-18.2",
@@ -15370,7 +15409,7 @@
       "substep": "EZ-18-acceptance-06-consumer-viceroy",
       "sentinel": "ez_18_acceptance_06_consumer_viceroy",
       "command": "consumer-runbook EZ-18/acceptance/06 --environment consumer-viceroy --sentinel ez_18_acceptance_06_consumer_viceroy",
-      "expected": "Trusted Server, Viceroy 0.21.0 and hosted Fastly. Auction JSON, discovery JSON, a tsjs bundle and an error page match the pre-cut build's `content-length` and `transfer-encoding`. Publisher HEAD and 304 match the pre-cut build.",
+      "expected": "Trusted Server, Viceroy 0.21.0 and hosted Fastly. Auction JSON, discovery JSON, a tsjs bundle and an error page match the pre-cut build's `content-length` and `transfer-encoding`. Publisher HEAD and 304 satisfy EZ-18.6 strict suppression with actual zero-payload/clean-completion proof, no synthesized length, and separate guest handoff/client-visible observations of supplied representation lengths; they need not reproduce pre-cut SDK framing.",
       "artifact_path": "outbound/EZ-18/acceptance/06/consumer-viceroy.json",
       "implementation": "planned",
       "comparison": false
@@ -15378,7 +15417,7 @@
     {
       "case_id": "EZ-18/acceptance/06",
       "source_id": "EZ-18/acceptance/06",
-      "source_digest": "e9ec6d77ffb42e8cffba348fc410814737d5d9981198fec67a969e12860661f8",
+      "source_digest": "bde6cfb5dfc8a0820bff049e1dd3ca8b4f0262612e65c199fde2acb01937a287",
       "requirement_ids": [
         "EZ-18.1",
         "EZ-18.2",
@@ -15398,7 +15437,7 @@
       "substep": "EZ-18-acceptance-06-consumer-hosted-fastly",
       "sentinel": "ez_18_acceptance_06_consumer_hosted_fastly",
       "command": "consumer-runbook EZ-18/acceptance/06 --environment consumer-hosted-fastly --sentinel ez_18_acceptance_06_consumer_hosted_fastly",
-      "expected": "Trusted Server, Viceroy 0.21.0 and hosted Fastly. Auction JSON, discovery JSON, a tsjs bundle and an error page match the pre-cut build's `content-length` and `transfer-encoding`. Publisher HEAD and 304 match the pre-cut build.",
+      "expected": "Trusted Server, Viceroy 0.21.0 and hosted Fastly. Auction JSON, discovery JSON, a tsjs bundle and an error page match the pre-cut build's `content-length` and `transfer-encoding`. Publisher HEAD and 304 satisfy EZ-18.6 strict suppression with actual zero-payload/clean-completion proof, no synthesized length, and separate guest handoff/client-visible observations of supplied representation lengths; they need not reproduce pre-cut SDK framing.",
       "artifact_path": "outbound/EZ-18/acceptance/06/consumer-hosted-fastly.json",
       "implementation": "planned",
       "comparison": false
@@ -19003,7 +19042,7 @@
     {
       "case_id": "EZ-18/acceptance/03b",
       "source_id": "EZ-18/acceptance/03",
-      "source_digest": "b0f560193d9b89adddeda14327d46ad84a504177aece21342e9b7396533406d8",
+      "source_digest": "2f0a4cd2f6f42d052f06bed19693ff78d3185ceb3681ed4ba7d0da1a8b344dc1",
       "requirement_ids": [
         "EZ-18.5"
       ],
@@ -19016,7 +19055,7 @@
       "substep": "EZ-18-acceptance-03-hosted-fastly-http1",
       "sentinel": "ez_18_acceptance_03_hosted_fastly_http1_streamed_transform",
       "command": "hosted-runbook EZ-18/acceptance/03b --environment hosted-fastly/http1 --sentinel ez_18_acceptance_03_hosted_fastly_http1_streamed_transform",
-      "expected": "Hosted Fastly, HTTP/1.1 and HTTP/2, on TS's staging service. For a buffered 200, a buffered 200 with `x-compress-hint: on` requested with `Accept-Encoding: gzip`, HEAD and conditional-GET 304 of a buffered route, and a 204, the framing equals that of TS's pre-cut build. The compressed body decompresses to the expected SHA-256. Also exercise a streamed compressible response with its source `Content-Length` declared and `x-compress-hint: on`, requested with gzip: verify the host-compressed body decompresses to the source SHA-256 and has valid framing. Record the source length, transmitted byte count, coding, and any client-visible length; that length, when present, equals the transmitted count, not the source count.",
+      "expected": "Hosted Fastly, HTTP/1.1 and HTTP/2, on TS's staging service. For a buffered 200 and a buffered 200 with `x-compress-hint: on` requested with `Accept-Encoding: gzip`, the framing equals that of TS's pre-cut build. The compressed body decompresses to the expected SHA-256. HEAD and conditional-GET 304 of a buffered route, 204 and 205 instead satisfy EZ-18.6 strict suppression, not pre-cut SDK framing parity: retain actual zero-payload/clean-completion proof, no synthesized length, and separate guest handoff/client-visible observations for supplied HEAD/304 lengths. SDK controls for these bodiless cases are reference observations only. Also exercise a streamed compressible response with its source `Content-Length` declared and `x-compress-hint: on`, requested with gzip: verify the host-compressed body decompresses to the source SHA-256 and has valid framing. Record the source length, transmitted byte count, coding, and any client-visible length; that length, when present, equals the transmitted count, not the source count.",
       "artifact_path": "outbound/EZ-18/acceptance/03b/hosted-fastly/http1.json",
       "implementation": "planned",
       "comparison": false,
@@ -19025,7 +19064,7 @@
     {
       "case_id": "EZ-18/acceptance/03b",
       "source_id": "EZ-18/acceptance/03",
-      "source_digest": "b0f560193d9b89adddeda14327d46ad84a504177aece21342e9b7396533406d8",
+      "source_digest": "2f0a4cd2f6f42d052f06bed19693ff78d3185ceb3681ed4ba7d0da1a8b344dc1",
       "requirement_ids": [
         "EZ-18.5"
       ],
@@ -19038,7 +19077,7 @@
       "substep": "EZ-18-acceptance-03-hosted-fastly-http2",
       "sentinel": "ez_18_acceptance_03_hosted_fastly_http2_streamed_transform",
       "command": "hosted-runbook EZ-18/acceptance/03b --environment hosted-fastly/http2 --sentinel ez_18_acceptance_03_hosted_fastly_http2_streamed_transform",
-      "expected": "Hosted Fastly, HTTP/1.1 and HTTP/2, on TS's staging service. For a buffered 200, a buffered 200 with `x-compress-hint: on` requested with `Accept-Encoding: gzip`, HEAD and conditional-GET 304 of a buffered route, and a 204, the framing equals that of TS's pre-cut build. The compressed body decompresses to the expected SHA-256. Also exercise a streamed compressible response with its source `Content-Length` declared and `x-compress-hint: on`, requested with gzip: verify the host-compressed body decompresses to the source SHA-256 and has valid framing. Record the source length, transmitted byte count, coding, and any client-visible length; that length, when present, equals the transmitted count, not the source count.",
+      "expected": "Hosted Fastly, HTTP/1.1 and HTTP/2, on TS's staging service. For a buffered 200 and a buffered 200 with `x-compress-hint: on` requested with `Accept-Encoding: gzip`, the framing equals that of TS's pre-cut build. The compressed body decompresses to the expected SHA-256. HEAD and conditional-GET 304 of a buffered route, 204 and 205 instead satisfy EZ-18.6 strict suppression, not pre-cut SDK framing parity: retain actual zero-payload/clean-completion proof, no synthesized length, and separate guest handoff/client-visible observations for supplied HEAD/304 lengths. SDK controls for these bodiless cases are reference observations only. Also exercise a streamed compressible response with its source `Content-Length` declared and `x-compress-hint: on`, requested with gzip: verify the host-compressed body decompresses to the source SHA-256 and has valid framing. Record the source length, transmitted byte count, coding, and any client-visible length; that length, when present, equals the transmitted count, not the source count.",
       "artifact_path": "outbound/EZ-18/acceptance/03b/hosted-fastly/http2.json",
       "implementation": "planned",
       "comparison": false,
@@ -19108,6 +19147,108 @@
       "command": "node --test scripts/check_outbound_docs_contract.test.mjs",
       "expected": "Environment is EdgeZero CI on the recorded commit. Given the fixes, when EdgeZero's documentation checks run (`scripts/check_outbound_docs_contract.mjs`, `scripts/check_outbound_legacy_api.sh`, and the docs formatter), then they pass.",
       "artifact_path": "outbound/EZ-25/acceptance/05b/edgezero-ci.json",
+      "implementation": "planned",
+      "comparison": false
+    },
+    {
+      "case_id": "EZ-1/acceptance/02",
+      "source_id": "EZ-1/acceptance/02",
+      "source_digest": "14eaed2885507ca5f996318487cd764a2e75c23d62a8c6f19541ee8025dd507e",
+      "requirement_ids": [
+        "EZ-1.1",
+        "EZ-1.2",
+        "EZ-1.3",
+        "EZ-1.4",
+        "EZ-1.5",
+        "EZ-1.6",
+        "EZ-1.7",
+        "EZ-1.8",
+        "EZ-1.9",
+        "EZ-1.10",
+        "EZ-1.11",
+        "EZ-1.12",
+        "EZ-1.13",
+        "EZ-1.14"
+      ],
+      "environment": "hosted-axum/http3",
+      "applicability": "blocking",
+      "approval": "HTTP3 receive support@hosted-axum/http3",
+      "condition": "HTTP3 receive applicability requires adapter/deployment evidence",
+      "owner": "EdgeZero",
+      "task": "P2",
+      "substep": "EZ-1-acceptance-02-hosted-axum-http3",
+      "sentinel": "ez_1_acceptance_02_hosted_axum_http3",
+      "command": "hosted-runbook EZ-1/acceptance/02 --environment hosted-axum/http3 --sentinel ez_1_acceptance_02_hosted_axum_http3",
+      "expected": "Environment is hosted Fastly, Trusted Server staging, for the original HTTP/1.1 and HTTP/2 legs: repeat criterion 1 with clients that send no `content-length`. Separately qualify HTTP/3 receive behavior for each selected Axum, Cloudflare, Fastly and Spin adapter/deployment, without depending on a consuming application's staging setup. Where the selected deployment supports HTTP/3, repeat criterion 1 with a real HTTP/3 client and retain negotiated-protocol proof, adapter/runtime/build/deployment/configuration identities, origin receipts and the original deadline checks. Where it cannot support HTTP/3, record the reason and evidence through an attributed requirement-change decision scoped only to that adapter/deployment leg; report approved N/A, not a passed execution. Unknown support, disabled service configuration, inaccessible deployment or unavailable client remains unresolved, not N/A. A normalized guest HTTP version is not receive-protocol proof. Record per protocol whether a bodiless forward still succeeds after the inbound read deadline has passed, which shows whether EZ-1.2 held.",
+      "artifact_path": "outbound/EZ-1/acceptance/02/hosted-axum/http3.json",
+      "implementation": "planned",
+      "comparison": false
+    },
+    {
+      "case_id": "EZ-1/acceptance/02",
+      "source_id": "EZ-1/acceptance/02",
+      "source_digest": "14eaed2885507ca5f996318487cd764a2e75c23d62a8c6f19541ee8025dd507e",
+      "requirement_ids": [
+        "EZ-1.1",
+        "EZ-1.2",
+        "EZ-1.3",
+        "EZ-1.4",
+        "EZ-1.5",
+        "EZ-1.6",
+        "EZ-1.7",
+        "EZ-1.8",
+        "EZ-1.9",
+        "EZ-1.10",
+        "EZ-1.11",
+        "EZ-1.12",
+        "EZ-1.13",
+        "EZ-1.14"
+      ],
+      "environment": "hosted-cloudflare/http3",
+      "applicability": "blocking",
+      "approval": "HTTP3 receive support@hosted-cloudflare/http3",
+      "condition": "HTTP3 receive applicability requires adapter/deployment evidence",
+      "owner": "EdgeZero",
+      "task": "P2",
+      "substep": "EZ-1-acceptance-02-hosted-cloudflare-http3",
+      "sentinel": "ez_1_acceptance_02_hosted_cloudflare_http3",
+      "command": "hosted-runbook EZ-1/acceptance/02 --environment hosted-cloudflare/http3 --sentinel ez_1_acceptance_02_hosted_cloudflare_http3",
+      "expected": "Environment is hosted Fastly, Trusted Server staging, for the original HTTP/1.1 and HTTP/2 legs: repeat criterion 1 with clients that send no `content-length`. Separately qualify HTTP/3 receive behavior for each selected Axum, Cloudflare, Fastly and Spin adapter/deployment, without depending on a consuming application's staging setup. Where the selected deployment supports HTTP/3, repeat criterion 1 with a real HTTP/3 client and retain negotiated-protocol proof, adapter/runtime/build/deployment/configuration identities, origin receipts and the original deadline checks. Where it cannot support HTTP/3, record the reason and evidence through an attributed requirement-change decision scoped only to that adapter/deployment leg; report approved N/A, not a passed execution. Unknown support, disabled service configuration, inaccessible deployment or unavailable client remains unresolved, not N/A. A normalized guest HTTP version is not receive-protocol proof. Record per protocol whether a bodiless forward still succeeds after the inbound read deadline has passed, which shows whether EZ-1.2 held.",
+      "artifact_path": "outbound/EZ-1/acceptance/02/hosted-cloudflare/http3.json",
+      "implementation": "planned",
+      "comparison": false
+    },
+    {
+      "case_id": "EZ-1/acceptance/02",
+      "source_id": "EZ-1/acceptance/02",
+      "source_digest": "14eaed2885507ca5f996318487cd764a2e75c23d62a8c6f19541ee8025dd507e",
+      "requirement_ids": [
+        "EZ-1.1",
+        "EZ-1.2",
+        "EZ-1.3",
+        "EZ-1.4",
+        "EZ-1.5",
+        "EZ-1.6",
+        "EZ-1.7",
+        "EZ-1.8",
+        "EZ-1.9",
+        "EZ-1.10",
+        "EZ-1.11",
+        "EZ-1.12",
+        "EZ-1.13",
+        "EZ-1.14"
+      ],
+      "environment": "hosted-spin/http3",
+      "applicability": "blocking",
+      "approval": "HTTP3 receive support@hosted-spin/http3",
+      "condition": "HTTP3 receive applicability requires adapter/deployment evidence",
+      "owner": "EdgeZero",
+      "task": "P2",
+      "substep": "EZ-1-acceptance-02-hosted-spin-http3",
+      "sentinel": "ez_1_acceptance_02_hosted_spin_http3",
+      "command": "hosted-runbook EZ-1/acceptance/02 --environment hosted-spin/http3 --sentinel ez_1_acceptance_02_hosted_spin_http3",
+      "expected": "Environment is hosted Fastly, Trusted Server staging, for the original HTTP/1.1 and HTTP/2 legs: repeat criterion 1 with clients that send no `content-length`. Separately qualify HTTP/3 receive behavior for each selected Axum, Cloudflare, Fastly and Spin adapter/deployment, without depending on a consuming application's staging setup. Where the selected deployment supports HTTP/3, repeat criterion 1 with a real HTTP/3 client and retain negotiated-protocol proof, adapter/runtime/build/deployment/configuration identities, origin receipts and the original deadline checks. Where it cannot support HTTP/3, record the reason and evidence through an attributed requirement-change decision scoped only to that adapter/deployment leg; report approved N/A, not a passed execution. Unknown support, disabled service configuration, inaccessible deployment or unavailable client remains unresolved, not N/A. A normalized guest HTTP version is not receive-protocol proof. Record per protocol whether a bodiless forward still succeeds after the inbound read deadline has passed, which shows whether EZ-1.2 held.",
+      "artifact_path": "outbound/EZ-1/acceptance/02/hosted-spin/http3.json",
       "implementation": "planned",
       "comparison": false
     }
