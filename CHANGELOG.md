@@ -13,6 +13,9 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Make Fastly helper-ownership coverage independent of early connection failure. Observe the
+  actual callback scope and exactly-once family-resource release with both pending and failed
+  timers, retaining the closed-scope batch assertion without changing production lifetimes.
 - Qualify HTTP/3 per adapter/deployment, retaining the original Fastly HTTP/1.1/HTTP/2 legs.
   Add three HTTP/3 disposition legs without dropping any existing identity; unknown support,
   disabled deployments and missing clients cannot silently become N/A.

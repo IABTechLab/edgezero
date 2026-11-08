@@ -448,46 +448,66 @@ mod tests {
     fn helper_batch_owner_is_local_or_reuses_custom_callback() {
         use edgezero_adapter_fastly::lifecycle::run_custom;
         use edgezero_adapter_fastly::outbound::FastlyOutboundClient;
-        use edgezero_core::{HttpClient, OutboundBatch};
+        use edgezero_core::{
+            HttpClient, IndependentOutboundProgress, OutboundBatch, OutboundScope,
+            OutboundScopeKind,
+        };
         use futures_util::future::pending;
         use std::cell::RefCell;
         use std::rc::Rc;
 
-        struct TimerOwner(Arc<AtomicUsize>);
+        struct CallbackResource(Arc<AtomicUsize>);
 
         #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
-        impl Drop for TimerOwner {
+        impl Drop for CallbackResource {
             fn drop(&mut self) {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
         }
 
-        for wrapped in [false, true] {
+        for (wrapped, timer_fails) in [(false, false), (true, false), (false, true), (true, true)] {
             let app = build_test_app();
             let released = Arc::new(AtomicUsize::new(0));
-            let saved: Rc<RefCell<Option<OutboundBatch>>> = Rc::new(RefCell::new(None));
+            let timers_started = Arc::new(AtomicUsize::new(0));
+            let saved: Rc<RefCell<Option<(OutboundScope, OutboundBatch)>>> =
+                Rc::new(RefCell::new(None));
             let invoke = |request| {
                 let now = MonotonicInstant::now();
                 let clock = MonotonicClock::new(move || now);
-                let timer_released = Arc::clone(&released);
+                let timer_starts = Arc::clone(&timers_started);
                 let time = OutboundTime::new(clock, move |_, _| {
-                    let owner = TimerOwner(Arc::clone(&timer_released));
+                    timer_starts.fetch_add(1, Ordering::SeqCst);
                     Box::pin(async move {
-                        let _owner = owner;
-                        pending().await
+                        if timer_fails {
+                            Err(EdgeError::bad_gateway("controlled timer failure"))
+                        } else {
+                            pending().await
+                        }
                     })
                 });
                 let delivered = FastlyService::new(&app).run_request_with_hooks_for_test(
                     request,
                     |_raw, _extensions| {
+                        let scope = OutboundScope::capture(Rc::new(IndependentOutboundProgress));
+                        assert!(scope.is_managed());
+                        assert_eq!(scope.kind(), Some(OutboundScopeKind::Callback));
+                        scope.check().expect("callback open during preparation");
+                        // A completed exchange may drop its timer before this callback closes.
+                        drop(
+                            scope
+                                .provider_state(|| CallbackResource(Arc::clone(&released)))
+                                .expect("callback-family resource"),
+                        );
+                        assert_eq!(released.load(Ordering::SeqCst), 0);
                         let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
                         let outbound = OutboundRequest::post("http://127.0.0.1:9/helper-scope")
                             .unwrap()
                             .body("pending");
-                        *saved.borrow_mut() = Some(client.start_batch_until(
+                        let batch = client.start_batch_until(
                             vec![outbound],
                             Deadline::after(Duration::from_secs(1)),
-                        ));
+                        );
+                        *saved.borrow_mut() = Some((scope, batch));
                     },
                     |_response| (),
                     |envelope| {
@@ -496,6 +516,10 @@ mod tests {
                     },
                 );
                 assert!(matches!(delivered, FastlyRequestDelivery::Routed { .. }));
+                let prepared = saved.borrow();
+                let (scope, _) = prepared.as_ref().expect("prepared batch");
+                assert_eq!(scope.check().is_ok(), wrapped);
+                assert_ne!(timers_started.load(Ordering::SeqCst), 0);
                 assert_eq!(released.load(Ordering::SeqCst), usize::from(!wrapped));
                 Ok::<(), ()>(())
             };
@@ -506,7 +530,8 @@ mod tests {
                 invoke(request).unwrap();
             }
             assert_eq!(released.load(Ordering::SeqCst), 1);
-            let batch = saved.borrow_mut().take().expect("prepared batch");
+            let (scope, batch) = saved.borrow_mut().take().expect("prepared batch");
+            assert!(matches!(scope.check(), Err(EdgeError::Internal { .. })));
             assert!(matches!(
                 block_on(batch.collect()).unwrap_err().error(),
                 EdgeError::Internal { .. }
