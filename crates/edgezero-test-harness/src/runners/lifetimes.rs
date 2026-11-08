@@ -6,7 +6,7 @@ mod callback;
 mod cleanup;
 mod connect;
 mod post_delivery;
-mod protocol;
+pub(super) mod protocol;
 mod response_cleanup;
 
 #[derive(Clone, Copy)]

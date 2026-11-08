@@ -567,8 +567,181 @@ fn diagnostic_failures_preserve_the_original_runtime_error() {
 fn cloudflare_primary_uri_preserves_no_hook_routing() {
     let fixture = crate::fixture_root().join("../request-fidelity");
     let cancelled = Arc::new(AtomicBool::new(false));
-    cloudflare_routing_probes(&fixture, &cancelled, Duration::from_secs(60))
+    let output = tempfile::Builder::new()
+        .prefix("edgezero-routing-probe-")
+        .tempdir()
+        .expect("persistent probe evidence")
+        .keep();
+    cloudflare_routing_probes(&fixture, &output, &cancelled, Duration::from_secs(60))
         .expect("primary URI normalization and raw ingress capture must remain independent");
+}
+
+#[test]
+fn routing_probe_failure_retains_native_log_and_inputs() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = tempfile::tempdir().expect("probe fixture");
+    let binary = fixture.path().join("node_modules/.bin/workerd");
+    std::fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary directory");
+    std::fs::write(
+        &binary,
+        "#!/bin/sh\nprintf 'native-probe startup failure\\n' >&2\nexit 73\n",
+    )
+    .expect("failing runtime");
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+        .expect("executable runtime");
+    let inputs = [
+        ("workerd.capnp", b"# exact probe configuration\n".as_slice()),
+        (
+            "build/cloudflare/index.js",
+            b"export default {};\n".as_slice(),
+        ),
+        (
+            "build/cloudflare/index_bg.wasm",
+            b"\0asm\x01\0\0\0".as_slice(),
+        ),
+    ];
+    for (name, bytes) in inputs {
+        let path = fixture.path().join(name);
+        std::fs::create_dir_all(path.parent().expect("input parent")).expect("input directory");
+        std::fs::write(path, bytes).expect("probe input");
+    }
+    let error = cloudflare_routing_probes(
+        fixture.path(),
+        &fixture.path().join("retained"),
+        &AtomicBool::new(false),
+        Duration::from_secs(1),
+    )
+    .expect_err("native startup must fail");
+    let message = error.to_string();
+    let (_, path) = message
+        .rsplit_once("; see ")
+        .expect("original native log path");
+    let log = Path::new(path);
+    assert!(log.is_file(), "native failure log was deleted: {message}");
+    assert_eq!(
+        std::fs::read(log).expect("retained native log"),
+        b"native-probe startup failure\n"
+    );
+    for (name, bytes) in inputs {
+        assert_eq!(
+            std::fs::read(log.parent().expect("artifact directory").join(name))
+                .expect("retained native input"),
+            bytes
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a freshly built Cloudflare fixture and pinned workerd; diagnostic only"]
+fn cloudflare_native_idle_versus_requests_term_diagnostic() {
+    let fixture = crate::fixture_root().join("../request-fidelity");
+    let root = tempfile::Builder::new()
+        .prefix("edgezero-native-drain-")
+        .tempdir()
+        .unwrap()
+        .keep();
+    let mut outcomes = Vec::new();
+    for requests in [false, true] {
+        let label = if requests { "requests" } else { "idle" };
+        let artifacts = super::cloudflare_routing_inputs(&fixture, &root.join(label)).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let config = artifacts.join("workerd.capnp");
+        let address = format!("http=127.0.0.1:{port}");
+        let mut command = super::command(
+            &fixture,
+            "node_modules/.bin/workerd",
+            &[
+                "serve",
+                &config.to_string_lossy(),
+                "--socket-addr",
+                &address,
+                "--control-fd=1",
+                "--verbose",
+            ],
+        );
+        let stderr = artifacts.join("workerd.log");
+        let control = artifacts.join("control.jsonl");
+        let mut process = Process::spawn_with_stdout(&mut command, &stderr, &control).unwrap();
+        let pid = process.0.id();
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(60);
+        let result = (|| -> io::Result<()> {
+            loop {
+                process.check_running().map_err(super::io_error)?;
+                if crate::logs(&control).iter().any(|event| {
+                    event["event"] == "listen" && event["socket"] == "http" && event["port"] == port
+                }) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::other("native control readiness expired"));
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            if requests {
+                let cancelled = AtomicBool::new(false);
+                for case in [
+                    super::ready_case(),
+                    Case {
+                        name: "route-unicode",
+                        target: b"/caf\xc3\xa9",
+                        ..super::ready_case()
+                    },
+                    Case {
+                        name: "route-backslash",
+                        target: b"/a\\b",
+                        ..super::ready_case()
+                    },
+                ] {
+                    let (status, verdict) = super::exchange(
+                        port,
+                        &case,
+                        &cancelled,
+                        Instant::now() + Duration::from_secs(5),
+                    )?;
+                    if status != 200
+                        || (case.name != "ready"
+                            && verdict
+                                != json!({
+                                    "ordinary":true, "primary_uri_normalized":true,
+                                    "raw_target_preserved":true,
+                                }))
+                    {
+                        return Err(io::Error::other("native diagnostic probe failed"));
+                    }
+                }
+            }
+            Ok(())
+        })();
+        let term_started = started.elapsed().as_nanos();
+        let result = super::complete_runtime(&mut process, result);
+        let outcome = json!({"arm":label,"pid":pid,"process_group":pid,
+            "ready_and_probed_ns":term_started,"finished_ns":started.elapsed().as_nanos(),
+            "clean_shutdown_configured":std::env::var_os("KJ_CLEAN_SHUTDOWN").is_some(),
+            "exit":process.0.try_wait().unwrap().map(|status|status.to_string()),
+            "cleanup_error":result.as_ref().err().map(ToString::to_string),"qualification":false});
+        std::fs::write(
+            artifacts.join("outcome.json"),
+            serde_json::to_vec(&outcome).unwrap(),
+        )
+        .unwrap();
+        outcomes.push(outcome);
+    }
+    std::fs::write(
+        root.join("outcomes.json"),
+        serde_json::to_vec(&outcomes).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| outcome["cleanup_error"].is_null()),
+        "native drain diagnostic failed; evidence: {}",
+        root.display()
+    );
 }
 
 #[test]

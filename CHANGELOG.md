@@ -13,6 +13,13 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Wait for the original Fastly guest's native reuse registration and matching wait before
+  dispatching each remaining custom-initialization probe. Preserve the five original requests,
+  callback identity and 500 ms reuse window; reject stale, malformed, partial or late witnesses.
+- Retain the direct workerd routing probe's exact inputs, native log and process identity in
+  its existing output directory, including startup and shutdown failures. Add an opt-in idle
+  versus request shutdown diagnostic without relaxing the five-second TERM gate. Intermittent
+  native shutdown failure remains unresolved and earns no qualification credit.
 - Make Fastly helper-ownership coverage independent of early connection failure. Observe the
   actual callback scope and exactly-once family-resource release with both pending and failed
   timers, retaining the closed-scope batch assertion without changing production lifetimes.

@@ -55,6 +55,13 @@ fails its cold first case in two local runs, although each passes the other nine
 the complete SDK pending-body witness case. Keep these strict timing failures and qualification
 gates open; loading a valid native manifest does not establish a timing or capability guarantee.
 
+The direct request-fidelity routing probe retains its exact inputs, native log and process
+identity under `cloudflare-routing` in the existing run directory, even on failure. The opt-in
+`fidelity::tests::cloudflare_native_idle_versus_requests_term_diagnostic` compares an idle real
+fixture with the original routing requests and retains both outcomes. It adds no CI phase or
+qualification credit. Intermittent native TERM shutdown remains unresolved; the unchanged
+five-second grace still fails when SIGKILL is needed.
+
 ## Outbound Cutover Gates
 
 ### Qualification Scope Amendment (2026-11-08)
@@ -1231,6 +1238,11 @@ retained reuse. The sequence must share one guest to establish recovery; early
 guest retirement is reported as unverified. Router-produced finalization metadata
 carries each request's token, so finalization also checks response-extension
 preservation and isolation rather than merely setting a constant header.
+Before callbacks two through five, the harness requires the original guest's native reuse
+registration and matching handle wait within the original 500 ms window. Response receipt alone
+does not grant reuse. Trace logging is enabled only for this child; a bounded, single-use cursor
+rejects stale, foreign, partial and late witnesses. The final callback's optional registration
+earns no permission, and its normal SDK wait expiry is allowed only after a matching wait.
 
 - A: original single-request helper.
 - B: `Serve`, once-only logging, app construction on each callback.

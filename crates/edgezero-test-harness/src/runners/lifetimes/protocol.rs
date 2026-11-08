@@ -3,8 +3,8 @@ use super::*;
 pub(super) const LOG_LIMIT: usize = 1024 * 1024;
 
 #[derive(Default)]
-pub(super) struct LogCursor {
-    pub(super) offset: u64,
+pub(in crate::runners) struct LogCursor {
+    pub(in crate::runners) offset: u64,
     observed: std::cell::Cell<u64>,
 }
 
@@ -70,7 +70,7 @@ pub(super) fn finish(log: &Path, cursor: &LogCursor, prefix: &[u8]) -> Result<()
     )
 }
 
-fn read_bytes(log: &Path, cursor: &LogCursor) -> Result<Vec<u8>> {
+pub(in crate::runners) fn read_bytes(log: &Path, cursor: &LogCursor) -> Result<Vec<u8>> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let mut file = fs::File::open(log)?;
     let length = file.metadata()?.len();

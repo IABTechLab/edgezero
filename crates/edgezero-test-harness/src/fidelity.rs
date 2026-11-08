@@ -455,7 +455,7 @@ pub fn run(args: &Args, output: &Path) -> crate::Result<()> {
             let mut observed = probes(platform, port, cancelled)?;
             if *platform == "cloudflare" {
                 let routing =
-                    cloudflare_routing_probes(&fixture, cancelled, args.readiness_timeout)?;
+                    cloudflare_routing_probes(&fixture, output, cancelled, args.readiness_timeout)?;
                 observed
                     .as_object_mut()
                     .expect("probe results are objects")
@@ -962,24 +962,55 @@ fn complete_runtime<T>(process: &mut Process, result: io::Result<T>) -> io::Resu
     }
 }
 
+fn cloudflare_routing_inputs(fixture: &Path, output: &Path) -> io::Result<PathBuf> {
+    let artifacts = output.join("cloudflare-routing");
+    fs::create_dir_all(output)?;
+    fs::create_dir(&artifacts)?;
+    fs::create_dir_all(artifacts.join("build/cloudflare"))?;
+    for name in [
+        "workerd.capnp",
+        "build/cloudflare/index.js",
+        "build/cloudflare/index_bg.wasm",
+    ] {
+        fs::copy(fixture.join(name), artifacts.join(name))?;
+    }
+    Ok(artifacts)
+}
+
 fn cloudflare_routing_probes(
     fixture: &Path,
+    output: &Path,
     cancelled: &Cancelled,
     readiness_timeout: Duration,
 ) -> io::Result<serde_json::Map<String, Value>> {
-    let scratch = tempfile::tempdir()?;
+    let artifacts = cloudflare_routing_inputs(fixture, output)?;
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     drop(listener);
     let address = format!("http=127.0.0.1:{port}");
+    let config = artifacts.join("workerd.capnp");
     let mut runtime = command(
         fixture,
         "node_modules/.bin/workerd",
-        &["serve", "workerd.capnp", "--socket-addr", &address],
+        &[
+            "serve",
+            &config.to_string_lossy(),
+            "--socket-addr",
+            &address,
+        ],
     );
-    let log_path = scratch.path().join("workerd.log");
+    let log_path = artifacts.join("workerd.log");
     let mut process = Process::spawn(&mut runtime, &log_path).map_err(io_error)?;
     let result = (|| {
+        fs::write(
+            artifacts.join("runtime.json"),
+            serde_json::to_vec(&json!({
+                "executable": fixture.join("node_modules/.bin/workerd"),
+                "pid": process.0.id(),
+                "process_group": process.0.id(),
+                "qualification": false,
+            }))?,
+        )?;
         let deadline = Instant::now() + readiness_timeout;
         loop {
             check_cancelled(cancelled)?;

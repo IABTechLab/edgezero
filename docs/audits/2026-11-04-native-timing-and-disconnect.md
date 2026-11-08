@@ -274,3 +274,41 @@ strict WASM feature configurations. Docs formatting/lint/build and legacy/docume
 guards pass. Two independent scoped reviews find no implementation defect; neither is maintainer
 approval. The initial sandboxed workspace run cannot bind loopback sockets; the permitted TCP
 run passes. No native timing or hosted gate is closed by these results.
+
+## Local Reuse And Shutdown Closeout (2026-11-08)
+
+The investigation starts at `26612053050812a6c418f006e9f199b2e36ac328`. A retained Fastly
+failure has the first custom-initialization callback in one guest and the remaining four in
+another. Receiving a response does not prove the first guest has registered for SDK reuse.
+The fixture now observes that guest's native registration and matching pending-handle wait
+before each of the next four original requests. The original five-request sequence, same-guest
+assertion and 500 ms window remain unchanged. The final callback earns no reuse permission.
+Nine deterministic tests cover ordering, malformed and invalid handles, stale/foreign records,
+partial tails, bounded cursor consumption and expiry before/after reading. The native smoke
+run passes with one guest and four correlated registrations. This is local functional evidence,
+not hosted reuse qualification.
+
+The separate direct-workerd routing probe now retains its byte-identical configuration,
+JavaScript, Wasm, native log and PID/process-group identity in the caller's existing output.
+A fail-first startup regression proves these artifacts survive failure. Previously, the
+callee's temporary-directory destructor deleted the native log named by the error.
+
+The optional `cloudflare_native_idle_versus_requests_term_diagnostic` uses the same real
+fixture, native listener and process controller, with separate native control output. The local
+runtime is workerd package `1.20260415.1` on Apple ARM64, executable SHA-256
+`1a83a28ded72d8b4192fca1869e5899ea3d58670a84dcfefe8250ebbb231c7bf`. One
+paired capture needs SIGKILL for the idle arm after the unchanged five-second TERM grace;
+the request arm exits normally. A subsequent pair exits normally in both arms. Response work
+is therefore not necessary for the intermittent failure, and passing samples do not resolve
+it. No valid native stack capture or verified controller defect is established. Keep this
+shutdown investigation open; do not substitute SIGKILL, retries or an extended grace for the
+original gate. Runtime pins, provider capabilities and all manual qualification gates remain
+unchanged. The diagnostic is opt-in and receives no acceptance credit.
+
+The full prescribed suite passes with `RUST_TEST_THREADS=2`, including all four adapter
+CI suites. A separate default-parallel workspace run retains an Axum pending-upload timing
+failure: the 100 ms request reaches its terminal observation at 107.941125 ms, beyond the
+unchanged 105 ms bound. Its cause is unconfirmed, not dismissed or labelled pre-existing.
+A standalone two-thread repeat also fails at 112.950416 ms. Reduced parallelism is not an
+established repair. Both failures remain open despite the passing full-script run; no further
+retry is used to turn them into acceptance credit.

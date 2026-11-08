@@ -8,6 +8,7 @@ mod overflow;
 mod progress;
 mod readiness;
 mod response_headers;
+mod reuse;
 mod wire;
 
 const CLOUDFLARE_MODULE_ENTRIES: usize = 128;
@@ -217,19 +218,27 @@ fn custom_initialization_contract(
     let log = run.join("custom-initialization.log");
     let outcome = (|| -> Result<()> {
         let port = net::port()?;
-        let _process = Process::start(
-            &mut fastly_command(exe, config, run, "custom-c", port)?,
-            &log,
-            port,
-        )?;
+        let mut command = fastly_command(exe, config, run, "custom-c", port)?;
+        command
+            .env("RUST_LOG", "warn,viceroy_lib::execute=info,viceroy_lib::wiggle_abi::fastly_http_downstream=trace")
+            .env("RUST_LOG_PRETTY", "false");
+        let _process = Process::start(&mut command, &log, port)?;
         let mut instances = Vec::new();
-        for (path, status, attempts, initialized) in [
+        let mut cursor = lifetimes::protocol::LogCursor::default();
+        let mut guest = None;
+        let mut dispatch_before = None;
+        for (index, (path, status, attempts, initialized)) in [
             ("/health", 200, 0, false),
             ("/initialization-error", 503, 1, false),
             ("/health", 200, 1, false),
             ("/probe/recovered", 200, 2, true),
             ("/probe/retained", 200, 2, true),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            reuse::before_dispatch(dispatch_before)?;
+            let sent_at = Instant::now();
             let reply = req(port, path)?;
             require(
                 reply["status"] == status,
@@ -237,31 +246,41 @@ fn custom_initialization_contract(
             )?;
             let parsed: Value =
                 serde_json::from_str(reply["body"].as_str().ok_or("missing body")?)?;
-            let value = if status == 503 {
+            if status == 503 {
                 require(
                     parsed
                         == json!({"error":{"kind":"service_unavailable","message":"state unavailable","status":503}}),
                     "initialization did not use the canonical error body",
                 )?;
-                await_evidence(|| {
-                    require(
-                        logs(&log)
-                            .iter()
-                            .filter(|event| {
-                                event["event"] == "assembly-rejected"
-                                    && event["token"] == reply["token"]
-                            })
-                            .count()
-                            == 1,
-                        "missing correlated assembly failure",
-                    )
-                })?;
-                logs(&log)
-                    .into_iter()
-                    .find(|event| {
-                        event["event"] == "assembly-rejected" && event["token"] == reply["token"]
-                    })
-                    .ok_or("missing assembly failure metadata")?
+            }
+            let ordinal = index + 1;
+            let deadline = sent_at
+                + if ordinal < reuse::CALLBACKS {
+                    reuse::WINDOW
+                } else {
+                    Duration::from_secs(5)
+                };
+            let witness = reuse::wait(
+                &log,
+                &mut cursor,
+                guest.as_ref(),
+                reply["token"]
+                    .as_str()
+                    .ok_or("missing initialization request token")?,
+                ordinal,
+                deadline,
+                Instant::now,
+            )?;
+            records.push(
+                json!({"event":"initialization-native-reuse", "ordinal":ordinal,
+                "registration_handle":witness.handle, "offset":cursor.offset,
+                "qualification":false}),
+            )?;
+            guest = Some(witness.guest);
+            let value = if status == 503 {
+                witness
+                    .rejection
+                    .ok_or("missing correlated assembly failure")?
             } else {
                 parsed
             };
@@ -308,6 +327,7 @@ fn custom_initialization_contract(
                 reply,
                 json!({"variant":"custom-initialization", "guest":value}),
             ))?;
+            dispatch_before = (ordinal < reuse::CALLBACKS).then_some(deadline);
         }
         records.push(json!({"assertion":"custom_lazy_initialization_recovery", "status":if instances.iter().all(|id| id == &instances[0]) {"pass"} else {"unverified"}, "reason":"recovery requires all five callbacks in the same guest"}))
     })();
