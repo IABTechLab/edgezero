@@ -26,7 +26,7 @@ use edgezero_core::outbound::{
     OutboundPending, OutboundPreparedBatch, OutboundRequest, OutboundRequestParts,
     OutboundResponse, OutboundResponseContext, OutboundSendMode, OutboundTask, OutboundTime,
 };
-use edgezero_core::time::{DispatchBudget, MonotonicClock, MonotonicInstant};
+use edgezero_core::time::{Deadline, DispatchBudget, MonotonicClock, MonotonicInstant};
 use edgezero_core::{IndependentOutboundProgress, OutboundProgressRuntime};
 use futures::channel::{mpsc, oneshot};
 use futures_util::StreamExt as _;
@@ -43,9 +43,9 @@ use std::sync::Arc;
 use std::task::Poll;
 use tokio::runtime::Handle;
 use tokio::task::spawn_local;
-use tokio::time::sleep;
 #[cfg(test)]
 use tokio::time::timeout;
+use tokio::time::{Instant as TokioInstant, sleep_until};
 
 #[cfg(test)]
 mod testing;
@@ -577,6 +577,20 @@ fn preserve_timeout_detail(
     selected
 }
 
+fn native_timer_deadline(
+    deadline: Deadline,
+    clock: &MonotonicClock,
+) -> Result<Option<TokioInstant>, EdgeError> {
+    // Sampling the paired clock must not move the native deadline forward.
+    let anchor = TokioInstant::now();
+    let Some(remaining) = deadline.remaining_at(clock.now()) else {
+        return Ok(None);
+    };
+    anchor.checked_add(remaining).map(Some).ok_or_else(|| {
+        EdgeError::internal(anyhow::anyhow!("outbound timer deadline is out of range"))
+    })
+}
+
 pub(crate) fn native_time(clock: MonotonicClock) -> OutboundTime {
     OutboundTime::new(clock, |deadline, paired_clock| {
         Box::pin(async move {
@@ -585,15 +599,17 @@ pub(crate) fn native_time(clock: MonotonicClock) -> OutboundTime {
                     "outbound timer requires a Tokio runtime"
                 )));
             }
-            let Some(remaining) = deadline.remaining_at(paired_clock.now()) else {
-                return Ok(());
-            };
             AssertUnwindSafe(async move {
-                sleep(remaining).await;
+                if let Some(target) = native_timer_deadline(deadline, &paired_clock)? {
+                    sleep_until(target).await;
+                }
+                Ok(())
             })
             .catch_unwind()
             .await
-            .map_err(|_panic| EdgeError::internal(anyhow::anyhow!("outbound timer is unavailable")))
+            .map_err(|_panic| {
+                EdgeError::internal(anyhow::anyhow!("outbound timer is unavailable"))
+            })?
         })
     })
 }
@@ -1089,6 +1105,45 @@ mod clock_tests {
         let error = block_on(pair.wait_until(deadline)).expect_err("no runtime");
         assert!(matches!(error, EdgeError::Internal { .. }));
         assert!(error.to_string().contains("Tokio runtime"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_timer_deadline_does_not_add_clock_sampling_delay() {
+        use tokio::time::advance;
+
+        let started = TokioInstant::now();
+        let deadline = Deadline::at_instant((started + Duration::from_millis(100)).into_std());
+        let clock = MonotonicClock::new(|| {
+            let sampled = TokioInstant::now();
+            // Model preemption after the paired sample but before native timer construction.
+            assert!(advance(Duration::from_millis(20)).now_or_never().is_none());
+            sampled.into_std()
+        });
+        assert_eq!(
+            native_timer_deadline(deadline, &clock).expect("native target"),
+            Some(started + Duration::from_millis(100))
+        );
+        assert_eq!(TokioInstant::now(), started + Duration::from_millis(20));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_timer_early_wake_keeps_original_paired_deadline() {
+        use tokio::time::advance;
+
+        let started = TokioInstant::now();
+        let observed = Arc::new(Mutex::new(started.into_std()));
+        let sampled = Arc::clone(&observed);
+        let pair = native_time(MonotonicClock::new(move || *sampled.lock().unwrap()));
+        let deadline = Deadline::at_instant((started + Duration::from_millis(100)).into_std());
+        let mut wait = pair.wait_until(deadline);
+        assert!(wait.as_mut().now_or_never().is_none());
+        advance(Duration::from_millis(100)).await;
+        assert!(
+            wait.as_mut().now_or_never().is_none(),
+            "native wake is not logical expiry"
+        );
+        *observed.lock().unwrap() = deadline.instant();
+        assert!(matches!(wait.as_mut().now_or_never(), Some(Ok(()))));
     }
 
     #[test]

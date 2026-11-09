@@ -13,6 +13,13 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Anchor Axum's native outbound timer before sampling its paired clock, then use an absolute
+  Tokio target so clock sampling or intervening preemption cannot extend that target. Add
+  deterministic clock-delay and early-wake regressions; retain the existing deadline limits.
+  Historical wall-clock timing misses remain unexplained, not retrospectively qualified.
+- Record native workerd shutdown stacks and a JavaScript-only control without retaining
+  temporary profiling code. Preserve original TERM cleanup and all failures; native event-loop
+  stacks narrow the investigation but do not establish a shutdown repair.
 - Wait for the original Fastly guest's native reuse registration and matching wait before
   dispatching each remaining custom-initialization probe. Preserve the five original requests,
   callback identity and 500 ms reuse window; reject stale, malformed, partial or late witnesses.

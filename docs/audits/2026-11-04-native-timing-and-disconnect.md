@@ -300,7 +300,7 @@ runtime is workerd package `1.20260415.1` on Apple ARM64, executable SHA-256
 paired capture needs SIGKILL for the idle arm after the unchanged five-second TERM grace;
 the request arm exits normally. A subsequent pair exits normally in both arms. Response work
 is therefore not necessary for the intermittent failure, and passing samples do not resolve
-it. No valid native stack capture or verified controller defect is established. Keep this
+it. At that stage, no valid native stack capture or verified controller defect was established. Keep this
 shutdown investigation open; do not substitute SIGKILL, retries or an extended grace for the
 original gate. Runtime pins, provider capabilities and all manual qualification gates remain
 unchanged. The diagnostic is opt-in and receives no acceptance credit.
@@ -312,3 +312,60 @@ unchanged 105 ms bound. Its cause is unconfirmed, not dismissed or labelled pre-
 A standalone two-thread repeat also fails at 112.950416 ms. Reduced parallelism is not an
 established repair. Both failures remain open despite the passing full-script run; no further
 retry is used to turn them into acceptance credit.
+
+## Native Timer And Shutdown Investigation
+
+The next diagnostic pass removes a separately demonstrated native re-anchoring window, not
+the unconfirmed cause of the historical 107.941125 ms and 112.950416 ms observations. Axum
+previously computed a paired-clock remainder and then called `sleep(remaining)`, which anchors
+again when Tokio constructs the timer. A deterministic paused-time regression models a 20 ms
+preemption after the clock sample: the old conversion produces a 120 ms native target for a
+100 ms deadline. Capture Tokio's anchor before sampling the paired clock and use `sleep_until`
+with that absolute target instead. The regression then passes at 100 ms. Checked target
+overflow is typed Internal, not expiry; absent-runtime and absent-timer-driver tests remain.
+A companion test proves that a native timer wake cannot complete a frozen paired clock early.
+
+Temporary, opt-in tracing used the existing native timer and application client injection;
+it added no executor, native timer, fetch, warmup or changed budget. Twelve declared isolated
+trials and two instrumented workspace runs passed. Their passing traces do not explain the
+older failures. The approximately 250-line observer and its connection-test wiring were
+removed after retaining the measurements; only the focused production conversion and
+co-located regressions remain. The original TCP test and its 105/205 ms limits are unchanged.
+
+Temporary instrumentation of the existing ignored workerd diagnostic invoked macOS
+`sample <owned-pid> 1 10 -mayDie -file <retained-report>` directly, without discovering PIDs by
+process name. It retained launch identity, actual process group and sample output, and observed
+the sampler separately from native cleanup. Native cleanup started immediately with its original
+five-second TERM grace; observer results were not used to override the native cleanup verdict. Sampling may perturb
+scheduling, so every sampled observation is explicitly unqualified. The instrumentation was
+removed after retaining its patch and captures; no profiler dependency or additional CI probe
+is added to the permanent runner.
+
+Two of four declared sampled pairs captured the idle failure. Both actual native reports
+match the retained parent/PID, shutdown interval and executable UUID
+`4C4C4409-5555-3144-A14E-67E446AFA2B0`. Their main-thread samples wait in KJ's Unix event
+port (`doKqueueWait` / `kevent`); they show neither application execution nor a CPU-busy loop.
+This does not distinguish an unresolved TERM notification from stalled drain/listener/task
+propagation. The native signal promise is installed before the listener in the pinned source;
+no verified controller or runtime repair follows from the stack alone.
+
+A third, separately labelled temporary `native-control` arm loaded only minimal JavaScript, with no
+generated bootstrap, Wasm or HTTP requests. Four declared three-arm runs retain one original
+idle failure and three all-pass observations; the JavaScript-only controls all pass. Given
+the intermittent original failure, those controls do not establish bootstrap causation.
+The original real-fixture gates remain authoritative. No retry credit, runtime-pin change,
+provider capability promotion, hosted claim or waiver is introduced by this investigation.
+
+The repaired working tree passes all five primary Rust gates, 2,700 workspace tests across
+33 binaries (zero failed, one existing ignored), 650 harness tests (zero failed, three opt-in
+tests ignored), and all 30 additional workflow format/lint/WASM/docs commands. The complete
+`RUST_TEST_THREADS=2 bash scripts/run_tests.sh` exits 1, however: Axum and Fastly integration
+suites pass, then the real Cloudflare routing probe requires SIGKILL after the original
+five-second TERM grace. Preserve run `18e64816e16e8f68-663-0`, including exact routing inputs,
+native log and process identity. This is a retained failure, not a passing full-suite result
+or an established regression classification. The script stops there; later checks executed
+independently must be reported separately, not credited as continuation of a successful run.
+The subsequent default-parallel workspace command exits 0, as do the separately executed Spin
+CI suite, generated-workspace gate, demo tests and all three demo WASM checks, plus the legacy
+and documentation guards. They do not replace the failed Cloudflare shutdown result or waive
+any historical timing observation. Hosted qualification and independent review remain open.
