@@ -317,6 +317,16 @@ authorization and any preflight requests remain application policy. Forwarded in
 settlement and explicit redirect following use the same shared dispatch pipeline; neither adds
 an optimizer fallback or another provider fetch.
 
+For signed-origin image workflows with an application-owned HEAD preflight, select caching per
+request. Send the signed HEAD and any separately signed raw error-body GET with
+`.cache_policy(OutboundCachePolicy::Bypass)` and no optimizer options. Keep the final optimized
+GET on `PlatformDefault` with its options. Fastly's default readthrough cache can transform a
+signed HEAD after signing; bypass avoids that cache path. Do not apply bypass to the whole
+workflow: it disables Fastly Image Optimizer, so that combination is rejected. Keep signing,
+preflight decisions and private/no-store error rendering in application code, not a second
+transport. Verify cold optimized requests without a preparatory raw GET; an existing service's
+successful deployment is not qualification of a migrated application.
+
 ## Forward An Inbound Request
 
 This example preserves the inbound method, forwards the inbound body for methods that carry one,

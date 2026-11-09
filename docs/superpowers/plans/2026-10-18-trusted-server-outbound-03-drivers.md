@@ -364,6 +364,16 @@ approval. Measurement approval and staging authorization separately gate hosted 
       automatic HEAD/retry/fetch. Update the generic attachment/streaming guide and applicable
       demo/generated examples only with the working request API, and compile them in the same
       hard migration. Do not present an unsupported target as serving optimized images.
+      Preserve the signed-origin cache correction from TS PR 1516: the signed HEAD preflight
+      and separately signed raw error-body GET use `Bypass` without optimizer options; the final
+      optimized GET uses `PlatformDefault` with options. Record method, target, signing headers,
+      cache policy and options independently for each request. Use the existing Fastly cache
+      selection tests for both HEAD and GET, plus the facade/native conversion regression;
+      no SDK debug-format assertion, alternate client or application signing helper is needed.
+      Strengthen existing EZ-8 acceptance 08/09 and refresh their derived inventory/snapshot
+      identities without adding or reordering legs. Hosted cold GET success without raw-GET
+      warming, normal repeated GET caching/optimizer metadata and bodyless 403/404 HEAD errors
+      remain candidate-specific checks, not credit inherited from the original deployment.
 
 - [ ] Add `image_optimizer_follow_uses_single_send_mapping` at the Fastly boundary and run it
       with `scripts/run_test_nonzero.sh image_optimizer_follow_uses_single_send_mapping cargo test -p edgezero-adapter-fastly --features test-utils`.
@@ -388,6 +398,37 @@ approval. Measurement approval and staging authorization separately gate hosted 
       IDs and an SDK-only control. Registration counts, same POP and resumed TLS alone do not prove
       pooling. Keep existing M1 handshake-rate measurement and M4's separate reuse-mode scope.
       Apply the task fmt/clippy card. Suggested commit: `feat: map Fastly optimized single sends with approved horizon`.
+
+### Signed-Origin Cache Policy Checkpoint (2026-11-09)
+
+AG approved carrying the signed-origin cache correction into migration requirements and acceptance.
+This checkpoint changes tests and documentation only, not transport or automatic application policy.
+
+- [x] Clarify the signed HEAD/raw-error GET `Bypass` versus optimized GET `PlatformDefault`
+      split in the requirements and guide, keeping Image Optimizer off both control requests.
+- [x] Add `signed_requests_preserve_cache_and_optimizer_independence` at the existing facade/
+      native conversion boundary. Check method, escaped target, authority and fixture signing
+      headers without implementing SigV4 or fetching an image. Extend the existing SDK cache
+      selection tests to HEAD/GET in both Send/Batch modes; no private Debug-format dependency.
+- [x] Refresh only EZ-8 acceptance 08/09's three rows and the complete-document identities.
+      Preserve 255 criteria, 514 legs, all bindings/approvals and 140 reviewed titles/223 scenarios.
+- [ ] Qualify the migrated application with cold signed-S3 requests without raw-GET warming,
+      ordinary repeated-GET caching/optimizer metadata and bodyless private 403/404 HEAD errors.
+      The original PR 1516 deployment does not satisfy this candidate-specific gate.
+
+Local targeted checks use installed Viceroy 0.21.0 only for metadata/cache-path controls:
+the new conversion case and both expanded SDK tests pass. Deliberately disabling the native pass
+flag fails the bypass assertion (Wasm abort, exit 134); restoring the unchanged production mapping
+passes again. The stale inventory fails first, then all 30 cutover tests, manifest and coverage
+guards pass after refresh. None of these is hosted optimizer or readiness qualification.
+
+All five primary Rust gates pass, with 2,700 workspace tests across 33 binaries. Broader validation
+remains mixed: a standalone harness run has 649 passes and one startup identity-test connection
+refusal; the prescribed two-thread run has 650 passes/zero failures/three opt-in ignored and then
+passes Axum integration. That full script exits 1 when Fastly cannot find the explicitly selected
+temporary repaired Viceroy executable. The installed executable was not substituted for that gate.
+Retain both failures without declaring their cause pre-existing or changing unrelated fixtures,
+runtime pins, historical timing observations, hosted gates or qualification status.
 
 ## Task D2: Native Axum Eager Exchanges
 

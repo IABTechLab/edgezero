@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "source": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
-  "source_digest": "7212a3baeedf32598b1bd7eedf019554e2f7749334689c0202ef237af9843bff",
+  "source_digest": "45f265a199a91ccaf7bb08dc5bff6ff5d62fa27915437d7058c7aaddd2394c21",
   "status": "Required-local acceptance reconciliation in progress. Run the existing evidence checker with --coverage for derived binding counts and explicit local, external, conditional and unpromoted follow-up scope. Readiness is not qualification or applicability approval. Mandatory EZ-1.14 compile-only prerequisite: README.md#mandatory-forwarding-example-doctest (Q1/Q2). Hosted and exact-candidate qualification remain separate; no EZ-25.42 adoption.",
   "external_prerequisites": [
     {
@@ -10797,7 +10797,7 @@
     {
       "case_id": "EZ-8/acceptance/08",
       "source_id": "EZ-8/acceptance/08",
-      "source_digest": "b01192f46c0ab7fa7f45027a1a2b7d788193be9cfff870c506e1b19a09ce9073",
+      "source_digest": "a7e13c25a383ee9ffa79aa13917826ee3bb24919ae7b793557c4ee7f9f37e2db",
       "requirement_ids": [
         "EZ-8.1",
         "EZ-8.2",
@@ -10826,7 +10826,7 @@
       "substep": "EZ-8-acceptance-08-hosted-fastly-io-entitled",
       "sentinel": "ez_8_acceptance_08_hosted_fastly_io_entitled",
       "command": "hosted-runbook EZ-8/acceptance/08 --environment hosted-fastly/io-entitled --sentinel ez_8_acceptance_08_hosted_fastly_io_entitled",
-      "expected": "Hosted Fastly, run under EZ-Q1 on Trusted Server's staging service with Image Optimizer enabled. Given a known JPEG and options for width 100 and WebP, when sent as GET, then the response is `image/webp` with a decoded width of 100 and the body streams. The same request as HEAD succeeds, and its status and headers are recorded in the capability footnote. Given an origin that accepts the connection and never answers, and a 1 s timeout, the request fails within the pre-approved EZ-8.10 bound. Repeat with a shortened effective absolute deadline but unchanged per-call timeout/backend and with representative deadline-only policy boundaries; record preparation, host-call and total original-entry timings, settings, `H(K)`, source and outcomes. Exercise the ordinary post-head body deadline separately. A horizon violation fails qualification; do not enlarge the rule to fit the run. An expired pre-dispatch case is a separate result, not a successful horizon probe. With an Image Optimizer parameter and an unrelated query parameter present, record the built request target and the origin target with query preservation on and off. The Image Optimizer parameter is not forwarded; the unrelated parameter is retained only when preservation is on. Documentation MUST distinguish these provider changes from EdgeZero's target invariant.\n  This hosted criterion also requires a paired native-path performance comparison. Compare the\n  candidate with both the frozen Trusted Server native path and an SDK-only control using identical\n  image bytes, region, options, negotiation headers, origin/cache settings and execution mode.\n  Separate verified cache hits and misses, GET/HEAD, and ordinary versus application-owned S3\n  preflight cases. Record sample counts, randomized build order, first-byte/completion latency\n  distributions, throughput, guest allocations/copied bytes/peak buffering, backend registration\n  and transport host-call counts, origin receipts and connection identities where observable.\n  Preserve transformation output semantics and lazy streaming; no additional EdgeZero-origin\n  fetch or image-specific backend configuration is permitted. Approve sampling, instrumentation,\n  performance acceptance rules and treatment of noise or unavailable counters before replay,\n  independently from the horizon rule. Do not borrow unrelated bidder-latency tolerances, weaken\n  caps/deadlines for speed, or call missing/inconclusive comparisons performance parity. Viceroy's\n  unsupported result is not an optimization-performance sample.",
+      "expected": "Hosted Fastly, run under EZ-Q1 on Trusted Server's staging service with Image Optimizer enabled. Given a known JPEG and options for width 100 and WebP, when sent as GET, then the response is `image/webp` with a decoded width of 100 and the body streams. The same request as HEAD succeeds, and its status and headers are recorded in the capability footnote. Given an origin that accepts the connection and never answers, and a 1 s timeout, the request fails within the pre-approved EZ-8.10 bound. Repeat with a shortened effective absolute deadline but unchanged per-call timeout/backend and with representative deadline-only policy boundaries; record preparation, host-call and total original-entry timings, settings, `H(K)`, source and outcomes. Exercise the ordinary post-head body deadline separately. A horizon violation fails qualification; do not enlarge the rule to fit the run. An expired pre-dispatch case is a separate result, not a successful horizon probe. With an Image Optimizer parameter and an unrelated query parameter present, record the built request target and the origin target with query preservation on and off. The Image Optimizer parameter is not forwarded; the unrelated parameter is retained only when preservation is on. Documentation MUST distinguish these provider changes from EdgeZero's target invariant.\n  This hosted criterion also requires a paired native-path performance comparison. Compare the\n  candidate with both the frozen Trusted Server native path and an SDK-only control using identical\n  image bytes, region, options, negotiation headers, origin/cache settings and execution mode.\n  Separate verified cache hits and misses, GET/HEAD, and ordinary versus application-owned S3\n  preflight cases. Match each request's cache policy: bypass without optimizer options for signed\n  HEAD preflights and raw error-body GETs, default caching with options for the optimized GET.\n  Record sample counts, randomized build order, first-byte/completion latency\n  distributions, throughput, guest allocations/copied bytes/peak buffering, backend registration\n  and transport host-call counts, origin receipts and connection identities where observable.\n  Preserve transformation output semantics and lazy streaming; no additional EdgeZero-origin\n  fetch or image-specific backend configuration is permitted. Approve sampling, instrumentation,\n  performance acceptance rules and treatment of noise or unavailable counters before replay,\n  independently from the horizon rule. Do not borrow unrelated bidder-latency tolerances, weaken\n  caps/deadlines for speed, or call missing/inconclusive comparisons performance parity. Viceroy's\n  unsupported result is not an optimization-performance sample.",
       "artifact_path": "outbound/EZ-8/acceptance/08/hosted-fastly/io-entitled.json",
       "implementation": "planned",
       "comparison": true
@@ -10834,7 +10834,7 @@
     {
       "case_id": "EZ-8/acceptance/09",
       "source_id": "EZ-8/acceptance/09",
-      "source_digest": "f2cf27d8a2b8cfb3a6879879b1ee629c19962cd704711fc60e62c96e07b17ade",
+      "source_digest": "60af603a6673993299ca754ffbb95d7c592c9e9eb62bf870cf295385a237022a",
       "requirement_ids": [
         "EZ-8.1",
         "EZ-8.2",
@@ -10863,7 +10863,7 @@
       "substep": "EZ-8-acceptance-09-consumer-hosted-fastly-io-entitled",
       "sentinel": "ez_8_acceptance_09_consumer_hosted_fastly_io_entitled",
       "command": "consumer-runbook EZ-8/acceptance/09 --environment consumer-hosted-fastly/io-entitled --sentinel ez_8_acceptance_09_consumer_hosted_fastly_io_entitled",
-      "expected": "Trusted Server end to end, on a Fastly staging service. An optimized asset path returns a transformed image, the HEAD preflight carries no options, and a missing S3 object returns the raw S3 status from the preflight. Trusted Server unit tests read back the options on the final GET and find them equal to the profile-table expectation (EZ-8.17).",
+      "expected": "Trusted Server end to end, on a Fastly staging service. An optimized asset path returns a transformed image. For signed S3 assets, a successful HEAD preflight uses `Bypass` without optimizer options, followed by the final GET using `PlatformDefault` with the expected profile-table options (EZ-8.17). An unsuccessful preflight for a GET client is followed by a separately signed raw error-body GET using `Bypass` without options; retain the raw origin error and application `no-store, private` policy. For HEAD clients, 403 and 404 preflight errors retain their status and any valid representation length, transmit no body or cookies, use the same private no-store policy, and issue neither a raw GET nor an optimizer call. Application recording tests assert exact method, target, signing-header and per-request policy/options sequences. Hosted cold optimized GET cases MUST succeed without a preparatory raw/debug GET or other object-warming request; repeated optimized GETs must retain optimizer metadata and normal cache-hit behavior. These cold functional controls do not change independently approved performance-sampling warmups. Cold standalone raw/debug HEAD and optimized HEAD outcomes remain explicitly unqualified until separately exercised. PR 1516's original deployment results are reference evidence, not acceptance of the EdgeZero candidate.",
       "artifact_path": "outbound/EZ-8/acceptance/09/consumer-hosted-fastly/io-entitled.json",
       "implementation": "planned",
       "comparison": false
@@ -10871,7 +10871,7 @@
     {
       "case_id": "EZ-8/acceptance/09",
       "source_id": "EZ-8/acceptance/09",
-      "source_digest": "f2cf27d8a2b8cfb3a6879879b1ee629c19962cd704711fc60e62c96e07b17ade",
+      "source_digest": "60af603a6673993299ca754ffbb95d7c592c9e9eb62bf870cf295385a237022a",
       "requirement_ids": [
         "EZ-8.1",
         "EZ-8.2",
@@ -10900,7 +10900,7 @@
       "substep": "EZ-8-acceptance-09-consumer-unit-core-profile-readback",
       "sentinel": "ez_8_acceptance_09_consumer_unit_core_profile_readback",
       "command": "consumer-runbook EZ-8/acceptance/09 --environment consumer-unit/core/profile-readback --sentinel ez_8_acceptance_09_consumer_unit_core_profile_readback",
-      "expected": "Trusted Server end to end, on a Fastly staging service. An optimized asset path returns a transformed image, the HEAD preflight carries no options, and a missing S3 object returns the raw S3 status from the preflight. Trusted Server unit tests read back the options on the final GET and find them equal to the profile-table expectation (EZ-8.17).",
+      "expected": "Trusted Server end to end, on a Fastly staging service. An optimized asset path returns a transformed image. For signed S3 assets, a successful HEAD preflight uses `Bypass` without optimizer options, followed by the final GET using `PlatformDefault` with the expected profile-table options (EZ-8.17). An unsuccessful preflight for a GET client is followed by a separately signed raw error-body GET using `Bypass` without options; retain the raw origin error and application `no-store, private` policy. For HEAD clients, 403 and 404 preflight errors retain their status and any valid representation length, transmit no body or cookies, use the same private no-store policy, and issue neither a raw GET nor an optimizer call. Application recording tests assert exact method, target, signing-header and per-request policy/options sequences. Hosted cold optimized GET cases MUST succeed without a preparatory raw/debug GET or other object-warming request; repeated optimized GETs must retain optimizer metadata and normal cache-hit behavior. These cold functional controls do not change independently approved performance-sampling warmups. Cold standalone raw/debug HEAD and optimized HEAD outcomes remain explicitly unqualified until separately exercised. PR 1516's original deployment results are reference evidence, not acceptance of the EdgeZero candidate.",
       "artifact_path": "outbound/EZ-8/acceptance/09/consumer-unit/core/profile-readback.json",
       "implementation": "planned",
       "comparison": false

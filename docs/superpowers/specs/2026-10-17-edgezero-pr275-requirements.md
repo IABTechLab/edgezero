@@ -57,6 +57,15 @@ observations, not parity acceptance tests. Content-bearing parity, host compress
 suppression, original logical deadlines and hosted qualification remain required. Keep all 255
 criterion identities and 511 existing environment identities; three new HTTP/3 legs make 514.
 
+**Signed-origin image migration clarification (2026-11-09).** AG approved preserving the
+per-request cache-policy correction in [Trusted Server PR 1516](https://github.com/IABTechLab/trusted-server/pull/1516),
+source revision `f37e1e811d277f1f24ec7353e83d0db056ecfa77`, in this migration. Application-owned
+signed HEAD preflights and raw error-body GETs use cache bypass without optimizer options;
+the final optimized GET retains default caching and its options. This clarifies EZ-8 acceptance
+08/09 and does not introduce automatic preflights, signing, a new API or a second transport.
+The functional reference and its deployment results do not replace the frozen performance
+baseline or qualify the migrated candidate. See the [scoped approval record](../../audits/2026-10-18-outbound-api-approval.md#signed-origin-image-cache-policy-clarification-2026-11-09).
+
 ## Purpose
 
 Trusted Server (TS) is moving onto EdgeZero PR 275 in one hard cut. TS will use EdgeZero's
@@ -980,12 +989,12 @@ Trusted Server serves publisher images through asset routes and asks Fastly Imag
 1. It builds the options from the route's profile table unless the incoming or rewritten path is SVG (`proxy.rs:1105-1117`, `ts:crates/trusted-server-core/src/asset_image_optimizer.rs:43-97`). The closed set covers region, a preserve-origin-query flag, format, quality, resize filter, width, height and crop (`ts:crates/trusted-server-core/src/platform/image_optimizer.rs:12-181`).
 2. It strips the origin query by default (`proxy.rs:1118-1120`, `ts:crates/trusted-server-core/src/settings.rs:1738-1758`). Config validation rejects preserving the query on Image Optimizer routes (`settings.rs:1709-1719`) because Image Optimizer reads client query parameters as transformation inputs (`settings.rs:965-967`).
 3. It sets `Host` to the URI authority (`proxy.rs:1151`, `:893-917`). S3 SigV4 signs `host`, `x-amz-content-sha256`, `x-amz-date` and an optional `x-amz-security-token` (`ts:crates/trusted-server-core/src/s3_sigv4.rs:62-149`, header set `:128-133`).
-4. Only when the route has options, S3 auth, and the request is GET or HEAD (`proxy.rs:1015-1023`), it first sends a signed HEAD without Image Optimizer (`:1025-1078`), because Image Optimizer can mask S3 errors (`:1037-1039`). A failed HEAD answers a HEAD client directly, or triggers a signed streamed GET without Image Optimizer that returns the raw S3 error (`:1056-1077`).
+4. Only when the route has options, S3 auth, and the request is GET or HEAD (`proxy.rs:1015-1023`), it first sends a signed HEAD without Image Optimizer (`:1025-1078`), because Image Optimizer can mask S3 errors (`:1037-1039`). A failed HEAD answers a HEAD client directly, or triggers a signed streamed GET without Image Optimizer that returns the raw S3 error (`:1056-1077`). The later signed-origin correction in PR 1516 requires cache bypass on both control requests: Fastly's readthrough cache can otherwise transform a signed HEAD after signing. The final optimized GET keeps its existing default-cache policy.
 5. It then signs the final request (`proxy.rs:1167-1169`), attaches Image Optimizer (`:1173-1175`), asks for a streamed response (`:1176-1179`) and sends (`:1181-1187`).
 
 The Trusted Server Fastly adapter translates the options to the SDK (`ts:crates/trusted-server-adapter-fastly/src/platform.rs:190-305`), sends with the blocking `fastly::Request::send` (`:521-523`), and refuses Image Optimizer on its async path (`:527-536`).
 
-After the cut Trusted Server deletes that adapter layer. The asset route builds an `OutboundRequest` with `stream_response()`, a `timeout`, the SigV4 headers set through `header(..)`, and the Image Optimizer options, then calls `HttpClient::send`. The S3 HEAD preflight and the raw-error GET stay Trusted Server logic and are plain signed sends without options. Without EZ-8 the options cannot be attached, so every optimized route serves the untransformed original at full size and in its original format. A local operator configuration (not named here) enables an Image Optimizer route with S3 SigV4 today, so this blocks the cut.
+After the cut Trusted Server deletes that adapter layer. The asset route builds an `OutboundRequest` with `stream_response()`, a `timeout`, the SigV4 headers set through `header(..)`, and the Image Optimizer options, then calls `HttpClient::send`. The S3 HEAD preflight and the raw-error GET stay Trusted Server logic and are plain signed sends with `cache_policy(OutboundCachePolicy::Bypass)` and no optimizer options. The final optimized GET uses `PlatformDefault` with its options; a blanket bypass would disable optimization and is rejected by EZ-8.6. Without EZ-8 the options cannot be attached, so every optimized route serves the untransformed original at full size and in its original format. A local operator configuration (not named here) enables an Image Optimizer route with S3 SigV4 today, so this blocks the cut.
 
 #### Gap at F
 
@@ -1038,7 +1047,9 @@ At F the Fastly single send uses `send_async` (`edgezero:crates/edgezero-adapter
   candidate with both the frozen Trusted Server native path and an SDK-only control using identical
   image bytes, region, options, negotiation headers, origin/cache settings and execution mode.
   Separate verified cache hits and misses, GET/HEAD, and ordinary versus application-owned S3
-  preflight cases. Record sample counts, randomized build order, first-byte/completion latency
+  preflight cases. Match each request's cache policy: bypass without optimizer options for signed
+  HEAD preflights and raw error-body GETs, default caching with options for the optimized GET.
+  Record sample counts, randomized build order, first-byte/completion latency
   distributions, throughput, guest allocations/copied bytes/peak buffering, backend registration
   and transport host-call counts, origin receipts and connection identities where observable.
   Preserve transformation output semantics and lazy streaming; no additional EdgeZero-origin
@@ -1048,7 +1059,7 @@ At F the Fastly single send uses `send_async` (`edgezero:crates/edgezero-adapter
   caps/deadlines for speed, or call missing/inconclusive comparisons performance parity. Viceroy's
   unsupported result is not an optimization-performance sample.
 
-- Trusted Server end to end, on a Fastly staging service. An optimized asset path returns a transformed image, the HEAD preflight carries no options, and a missing S3 object returns the raw S3 status from the preflight. Trusted Server unit tests read back the options on the final GET and find them equal to the profile-table expectation (EZ-8.17).
+- Trusted Server end to end, on a Fastly staging service. An optimized asset path returns a transformed image. For signed S3 assets, a successful HEAD preflight uses `Bypass` without optimizer options, followed by the final GET using `PlatformDefault` with the expected profile-table options (EZ-8.17). An unsuccessful preflight for a GET client is followed by a separately signed raw error-body GET using `Bypass` without options; retain the raw origin error and application `no-store, private` policy. For HEAD clients, 403 and 404 preflight errors retain their status and any valid representation length, transmit no body or cookies, use the same private no-store policy, and issue neither a raw GET nor an optimizer call. Application recording tests assert exact method, target, signing-header and per-request policy/options sequences. Hosted cold optimized GET cases MUST succeed without a preparatory raw/debug GET or other object-warming request; repeated optimized GETs must retain optimizer metadata and normal cache-hit behavior. These cold functional controls do not change independently approved performance-sampling warmups. Cold standalone raw/debug HEAD and optimized HEAD outcomes remain explicitly unqualified until separately exercised. PR 1516's original deployment results are reference evidence, not acceptance of the EdgeZero candidate.
 
 #### Out of scope
 

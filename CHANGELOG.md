@@ -13,6 +13,11 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Pin the signed-origin image migration's per-request cache split: bypass for plain signed HEAD
+  preflights and raw error-body GETs, default caching for the optimized GET. Extend existing
+  Fastly cache-selection coverage to HEAD/GET and check prepared/native signing-header and
+  target preservation. Keep signing/preflights in application policy and hosted qualification open;
+  no production API, optimizer or transport change.
 - Anchor Axum's native outbound timer before sampling its paired clock, then use an absolute
   Tokio target so clock sampling or intervening preemption cannot extend that target. Add
   deterministic clock-delay and early-wake regressions; retain the existing deadline limits.

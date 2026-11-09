@@ -239,7 +239,7 @@ const scopeSnapshot = execFileSync('git', ['show', `2be1dd8704553395ef4f85f914fb
 assert.equal(digest(scopeSnapshot), '10776c6db1bfacaecca91a32c9ad955ad13f696ef8d078312e5b566b43f6205b');
 const preFocus = execFileSync('git', ['show', `fc973719c1c4840e3eca7fec235924998a0d9d5b:${requirementsPath}`]);
 assert.equal(digest(preFocus), 'a3d58bcabe7e9e556d21227de973c660794d25606b7ee3365bd7808d3d101c70');
-assert.equal(digest(readFileSync(requirementsPath)), '7212a3baeedf32598b1bd7eedf019554e2f7749334689c0202ef237af9843bff');
+assert.equal(digest(readFileSync(requirementsPath)), '45f265a199a91ccaf7bb08dc5bff6ff5d62fa27915437d7058c7aaddd2394c21');
 console.log('Historical and scoped-amendment identities match; authorization remains separately scoped.');
 JS
 ```
@@ -869,3 +869,35 @@ existing sibling rows share the full criterion identity, including the compressi
 rows whose assertion scope remains unchanged. The regression snapshot retains all original
 140 test titles and 223 scenarios; only current identities, affected text and derived coverage
 expectations change. No historical capture or failed evidence file is edited.
+
+## Signed-Origin Image Cache Policy Clarification (2026-11-09)
+
+**Approved by AG, scoped migration and acceptance work.** After the implementer explained
+that PR 275 already supplies per-request cache controls, the requester directed
+**"ok do the work for edgezero right now"**. Preserve the correction from
+[Trusted Server PR 1516](https://github.com/IABTechLab/trusted-server/pull/1516), revision
+`f37e1e811d277f1f24ec7353e83d0db056ecfa77`, without adding automatic application policy.
+
+- Signed HEAD preflights and separately signed raw error-body GETs use `Bypass` without
+  optimizer options. The final optimized GET uses `PlatformDefault` with its options.
+- Retain method, built target and signature-bearing headers subject to documented Host/header
+  normalization. Do not implement signing, preflight orchestration, a second transport or a
+  blanket bypass in EdgeZero. Existing optimizer-plus-bypass rejection stays intact.
+- Strengthen only existing EZ-8 acceptance 08/09; preserve all 255 criterion identities and
+  514 environment identities. Keep hosted entitlement/performance/horizon gates and separately
+  approved performance warmups. Add cold functional GET controls without preparatory raw GETs
+  and preserve bodyless/private HEAD error behavior in the consuming application.
+- The original deployment evidence is reference material, not a new candidate, performance
+  baseline, successful migrated run or qualification credit. Cold standalone raw/debug HEAD and
+  optimized HEAD remain unqualified until separately exercised.
+
+This authorization changes no production API, transport, SDK/runtime pin, deadline, limit,
+capability or deployment permission. Historical digests and failed captures stay unchanged.
+The derived inventory and regression snapshot retain every binding, pending disposition,
+comparison flag, original 140 test titles and 223 scenarios.
+
+| Current Subject                   | SHA-256                                                            |
+| --------------------------------- | ------------------------------------------------------------------ |
+| Requirements before clarification | `7212a3baeedf32598b1bd7eedf019554e2f7749334689c0202ef237af9843bff` |
+| Clarified requirements            | `45f265a199a91ccaf7bb08dc5bff6ff5d62fa27915437d7058c7aaddd2394c21` |
+| Reviewed 514-leg identity set     | `4c2ca209d21e88c30ca11317ef5d39b81423ea06788c3199a5a36dceec3acae4` |

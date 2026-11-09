@@ -2033,7 +2033,11 @@ mod fastly_impl {
             }
         }
 
-        fn sdk_cache_selection(mode: OutboundSendMode, policy: OutboundCachePolicy) {
+        fn sdk_cache_selection(
+            mode: OutboundSendMode,
+            policy: OutboundCachePolicy,
+            method: Method,
+        ) {
             use edgezero_core::OutboundScopeOwner;
 
             let trace = NativeSdkTrace::new(Duration::ZERO);
@@ -2042,10 +2046,15 @@ mod fastly_impl {
             let scope = callback.with(super::super::scope::capture);
             let progress = super::super::scope::native_progress(&scope, &time, trace.entered)
                 .expect("native progress");
-            let request = OutboundRequest::get("http://127.0.0.1:9/sdk-cache-selection")
-                .expect("request")
-                .cache_policy(policy)
-                .timeout(Duration::from_secs(1));
+            let request = OutboundRequest::new(
+                method,
+                "http://127.0.0.1:9/sdk-cache-selection"
+                    .parse()
+                    .expect("target"),
+            )
+            .expect("request")
+            .cache_policy(policy)
+            .timeout(Duration::from_secs(1));
             let dispatch = callback.with(|| match mode {
                 OutboundSendMode::Batch => testing::batch_dispatch(
                     request,
@@ -2117,14 +2126,18 @@ mod fastly_impl {
         #[test]
         fn buffered_send_and_batch_preserve_sdk_cache_selection() {
             for mode in [OutboundSendMode::Send, OutboundSendMode::Batch] {
-                sdk_cache_selection(mode, OutboundCachePolicy::PlatformDefault);
+                for method in [Method::HEAD, Method::GET] {
+                    sdk_cache_selection(mode, OutboundCachePolicy::PlatformDefault, method);
+                }
             }
         }
 
         #[test]
         fn buffered_send_and_batch_bypass_unsupported_guest_cache_hooks() {
             for mode in [OutboundSendMode::Send, OutboundSendMode::Batch] {
-                sdk_cache_selection(mode, OutboundCachePolicy::Bypass);
+                for method in [Method::HEAD, Method::GET] {
+                    sdk_cache_selection(mode, OutboundCachePolicy::Bypass, method);
+                }
             }
         }
 
@@ -4240,6 +4253,88 @@ mod fastly_impl {
             assert_eq!(
                 native.get_header(ACCEPT_ENCODING.as_str()),
                 Some(&HeaderValue::from_static("identity"))
+            );
+        }
+
+        #[test]
+        fn signed_requests_preserve_cache_and_optimizer_independence() {
+            use edgezero_core::http::header::HOST;
+            use edgezero_core::{OutboundImageOptimizerOptions, OutboundImageOptimizerRegion};
+
+            let trace = NativeSdkTrace::new(Duration::ZERO);
+            let target = "https://images.fixture.invalid:8443/photo%20one.jpg";
+            let signatures = [
+                ("authorization", "AWS4-HMAC-SHA256 fixture-only-signature"),
+                ("x-amz-date", "20261109T000000Z"),
+                ("x-amz-content-sha256", "fixture-only-payload-hash"),
+                ("x-amz-security-token", "fixture-only-session-token"),
+            ];
+            let mut policies = Vec::new();
+            let mut optimizer_requests = Vec::new();
+            for (method, policy, optimized) in [
+                (Method::HEAD, OutboundCachePolicy::Bypass, false),
+                (Method::GET, OutboundCachePolicy::Bypass, false),
+                (Method::GET, OutboundCachePolicy::PlatformDefault, true),
+            ] {
+                let mut request = OutboundRequest::new(method.clone(), target.parse().unwrap())
+                    .expect("request")
+                    .cache_policy(policy)
+                    .timeout(Duration::from_secs(1));
+                request.headers_mut().insert(
+                    HOST,
+                    HeaderValue::from_static("images.fixture.invalid:8443"),
+                );
+                for (name, value) in signatures {
+                    request
+                        .headers_mut()
+                        .insert(name, HeaderValue::from_static(value));
+                }
+                if optimized {
+                    request = request.image_optimizer(
+                        OutboundImageOptimizerOptions::new()
+                            .region(OutboundImageOptimizerRegion::Asia),
+                    );
+                }
+                let plan = RequestPlan::new(testing::dispatch(request, trace.time()));
+                assert_eq!(plan.parts.method, method);
+                assert_eq!(plan.parts.uri.to_string(), target);
+                assert_eq!(
+                    plan.identity.expect("backend identity").wire_authority,
+                    "images.fixture.invalid:8443"
+                );
+                let native = build_fastly_request(
+                    &plan.parts.method,
+                    &plan.parts.uri,
+                    &plan.parts.headers,
+                    plan.parts.cache_policy,
+                );
+                assert_eq!(native.get_method(), &method);
+                assert_eq!(native.get_url_str(), target);
+                for (name, value) in signatures {
+                    assert_eq!(plan.parts.headers[name].as_bytes(), value.as_bytes());
+                    assert_eq!(
+                        native
+                            .get_header(name)
+                            .expect("native signing header")
+                            .as_bytes(),
+                        value.as_bytes()
+                    );
+                }
+                policies.push(plan.parts.cache_policy);
+                optimizer_requests.push(plan.parts.image_optimizer.is_some());
+            }
+            assert_eq!(
+                policies,
+                [
+                    OutboundCachePolicy::Bypass,
+                    OutboundCachePolicy::Bypass,
+                    OutboundCachePolicy::PlatformDefault,
+                ]
+            );
+            assert_eq!(optimizer_requests, [false, false, true]);
+            assert!(
+                trace.events.borrow().is_empty(),
+                "conversion performs no SDK I/O"
             );
         }
 
