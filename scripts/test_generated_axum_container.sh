@@ -49,7 +49,7 @@ NETWORK="$ID"
 CONTAINERS=()
 cleanup() {
   status=$?
-  for container in "${CONTAINERS[@]}"; do
+  for container in ${CONTAINERS[@]+"${CONTAINERS[@]}"}; do
     docker logs "$container" > "$WORK/$container.log" 2>&1 || true
     docker rm -f "$container" >/dev/null 2>&1 || true
   done

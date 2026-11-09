@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { contextHash } from '../axum_container_helpers.mjs';
-import { hashContext } from '../../examples/container-publishing/prepare_inputs.mjs';
+import { baseImages, hashContext, prepareInputs, verifyContext } from '../../examples/container-publishing/prepare_inputs.mjs';
+import { check_inputs } from '../../examples/container-publishing/verify_artifacts.mjs';
 
 const root = new URL('../../', import.meta.url);
 const workflow = readFileSync(new URL('examples/container-publishing/release.yml', root), 'utf8');
@@ -34,7 +35,7 @@ test('application preparation hashes exactly the sorted committed context bytes'
     'assets/\uE000.txt': 'BMP filename\n',
     'assets/\u{10000}.txt': 'supplementary filename\n',
     'Cargo.lock': 'application-owned lock\n',
-    'Dockerfile': `FROM debian@sha256:${'b'.repeat(64)}\n`,
+    'Dockerfile': `  fRoM --platform=$BUILDPLATFORM debian@sha256:${'b'.repeat(64)} AS builder\n\tfrom gcr.io/distroless/cc-debian13:nonroot\n`,
     '.tool-versions': 'rust 1.95.0\n',
   };
   for (const [name, data] of Object.entries(files)) writeFileSync(join(app, name), data);
@@ -46,7 +47,11 @@ test('application preparation hashes exactly the sorted committed context bytes'
   const inputs = JSON.parse(readFileSync(join(app, 'fixture-inputs.json')));
   const context = createHash('sha256');
   for (const name of Object.keys(files).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
-    context.update(name + '\0' + files[name] + '\0');
+    for (const value of [Buffer.from(name), Buffer.from(files[name])]) {
+      const length = Buffer.alloc(8);
+      length.writeBigUInt64BE(BigInt(value.length));
+      context.update(length).update(value);
+    }
   }
   assert.equal(inputs.context_sha256, context.digest('hex'));
   assert.equal(inputs.context_sha256, fixtureHash);
@@ -55,10 +60,87 @@ test('application preparation hashes exactly the sorted committed context bytes'
   assert.equal(inputs.source_sha256, sha256(readFileSync(source)));
   assert.equal(inputs.lock_sha256, sha256(files['Cargo.lock']));
   assert.equal(inputs.dockerfile_sha256, sha256(files.Dockerfile));
-  assert.deepEqual(inputs.base_images, [`debian@sha256:${'b'.repeat(64)}`]);
+  assert.deepEqual(inputs.base_images, [`debian@sha256:${'b'.repeat(64)}`, 'gcr.io/distroless/cc-debian13:nonroot']);
+  check_inputs(inputs, 'a'.repeat(40), '123-1');
   assert.equal(inputs.toolchain, files['.tool-versions']);
   assert.equal(inputs.revision, 'a'.repeat(40));
   assert.equal(inputs.dirty, false);
+});
+
+test('base extraction rejects unpinned bases regardless of instruction spelling or flags', () => {
+  const pinned = `debian@sha256:${'b'.repeat(64)}`;
+  for (const instruction of ['FROM', 'from', '  FrOm', '\tFROM\t--platform=$BUILDPLATFORM']) {
+    const bases = baseImages(`${instruction} debian:latest AS tools\nFROM ${pinned}\n`);
+    assert.deepEqual(bases, ['debian:latest', pinned]);
+    const inputs = { revision: 'a'.repeat(40), dirty: false, toolchain: 'rust 1.95.0\n', base_images: bases,
+      ...Object.fromEntries(['source_sha256', 'context_sha256', 'lock_sha256', 'dockerfile_sha256'].map(key => [key, 'c'.repeat(64)])) };
+    assert.throws(() => check_inputs(inputs, inputs.revision, '123-1'), /Pinned base trace missing/);
+  }
+});
+
+test('context hashes distinguish embedded NUL bytes from file boundaries', () => {
+  assert.notEqual(hashContext([['a', Buffer.from('x\0b\0y')]]),
+    hashContext([['a', Buffer.from('x')], ['b', Buffer.from('y')]]));
+  assert.notEqual(hashContext([['é', Buffer.from([0, 255])]]), hashContext([['é', Buffer.from([0, 254])]]));
+  assert.equal(hashContext([['b', 'two'], ['a', 'one']]), hashContext([['a', 'one'], ['b', 'two']]));
+});
+
+function preparedApp(t) {
+  const directory = scratch(t);
+  const app = join(directory, 'context');
+  mkdirSync(join(app, 'nested'), { recursive: true });
+  for (const [name, content] of Object.entries({ 'Cargo.lock': '# locked\n',
+    'Dockerfile': 'FROM gcr.io/distroless/cc-debian13:nonroot\n', '.tool-versions': 'rust 1.95.0\n',
+    'nested/fixture-inputs.json': 'nested app asset', 'asset.bin': Buffer.from([0, 255, 0]) })) {
+    writeFileSync(join(app, name), content);
+  }
+  const source = join(directory, 'source.tar');
+  writeFileSync(source, 'immutable source');
+  prepareInputs(app, source, 'a'.repeat(40));
+  return { app, directory };
+}
+
+test('extracted context verification excludes only the root input receipt', t => {
+  const { app } = preparedApp(t);
+  verifyContext(app);
+  const result = spawnSync(process.execPath, [preparation.pathname, '--verify', app], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  writeFileSync(join(app, 'nested/fixture-inputs.json'), 'modified nested app asset');
+  assert.throws(() => verifyContext(app), /Prepared context hash mismatch/);
+});
+
+for (const mutation of ['changed', 'added', 'removed', 'symlink']) {
+  test(`extracted context verification rejects ${mutation} input`, t => {
+    const { app, directory } = preparedApp(t);
+    const asset = join(app, 'asset.bin');
+    if (mutation === 'changed') writeFileSync(asset, 'changed');
+    else if (mutation === 'added') writeFileSync(join(app, 'extra'), 'extra');
+    else {
+      rmSync(asset);
+      if (mutation === 'symlink') {
+        writeFileSync(join(directory, 'outside'), Buffer.from([0, 255, 0]));
+        symlinkSync(join(directory, 'outside'), asset);
+      }
+    }
+    const result = spawnSync(process.execPath, [preparation.pathname, '--verify', app], { encoding: 'utf8' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, mutation === 'symlink' ? /must not contain links/ : /Prepared context hash mismatch/);
+  });
+}
+
+test('handoff verifies context before invoking the image builder', t => {
+  const { app, directory } = preparedApp(t);
+  writeFileSync(join(app, 'asset.bin'), 'changed after preparation');
+  const env = join(directory, 'mocks.sh');
+  writeFileSync(env, 'docker() { if [[ "$1" == info ]]; then echo x86_64; else printf "%s\\n" "$*" >> "$DOCKER_EVENTS"; fi; }\n');
+  const events = join(directory, 'docker-events');
+  const result = spawnSync('bash', [new URL('scripts/test_axum_container_handoff.sh', root).pathname,
+    'build', app, join(directory, 'output'), 'linux/amd64', 'a'.repeat(40), '123-1'], {
+    encoding: 'utf8', env: { ...process.env, BASH_ENV: env, DOCKER_EVENTS: events },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Prepared context hash mismatch/);
+  assert.doesNotMatch(readFileSync(events, 'utf8'), /buildx (create|build)/);
 });
 
 test('application preparation rejects symlinked source instead of hashing external bytes', t => {

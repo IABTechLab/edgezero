@@ -361,7 +361,10 @@ still requires readiness, required-config failure, durable restart and bounded
 SIGTERM draining through the accepted runtime. A response from `/` is not
 application readiness, and exec startup alone does not implement signal handling.
 The scaffold uses `STOPSIGNAL SIGINT` for the current development entrypoint's
-graceful path; this does not certify bounded SIGTERM draining.
+graceful path; this does not certify bounded SIGTERM draining. As container PID 1,
+the current entrypoint ignores SIGTERM. A direct `docker kill -s TERM` or an
+orchestrator override to SIGTERM does not initiate graceful shutdown; a stop
+operation can reach its kill timeout and send SIGKILL instead.
 Application owners publish their own images. No public EdgeZero image is needed.
 
 See [Publishing Axum containers](../publishing-axum-containers.md) for native

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { createGunzip } from 'node:zlib';
 import { readTar } from '../examples/container-publishing/verify_artifacts.mjs';
 import { parse as parseToml } from 'smol-toml';
-import { compareNames, hashContext } from '../examples/container-publishing/prepare_inputs.mjs';
+import { baseImages, compareNames, hashContext } from '../examples/container-publishing/prepare_inputs.mjs';
 
 export { parseToml };
 const read = (file) => fs.readFileSync(file, 'utf8');
@@ -124,7 +124,7 @@ export function recordInputs(app, metadataFile) {
   inputs.lock_sha256 = sha256(lock);
   inputs.toolchain = read(path.join(app, '.tool-versions'));
   inputs.dockerfile_sha256 = sha256(fs.readFileSync(path.join(app, 'Dockerfile')));
-  inputs.base_images = [...read(path.join(app, 'Dockerfile')).matchAll(/^FROM (\S+)/gm)].map((match) => match[1]);
+  inputs.base_images = baseImages(read(path.join(app, 'Dockerfile')));
   inputs.context_sha256 = contextHash(app);
   writeJson(path.join(app, 'fixture-inputs.json'), inputs);
 }

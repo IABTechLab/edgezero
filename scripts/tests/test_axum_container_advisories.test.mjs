@@ -19,6 +19,24 @@ test('cargo-audit source archive has a committed checksum pin', () => {
     '700c2b240f7fd330c24b675fe429f73a5b676531fcc6300400b2b67f155ba12a');
 });
 
+for (const [pin, ending, valid] of [['1.95.0', '\n', true], ['1.95.0', '\r\n', true], ['stable', '\r\n', false]]) {
+  test(`handoff parses ${JSON.stringify(pin + ending)} without weakening exact Rust pins`, t => {
+    const input = fs.mkdtempSync(path.join(os.tmpdir(), 'axum-rust-pin-'));
+    t.after(() => fs.rmSync(input, { recursive: true, force: true }));
+    fs.writeFileSync(path.join(input, '.tool-versions'), `rust ${pin}${ending}`);
+    const block = handoff.slice(handoff.indexOf('  rust_pin='), handoff.indexOf('  curl --fail --silent --show-error --location'));
+    const result = spawnSync('bash', ['-euo', 'pipefail', '-c', `rustup() { printf '%s\\n' "$*"; }\n${block}`], {
+      encoding: 'utf8', env: { ...process.env, INPUT: input },
+    });
+    assert.equal(result.status === 0, valid, result.stderr);
+    if (valid) assert.equal(result.stdout, 'toolchain install 1.95.0 --profile minimal\n');
+    else {
+      assert.equal(result.stdout, '');
+      assert.match(result.stderr, /Expected exact Rust pin/);
+    }
+  });
+}
+
 for (const scenario of ['success', 'bad checksum', 'missing lock']) {
   test(`cargo-audit source installation: ${scenario}`, t => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'axum-audit-install-'));

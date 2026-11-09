@@ -18,7 +18,7 @@ RUN <<'SH'
 set -eu
 fail() { echo "container toolchain: $*" >&2; exit 1; }
 test -f Cargo.lock || fail 'prepare and commit the application Cargo.lock first'
-pin=$(awk '$1 == "rust" { if (NF != 2 || ++count != 1) exit 1; pin = $2 }
+pin=$(awk '{ sub(/\r$/, "") } $1 == "rust" { if (NF != 2 || ++count != 1) exit 1; pin = $2 }
     END { if (count != 1) exit 1; print pin }' .tool-versions) \
     || fail 'expected one rust X.Y.Z entry in .tool-versions'
 printf '%s\n' "$pin" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -27,7 +27,7 @@ test "$pin" = "$RUST_VERSION" || fail 'update the Docker Rust pin to match .tool
 test ! -e rust-toolchain || fail 'use rust-toolchain.toml with an exact channel instead of rust-toolchain'
 if test -f rust-toolchain.toml; then
     channel=$(awk '
-        { sub(/#.*/, ""); gsub(/^[ \t]+|[ \t]+$/, "") }
+        { sub(/\r$/, ""); sub(/#.*/, ""); gsub(/^[ \t]+|[ \t]+$/, "") }
         /^\[/ { section = $0; next }
         section == "[toolchain]" && /^channel[ \t]*=/ {
             if (++count != 1 || $0 !~ /^channel[ \t]*=[ \t]*"[0-9]+\.[0-9]+\.[0-9]+"$/) exit 1

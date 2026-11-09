@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import test from 'node:test';
+import { hashContext, verifyContext } from '../../examples/container-publishing/prepare_inputs.mjs';
 import { paxRecord, tarEntry } from './axum_container_tar.mjs';
 import {
   appName, assertRegistrySubset, contextFiles, contextHash, isWithin, parseToml, recordInputs,
@@ -235,20 +236,17 @@ test('record-inputs verifies confinement and retains context, lock, Dockerfile a
   stageSources(root, app);
   put(app, 'Cargo.lock', lockToml([{ name: 'registry', version: '1.0.0', source: 'registry+example' }, { name: 'app', version: '0.1.0' }]));
   put(app, '.tool-versions', 'rust 1.95.0\nnodejs 22.0.0\n');
-  put(app, 'Dockerfile', 'FROM rust:pin AS builder\nFROM debian:pin\n');
+  put(app, 'Dockerfile', '  from --platform=$BUILDPLATFORM rust:pin AS builder\n\tFROM debian:pin\n');
   const metadata = put(path.dirname(app), 'metadata.json', JSON.stringify({ packages: [
     { name: 'app', source: null, manifest_path: path.join(app, 'Cargo.toml') },
     { name: 'registry', source: 'registry+example', manifest_path: '/outside/context' },
   ] }));
-  const expectedHash = createHash('sha256');
-  for (const file of contextFiles(app)) {
-    expectedHash.update(`${path.relative(app, file)}\0`).update(fs.readFileSync(file)).update('\0');
-  }
-  const before = expectedHash.digest('hex');
+  const before = hashContext(contextFiles(app).map(file => [path.relative(app, file), fs.readFileSync(file)]));
   assert.equal(contextHash(app), before);
   recordInputs(app, metadata);
   const inputs = readJson(path.join(app, 'fixture-inputs.json'));
   assert.equal(inputs.context_sha256, before);
+  verifyContext(app);
   assert.equal(inputs.lock_sha256, digest(fs.readFileSync(path.join(app, 'Cargo.lock'))));
   assert.equal(inputs.seed_lock_sha256, digest(fs.readFileSync(path.join(app, 'vendor/edgezero/Cargo.lock'))));
   assert.equal(inputs.lock_mode, 'framework-seeded-derived-fixture');

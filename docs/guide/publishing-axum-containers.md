@@ -65,6 +65,12 @@ This is a derived fixture lockfile, not a claim that both lockfiles are identica
 Consumers still prepare their own lockfiles. This is explicit test preparation,
 not a new scaffold dependency-selection option or consumer release recipe.
 
+Context hashes sort relative paths by UTF-8 bytes, then hash each UTF-8 name and
+file payload with an unsigned 64-bit big-endian byte length before each field.
+Before building, the handoff rechecks the extracted context, excluding only the
+root `fixture-inputs.json` receipt. Regenerate prepared inputs when updating the
+hash encoding; receipts from a different encoding are not interchangeable.
+
 The build helper uses the existing generated-app HTTP/TLS packaging smoke and the
 no-store Compose check. An application-owned `APP_SMOKE_SCRIPT` can replace those
 fixture checks in a credential-free build job. It receives `IMAGE_REF PLATFORM`.

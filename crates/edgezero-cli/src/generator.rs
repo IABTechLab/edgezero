@@ -1235,6 +1235,13 @@ mod tests {
         let path = format!("{}:{}", bin.display(), env::var("PATH").expect("PATH"));
         for (versions, toolchain, installed, expected_error) in [
             ("rust 1.95.0\n", None, "1.95.0", ""),
+            ("rust 1.95.0\r\nnodejs 24.20.0\r\n", None, "1.95.0", ""),
+            (
+                "rust 1.95.0\r\n",
+                Some("[toolchain]\r\nchannel = \"1.95.0\"\r\ntargets = []\r\n"),
+                "1.95.0",
+                "",
+            ),
             (
                 "rust 1.95.0\n",
                 Some("[toolchain]\nchannel = \"1.95.0\" # pin\ntargets = []\n"),
@@ -1242,6 +1249,14 @@ mod tests {
                 "",
             ),
             ("rust stable\n", None, "1.95.0", "exact X.Y.Z"),
+            ("rust stable\r\n", None, "1.95.0", "exact X.Y.Z"),
+            ("rust 1.95.0\r\nrust 1.95.0\r\n", None, "1.95.0", "one rust"),
+            (
+                "rust 1.95.0\r\n",
+                Some("[toolchain]\r\nchannel = \"1.94.0\"\r\n"),
+                "1.95.0",
+                "conflicts",
+            ),
             ("rust 1.94.0\n", None, "1.95.0", "Docker Rust pin"),
             ("rust 1.95.0\nrust 1.95.0\n", None, "1.95.0", "one rust"),
             ("nodejs 24.12.0\n", None, "1.95.0", "one rust"),

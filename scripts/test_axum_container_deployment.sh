@@ -2,11 +2,26 @@
 set -euo pipefail
 
 # Opt-in no-store Compose packaging check; not readiness/storage/drain proof.
+# Usage: test_axum_container_deployment.sh IMAGE [NAME] [--evidence-dir NEW_DIR]
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export AXUM_IMAGE="${1:?pass a local loaded image digest}"
-NAME="${2:-container-probe}"
-[[ $# -le 2 && "$AXUM_IMAGE" == *@sha256:* && "$NAME" =~ ^[a-zA-Z0-9_-]+$ ]] \
+shift
+NAME=container-probe
+if [[ $# -gt 0 && "$1" != --* ]]; then NAME="${1:-container-probe}"; shift; fi
+EVIDENCE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --evidence-dir) EVIDENCE="${2:?--evidence-dir requires a directory}"; shift 2 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+[[ "$AXUM_IMAGE" == *@sha256:* && "$NAME" =~ ^[a-zA-Z0-9_-]+$ ]] \
   || { echo 'Expected image digest and generated app name' >&2; exit 2; }
+if [[ -n "$EVIDENCE" ]]; then
+  [[ ! -e "$EVIDENCE" ]] || { echo 'Evidence directory must not exist' >&2; exit 2; }
+  mkdir -p "$EVIDENCE"
+  EVIDENCE="$(cd "$EVIDENCE" && pwd)"
+fi
 export AXUM_PORT=0
 PROJECT="edgezero-compose-$$-$RANDOM"
 WORK="$(mktemp -d -t edgezero-compose.XXXXXX)"
@@ -22,13 +37,19 @@ wait_for_http() {
 }
 cleanup() {
   status=$?
-  if [[ "$status" -eq 0 ]]; then
-    rm -rf "$WORK"
-  else
+  if [[ "$status" -ne 0 ]]; then
     compose logs > "$WORK/cleanup-compose.log" 2>&1 || true
     compose down > "$WORK/cleanup.log" 2>&1 || true
     echo "Diagnostics: $WORK" >&2
   fi
+  if [[ -n "$EVIDENCE" ]]; then
+    # Retain logs only, not rendered configuration or response bodies.
+    for log in "$WORK"/*.log; do
+      [[ ! -f "$log" ]] || cp "$log" "$EVIDENCE/" || echo "Could not retain $log" >&2
+    done
+    printf '%s\n' "$status" > "$EVIDENCE/exit-status" || echo 'Could not retain exit status' >&2
+  fi
+  if [[ "$status" -eq 0 ]]; then rm -rf "$WORK"; fi
   exit "$status"
 }
 trap cleanup EXIT

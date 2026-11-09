@@ -13,7 +13,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { hashContext } from './prepare_inputs.mjs';
+import { baseImages, hashContext } from './prepare_inputs.mjs';
 
 export const MANIFEST = 'application/vnd.oci.image.manifest.v1+json';
 export const CONFIG = 'application/vnd.oci.image.config.v1+json';
@@ -447,7 +447,7 @@ export async function release_record(source, bundles, metadata, revision, runId,
     await git.done;
   } finally { if (git.process.exitCode === null) git.process.kill(); }
 
-  const expected = { source_sha256: sourceHash.digest('hex'), context_sha256: hashContext(files), lock_sha256: hash(files.get('Cargo.lock')), dockerfile_sha256: hash(files.get('Dockerfile')), toolchain: utf8(files.get('.tool-versions')), base_images: [...utf8(files.get('Dockerfile')).matchAll(/^FROM (\S+)/gm)].map(match => match[1]), dirty: false };
+  const expected = { source_sha256: sourceHash.digest('hex'), context_sha256: hashContext(files), lock_sha256: hash(files.get('Cargo.lock')), dockerfile_sha256: hash(files.get('Dockerfile')), toolchain: utf8(files.get('.tool-versions')), base_images: baseImages(utf8(files.get('Dockerfile'))), dirty: false };
   require(/^[0-9]+-[0-9]+(?![\s\S])/.test(runId), 'Invalid release run identity');
   const [run, attempt] = runId.split('-');
   artifact_ids(metadata, run, attempt, revision);

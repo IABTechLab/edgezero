@@ -46,6 +46,7 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "$MODE" == build ]]; then
+  node "$ROOT/examples/container-publishing/prepare_inputs.mjs" --verify "$INPUT"
   docker buildx create --name "$BUILDER" --driver docker-container --driver-opt "image=$BUILDKIT_IMAGE" > "$OUTPUT/builder.log"
   BUILDX_METADATA_PROVENANCE=min docker buildx build --builder "$BUILDER" --platform "$PLATFORM" --pull \
     --provenance=false --sbom=false --metadata-file "$WORK/build-metadata.json" \
@@ -91,10 +92,10 @@ if [[ "$MODE" == build ]]; then
     "$ROOT/scripts/test_generated_axum_container.sh" "$INPUT" --image "$IMAGE" \
       --platform "$PLATFORM" --evidence-dir "$OUTPUT/smoke"
     APP_NAME="$(node "$ROOT/scripts/axum_container_helpers.mjs" app-name "$INPUT/edgezero.toml")"
-    "$ROOT/scripts/test_axum_container_deployment.sh" "$IMAGE" "$APP_NAME"
+    "$ROOT/scripts/test_axum_container_deployment.sh" "$IMAGE" "$APP_NAME" --evidence-dir "$OUTPUT/compose"
   fi
   # Audit exactly the prepared lockfile, without repository/user audit configuration.
-  rust_pin="$(awk '$1 == "rust" { print $2 }' "$INPUT/.tool-versions")"
+  rust_pin="$(awk '{ sub(/\r$/, "") } $1 == "rust" { print $2 }' "$INPUT/.tool-versions")"
   [[ "$rust_pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected exact Rust pin' >&2; exit 1; }
   rustup toolchain install "$rust_pin" --profile minimal
   curl --fail --silent --show-error --location \

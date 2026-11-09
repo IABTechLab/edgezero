@@ -187,6 +187,7 @@ jobs:
             ${{ runner.temp }}/accepted/inputs.json
             ${{ runner.temp }}/accepted/rust-advisories.json
             ${{ runner.temp }}/accepted/smoke
+            ${{ runner.temp }}/accepted/compose
           if-no-files-found: warn
           retention-days: 7
 

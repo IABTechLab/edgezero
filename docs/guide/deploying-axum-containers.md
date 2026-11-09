@@ -52,7 +52,11 @@ The check verifies HTTP, UID, read-only root, capabilities, no-new-privileges,
 clean exit after stop, restart and teardown. It never builds or deletes the supplied image. Plain
 stop/start is not durable-state or bounded-drain evidence. The Compose 30-second
 stop budget is a placeholder; it must exceed the application's accepted drain
-budget before production use.
+budget before production use. The scaffold uses `STOPSIGNAL SIGINT` for the
+current entrypoint's graceful path. As container PID 1, that entrypoint ignores
+SIGTERM: a direct `docker kill -s TERM` or an orchestrator override to SIGTERM does
+not initiate graceful shutdown, and a stop operation can reach its kill timeout
+and send SIGKILL instead.
 
 ## External state, configuration and secrets
 

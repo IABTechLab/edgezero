@@ -11,6 +11,7 @@ import https from 'node:https';
 import { once } from 'node:events';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import { hashContext } from '../../examples/container-publishing/prepare_inputs.mjs';
 import * as v from '../../examples/container-publishing/verify_artifacts.mjs';
 import { paxRecord, tarEntry } from './axum_container_tar.mjs';
 
@@ -339,17 +340,15 @@ test('registry preflight accepts valid image-name separators and rejects malform
 });
 caseTest('release record recomputes committed source', async ({ root }) => {
   const source = path.join(root, 'source'); fs.mkdirSync(source);
-  const contents = { 'Cargo.lock': '# locked\n', '.tool-versions': 'rust 1.95.0\n', Dockerfile: 'FROM gcr.io/distroless/cc-debian13:nonroot\n', 'a/b': 'nested', 'a-extra/c': 'ordering', 'unicode/é': 'UTF-8', 'unicode/\ue000': 'BMP scalar', 'unicode/\u{10000}': 'astral scalar' };
+  const contents = { 'Cargo.lock': '# locked\n', '.tool-versions': 'rust 1.95.0\n', Dockerfile: `  FrOm --platform=$BUILDPLATFORM debian@sha256:${'b'.repeat(64)} AS tools\n\tfrom gcr.io/distroless/cc-debian13:nonroot\n`, 'a/b': 'nested', 'a-extra/c': 'ordering', 'unicode/é': 'UTF-8', 'unicode/\ue000': 'BMP scalar', 'unicode/\u{10000}': 'astral scalar' };
   for (const [name, text] of Object.entries(contents)) { const file = path.join(source, name); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); }
   function git(...args) { const result = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', ...args], { cwd: source }); assert.equal(result.status, 0, result.stderr.toString()); return result.stdout; }
   git('init', '-q'); git('add', '.'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture');
   const revision = git('rev-parse', 'HEAD').toString().trim(), archive = git('archive', '--format=tar', revision);
-  const context = createHash('sha256');
-  for (const name of ['.tool-versions', 'Cargo.lock', 'Dockerfile', 'a-extra/c', 'a/b', 'unicode/é', 'unicode/\ue000', 'unicode/\u{10000}']) context.update(name).update('\0').update(contents[name]).update('\0');
-  const contextDigest = context.digest('hex'), bundles = [];
+  const contextDigest = hashContext(Object.entries(contents)), bundles = [];
   for (const arch of ['amd64', 'arm64']) {
     const bundle = path.join(root, 'release-' + arch); fs.mkdirSync(bundle); fixture(bundle, arch, revision, arch === 'arm64' ? 'v8' : undefined);
-    const inputs = { ...v.load(path.join(bundle, 'inputs.json')), source_sha256: sha(archive), context_sha256: contextDigest, lock_sha256: v.checksum(path.join(source, 'Cargo.lock')), dockerfile_sha256: v.checksum(path.join(source, 'Dockerfile')) };
+    const inputs = { ...v.load(path.join(bundle, 'inputs.json')), base_images: [`debian@sha256:${'b'.repeat(64)}`, 'gcr.io/distroless/cc-debian13:nonroot'], source_sha256: sha(archive), context_sha256: contextDigest, lock_sha256: v.checksum(path.join(source, 'Cargo.lock')), dockerfile_sha256: v.checksum(path.join(source, 'Dockerfile')) };
     put(path.join(bundle, 'inputs.json'), inputs);
     put(path.join(bundle, 'rust-advisories.json'), { ...v.load(path.join(bundle, 'rust-advisories.json')), lock_sha256: inputs.lock_sha256 });
     put(path.join(bundle, 'provenance.json'), { ...v.load(path.join(bundle, 'provenance.json')), inputs });
@@ -442,12 +441,25 @@ caseTest('index requires two same-run variants', ({ seal }) => {
   assert.deepEqual(new Set(v.runtime_index([one, two]).manifests.map(manifest => manifest.platform.architecture)), new Set(['amd64', 'arm64']));
   for (const receipts of [[one], [one, one], [one, { ...two, run_id: '124-1' }], [one, { ...two, sidecars: { ...two.sidecars, 'inputs.json': 'f'.repeat(64) } }]]) assert.throws(() => v.runtime_index(receipts));
 });
-caseTest('unsafe archive members', async ({ root }) => {
+caseTest('unsafe archive paths are rejected without a link target', async ({ root }) => {
   let index = 0;
-  for (const [name, type] of [['../escape', '0'], ['/absolute', '0'], ['blobs/sha256/' + 'a'.repeat(64), '2'], ['index.json', '1'], ['script.sh', '0'], ['index.json', '6'], ['index.json', '3'], ['index.json', '4'], ['index.json', 'S'], ['blobs//sha256/' + 'a'.repeat(64), '0'], ['blobs/./sha256/' + 'a'.repeat(64), '0']]) {
-    const archive = path.join(root, 'unsafe.tar'); fs.writeFileSync(archive, tar([{ name, type, link: '/escape' }]));
-    await assert.rejects(v.unpack(archive, path.join(root, 'unsafe-' + index++)), undefined, `${name} ${type}`);
+  for (const name of ['../escape', '/absolute', 'blobs//sha256/' + 'a'.repeat(64), 'blobs/./sha256/' + 'a'.repeat(64)]) {
+    const archive = path.join(root, 'unsafe.tar'); fs.writeFileSync(archive, tar([{ name }]));
+    await assert.rejects(v.unpack(archive, path.join(root, 'unsafe-' + index++)), /Unsafe archive path/, name);
   }
+});
+caseTest('unexpected archive types and names are rejected without a link target', async ({ root }) => {
+  let index = 0;
+  for (const [name, type] of [['blobs/sha256/' + 'a'.repeat(64), '2'], ['index.json', '1'],
+    ['script.sh', '0'], ['index.json', '6'], ['index.json', '3'], ['index.json', '4'], ['index.json', 'S']]) {
+    const archive = path.join(root, 'unsafe.tar'); fs.writeFileSync(archive, tar([{ name, type }]));
+    await assert.rejects(v.unpack(archive, path.join(root, 'unsafe-' + index++)), /Unexpected archive member/, `${name} ${type}`);
+  }
+});
+caseTest('otherwise allowed archive members reject a link target', async ({ root }) => {
+  const archive = path.join(root, 'unsafe.tar');
+  fs.writeFileSync(archive, tar([{ name: 'index.json', link: '/escape' }]));
+  await assert.rejects(v.unpack(archive, path.join(root, 'unsafe')), /Unexpected archive member/);
 });
 caseTest('duplicate archive member', async ({ root }) => {
   const archive = path.join(root, 'unsafe.tar'); fs.writeFileSync(archive, tar([{ name: 'index.json', data: Buffer.from('{}') }, { name: 'index.json', data: Buffer.from('{}') }]));
