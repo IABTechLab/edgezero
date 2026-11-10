@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Native-store PRs are currently stacked on the outbound HTTP specification.
-    branches: [main, docs/outbound-http-spec]
 permissions:
   contents: read
 
