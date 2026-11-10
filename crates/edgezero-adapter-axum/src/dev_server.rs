@@ -148,6 +148,7 @@ pub struct AxumDevServer {
 }
 
 impl AxumDevServer {
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) async fn bind_listener(&self) -> anyhow::Result<TokioTcpListener> {
         TokioTcpListener::bind(self.config.addr)
             .await
