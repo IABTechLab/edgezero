@@ -94,7 +94,8 @@ my-app/
 │   ├── my-app-adapter-cloudflare/
 │   │   ├── Cargo.toml
 │   │   ├── wrangler.toml
-│   │   └── src/main.rs
+│   │   ├── src/lib.rs      # Workers entrypoint
+│   │   └── src/main.rs     # Host-only stub
 │   ├── my-app-adapter-axum/
 │   │   ├── Cargo.toml
 │   │   ├── axum.toml
@@ -102,7 +103,8 @@ my-app/
 │   └── my-app-adapter-spin/
 │       ├── Cargo.toml
 │       ├── spin.toml
-│       └── src/main.rs
+│       ├── runtime-config.toml
+│       └── src/lib.rs
 ```
 
 ## Writing Your First Handler

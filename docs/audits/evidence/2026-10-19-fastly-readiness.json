@@ -1,0 +1,332 @@
+{
+  "schema": 1,
+  "execution_date": "2026-10-19",
+  "status": "Failed",
+  "qualification": false,
+  "base_revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+  "source_state": "uncommitted working-tree characterization, not qualification for base_revision",
+  "command": "scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness",
+  "exit_code": 1,
+  "source_sha256": {
+    "tests/fixtures/reusable-app/Cargo.lock": "da27aa5e3c6c062b18ddabc45a2ed4f86196cc7bbf58b46da69bdfbd047d3f6f",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/Cargo.toml": "c677d3eae023a662a33452685bf1668feb6a2beb6a885744372e5ddf4b879276",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_readiness.rs": "90b959abd5250a230c04409518f6416436db5485c0a174deb9a6a0a5e51bad4e",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/main.rs": "640c7e1ff4aaabcca9ba09cdcd26800bf4aef3b4fc00f464532ebf6e89f894bd",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/net.rs": "5dd4463d89ee25b6a5db134361786006d24e83f5f62037f255699a4bb2cde3b2",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/runners.rs": "29e5caf2139519cf3a135f497905de1e2ea2d449de32355be421eb1ecee13b43",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence.rs": "b0b1697f06a84db147b2581085ea1472126b5e91dc9a05715501736580e6afd4"
+  },
+  "viceroy_source_sha256": {
+    "body.rs": "df2134af7ebf5d404b1ad41fcc744737325c7d0d929908f8d8742f50a93f4ee5",
+    "async_io.rs": "49a73f24b6c495e5240768b4e3af47af21252ae6e4c891df80c635395e3025c3",
+    "sandbox/async_item.rs": "5ea625789320ecf07988c5fff9db860f7c0b11a69f22779d7cf3b76b64b1f757"
+  },
+  "binary_sha256": "908f69f5224f5cab40efaba8c9856473c45cab260102ce3c251ae548b9d969e3",
+  "raw_events_sha256": "7c0731f08a53ae4c9d576e2b3f1247e79b9314190cfe16e0b5f1e3d24fc52bad",
+  "events": [
+    {
+      "construction_rounds": 0,
+      "event": "run",
+      "max_requests": 10,
+      "seed": 856,
+      "suite": "outbound-readiness"
+    },
+    {
+      "event": "build_environment",
+      "host_arch": "aarch64",
+      "host_os": "macos",
+      "lockfile": {
+        "bytes": 84052,
+        "fnv1a64": "f1ec2624d284e86b",
+        "path": "/private/tmp/edgezero-outbound-readiness-final/Cargo.lock",
+        "purpose": "non-security build identity"
+      },
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"
+    },
+    {
+      "adapter": "fastly",
+      "event": "runtime",
+      "executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+      "expected": "0.21.0",
+      "version": "viceroy 0.21.0"
+    },
+    {
+      "artifact": {
+        "bytes": 737829,
+        "fnv1a64": "b61715b6c7c8d1a1",
+        "path": "/private/tmp/edgezero-outbound-readiness-final/artifacts/fixture-fastly-outbound-readiness.wasm",
+        "purpose": "non-security build identity"
+      },
+      "event": "readiness-build",
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "sdk": "0.13.1",
+      "source_state": "working-tree-characterization"
+    },
+    {
+      "case": "truncated",
+      "deadline_us": 500000,
+      "mode": "direct",
+      "qualification": false,
+      "read_limit": 1,
+      "repetition": 0,
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "samples": [
+        {
+          "end_us": 12524,
+          "operation": "head-select",
+          "selected": 0,
+          "start_us": 1039,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 500
+        },
+        {
+          "bytes": 1,
+          "end_us": 13902,
+          "operation": "read",
+          "start_us": 12831
+        },
+        {
+          "end_us": 64129,
+          "error": "UnexpectedEof",
+          "operation": "read",
+          "start_us": 13904
+        }
+      ],
+      "source_state": "working-tree-characterization"
+    },
+    {
+      "case": "truncated",
+      "deadline_us": 500000,
+      "mode": "selected",
+      "qualification": false,
+      "read_limit": 1,
+      "repetition": 0,
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "samples": [
+        {
+          "end_us": 3983,
+          "operation": "head-select",
+          "selected": 0,
+          "start_us": 27,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 500
+        },
+        {
+          "end_us": 3994,
+          "operation": "body-select",
+          "selected": 0,
+          "start_us": 3989,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 496
+        },
+        {
+          "bytes": 1,
+          "end_us": 4017,
+          "operation": "read",
+          "start_us": 3995
+        },
+        {
+          "end_us": 56289,
+          "operation": "body-select",
+          "selected": 0,
+          "start_us": 4018,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 495
+        },
+        {
+          "bytes": 0,
+          "end_us": 56339,
+          "operation": "read",
+          "start_us": 56291
+        }
+      ],
+      "source_state": "working-tree-characterization"
+    },
+    {
+      "case": "truncated",
+      "deadline_us": 500000,
+      "mode": "direct",
+      "qualification": false,
+      "read_limit": 1,
+      "repetition": 1,
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "samples": [
+        {
+          "end_us": 4782,
+          "operation": "head-select",
+          "selected": 0,
+          "start_us": 23,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 500
+        },
+        {
+          "bytes": 1,
+          "end_us": 4809,
+          "operation": "read",
+          "start_us": 4787
+        },
+        {
+          "end_us": 55070,
+          "error": "UnexpectedEof",
+          "operation": "read",
+          "start_us": 4813
+        }
+      ],
+      "source_state": "working-tree-characterization"
+    },
+    {
+      "case": "truncated",
+      "deadline_us": 500000,
+      "mode": "selected",
+      "qualification": false,
+      "read_limit": 1,
+      "repetition": 1,
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "samples": [
+        {
+          "end_us": 3320,
+          "operation": "head-select",
+          "selected": 0,
+          "start_us": 37,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 500
+        },
+        {
+          "end_us": 3331,
+          "operation": "body-select",
+          "selected": 0,
+          "start_us": 3326,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 496
+        },
+        {
+          "bytes": 1,
+          "end_us": 3374,
+          "operation": "read",
+          "start_us": 3332
+        },
+        {
+          "end_us": 56533,
+          "operation": "body-select",
+          "selected": 0,
+          "start_us": 3375,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 496
+        },
+        {
+          "bytes": 0,
+          "end_us": 56586,
+          "operation": "read",
+          "start_us": 56535
+        }
+      ],
+      "source_state": "working-tree-characterization"
+    },
+    {
+      "case": "truncated",
+      "deadline_us": 500000,
+      "mode": "direct",
+      "qualification": false,
+      "read_limit": 1,
+      "repetition": 2,
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "samples": [
+        {
+          "end_us": 744,
+          "operation": "head-select",
+          "selected": 0,
+          "start_us": 21,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 500
+        },
+        {
+          "bytes": 1,
+          "end_us": 771,
+          "operation": "read",
+          "start_us": 749
+        },
+        {
+          "end_us": 50945,
+          "error": "UnexpectedEof",
+          "operation": "read",
+          "start_us": 772
+        }
+      ],
+      "source_state": "working-tree-characterization"
+    },
+    {
+      "case": "truncated",
+      "deadline_us": 500000,
+      "mode": "selected",
+      "qualification": false,
+      "read_limit": 1,
+      "repetition": 2,
+      "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+      "samples": [
+        {
+          "end_us": 7289,
+          "operation": "head-select",
+          "selected": 0,
+          "start_us": 17,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 500
+        },
+        {
+          "end_us": 7299,
+          "operation": "body-select",
+          "selected": 0,
+          "start_us": 7294,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 492
+        },
+        {
+          "bytes": 1,
+          "end_us": 7339,
+          "operation": "read",
+          "start_us": 7300
+        },
+        {
+          "end_us": 57681,
+          "operation": "body-select",
+          "selected": 0,
+          "start_us": 7340,
+          "status": "FastlyStatus::OK",
+          "timeout_ms": 492
+        },
+        {
+          "bytes": 0,
+          "end_us": 57709,
+          "operation": "read",
+          "start_us": 57683
+        }
+      ],
+      "source_state": "working-tree-characterization"
+    },
+    {
+      "direct": "UnexpectedEof",
+      "event": "readiness-error-preservation",
+      "qualification": false,
+      "selected": null,
+      "status": "fail"
+    },
+    {
+      "direct": "UnexpectedEof",
+      "event": "readiness-error-preservation",
+      "qualification": false,
+      "selected": null,
+      "status": "fail"
+    },
+    {
+      "direct": "UnexpectedEof",
+      "event": "readiness-error-preservation",
+      "qualification": false,
+      "selected": null,
+      "status": "fail"
+    },
+    {
+      "adapter": "fastly",
+      "error": "pinned Viceroy body readiness consumed the source error; Fastly G2 fails",
+      "status": "fail"
+    }
+  ]
+}
