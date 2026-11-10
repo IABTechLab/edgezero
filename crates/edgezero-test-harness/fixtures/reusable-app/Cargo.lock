@@ -515,6 +515,7 @@ dependencies = [
  "ipnet",
  "libc",
  "log",
+ "mime",
  "redb",
  "reqwest",
  "serde",
@@ -525,6 +526,7 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
+ "validator",
 ]
 
 [[package]]
