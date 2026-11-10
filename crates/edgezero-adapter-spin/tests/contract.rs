@@ -573,7 +573,7 @@ mod tests {
     mod ingress_contract {
         use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
         use std::collections::VecDeque;
-        use std::future::{Future, poll_fn as poll_future, ready};
+        use std::future::{Future, pending, poll_fn as poll_future, ready};
         use std::io;
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex};
@@ -610,11 +610,12 @@ mod tests {
         #[test]
         fn geo_managed_dispatch_ignores_forged_extensions() {
             let app = build_test_app();
-            let response = block_on(dispatch_ingress_stream_for_test(
+            let response = block_on(dispatch_ingress_stream_with_timer(
                 &app,
                 Method::GET,
                 "http://example.com/uri".parse().expect("URI"),
                 empty::<Result<Bytes, io::Error>>(),
+                |_remaining| pending::<()>(),
             ))
             .expect("Spin admitted dispatch");
             assert_eq!(captured_body(response).as_ref(), b"http://example.com/uri");
