@@ -44,6 +44,8 @@ async-trait = "0.1"
 aws-config = { version = "=1.12.0", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process", "sso"] }
 aws-sdk-dynamodb = { version = "=1.120.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-sdk-secretsmanager = { version = "=1.120.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
+# aws-config 1.12 uses smithy-schema 0.2; aws-types 1.7 crosses that type boundary.
+aws-types = "=1.6.0"
 axum = { version = "0.8", default-features = true }
 base16ct = { version = "1", features = ["alloc"] }
 base64 = "=0.22.1"
