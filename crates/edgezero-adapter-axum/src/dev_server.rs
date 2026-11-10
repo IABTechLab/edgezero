@@ -2409,6 +2409,60 @@ mod tests {
         assert!(server.config.enable_ctrl_c);
     }
 
+    async fn router_json_upload(addr: SocketAddr, body: String, status: u16) -> String {
+        use std::io::ErrorKind;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpStream;
+        use tokio::time::timeout;
+
+        let socket = TcpStream::connect(addr).await.expect("upload connection");
+        let (mut reader, mut writer) = socket.into_split();
+        let request_head = format!(
+            "POST /json HTTP/1.1\r\nHost: fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut bytes = Vec::new();
+        // Keep reading an early 413 even if the peer stops accepting the upload.
+        let (sent, reading) = timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    writer.write_all(request_head.as_bytes()).await?;
+                    writer.write_all(body.as_bytes()).await
+                },
+                reader.read_to_end(&mut bytes)
+            )
+        })
+        .await
+        .expect("bounded upload and response");
+        let response = String::from_utf8(bytes).expect("UTF-8 response");
+        let (head, payload) = response
+            .split_once("\r\n\r\n")
+            .expect("usable response head");
+        assert!(
+            head.starts_with(&format!("HTTP/1.1 {status} ")),
+            "{response}"
+        );
+        let length = head
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().expect("response length"))
+            })
+            .expect("finite response framing");
+        assert_eq!(payload.len(), length, "complete response: {response}");
+        if let Err(error) = reading {
+            assert!(
+                status == 413 && error.kind() == ErrorKind::ConnectionReset,
+                "response read: {error}"
+            );
+        }
+        if let Err(error) = sent {
+            assert_eq!(status, 413, "upload failure without 413: {error}");
+        }
+        payload.to_owned()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn router_only_default_json_boundary_for_both_constructors() {
         use edgezero_core::action;
@@ -2439,10 +2493,6 @@ mod tests {
             };
             let serving =
                 tokio::spawn(async move { server.serve(listener, future::pending()).await });
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .expect("client");
             for (bytes, status) in [
                 (limit, StatusCode::OK),
                 (limit.saturating_add(1), StatusCode::PAYLOAD_TOO_LARGE),
@@ -2451,15 +2501,7 @@ mod tests {
                     "\"{}\"",
                     "x".repeat(bytes.checked_sub(2).expect("delimiters"))
                 );
-                let response = client
-                    .post(format!("http://{addr}/json"))
-                    .header("content-type", "application/json")
-                    .body(body)
-                    .send()
-                    .await
-                    .expect("prebound listener request");
-                assert_eq!(response.status(), status);
-                let text = response.text().await.expect("usable response");
+                let text = router_json_upload(addr, body, status.as_u16()).await;
                 if status == StatusCode::OK {
                     assert_eq!(text, limit.checked_sub(2).expect("length").to_string());
                 } else {
