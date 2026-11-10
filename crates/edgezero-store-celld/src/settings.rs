@@ -5,7 +5,7 @@
     reason = "keep each public settings shape beside its validator and redacted Debug implementation"
 )]
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use url::{Host, Url};
@@ -13,7 +13,7 @@ use url::{Host, Url};
 use crate::PreparationError;
 
 /// Explicit listener access policy, not a credential value.
-#[derive(Clone, Deserialize, Eq, Hash, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, Eq, Hash, PartialEq)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum CelldAccess {
     TrustedNetwork {
@@ -101,7 +101,7 @@ impl fmt::Debug for CelldConfigSettings {
 }
 
 /// One live scoped store alias. No physical namespace is accepted.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CelldKvSettings {
     pub endpoint: String,
@@ -329,6 +329,22 @@ fn valid_variable(value: &str) -> bool {
 mod tests {
     use super::{CelldAccess, CelldAccessToken, CelldKvSettings, CelldPreparationLimits, endpoint};
     use crate::PreparationError;
+
+    #[test]
+    fn live_store_settings_round_trip_locator_and_credential_reference_only() {
+        for access in [
+            serde_json::json!({"mode":"authenticated","token_env":"STORE_TOKEN"}),
+            serde_json::json!({"mode":"trusted-network","allow_remote_http":false}),
+        ] {
+            let input = serde_json::json!({"endpoint":"https://stores.example","store":"identity","access":access});
+            let settings: CelldKvSettings =
+                serde_json::from_value(input.clone()).expect("should parse pure settings");
+            assert_eq!(
+                serde_json::to_value(settings).expect("should serialize pure settings"),
+                input
+            );
+        }
+    }
 
     #[test]
     fn endpoints_are_explicit_origins_not_normalized_paths_or_obfuscated_ips() {

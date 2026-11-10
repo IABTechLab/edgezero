@@ -27,6 +27,8 @@ use crate::client::ScopedClient;
 use crate::config::ConfigSnapshot;
 #[cfg(feature = "kv")]
 use crate::kv::CelldKvStore;
+#[cfg(feature = "records")]
+use crate::records::CelldRecordStore;
 #[cfg(feature = "config")]
 use crate::settings::CelldConfigSettings;
 #[cfg(feature = "kv")]
@@ -134,6 +136,27 @@ impl CelldPreparation {
     ) -> Result<KvHandle, PreparationError> {
         self.begin()?;
         let result = self.kv_inner(settings, token);
+        if result.is_ok() {
+            self.poisoned = false;
+        }
+        result
+    }
+
+    /// Prepares a live conditional-record client and checks its protocol through
+    /// one bounded read-only list. Rows are never cached in the startup snapshot.
+    ///
+    /// # Errors
+    /// Validation, quota, protocol, permission and preparation failures poison
+    /// the session. The probe does not establish write/delete authorization.
+    #[cfg(feature = "records")]
+    #[inline]
+    pub async fn prepare_records(
+        &mut self,
+        settings: &CelldKvSettings,
+        token: Option<&CelldAccessToken>,
+    ) -> Result<CelldRecordStore, PreparationError> {
+        self.begin()?;
+        let result = self.records_inner(settings, token).await;
         if result.is_ok() {
             self.poisoned = false;
         }
@@ -314,6 +337,22 @@ impl CelldPreparation {
         Ok(ConfigStoreHandle::new(Arc::new(ConfigSnapshot::new(
             entries,
         ))))
+    }
+
+    #[cfg(feature = "records")]
+    async fn records_inner(
+        &mut self,
+        settings: &CelldKvSettings,
+        token: Option<&CelldAccessToken>,
+    ) -> Result<CelldRecordStore, PreparationError> {
+        settings.validate()?;
+        self.charge_mapping(&[settings.endpoint.len(), settings.store.len()])?;
+        let (_, client) = self.client(&settings.endpoint, &settings.access, token)?;
+        self.check()?;
+        let records = CelldRecordStore::new(client, settings.store.clone(), self.limits);
+        records.probe(self.deadline).await?;
+        self.check()?;
+        Ok(records)
     }
 
     #[cfg(feature = "kv")]
