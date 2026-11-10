@@ -1,4 +1,5 @@
 use std::env::vars_os;
+use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr as _;
@@ -47,16 +48,22 @@ impl AxumRunOptions {
     /// Returns safe setting categories for supplied invalid hosting settings.
     #[inline]
     pub fn from_env() -> anyhow::Result<Self> {
+        Self::from_os_vars(vars_os(), cfg!(windows))
+    }
+
+    fn from_os_vars<I>(vars: I, windows: bool) -> anyhow::Result<Self>
+    where
+        I: IntoIterator<Item = (OsString, OsString)>,
+    {
         let mut pairs = Vec::new();
         let mut non_unicode = Vec::new();
-        for (os_key, os_value) in vars_os() {
+        for (os_key, os_value) in vars {
             let Some(key) = os_key.to_str() else { continue };
-            let Some(rest) = key.strip_prefix("EDGEZERO__") else {
+            let Some(path) = config_path(key, windows) else {
                 continue;
             };
-            let path: Vec<String> = rest.split("__").map(str::to_ascii_lowercase).collect();
             if let Some(value) = os_value.to_str() {
-                pairs.push((key.to_owned(), value.to_owned()));
+                pairs.push((format!("EDGEZERO__{}", path.join("__")), value.to_owned()));
             } else if let Some(setting) = fixed_setting(&path) {
                 return Err(failure("settings", setting, "non-Unicode value"));
             } else {
@@ -244,6 +251,21 @@ pub(crate) fn failure(stage: &str, subject: &str, category: &str) -> anyhow::Err
     anyhow::anyhow!("startup {stage}: {subject}: {category}")
 }
 
+// Match EnvConfig's process-key identity without a second public configuration API.
+pub(crate) fn config_path(key: &str, windows: bool) -> Option<Vec<String>> {
+    let prefix = "EDGEZERO__";
+    let supplied_prefix = key.get(..prefix.len())?;
+    if supplied_prefix != prefix && !(windows && supplied_prefix.eq_ignore_ascii_case(prefix)) {
+        return None;
+    }
+    let path: Vec<String> = key
+        .get(prefix.len()..)?
+        .split("__")
+        .map(str::to_ascii_lowercase)
+        .collect();
+    (!path.iter().any(String::is_empty)).then_some(path)
+}
+
 fn fixed_setting(path: &[String]) -> Option<&'static str> {
     let segments: Vec<&str> = path.iter().map(String::as_str).collect();
     match segments.as_slice() {
@@ -253,6 +275,24 @@ fn fixed_setting(path: &[String]) -> Option<&'static str> {
         ["adapter", "data_dir"] => Some("DATA_DIR"),
         ["adapter", "shutdown_grace_seconds"] => Some("SHUTDOWN_GRACE_SECONDS"),
         ["logging", "level"] => Some("LOGGING__LEVEL"),
+        _ => native_limit_setting(path),
+    }
+}
+
+pub(crate) fn native_limit_setting(path: &[String]) -> Option<&'static str> {
+    let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+    match segments.as_slice() {
+        [
+            "adapter",
+            "ingress",
+            "max_connections" | "max_raw_head_bytes" | "max_header_count" | "head_read_timeout_ms",
+        ] => Some("INGRESS"),
+        [
+            "adapter",
+            "config_store",
+            "max_file_bytes" | "max_entries" | "max_key_bytes" | "max_value_bytes"
+            | "max_resident_bytes" | "max_startup_bytes",
+        ] => Some("CONFIG_STORE"),
         _ => None,
     }
 }
@@ -342,6 +382,66 @@ mod tests {
                 assert!(!format!("{error:?}").contains("sentinel"));
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_owned_limits_fail_capture_without_disclosing_values() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        for path in [
+            "ADAPTER__INGRESS__MAX_CONNECTIONS",
+            "ADAPTER__INGRESS__MAX_RAW_HEAD_BYTES",
+            "ADAPTER__INGRESS__MAX_HEADER_COUNT",
+            "ADAPTER__INGRESS__HEAD_READ_TIMEOUT_MS",
+            "ADAPTER__CONFIG_STORE__MAX_FILE_BYTES",
+            "ADAPTER__CONFIG_STORE__MAX_ENTRIES",
+            "ADAPTER__CONFIG_STORE__MAX_KEY_BYTES",
+            "ADAPTER__CONFIG_STORE__MAX_VALUE_BYTES",
+            "ADAPTER__CONFIG_STORE__MAX_RESIDENT_BYTES",
+            "ADAPTER__CONFIG_STORE__MAX_STARTUP_BYTES",
+        ] {
+            let result = AxumRunOptions::from_os_vars(
+                [(
+                    OsString::from(format!("EDGEZERO__{path}")),
+                    OsString::from_vec(b"PRIVATE_SENTINEL\xff".to_vec()),
+                )],
+                false,
+            );
+            let error = result.err().expect("supplied binary owned limit must fail");
+            assert_eq!(error.chain().count(), 1);
+            assert!(!format!("{error:?}").contains("PRIVATE_SENTINEL"));
+            assert!(error.to_string().contains(if path.contains("INGRESS") {
+                "INGRESS"
+            } else {
+                "CONFIG_STORE"
+            }));
+        }
+        AxumRunOptions::from_os_vars(
+            [(
+                OsString::from("EDGEZERO__ADAPTER__UNKNOWN"),
+                OsString::from_vec(vec![0xff]),
+            )],
+            false,
+        )
+        .expect("unknown binary setting remains ignored");
+    }
+
+    #[test]
+    fn os_capture_preserves_platform_prefix_identity() {
+        use std::ffi::OsString;
+
+        let pair = || {
+            (
+                OsString::from("edgezero__adapter__port"),
+                OsString::from("4321"),
+            )
+        };
+        let unix = AxumRunOptions::from_os_vars([pair()], false).expect("Unix capture");
+        assert_eq!(unix.addr.port(), addr::DEFAULT_PORT);
+        let windows = AxumRunOptions::from_os_vars([pair()], true).expect("Windows capture");
+        assert_eq!(windows.addr.port(), 4321);
     }
 
     #[test]
