@@ -328,6 +328,8 @@ fn kv_error(error: PreparationError) -> KvError {
         | PreparationError::UnsupportedVersion
         | PreparationError::Unavailable
         | PreparationError::Deadline => KvError::Unavailable,
+        #[cfg(feature = "records")]
+        PreparationError::PreconditionFailed => KvError::Unavailable,
     }
 }
 

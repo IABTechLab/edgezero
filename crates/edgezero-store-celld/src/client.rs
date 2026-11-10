@@ -55,6 +55,69 @@ pub(crate) enum ResponseKind {
     Document,
     #[cfg(feature = "kv")]
     Value,
+    #[cfg(feature = "records")]
+    Record,
+    #[cfg(feature = "records")]
+    RecordExists,
+    #[cfg(feature = "records")]
+    RecordMutation,
+    #[cfg(feature = "records")]
+    RecordPage,
+}
+
+impl ResponseKind {
+    fn mutation(self) -> bool {
+        match self {
+            #[cfg(feature = "kv")]
+            Self::Mutation => true,
+            #[cfg(feature = "records")]
+            Self::RecordMutation => true,
+            #[cfg(feature = "kv")]
+            Self::Exists | Self::Page | Self::Value => false,
+            #[cfg(feature = "config")]
+            Self::Document => false,
+            #[cfg(feature = "records")]
+            Self::Record | Self::RecordExists | Self::RecordPage => false,
+        }
+    }
+
+    fn json(self) -> bool {
+        match self {
+            #[cfg(feature = "kv")]
+            Self::Page => true,
+            #[cfg(feature = "records")]
+            Self::Record | Self::RecordPage => true,
+            #[cfg(feature = "kv")]
+            Self::Exists | Self::Mutation | Self::Value => false,
+            #[cfg(feature = "config")]
+            Self::Document => false,
+            #[cfg(feature = "records")]
+            Self::RecordExists | Self::RecordMutation => false,
+        }
+    }
+
+    fn optional(self) -> bool {
+        match self {
+            #[cfg(feature = "kv")]
+            Self::Value => true,
+            #[cfg(feature = "records")]
+            Self::Record => true,
+            #[cfg(feature = "kv")]
+            Self::Exists | Self::Mutation | Self::Page => false,
+            #[cfg(feature = "config")]
+            Self::Document => false,
+            #[cfg(feature = "records")]
+            Self::RecordExists | Self::RecordMutation | Self::RecordPage => false,
+        }
+    }
+
+    #[cfg(feature = "records")]
+    fn record(self) -> bool {
+        matches!(
+            self,
+            Self::Record | Self::RecordExists | Self::RecordMutation | Self::RecordPage
+        )
+    }
 }
 
 impl ScopedClient {
@@ -142,13 +205,6 @@ impl ScopedClient {
         body: Option<Bytes>,
         cap: usize,
         deadline: Deadline,
-        #[cfg_attr(
-            not(feature = "kv"),
-            expect(
-                unused_variables,
-                reason = "config-only builds have one request kind and no optional misses"
-            )
-        )]
         kind: ResponseKind,
     ) -> Result<Option<Vec<u8>>, PreparationError> {
         let budget = self
@@ -163,26 +219,33 @@ impl ScopedClient {
             request = request.header(AUTHORIZATION, authorization.clone());
         }
         if let Some(payload) = body {
-            request = request
-                .header(CONTENT_TYPE, "application/octet-stream")
-                .body(payload);
+            #[cfg(feature = "records")]
+            let content_type = if matches!(kind, ResponseKind::RecordMutation) {
+                "application/json"
+            } else {
+                "application/octet-stream"
+            };
+            #[cfg(not(feature = "records"))]
+            let content_type = "application/octet-stream";
+            request = request.header(CONTENT_TYPE, content_type).body(payload);
         }
         let result = timeout(budget, async {
             let response = request.send().await.map_err(http_error)?;
             let headers = response.headers();
             validate_headers(headers)?;
+            #[cfg(feature = "records")]
+            if kind.record() {
+                validate_record_version(headers)?;
+            }
             let status = response.status();
-            #[cfg(feature = "kv")]
             let success = status
-                == if matches!(kind, ResponseKind::Mutation) {
+                == if kind.mutation() {
                     StatusCode::NO_CONTENT
                 } else {
                     StatusCode::OK
                 };
-            #[cfg(not(feature = "kv"))]
-            let success = status == StatusCode::OK;
             #[cfg(feature = "kv")]
-            if matches!(kind, ResponseKind::Mutation)
+            if status == StatusCode::NO_CONTENT
                 && success
                 && headers
                     .get(CONTENT_LENGTH)
@@ -202,17 +265,10 @@ impl ScopedClient {
                         .map_or(PreparationError::Malformed, |(_, error)| error))
                 };
             }
-            #[cfg(feature = "kv")]
-            let expected_type = if !success || matches!(kind, ResponseKind::Page) {
+            let expected_type = if !success || kind.json() {
                 "application/json"
             } else {
                 "application/octet-stream"
-            };
-            #[cfg(not(feature = "kv"))]
-            let expected_type = if success {
-                "application/octet-stream"
-            } else {
-                "application/json"
             };
             validate_content_type(headers, expected_type)?;
             let response_cap = if success { cap } else { ERROR_CAP };
@@ -226,8 +282,7 @@ impl ScopedClient {
             if parsed.error != expected {
                 return Err(PreparationError::Malformed);
             }
-            #[cfg(feature = "kv")]
-            if missing && matches!(kind, ResponseKind::Value) {
+            if missing && kind.optional() {
                 return Ok(None);
             }
             Err(error)
@@ -237,6 +292,15 @@ impl ScopedClient {
         self.check(deadline)?;
         result?
     }
+}
+
+#[cfg(feature = "records")]
+fn validate_record_version(headers: &HeaderMap) -> Result<(), PreparationError> {
+    let mut versions = headers.get_all("x-celld-record-version").iter();
+    if versions.next().is_none_or(|value| value.as_bytes() != b"1") || versions.next().is_some() {
+        return Err(PreparationError::UnsupportedVersion);
+    }
+    Ok(())
 }
 
 fn validate_headers(headers: &HeaderMap) -> Result<(), PreparationError> {
@@ -319,6 +383,8 @@ fn status_error(status: StatusCode) -> Option<(&'static str, PreparationError)> 
         401 => ("unauthenticated", PreparationError::Unauthenticated),
         403 => ("forbidden", PreparationError::Forbidden),
         404 => ("not_found", PreparationError::Missing),
+        #[cfg(feature = "records")]
+        412 => ("precondition_failed", PreparationError::PreconditionFailed),
         413 => ("limit_exceeded", PreparationError::SizeLimit),
         426 => ("unsupported_version", PreparationError::UnsupportedVersion),
         503 => ("unavailable", PreparationError::Unavailable),
