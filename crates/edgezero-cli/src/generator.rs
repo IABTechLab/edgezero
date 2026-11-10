@@ -16,6 +16,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use thiserror::Error;
 
+// Update the reviewed compiler release and multi-architecture builder digest together.
+const GENERATED_RUST_BUILDER: (&str, &str) = (
+    "1.98.1",
+    "sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e",
+);
+const GENERATED_RUST_VERSION: &str = GENERATED_RUST_BUILDER.0;
+
 /// Errors produced by `edgezero new`.
 #[derive(Debug, Error)]
 pub enum GeneratorError {
@@ -582,6 +589,9 @@ fn build_base_data(
         .collect::<Vec<_>>()
         .join("\n");
     json!({
+        "has_axum": artifacts.adapter_ids.iter().any(|id| id == "axum"),
+        "rust_version": GENERATED_RUST_VERSION,
+        "rust_builder_digest": GENERATED_RUST_BUILDER.1,
         "name": layout.name,
         "proj_core": layout.core_name,
         "proj_cli": layout.cli_name,
@@ -607,8 +617,7 @@ fn build_base_data(
 ///
 /// `asdf install` reads this file to pin per-tool versions. Every
 /// generated project gets `rust` pinned (it's a Rust workspace).
-/// Per-adapter pins are added ONLY when the operator selected
-/// that adapter at `edgezero new` time:
+/// Per-adapter pins are added only for adapters registered in this CLI build:
 ///
 /// - `cloudflare` → `nodejs` (wrangler is a Node binary).
 /// - `fastly` → `fastly` (the Fastly CLI we shell out to for
@@ -617,8 +626,7 @@ fn build_base_data(
 /// - `spin` → `spin` (the runtime used by `spin build` and `spin up`).
 /// - `axum` → no extra pin (uses the host Rust toolchain only).
 ///
-/// Versions are pulled from this repo's own `.tool-versions` (see
-/// the repo root). When we bump those, we bump these.
+/// Keep these supported pins aligned with the repository's `.tool-versions`.
 fn build_tool_versions(adapter_ids: &[String]) -> String {
     let has = |id: &str| adapter_ids.iter().any(|adapter| adapter == id);
     let mut lines: Vec<String> = Vec::new();
@@ -632,7 +640,7 @@ fn build_tool_versions(adapter_ids: &[String]) -> String {
     if has("spin") {
         lines.push("spin 4.1.0".to_owned());
     }
-    lines.push("rust 1.98.1".to_owned());
+    lines.push(format!("rust {GENERATED_RUST_VERSION}"));
     // Sort + dedup so the file is stable regardless of adapter
     // declaration order (and asdf doesn't care).
     lines.sort();
@@ -642,8 +650,7 @@ fn build_tool_versions(adapter_ids: &[String]) -> String {
     body
 }
 
-/// Render the six workspace-root files (Cargo.toml, edgezero.toml,
-/// README.md, .gitignore, clippy.toml, .tool-versions).
+/// Render shared workspace-root files and the optional Axum container recipe.
 ///
 /// Split out of `render_templates` so the parent stays under the
 /// project's `too_many_lines` clippy cap; the order of writes is
@@ -662,6 +669,14 @@ fn write_root_files(
         ("root_tool_versions", ".tool-versions"),
     ] {
         write_tmpl(hbs, template, data_value, &layout.out_dir.join(rel))?;
+    }
+    if data_value["has_axum"].as_bool().unwrap_or(false) {
+        for (template, rel) in [
+            ("root_Dockerfile", "Dockerfile"),
+            ("root_dockerignore", ".dockerignore"),
+        ] {
+            write_tmpl(hbs, template, data_value, &layout.out_dir.join(rel))?;
+        }
     }
     Ok(())
 }
@@ -1373,6 +1388,217 @@ git = "https://github.com/stackpop/spin-rust-sdk"
     }
 
     #[test]
+    fn root_container_files_are_conditional_on_axum() {
+        let temp = TempDir::new().expect("temporary directory");
+        let mut hbs = Handlebars::new();
+        register_templates(&mut hbs);
+        for has_axum in [false, true] {
+            let layout = ProjectLayout::new(&NewArgs {
+                dir: Some(temp.path().to_string_lossy().into_owned()),
+                name: if has_axum { "My App" } else { "no-axum" }.to_owned(),
+            })
+            .expect("project layout");
+            let data = serde_json::json!({
+                "has_axum": has_axum,
+                "name": layout.name,
+                "proj_axum": format!("{}-adapter-axum", layout.name),
+                "rust_version": GENERATED_RUST_BUILDER.0,
+                "rust_builder_digest": GENERATED_RUST_BUILDER.1,
+            });
+            write_root_files(&hbs, &layout, &data).expect("root files");
+            for file in ["Dockerfile", ".dockerignore"] {
+                assert_eq!(layout.out_dir.join(file).is_file(), has_axum, "{file}");
+            }
+            if has_axum {
+                let dockerfile =
+                    fs::read_to_string(layout.out_dir.join("Dockerfile")).expect("Dockerfile");
+                assert!(dockerfile.contains(&format!("ARG RUST_VERSION={GENERATED_RUST_VERSION}")));
+                assert!(dockerfile.contains(&format!(
+                    "FROM rust:${{RUST_VERSION}}-bookworm@{} AS builder",
+                    GENERATED_RUST_BUILDER.1
+                )));
+                assert!(dockerfile.starts_with("# syntax=docker/dockerfile:1.19.0@sha256:"));
+                assert!(dockerfile.contains("-p my-app-adapter-axum --bin my-app-adapter-axum"));
+                assert!(dockerfile.contains("--release --locked"));
+                let runtime = dockerfile
+                    .split(" AS runtime\n")
+                    .nth(1)
+                    .expect("runtime stage");
+                assert!(
+                    dockerfile.contains("FROM gcr.io/distroless/cc-debian13:nonroot AS runtime")
+                );
+                assert!(!runtime.contains("apt-get"));
+                assert!(
+                    dockerfile
+                        .find("--no-install-recommends cmake")
+                        .expect("builder tools")
+                        < dockerfile.find("COPY . .").expect("source copy")
+                );
+                assert!(runtime.contains("STOPSIGNAL SIGINT\nENTRYPOINT [\"/usr/local/bin/app\"]"));
+                assert!(dockerfile.contains("USER 10001:10001"));
+                assert!(dockerfile.contains("ENTRYPOINT [\"/usr/local/bin/app\"]"));
+                assert!(dockerfile.contains("EDGEZERO__ADAPTER__HOST=0.0.0.0"));
+                assert!(dockerfile.contains("EDGEZERO__ADAPTER__PORT=8787"));
+                assert!(!dockerfile.contains("{{"));
+                let ignore =
+                    fs::read_to_string(layout.out_dir.join(".dockerignore")).expect("dockerignore");
+                assert!(ignore.lines().any(|line| line == "my-app.toml"));
+                assert!(
+                    !ignore
+                        .lines()
+                        .any(|line| matches!(line, "*.toml" | "*.json" | "crates"))
+                );
+                assert!(!layout.out_dir.join("Cargo.lock").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn container_build_caches_dependencies_and_exports_binary() {
+        let template = include_str!("templates/root/Dockerfile.hbs");
+        for target in [
+            "/usr/local/cargo/registry",
+            "/usr/local/cargo/git",
+            "/build/target",
+        ] {
+            assert!(template.contains(&format!("--mount=type=cache,target={target}")));
+        }
+        let build = template
+            .split("target=/build/target <<'SH'\n")
+            .nth(1)
+            .expect("cached build heredoc")
+            .split("\nSH")
+            .next()
+            .expect("cached build heredoc end");
+        assert!(build.contains("cp \"target/$host/release/"));
+        assert!(build.contains("/out/app"));
+    }
+
+    #[test]
+    fn container_readme_uses_valid_image_name_for_digit_leading_app() {
+        let mut hbs = Handlebars::new();
+        register_templates(&mut hbs);
+        let name = sanitize_crate_name("123app");
+        let readme = hbs
+            .render(
+                "root_README_md",
+                &serde_json::json!({
+                    "has_axum": true,
+                    "name": name,
+                    "proj_axum": format!("{name}-adapter-axum"),
+                }),
+            )
+            .expect("render README");
+        assert!(readme.contains("docker build -t app:local ."));
+        assert!(readme.contains("https://iabtechlab.github.io/edgezero/guide/adapters/axum"));
+        assert!(!readme.contains("stackpop"));
+        assert!(readme.contains("-p 127.0.0.1:8787:8787 app:local"));
+        assert!(readme.contains("`_123app-adapter-axum`"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn container_toolchain_check_validates_declared_and_installed_versions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = TempDir::new().expect("temporary directory");
+        let bin = temp.path().join("bin");
+        fs::create_dir_all(&bin).expect("bin directory");
+        let rustup = bin.join("rustup");
+        fs::write(
+            &rustup,
+            "#!/bin/sh\nprintf 'rustc %s (fixture)\\n' \"$MOCK_RUST_VERSION\"\n",
+        )
+        .expect("mock rustup");
+        fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).expect("executable mock");
+        fs::write(temp.path().join("Cargo.lock"), "").expect("application lockfile");
+        let template = include_str!("templates/root/Dockerfile.hbs");
+        let check = template
+            .split("RUN <<'SH'\n")
+            .nth(1)
+            .expect("toolchain check")
+            .split("\nSH")
+            .next()
+            .expect("heredoc end");
+        let path = format!("{}:{}", bin.display(), env::var("PATH").expect("PATH"));
+        for (versions, toolchain, installed, expected_error) in [
+            ("rust 1.95.0\n", None, "1.95.0", ""),
+            ("rust 1.95.0\r\nnodejs 24.20.0\r\n", None, "1.95.0", ""),
+            (
+                "rust 1.95.0\r\n",
+                Some("[toolchain]\r\nchannel = \"1.95.0\"\r\ntargets = []\r\n"),
+                "1.95.0",
+                "",
+            ),
+            (
+                "rust 1.95.0\n",
+                Some("[toolchain]\nchannel = \"1.95.0\" # pin\ntargets = []\n"),
+                "1.95.0",
+                "",
+            ),
+            ("rust stable\n", None, "1.95.0", "exact X.Y.Z"),
+            ("rust stable\r\n", None, "1.95.0", "exact X.Y.Z"),
+            ("rust 1.95.0\r\nrust 1.95.0\r\n", None, "1.95.0", "one rust"),
+            (
+                "rust 1.95.0\r\n",
+                Some("[toolchain]\r\nchannel = \"1.94.0\"\r\n"),
+                "1.95.0",
+                "conflicts",
+            ),
+            ("rust 1.94.0\n", None, "1.95.0", "Docker Rust pin"),
+            ("rust 1.95.0\nrust 1.95.0\n", None, "1.95.0", "one rust"),
+            ("nodejs 24.12.0\n", None, "1.95.0", "one rust"),
+            (
+                "rust 1.95.0\n",
+                Some("[toolchain]\nchannel = \"1.94.0\"\n"),
+                "1.95.0",
+                "conflicts",
+            ),
+            (
+                "rust 1.95.0\n",
+                Some("[toolchain]\nchannel = \"stable\"\n"),
+                "1.95.0",
+                "one quoted",
+            ),
+            (
+                "rust 1.95.0\n",
+                Some("[other]\nchannel = \"1.95.0\"\n"),
+                "1.95.0",
+                "one quoted",
+            ),
+            (
+                "rust 1.95.0\n",
+                None,
+                "1.94.0",
+                "installed builder compiler",
+            ),
+        ] {
+            fs::write(temp.path().join(".tool-versions"), versions).expect("tool versions");
+            let file = temp.path().join("rust-toolchain.toml");
+            match toolchain {
+                Some(contents) => fs::write(&file, contents).expect("toolchain file"),
+                None if file.exists() => fs::remove_file(&file).expect("remove toolchain file"),
+                None => {}
+            }
+            let output = Command::new("sh")
+                .args(["-c", check])
+                .current_dir(temp.path())
+                .env("PATH", &path)
+                .env("RUST_VERSION", "1.95.0") // Synthetic pin used by the cases above.
+                .env("MOCK_RUST_VERSION", installed)
+                .output()
+                .expect("run container check");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(
+                output.status.success(),
+                expected_error.is_empty(),
+                "{stderr}"
+            );
+            assert!(stderr.contains(expected_error), "{stderr}");
+        }
+    }
+
+    #[test]
     fn generator_error_format_displays_underlying_fmt_error() {
         // `writeln!`-to-`String` cannot actually fail in production, but the
         // variant is part of the public error surface and `From<fmt::Error>`
@@ -1518,6 +1744,15 @@ git = "https://github.com/stackpop/spin-rust-sdk"
         assert!(project_dir.join(".gitignore").exists());
         assert!(project_dir.join(".tool-versions").exists());
         assert!(project_dir.join("README.md").exists());
+        assert!(project_dir.join("Dockerfile").exists());
+        assert!(project_dir.join(".dockerignore").exists());
+        let dockerfile = fs::read_to_string(project_dir.join("Dockerfile")).expect("Dockerfile");
+        assert!(dockerfile.contains(&format!("ARG RUST_VERSION={GENERATED_RUST_VERSION}")));
+        assert!(dockerfile.contains(&format!(
+            "FROM rust:${{RUST_VERSION}}-bookworm@{} AS builder",
+            GENERATED_RUST_BUILDER.1
+        )));
+        assert!(build_tool_versions(&[]).contains(GENERATED_RUST_VERSION));
         let readme = fs::read_to_string(project_dir.join("README.md")).expect("read README");
         assert!(
             readme.contains("Fastly uses the logical key")
