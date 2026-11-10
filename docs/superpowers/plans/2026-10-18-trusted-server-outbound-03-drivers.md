@@ -430,6 +430,35 @@ temporary repaired Viceroy executable. The installed executable was not substitu
 Retain both failures without declaring their cause pre-existing or changing unrelated fixtures,
 runtime pins, historical timing observations, hosted gates or qualification status.
 
+### Startup-Fixture Validation Closeout (2026-11-09)
+
+- [x] Rebuild the existing tracked repair against exact Viceroy 0.21.0 upstream commit
+      `a69d982d1d95e13c0fc9f92683b9118639bb4b04`, with unchanged upstream lockfile and
+      repaired body-source identities. All 136 upstream library tests pass; repository pins
+      and installed tools remain unchanged.
+- [x] Reproduce the fixture's released-port gap with a retained foreign listener: the old
+      child fails to bind before endpoint publication. This deterministic regression does
+      not establish the cause of the historical intermittent connection refusal.
+- [x] Move only the test responder to child-owned bind-zero and atomic endpoint publication.
+      Validate at most 1,024 bytes against the owned child PID and configured launch nonce;
+      reject malformed, oversized, mismatched and invalid-port metadata, child exit and expiry.
+      Migrate every responder caller without retaining the old port-selection path.
+- [x] Preserve first-response attestation, sticky failures, original request ordinals and
+      the original 45-second deadline sampled before spawn. Readiness receives no HTTP or
+      acceptance credit; portable `Process::start` and its foreign-listener controls stay intact.
+- [x] Complete the full prescribed suite with the rebuilt repair explicitly selected, plus
+      root and harness formatting/Clippy gates. Report actual failures without retry credit,
+      capability promotion, qualification claims or changed acceptance bounds.
+
+`RUST_TEST_THREADS=2 bash scripts/run_tests.sh` exits 0, including all four adapter CI suites,
+fresh generated-project compilation, demo tests and all three demo WASM checks. Separate
+default-parallel commands pass 2,700 workspace tests across 33 binaries and 653 harness tests
+(zero failed; one and three existing ignored respectively). All five root Rust gates, strict
+harness Clippy/formatting, documentation formatting/lint/build and inventory guards pass.
+The inventory remains 255 criteria/514 legs with qualification false. Historical timing and
+intermittent workerd shutdown failures remain retained and unexplained; this passing sample
+does not waive them. Hosted checks, independent review, freeze and durable qualification stay open.
+
 ## Task D2: Native Axum Eager Exchanges
 
 **Files:** Modify `crates/edgezero-adapter-axum/src/outbound.rs`, `request.rs`, `service.rs`,

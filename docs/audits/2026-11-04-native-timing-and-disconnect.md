@@ -369,3 +369,61 @@ The subsequent default-parallel workspace command exits 0, as do the separately 
 CI suite, generated-workspace gate, demo tests and all three demo WASM checks, plus the legacy
 and documentation guards. They do not replace the failed Cloudflare shutdown result or waive
 any historical timing observation. Hosted qualification and independent review remain open.
+
+## Startup-Fixture And Tool Restoration (2026-11-09)
+
+The signed-origin cache checkpoint at `c8fd1939` retained a standalone harness connection
+refusal and a later full-script failure caused by a missing temporary repaired Viceroy binary.
+The latter is repaired by rebuilding the existing tracked patch, not substituting an installed
+binary or changing a pin. The restored source is upstream Viceroy 0.21.0 commit
+`a69d982d1d95e13c0fc9f92683b9118639bb4b04`; all 136 library tests pass. SHA-256 identities:
+
+| Input Or Output         | SHA-256                                                            |
+| ----------------------- | ------------------------------------------------------------------ |
+| Upstream lockfile       | `d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a` |
+| Tracked readiness patch | `42ff805147e003e0bec6ec190a5e72cab2ef445582940818c056f2718162663d` |
+| Repaired body source    | `1c56533d85a5c26390f9224e102425cbecc0fe4a280513e00095e7117d6722f7` |
+| Rebuilt executable      | `d8151efa02d82572951d980429e459f773bba5bab718233b7dbe3b776bb51c37` |
+
+Build settings are Rust 1.98.1, dev profile with the upstream optimization override,
+debug information disabled, incremental compilation disabled and two build jobs. Validation
+explicitly selects that executable. Wasmtime 48.0.2 and Chrome/ChromeDriver 154.0.8037.92
+are restored separately to match existing validation pins; project dependencies, runtime pins
+and installed tools remain unchanged.
+
+The historical refusal has no retained endpoint/ordinal evidence sufficient to establish its
+cause. A separate deterministic regression demonstrates a fixture gap: the parent releases its
+selected port before the responder child binds it. Holding that port in another listener makes
+the old child exit 101 before readiness; the regression fails with one failed test (exit 101).
+This is evidence for that race, not proof of the historical interleaving.
+
+The fixture now lets the child bind an ephemeral port and retain the listener throughout its
+lifetime. After validating its configuration, it atomically publishes a bounded endpoint with
+PID and launch nonce. The parent checks at most 1,024 bytes, schema, identity, port, child
+liveness and an absolute observation deadline. Its original 45-second startup deadline is
+sampled before spawn and is not reset. Every responder caller uses the same private helper;
+there is no legacy selection fallback or HTTP warmup. Endpoint publication is readiness only:
+the first prescribed response must still attest, and identity failure remains sticky.
+
+Fifteen startup tests pass, including the retained foreign listener, malformed/oversized or
+mismatched publication, invalid ports, missing publication, expiry and exited-child controls.
+The full two-thread harness run passes 653 tests with zero failures and three opt-in ignored.
+Portable `Process::start`, its foreign-listener controls, production transport, acceptance
+bounds and capability declarations are unchanged. Neither this fixture repair nor passing
+samples waive historical timing/shutdown failures or establish hosted qualification.
+
+The complete `RUST_TEST_THREADS=2 bash scripts/run_tests.sh` exits 0 with the restored repair
+explicitly selected: all four adapter CI suites, fresh generated-project compilation, demo
+tests and all three demo WASM checks pass. Separate default-parallel runs pass 2,700 workspace
+tests across 33 binaries and 653 harness tests, with zero failures and one/three existing
+ignored respectively. All five primary Rust gates and strict harness Clippy/formatting pass.
+Documentation formatting, lint and build pass using the actual `format`, `lint` and `build`
+package scripts; an earlier invocation of nonexistent `format:check` exits 1 and is retained
+as a command-selection error, not a documentation defect. Manifest and coverage guards retain
+255 criteria/514 legs, complete local bindings and qualification false.
+
+This closes the missing-runtime prerequisite and validates the fixture repair. It does not
+retrospectively explain the older connection refusal, native timing misses or intermittent
+workerd shutdown failures. The real Cloudflare routing/shutdown gate passes in this run, but
+that passing sample is not a shutdown repair. Hosted/manual checks, independent review,
+candidate freeze and durable Q5 evidence remain open.

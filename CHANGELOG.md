@@ -13,6 +13,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Keep startup-attestation test listeners owned from bind through shutdown. The child publishes
+  its ephemeral endpoint, PID and launch nonce atomically; the fixture validates bounded metadata
+  before its first prescribed HTTP request. Preserve response attestation, sticky failures and
+  the original absolute startup deadline without changing the portable process controller.
 - Pin the signed-origin image migration's per-request cache split: bypass for plain signed HEAD
   preflights and raw error-body GETs, default caching for the optimized GET. Extend existing
   Fastly cache-selection coverage to HEAD/GET and check prepared/native signing-header and
