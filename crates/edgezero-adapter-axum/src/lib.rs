@@ -11,6 +11,7 @@ mod connection;
 pub mod context;
 #[cfg(feature = "axum")]
 pub mod dev_server;
+#[cfg(feature = "axum")]
 pub mod diagnostics;
 #[cfg(feature = "axum")]
 mod header_deadline;
