@@ -13,7 +13,7 @@ const VERSION_B = "b".repeat(32);
 function client(endpoint, service) {
   const match = /^http:\/\/127\.0\.0\.1:([0-9]+)$/.exec(endpoint ?? "");
   if (!match || Number(match[1]) < 1 || Number(match[1]) > 65535) {
-    throw new Error(`Fixture endpoint must be literal http://127.0.0.1:<port>, got: ${endpoint}`);
+    throw new Error("Fixture endpoint must be literal http://127.0.0.1:<port>");
   }
   return (operation, payload = {}) => new Promise((resolve, reject) => {
     const body = JSON.stringify(payload);
@@ -163,5 +163,5 @@ export async function fixtureAction(action, payload, endpoints = {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   Promise.resolve().then(() => fixtureAction(process.argv[2], JSON.parse(process.argv[3])))
     .then((result) => console.log(JSON.stringify(result)))
-    .catch((error) => { console.error(error); process.exitCode = 1; });
+    .catch(() => { console.error("native AWS fixture administration failed"); process.exitCode = 1; });
 }
