@@ -120,9 +120,27 @@ test("CLI returns JSON only and rejects unknown actions and malformed input", as
   assert.equal(stdout, "{}\n");
   assert.equal(stderr, "");
   assert.deepEqual(setup.calls[0].payload, { SecretId: "edgezero-emulator-text", ForceDeleteWithoutRecovery: true });
-  await assert.rejects(exec(process.execPath, [script, "unknown", "{}"], options), /unknown fixture action/);
+  await assert.rejects(exec(process.execPath, [script, "unknown", "{}"], options), /native AWS fixture administration failed/);
   await assert.rejects(exec(process.execPath, [script, "seed", "not JSON"], options));
   assert.equal(setup.calls.length, 1);
+});
+
+test("CLI error output never includes endpoint or response payloads", async (t) => {
+  const marker = "fixture-private-value";
+  const setup = await emulator(t, () => ({ status: 500, raw: marker }));
+  for (const endpoint of [setup.endpoints.moto, `http://user:${marker}@origin.example.com`]) {
+    await assert.rejects(exec(process.execPath, [script, "ready", "{}"], { env: {
+      ...process.env,
+      EDGEZERO_AWS_TEST_DYNAMODB_ENDPOINT: setup.endpoints.dynamo,
+      EDGEZERO_AWS_TEST_SECRETS_ENDPOINT: endpoint,
+    } }), (error) => {
+      assert.equal(error.code, 1);
+      assert.equal(error.stdout, "");
+      assert.equal(error.stderr, "native AWS fixture administration failed\n");
+      assert.ok(!error.stderr.includes(marker));
+      return true;
+    });
+  }
 });
 
 test("HTTP failures, redirects and malformed responses fail without retries", async (t) => {
