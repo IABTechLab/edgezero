@@ -1704,6 +1704,74 @@ git = "https://github.com/stackpop/spin-rust-sdk"
     }
 
     #[test]
+    fn generated_image_example_matches_fastly_adapter_selection() {
+        let temp = TempDir::new().expect("temp dir");
+        let layout = ProjectLayout::new(&NewArgs {
+            name: "demo-app".into(),
+            dir: Some(temp.path().to_string_lossy().into_owned()),
+        })
+        .expect("project layout");
+        let mut hbs = Handlebars::new();
+        register_templates(&mut hbs);
+
+        for (adapter_ids, image_expected) in [
+            (vec!["axum"], false),
+            (vec!["fastly"], true),
+            (vec!["axum", "cloudflare", "fastly", "spin"], true),
+        ] {
+            let artifacts = AdapterArtifacts {
+                adapter_ids: adapter_ids.into_iter().map(str::to_owned).collect(),
+                contexts: Vec::new(),
+                manifest_sections: String::new(),
+                readme_adapter_crates: String::new(),
+                readme_adapter_dev: String::new(),
+                workspace_members: Vec::new(),
+            };
+            let data = build_base_data(&layout, "", "", &artifacts, &BTreeMap::new());
+            let handlers = hbs
+                .render("core_src_handlers_rs", &data)
+                .expect("render handlers");
+            for image_code in [
+                "OutboundImageFormat",
+                "OutboundImageOptimizerOptions",
+                "OutboundImageOptimizerRegion",
+                "pub async fn image_demo(",
+                "fn image_demo_request(",
+                "fn image_demo_uses_default_cache_and_preserves_outbound_limits(",
+            ] {
+                assert_eq!(
+                    handlers.contains(image_code),
+                    image_expected,
+                    "image code `{image_code}` must match adapters {:?}",
+                    artifacts.adapter_ids
+                );
+            }
+            let source = hbs
+                .render("root_edgezero_toml", &data)
+                .expect("render manifest");
+            let manifest: toml::Value = toml::from_str(&source).expect("parse manifest");
+            let image_route = manifest["triggers"]["http"]
+                .as_array()
+                .expect("HTTP routes")
+                .iter()
+                .find(|route| route["id"].as_str() == Some("image-demo"));
+            assert_eq!(image_route.is_some(), image_expected);
+            if let Some(route) = image_route {
+                assert_eq!(route["path"].as_str(), Some("/image-demo"));
+                assert_eq!(
+                    route["handler"].as_str(),
+                    Some("demo_app_core::handlers::image_demo")
+                );
+                assert_eq!(route["adapters"][0].as_str(), Some("fastly"));
+                assert_eq!(
+                    route["adapters"].as_array().expect("route adapters").len(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
     fn generated_spin_hosts_default_to_https_only() {
         with_generated_demo_app(|project_dir| {
             let app_manifest_path = project_dir.join("edgezero.toml");
@@ -2163,6 +2231,43 @@ git = "https://github.com/stackpop/spin-rust-sdk"
     }
 
     fn assert_generated_axum_entrypoint(project_dir: &Path) {
+        let axum_cargo =
+            fs::read_to_string(project_dir.join("crates/demo-app-adapter-axum/Cargo.toml"))
+                .expect("read generated axum Cargo.toml");
+        let parsed: toml::Value =
+            toml::from_str(&axum_cargo).expect("parse generated Axum Cargo.toml");
+        let features = parsed
+            .get("features")
+            .and_then(toml::Value::as_table)
+            .expect("generated native features");
+        for feature in [
+            "aws-appconfig-agent",
+            "aws-secrets-manager",
+            "aws-dynamodb",
+            "celld-config",
+            "celld-kv",
+        ] {
+            assert_eq!(
+                features.get(feature),
+                Some(&toml::Value::Array(vec![toml::Value::String(format!(
+                    "edgezero-adapter-axum/{feature}"
+                ))])),
+                "incorrect generated native forwarding for {feature}"
+            );
+        }
+        assert_eq!(
+            features.get("default"),
+            Some(&toml::Value::Array(Vec::new())),
+            "native providers must be opt-in"
+        );
+        assert_eq!(
+            features.get("aws-stores"),
+            Some(&toml::Value::Array(vec![
+                toml::Value::String("aws-appconfig-agent".to_owned()),
+                toml::Value::String("aws-secrets-manager".to_owned())
+            ])),
+            "AWS alias membership must not acquire other providers"
+        );
         let axum_main =
             fs::read_to_string(project_dir.join("crates/demo-app-adapter-axum/src/main.rs"))
                 .expect("read axum main.rs");
@@ -2170,7 +2275,7 @@ git = "https://github.com/stackpop/spin-rust-sdk"
             !axum_main.contains("process::exit")
                 && !axum_main.contains("EdgeZeroAxumService")
                 && !axum_main.contains("into_axum_response")
-                && axum_main.contains("run_app::<demo_app_core::App>()"),
+                && axum_main.contains("run_generated_app::<demo_app_core::App>()"),
             "generated Axum entrypoint must use the connection-owning runner",
         );
     }

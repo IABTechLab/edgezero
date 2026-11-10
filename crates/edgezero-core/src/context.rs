@@ -6,13 +6,14 @@ use std::{
     task::Poll,
 };
 
-use crate::body::{Body, BodyStream};
+use crate::body::{Body, BodyStream, BodyTransfer, BufferedJsonPolicy};
 use crate::config_store::ConfigExtractionLimits;
 use crate::error::{
     BadGatewayReason, BudgetSource, EdgeError, RequestBodyOverflowOrigin, ResponseLimitReason,
     StoreExtractionReason,
 };
 use crate::error_detail::ProviderFailureDetail;
+use crate::geo::GeoOutcome;
 use crate::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use crate::http::{
     Extensions, HeaderMap, HeaderValue, Method, Request, RequestParts, Uri, Version,
@@ -72,6 +73,15 @@ enum BodyState {
     Initial(Body),
     Poisoned(StoredError),
     Taken,
+}
+
+impl BodyState {
+    fn from_transfer(transfer: BodyTransfer) -> Self {
+        match transfer {
+            BodyTransfer::Cached(bytes) => Self::Cached(bytes),
+            BodyTransfer::Initial(body) => Self::Initial(body),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -289,7 +299,10 @@ impl StoredError {
 /// Request context exposed to handlers and middleware.
 pub struct RequestContext {
     body: RefCell<BodyState>,
+    body_policy: Option<BufferedJsonPolicy>,
+    category_only_json_errors: bool,
     config_extraction_limits: ConfigExtractionLimits,
+    geo: GeoOutcome,
     ingress_grant: RefCell<Option<IngressGrant>>,
     input_guard: Option<Rc<InputGuard>>,
     monotonic_clock: MonotonicClock,
@@ -325,6 +338,10 @@ impl Drop for DrainGuard<'_> {
     }
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "buffer policy resolution stays grouped with the guarded body collector"
+)]
 impl RequestContext {
     /// Drains and caches the inbound body under the caller's byte cap.
     ///
@@ -333,6 +350,26 @@ impl RequestContext {
     /// source error for every later accessor.
     #[inline]
     pub async fn body_bytes(&self, max: usize) -> Result<bytes::Bytes, EdgeError> {
+        self.buffered_bytes(max, false).await
+    }
+
+    pub(crate) fn json_body_default(&self) -> usize {
+        self.body_policy
+            .map_or(DEFAULT_INBOUND_JSON_BYTES, |policy| policy.ceiling().get())
+    }
+
+    async fn buffered_bytes(
+        &self,
+        requested_max: usize,
+        json: bool,
+    ) -> Result<bytes::Bytes, EdgeError> {
+        let max = self.body_policy.map_or(requested_max, |policy| {
+            if json || policy.ingress_is_json() {
+                requested_max.min(policy.ceiling().get())
+            } else {
+                requested_max
+            }
+        });
         let body = {
             let mut state = self.body.borrow_mut();
             if matches!(&*state, BodyState::Initial(_)) {
@@ -535,7 +572,8 @@ impl RequestContext {
     ) -> Self {
         self.path_params = params;
         self.route_metadata = route_metadata;
-        if let Some(admitted) = ingress {
+        if let Some(mut admitted) = ingress {
+            (self.geo, self.category_only_json_errors) = admitted.take_request_context();
             let (request_start, read_deadline, grant, limits, clock) = admitted.into_parts();
             self.config_extraction_limits = limits;
             *self.ingress_grant.get_mut() = Some(grant);
@@ -563,6 +601,13 @@ impl RequestContext {
         let bytes = self.body_bytes(max).await?;
         serde_urlencoded::from_bytes(bytes.as_ref())
             .map_err(|err| EdgeError::bad_request(format!("invalid form payload: {err}")))
+    }
+
+    /// Returns this request's immutable geographic outcome. Public extensions do not replace it.
+    #[must_use]
+    #[inline]
+    pub fn geo(&self) -> &GeoOutcome {
+        &self.geo
     }
 
     #[must_use]
@@ -594,13 +639,17 @@ impl RequestContext {
             return Err(error.to_edge_error());
         }
         let body = match self.body.into_inner() {
-            BodyState::Cached(bytes) => Body::from(bytes),
+            BodyState::Cached(bytes) => {
+                Body::from_transfer(self.body_policy, BodyTransfer::Cached(bytes))
+            }
             BodyState::Draining => {
                 return Err(EdgeError::internal(anyhow::anyhow!(
                     "body read in progress"
                 )));
             }
-            BodyState::Initial(body) => body,
+            BodyState::Initial(body) => {
+                Body::from_transfer(self.body_policy, BodyTransfer::Initial(body))
+            }
             BodyState::Poisoned(error) => return Err(error.to_edge_error()),
             BodyState::Taken => Body::empty(),
         };
@@ -617,14 +666,20 @@ impl RequestContext {
     ///
     /// # Errors
     /// Returns 413 on overflow, 400 on malformed input, and preserves body drain errors.
+    /// Managed JSON parse errors use fixed text rather than private serde details.
     #[inline]
     pub async fn json_within<T>(&self, max: usize) -> Result<T, EdgeError>
     where
         T: DeserializeOwned,
     {
-        let bytes = self.body_bytes(max).await?;
-        serde_json::from_slice(bytes.as_ref())
-            .map_err(|err| EdgeError::bad_request(format!("invalid JSON payload: {err}")))
+        let bytes = self.buffered_bytes(max, true).await?;
+        serde_json::from_slice(bytes.as_ref()).map_err(|err| {
+            if self.category_only_json_errors || self.body_policy.is_some() {
+                EdgeError::bad_request("invalid JSON payload")
+            } else {
+                EdgeError::bad_request(format!("invalid JSON payload: {err}"))
+            }
+        })
     }
 
     /// Resolve the [`BoundKvStore`] for `id`. Strict lookup: when a
@@ -707,8 +762,12 @@ impl RequestContext {
     #[inline]
     pub fn new(request: Request, params: PathParams) -> Self {
         let (parts, body) = request.into_parts();
+        let (body_policy, transfer) = body.into_transfer();
         Self {
-            body: RefCell::new(BodyState::Initial(body)),
+            body: RefCell::new(BodyState::from_transfer(transfer)),
+            body_policy,
+            geo: GeoOutcome::NoSelection,
+            category_only_json_errors: false,
             config_extraction_limits: ConfigExtractionLimits::default(),
             ingress_grant: RefCell::new(None),
             input_guard: None,
@@ -721,6 +780,10 @@ impl RequestContext {
         }
     }
     pub(crate) fn new_pre_dispatch(request: Request, ingress: Option<&AdmittedIngress>) -> Self {
+        let (geo, category_only_json_errors) = ingress.map_or(
+            (GeoOutcome::NoSelection, false),
+            AdmittedIngress::request_context,
+        );
         let clock = ingress.map_or_else(MonotonicClock::default, AdmittedIngress::monotonic_clock);
         let deadline = ingress.map(AdmittedIngress::read_deadline);
         let guard = Rc::new(InputGuard {
@@ -735,14 +798,21 @@ impl RequestContext {
             violation: Cell::new(None),
         });
         let (parts, raw_body) = request.into_parts();
-        let body = guard_input(raw_body, Rc::clone(&guard));
+        let (body_policy, transfer) = raw_body.into_transfer();
+        let body = match transfer {
+            BodyTransfer::Initial(body) => BodyState::Initial(guard_input(body, Rc::clone(&guard))),
+            BodyTransfer::Cached(bytes) => BodyState::Cached(bytes),
+        };
         let request_start = ingress.map_or_else(|| clock.now(), AdmittedIngress::request_start);
         Self {
-            body: RefCell::new(BodyState::Initial(body)),
+            body: RefCell::new(body),
+            body_policy,
             config_extraction_limits: ConfigExtractionLimits::default(),
             ingress_grant: RefCell::new(None),
             input_guard: Some(guard),
             monotonic_clock: clock,
+            geo,
+            category_only_json_errors,
             parts,
             path_params: PathParams::default(),
             read_deadline: deadline,
@@ -1136,6 +1206,10 @@ async fn drain_body_discard(body: Body) -> Result<(), EdgeError> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "managed policy regressions remain grouped in a colocated module"
+)]
 mod tests {
     use super::*;
     use crate::config_store::ready_config_store_bounded_read;
@@ -1162,6 +1236,385 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
     use std::time::Duration;
+
+    mod managed_policy_tests {
+        use super::*;
+        use std::num::NonZeroUsize;
+
+        #[test]
+        fn managed_form_family_keeps_caller_caps_and_typed_json_overflow() {
+            use crate::extractor::{Form, FromRequest as _, ValidatedForm, ValidatedFormWithin};
+            use validator::Validate;
+            #[derive(Debug, Deserialize, Validate)]
+            struct Fields {
+                name: String,
+            }
+            let make = || {
+                ctx(
+                    "/form",
+                    managed(Body::from("name=a"), 5, true),
+                    PathParams::default(),
+                )
+            };
+            assert_eq!(
+                block_on(make().form_within::<Fields>(100))
+                    .expect_err("helper cap")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            assert_eq!(
+                block_on(Form::<Fields>::from_request(&make()))
+                    .err()
+                    .expect("Form cap")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            assert_eq!(
+                block_on(ValidatedForm::<Fields>::from_request(&make()))
+                    .err()
+                    .expect("validated Form cap")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            assert_eq!(
+                block_on(ValidatedFormWithin::<Fields, 100>::from_request(&make()))
+                    .err()
+                    .expect("within cap")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            let non_json = ctx(
+                "/form",
+                managed(Body::from("name=a"), 1, false),
+                PathParams::default(),
+            );
+            assert_eq!(
+                block_on(Form::<Fields>::from_request(&non_json))
+                    .expect("non-JSON generic")
+                    .0
+                    .name,
+                "a"
+            );
+        }
+
+        #[test]
+        fn managed_source_bad_request_is_not_translated_by_message() {
+            let source = Body::from_stream(stream::iter([Err(EdgeError::bad_request(
+                "request body too large",
+            ))]));
+            let context = ctx("/source", managed(source, 1, true), PathParams::default());
+            assert_eq!(
+                block_on(context.body_bytes(100))
+                    .expect_err("source error")
+                    .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+
+        #[test]
+        fn managed_json_parse_errors_do_not_reflect_payload_but_unmanaged_errors_keep_detail() {
+            for native in [true, false] {
+                let payload = serde_json::to_string("PAYLOAD_SENTINEL").expect("payload");
+                let body = Body::from(payload);
+                let selected = if native {
+                    managed(body, 64, true)
+                } else {
+                    body
+                };
+                let context = ctx("/json", selected, PathParams::default());
+                let error = block_on(context.json_within::<u64>(64)).expect_err("wrong JSON type");
+                assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+                if native {
+                    assert_eq!(error.message(), "invalid JSON payload");
+                } else {
+                    assert!(error.message().contains("PAYLOAD_SENTINEL"));
+                }
+            }
+        }
+
+        fn managed(body: Body, cap: usize, is_json: bool) -> Body {
+            body.with_buffered_json_policy(NonZeroUsize::new(cap).expect("positive cap"), is_json)
+        }
+
+        #[test]
+        fn managed_partial_cancellation_drops_source_once_and_poisons() {
+            struct DropSignal(Rc<Cell<usize>>);
+            #[expect(
+                clippy::missing_trait_methods,
+                reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+            )]
+            impl Drop for DropSignal {
+                fn drop(&mut self) {
+                    self.0.set(self.0.get().saturating_add(1));
+                }
+            }
+            let drops = Rc::new(Cell::new(0_usize));
+            let signal = DropSignal(Rc::clone(&drops));
+            let polls = Rc::new(Cell::new(0_usize));
+            let seen = Rc::clone(&polls);
+            let source = Body::from_stream(stream::poll_fn(move |_| {
+                let _retained = &signal;
+                let step = seen.get();
+                seen.set(step.saturating_add(1));
+                if step == 0 {
+                    Poll::Ready(Some(Ok(Bytes::from_static(b"ab"))))
+                } else {
+                    Poll::Pending
+                }
+            }));
+            let context = ctx("/body", managed(source, 4, true), PathParams::default());
+            let mut reading = Box::pin(context.body_bytes(100));
+            let mut task = Context::from_waker(noop_waker_ref());
+            assert!(matches!(reading.as_mut().poll(&mut task), Poll::Pending));
+            assert_eq!(polls.get(), 2);
+            assert_eq!(context.body_kind(), BodyKind::Draining);
+            drop(reading);
+            assert_eq!(drops.get(), 1);
+            assert_eq!(context.body_kind(), BodyKind::Poisoned);
+            let error = block_on(context.body_bytes(100)).expect_err("cancel poison");
+            assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(error.message().contains("inbound body drain cancelled"));
+            assert_eq!(
+                context
+                    .into_request()
+                    .expect_err("sticky reconstruction")
+                    .status(),
+                error.status()
+            );
+            assert_eq!(polls.get(), 2);
+            assert_eq!(drops.get(), 1);
+        }
+
+        #[test]
+        fn managed_deadline_tie_wins_over_overflow_without_repolling() {
+            let start = MonotonicInstant::now();
+            let deadline = start.checked_add(Duration::from_secs(1)).expect("deadline");
+            let now = Arc::new(Mutex::new(start));
+            let poll_clock = Arc::clone(&now);
+            let observed_clock = Arc::clone(&now);
+            let polls = Rc::new(Cell::new(0_usize));
+            let seen = Rc::clone(&polls);
+            let source = Body::from_stream(stream::poll_fn(move |_| {
+                seen.set(seen.get().saturating_add(1));
+                *poll_clock.lock().expect("clock") = deadline;
+                Poll::Ready(Some(Ok(Bytes::from_static(b"oversized"))))
+            }));
+            let mut context = ctx("/body", managed(source, 1, true), PathParams::default());
+            context.monotonic_clock =
+                MonotonicClock::new(move || *observed_clock.lock().expect("clock"));
+            context.read_deadline = Some(Deadline::at_instant(deadline));
+            let error = block_on(context.body_bytes(100)).expect_err("deadline wins");
+            assert!(matches!(error, EdgeError::RequestTimeout { .. }));
+            *now.lock().expect("clock") = start;
+            assert_eq!(
+                block_on(context.body_bytes(100))
+                    .expect_err("sticky deadline")
+                    .status(),
+                StatusCode::REQUEST_TIMEOUT
+            );
+            assert_eq!(context.body_kind(), BodyKind::Poisoned);
+            assert_eq!(polls.get(), 1);
+        }
+
+        #[test]
+        fn managed_routed_reconstruction_restores_initial_and_cache_after_head_mutation() {
+            use crate::app::App;
+            use crate::ingress::{
+                IngressBeginOutcome, IngressFraming, IngressHeadAccounting, IngressHeadParts,
+            };
+            use crate::router::RouterService;
+            for cached in [false, true] {
+                let original = ctx(
+                    "/body",
+                    managed(Body::from("hello"), 5, true),
+                    PathParams::default(),
+                );
+                let retained = cached.then(|| block_on(original.body_bytes(5)).expect("cache"));
+                let mut request = original.into_request().expect("reconstruct");
+                request
+                    .headers_mut()
+                    .insert("content-type", HeaderValue::from_static("text/plain"));
+                request.extensions_mut().clear();
+                request.extensions_mut().insert(99_u32);
+                let app = App::new(RouterService::builder().build());
+                let head = IngressHeadParts::from_request(
+                    &request,
+                    IngressHeadAccounting::HostManaged,
+                    IngressFraming::HostManaged,
+                );
+                let IngressBeginOutcome::Admitted(prepared) = app
+                    .begin_ingress(head, app.monotonic_now())
+                    .expect("admission")
+                else {
+                    panic!("admit");
+                };
+                let (_resolved, ingress, _completion) = prepared.into_parts();
+                let metadata = RouteMetadata::new(Method::GET, "/body");
+                let routed = RequestContext::new_pre_dispatch(request, Some(&ingress))
+                    .finish_pre_dispatch(
+                        PathParams::default(),
+                        Some(metadata.clone()),
+                        Some(ingress),
+                    );
+                assert_eq!(routed.route_metadata(), Some(&metadata));
+                assert_eq!(routed.extensions().get::<u32>(), Some(&99));
+                assert_eq!(
+                    block_on(routed.body_bytes(4))
+                        .expect_err("captured JSON cap")
+                        .status(),
+                    StatusCode::PAYLOAD_TOO_LARGE
+                );
+                if let Some(bytes) = retained {
+                    assert_eq!(routed.body_kind(), BodyKind::Cached { len: 5 });
+                    assert_eq!(
+                        block_on(routed.body_bytes(100))
+                            .expect("cache retry")
+                            .as_ptr(),
+                        bytes.as_ptr()
+                    );
+                } else {
+                    assert_eq!(routed.body_kind(), BodyKind::Poisoned);
+                    assert_eq!(
+                        block_on(routed.body_bytes(100))
+                            .expect_err("initial sticky")
+                            .status(),
+                        StatusCode::PAYLOAD_TOO_LARGE
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn managed_initial_reconstruction_preserves_policy_without_polling() {
+            let polls = Rc::new(Cell::new(0_usize));
+            let observed = Rc::clone(&polls);
+            let initial_source = Body::from_stream(stream::poll_fn(move |_| {
+                observed.set(observed.get() + 1);
+                Poll::Ready(Some(Ok(Bytes::from_static(b"oversized"))))
+            }));
+            let original = ctx(
+                "/body",
+                managed(initial_source, 3, true),
+                PathParams::default(),
+            );
+            let mut request = original.into_request().expect("initial reconstruction");
+            request
+                .headers_mut()
+                .insert("content-type", HeaderValue::from_static("text/plain"));
+            request.extensions_mut().clear();
+            let (parts, body) = request.into_parts();
+            let reconstructed = RequestContext::new(
+                Request::from_parts(parts, managed(body, 100, false)),
+                PathParams::default(),
+            );
+            assert_eq!(polls.get(), 0);
+            let error = block_on(reconstructed.body_bytes(100)).expect_err("original ceiling");
+            assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(error.kind(), "payload_too_large");
+            assert_eq!(polls.get(), 1);
+            assert_eq!(
+                block_on(reconstructed.body_bytes(1000))
+                    .expect_err("sticky")
+                    .status(),
+                error.status()
+            );
+            assert_eq!(
+                reconstructed.take_body().expect_err("sticky take").status(),
+                error.status()
+            );
+            assert_eq!(
+                reconstructed
+                    .into_request()
+                    .expect_err("sticky reconstruction")
+                    .status(),
+                error.status()
+            );
+            assert_eq!(polls.get(), 1);
+        }
+
+        #[test]
+        fn managed_cached_reconstruction_reuses_allocation_and_stateless_rechecks() {
+            let original = ctx(
+                "/body",
+                managed(Body::from("hello"), 5, true),
+                PathParams::default(),
+            );
+            let bytes = block_on(original.body_bytes(5)).expect("exact cap");
+            let mut request = original.into_request().expect("cached reconstruction");
+            request.headers_mut().clear();
+            request.extensions_mut().clear();
+            let (parts, body) = request.into_parts();
+            let reconstructed = RequestContext::new(
+                Request::from_parts(parts, managed(body, 100, false)),
+                PathParams::default(),
+            );
+            assert_eq!(reconstructed.body_kind(), BodyKind::Cached { len: 5 });
+            assert_eq!(
+                block_on(reconstructed.body_bytes(4))
+                    .expect_err("stricter cap")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            let retry = block_on(reconstructed.body_bytes(100)).expect("intact cache");
+            assert_eq!(bytes.as_ptr(), retry.as_ptr());
+            assert_eq!(reconstructed.body_kind(), BodyKind::Cached { len: 5 });
+        }
+
+        #[test]
+        fn managed_json_helpers_cap_non_json_ingress_but_generic_reads_do_not() {
+            let original = ctx(
+                "/body",
+                managed(Body::from("\"abcdef\""), 4, false),
+                PathParams::default(),
+            );
+            let bytes = block_on(original.body_bytes(20)).expect("non-JSON generic read");
+            let error = block_on(original.json_within::<String>(20)).expect_err("JSON policy");
+            assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(original.body_kind(), BodyKind::Cached { len: 8 });
+            let request = original.into_request().expect("cached round trip");
+            let reconstructed = RequestContext::new(request, PathParams::default());
+            assert_eq!(
+                block_on(reconstructed.body_bytes(20))
+                    .expect("generic retry")
+                    .as_ptr(),
+                bytes.as_ptr()
+            );
+            assert_eq!(
+                block_on(reconstructed.json_within::<String>(20))
+                    .expect_err("preserved ceiling")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+
+        #[test]
+        fn managed_initial_once_overflow_is_sticky_and_taken_content_is_unmanaged() {
+            let initial = ctx(
+                "/body",
+                managed(Body::from("large"), 2, true),
+                PathParams::default(),
+            );
+            assert_eq!(
+                block_on(initial.body_bytes(10))
+                    .expect_err("overflow")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            assert_eq!(initial.body_kind(), BodyKind::Poisoned);
+            let taken = ctx(
+                "/body",
+                managed(Body::from("large"), 2, true),
+                PathParams::default(),
+            )
+            .take_body()
+            .expect("take");
+            assert!(taken.as_bytes().is_some());
+            assert_eq!(
+                block_on(taken.into_bytes_bounded(5)).expect("manual cap"),
+                "large"
+            );
+        }
+    }
 
     struct DummyOutboundClient;
 

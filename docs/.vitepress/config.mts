@@ -58,6 +58,14 @@ export default defineConfig({
             text: 'Deploying Axum containers',
             link: '/guide/deploying-axum-containers',
           },
+          {
+            text: 'Axum diagnostics and trusted proxies',
+            link: '/guide/axum-diagnostics',
+          },
+          { text: 'Native Geo providers', link: '/guide/native-geo' },
+          { text: 'Native AWS stores', link: '/guide/native-aws-stores' },
+          { text: 'Native celld stores', link: '/guide/native-celld-stores' },
+          { text: 'DynamoDB KV', link: '/guide/dynamodb-kv' },
         ],
       },
       {

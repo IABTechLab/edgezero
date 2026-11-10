@@ -35,9 +35,15 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-`run_app` installs `simple_logger` (unless `owns_logging = true`), builds the app, and reads bind /
-store / logging config at runtime from `EDGEZERO__*` environment
-variables (see [the migration guide](../manifest-store-migration.md)).
+`run_app` installs `simple_logger` unless `owns_logging = true`, builds the app, and reads bind,
+store, and logging config at runtime from `EDGEZERO__*` environment
+variables. See [the migration guide](../manifest-store-migration.md).
+
+Incoming proxy trust defaults to no trusted networks. Managed hosting strips raw forwarding
+headers before admission and exposes checked ingress metadata instead. See
+[Axum diagnostics and trusted proxies](/guide/axum-diagnostics) for configuration, migration,
+request records, and work snapshots.
+
 The portable store metadata baked into `App` by the `app!` macro
 drives which logical stores are exposed; no `edgezero.toml` needs to
 be loaded by the runtime.
@@ -94,6 +100,53 @@ cargo build -p my-app-adapter-axum --release
 ```
 
 The binary is placed in `target/release/my-app-adapter-axum`.
+
+## Buffered JSON body limits
+
+Every standard Axum hosting path defaults framework-managed JSON buffering to 2 MiB,
+exactly 2,097,152 bytes. Valid JSON at the effective limit succeeds; one byte over returns
+HTTP 413. Malformed JSON within the limit remains HTTP 400.
+
+For standalone development or production, select decimal integer bytes at startup:
+
+```bash
+EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES=4194304 cargo run -p my-app-adapter-axum
+```
+
+The value must be positive and representable by the collector. Zero, signs, whitespace,
+suffixes, fractions, overflowing values, and non-Unicode values fail startup before application
+configuration or readiness. There is no unlimited sentinel, CLI flag, or manifest setting.
+The selected value is captured once per run.
+
+For explicit production embedding or a router-only server, use the fallible builder:
+
+```rust
+use edgezero_adapter_axum::dev_server::{AxumDevServer, AxumRunOptions};
+
+let options = AxumRunOptions::new("127.0.0.1:8787".parse()?)?
+    .with_json_body_limit_bytes(4 * 1024 * 1024)?;
+let server = AxumDevServer::new(app).with_json_body_limit_bytes(4 * 1024 * 1024)?;
+```
+
+Explicit options and router builders do not merge ambient settings. `AxumRunOptions::from_env`
+is the deliberate environment-driven alternative. The low-level `into_core_request` converter
+attaches the finite default without reading this environment setting.
+
+Ordinary `Json` and `ValidatedJson` use the selected ceiling, including overrides above the
+portable 8 MiB fallback. Explicit JSON caps take the minimum of the caller cap and native ceiling.
+JSON helpers enforce it regardless of Content-Type; generic buffered helpers enforce it for the
+original `application/json` or `application/*+json` ingress classification. Ordinary Form retains
+its 1 MiB caller cap. Header/extension mutation and context reconstruction cannot loosen policy.
+
+Native-managed JSON deserialization failures return HTTP 400 with the fixed text
+`invalid JSON payload`. Custom renderers receive that same fixed error, not serde detail.
+Legacy/unmanaged JSON errors and application-authored `EdgeError` messages retain their
+existing behavior. See [privacy limits](/guide/axum-diagnostics#timing-failures-and-privacy-limits).
+
+Taken streams and proxy forwarding receive no new aggregate size cap. Manual body collection
+keeps its supplied cap and existing typed 413 overflow behavior. The ceiling bounds logical buffered
+body bytes, not parsed JSON allocations, host buffers, concurrent requests, or process memory.
+It does not promise client receipt or keep-alive reuse after rejection.
 
 ## Bounded HTTP/1 Ingress
 
@@ -225,6 +278,29 @@ field-section accounting or raw framing-rejection policy. Admission still receiv
 `IngressHeadAccounting::HostManaged` and `IngressFraming::HostManaged`; both raw-ingress
 capabilities remain `Unsupported`. See [Capabilities](/guide/capabilities).
 
+## Checked ingress and diagnostics
+
+Managed hosting validates the original normalized request head, removes raw forwarding fields,
+and exposes checked metadata from the actual socket peer. Proxy trust is off by default.
+Configure a bounded `TrustedProxyPolicy` only for deployment-owned peers. Native request records
+omit raw headers, addresses, paths/queries, and source error strings; application-owned loggers
+and observers remain responsible for their own output. See
+[Axum diagnostics and trusted proxies](../axum-diagnostics.md) for configuration, metadata,
+request identity, counters, and deployment examples.
+
+## Native Geo providers
+
+Geo is off by default and selected only through `AxumRunOptions::with_geo`. The opt-in
+`geo-cloudfront` feature adds a bounded local CloudFront parser, not AWS SDKs or store setup.
+Both built-in and supplied providers require a separate `ProtectedCloudFrontAlb` policy using
+the actual socket peer. Ordinary trusted-proxy configuration does not admit geographic assertions.
+
+Read the immutable outcome through `RequestContext::geo()`. Missing metadata, untrusted ingress,
+invalid assertions, and provider failures remain distinct; none grants permission or chooses an
+HTTP status. The [native Geo guide](../native-geo.md) covers the Rust API, mandatory HTTPS origin
+credential gate and network isolation, header generation, disabled shared caching, rotation,
+and the separate cloud/downstream acceptance checks.
+
 ## Outbound HTTP
 
 The Axum adapter uses a `HttpClient` registered in the assembled app's router state when present,
@@ -302,9 +378,26 @@ address takes precedence over `config.addr`. Resolving the shutdown future cance
 connections and waits for the local worker and its resources; it does not drain responses.
 Dropping the serving future signals cancellation but cannot wait for cleanup.
 
-::: tip Logging status
-`run_app` wires logging automatically; custom entrypoints should install a logger explicitly.
-:::
+The development `run_app` helper installs `simple_logger` at the level read from
+`EDGEZERO__LOGGING__LEVEL`, falling back to `info` when that variable is unset or unparseable.
+Production `AxumRunOptions` rejects an invalid supplied level. Neither reads `edgezero.toml`
+for logger setup, and `echo_stdout` has no runtime effect.
+
+To install your own logger, set `owns_logging = true` in the `app!` declaration and initialize
+it once in `main` before entering the runner. Ownership controls installation, not framework
+facade output. Safe native request and lifecycle records use target `edgezero::native`.
+
+Request records are on by default. `EDGEZERO__LOGGING__REQUEST_RECORDS` accepts exactly
+`true` or `false`; invalid supplied values fail startup in development and production.
+`AxumRunOptions::with_request_records(false)` and `AxumDevServer::with_request_records(false)`
+suppress only default native request logs. Application/native observers, lifecycle records,
+counts, and snapshots remain active. Explicit builders do not merge ambient record settings.
+
+Use `with_diagnostics` to attach a `NativeDiagnosticsHandle` for snapshots or an optional
+native request observer. No exporter or public metrics endpoint is installed. See
+[logger ownership](/guide/axum-diagnostics#records-and-logger-ownership) and
+[snapshots and metrics](/guide/axum-diagnostics#snapshots-and-optional-metrics) for examples
+and the synchronous sink limitations.
 
 ## Testing
 
@@ -372,7 +465,21 @@ The database file grows over time and does not shrink after deletions. To reclai
 space, delete the file in `.edgezero/`; the data is lost. See [KV Storage](/guide/kv)
 for the portable API.
 
-## Secret Store
+## Native store providers
+
+Axum keeps the existing local defaults, but native applications can select a provider
+per logical store ID. The portable manifest still declares IDs and defaults only. A
+separate, strict native bindings file selects supported providers; it does not change
+store metadata or add AWS dependencies to Fastly, Cloudflare, or Spin builds.
+
+Without a bindings file, config uses local `.edgezero/local-config-<id>.json`
+snapshots, secrets use environment variables, and KV uses the existing local backend.
+With explicit AWS bindings, the runner fetches mapped values before its initializer
+and before it accepts requests. It does not fall back to a local provider when an AWS
+lookup or preparation fails. See the [native AWS stores guide](../native-aws-stores.md)
+for the schema, feature selection, permissions, and lifecycle limits.
+The independent [native celld providers](../native-celld-stores.md) add startup
+configuration snapshots and live KV through a scoped listener inside celld.
 
 A declared `[stores.secrets]` id resolves to an `EnvSecretStore`, which reads
 secret key `api_key` from the environment variable `EDGEZERO__SECRETS__API_KEY`,
@@ -385,17 +492,23 @@ only one secrets id may be declared:
 EDGEZERO__SECRETS__API_KEY=mysecret edgezero serve --adapter axum
 ```
 
-## Config Store
+The native binding file path must be absolute. `EDGEZERO__STORE_BINDINGS_FILE` is
+read only by the environment-loading runner. Explicit `AxumRunOptions` selection
+uses only values supplied in code. Programmatic applications may also inject existing
+handles or deferred setup through `run_app_with_native_stores`; deferred setup is
+polled after source validation, in the current native runtime. Its construction must
+not perform provider work.
 
-For local development, each declared `[stores.config]` id resolves to a
-local-file config store backed by `.edgezero/local-config-<id>.json`.
-The standard runner loads immutable snapshots before binding its listener.
-Missing files create empty declared stores. Malformed files retain typed failing
-bindings, while allocation-limit violations fail startup. Changes made by `config
-push` take effect after restart, not on the next request.
-The portable manifest carries no inline defaults — the
-pre-rewrite `[stores.config.defaults]` table is gone (see
-[the migration guide](../manifest-store-migration.md)).
+A declared `[stores.secrets]` ID still defaults to an environment-backed store when
+not explicitly bound. It is no longer limited to one ID by Axum. Existing
+`EDGEZERO__STORES__SECRETS__<ID>__NAME` and config/KV local overrides retain their
+meaning for implicit local bindings; they cannot override an explicitly bound ID.
+
+`config push --adapter axum` remains a local-file writer. It does not publish to
+AppConfig. If passed an explicit `--store-bindings` file that binds the selected ID
+to AWS, the guard rejects the operation before writing anything. A push
+without that explicit file still only updates the local snapshot file; it does not
+update an AWS-bound deployment.
 
 ```toml
 [stores.config]
@@ -484,6 +597,22 @@ secrets. Kernel buffers, filesystem page cache, allocator fragmentation and tota
 not guaranteed. Local file reads are synchronous; no finite startup I/O interruption is
 claimed. The broad `config-read-allocation-bounds` capability remains `Unsupported`;
 this bounded local config-snapshot path does not certify every secret/provider allocation.
+
+## Optional AWS features
+
+Generated native targets opt into `aws-appconfig-agent` and
+`aws-secrets-manager` independently, or use the `aws-stores` alias for both. These
+features are separate from the CLI binary's own dependencies. A bindings file cannot
+enable a provider that was not compiled into the application. The AWS SDK and service
+clients stay out of default native and WASM target graphs.
+
+The native AWS SDK can emit diagnostic fields at dependency `DEBUG`/`TRACE` levels.
+Those events may include secret ARNs, credential-source metadata, or response details
+when sensitive-body logging is enabled. EdgeZero redacts its own errors and diagnostics,
+but the first version does not suppress dependency events because scoped suppression
+can break an application's tracing-to-log fallback. Do not enable dependency
+`DEBUG`/`TRACE` in production unless the process logging policy has been reviewed.
+This limitation must be disclosed in release and PR review notes.
 
 ## Container packaging
 
@@ -713,6 +842,7 @@ Consumers that require DNS-label syntax must apply that additional policy.
 
 ## Next Steps
 
+- Configure [native diagnostics and trusted proxies](/guide/axum-diagnostics)
 - Deploy to [Fastly Compute](/guide/adapters/fastly) for production
 - Deploy to [Cloudflare Workers](/guide/adapters/cloudflare) as an alternative
 - Explore [Configuration](/guide/configuration) for manifest options
