@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aws_config::BehaviorVersion;
 use aws_sdk_secretsmanager::Client;
 use aws_sdk_secretsmanager::config::retry::RetryConfig;
 use aws_sdk_secretsmanager::config::timeout::TimeoutConfig;
@@ -16,6 +15,7 @@ use aws_sdk_secretsmanager::error::SdkError;
 use aws_sdk_secretsmanager::operation::get_secret_value::GetSecretValueError;
 #[cfg(test)]
 use aws_sdk_secretsmanager::primitives::Blob;
+use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
 use aws_types::region::Region;
 use bytes::Bytes;
 use edgezero_core::secret_store::SecretHandle;

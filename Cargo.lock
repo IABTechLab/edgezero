@@ -1410,6 +1410,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-dynamodb",
  "aws-sdk-secretsmanager",
+ "aws-smithy-runtime-api",
  "aws-types",
  "base64",
  "bytes",
