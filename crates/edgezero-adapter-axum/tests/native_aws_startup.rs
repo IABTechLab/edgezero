@@ -305,11 +305,12 @@ mod tests {
                     )
                     .expect("write app request");
                     let mut response = String::new();
-                    stream
-                        .read_to_string(&mut response)
-                        .expect("read complete app response");
-                    if response.starts_with("HTTP/1.1 200") {
-                        return response;
+                    match stream.read_to_string(&mut response) {
+                        Ok(_) if response.starts_with("HTTP/1.1 200") => return response,
+                        Ok(_) => {}
+                        // A connected socket is not yet an HTTP-ready fixture.
+                        Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+                        Err(error) => panic!("read complete app response: {error}"),
                     }
                 }
                 assert!(Instant::now() < deadline, "host readiness deadline");

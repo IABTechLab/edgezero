@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use aws_config::BehaviorVersion;
 use aws_sdk_dynamodb::Client;
 use aws_sdk_dynamodb::config::timeout::TimeoutConfig;
 use aws_sdk_dynamodb::config::{Builder, retry::RetryConfig};
@@ -14,6 +13,7 @@ use aws_sdk_dynamodb::error::SdkError;
 use aws_sdk_dynamodb::operation::describe_table::DescribeTableError;
 use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::{AttributeValue, TableDescription};
+use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
 use aws_types::region::Region;
 use bytes::Bytes;
 use edgezero_core::key_value_store::{KvError, KvHandle, KvPage, KvStore};
