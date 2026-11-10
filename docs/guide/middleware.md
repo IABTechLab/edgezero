@@ -296,9 +296,9 @@ state injection and middleware. Canonical admission has already resolved the rou
 only direct router calls perform lookup after the hook. This includes unmatched 404/405 requests. The hook
 cannot observe downstream results or mark their completion.
 
-- **Fastly:** `run_app_with_request_extensions` and
-  `serve_app_with_request_extensions` can preinstall a handle. Applications that
-  own dispatch and delivery can use `lifecycle::run_custom`. See
+- **Fastly:** use a pre-dispatch hook with the standard managed entry point
+  to install a handle. Applications that own dispatch and delivery can use
+  `lifecycle::run_custom`. See
   [Fastly request extensions](./adapters/fastly.md#capturing-raw-request-signals-ja4-h2-fingerprint).
 - **Axum:** wrap `RouterService` in an application-owned tower service to retain
   the handle across dispatch, including unmatched routes and rendered errors.
