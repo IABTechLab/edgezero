@@ -23,7 +23,7 @@ use edgezero_core::response_egress::{
 };
 use edgezero_core::{MonotonicClock, MonotonicInstant};
 
-use crate::proxy::{CheckedProxyMetadata, ForwardingResult, Scheme};
+use crate::trusted_proxy::{CheckedProxyMetadata, ForwardingResult, Scheme};
 
 /// Framework-generated correlation value, not a credential or visitor-supplied ID.
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -1329,7 +1329,7 @@ mod tests {
 
     #[test]
     fn metadata_preserves_original_summary_and_public_replacement_cannot_change_private_identity() {
-        use crate::proxy::{TrustedProxyPolicy, normalize, strip_forwarding_headers};
+        use crate::trusted_proxy::{TrustedProxyPolicy, normalize, strip_forwarding_headers};
         use edgezero_core::http::{HeaderValue, Request};
         use edgezero_core::ingress::{
             IngressHeadLimits, validate_normalized_ingress_parts_with_summary,

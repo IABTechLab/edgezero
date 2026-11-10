@@ -1,5 +1,5 @@
 //! Shared bounded socket-peer networks for forwarding and protected Geo admission.
-use crate::proxy::ProxyTrustConfigError;
+use crate::trusted_proxy::ProxyTrustConfigError;
 use ipnet::{IpNet, Ipv4Net};
 use std::net::{IpAddr, Ipv6Addr};
 const MAX_BYTES: usize = 0x4000;

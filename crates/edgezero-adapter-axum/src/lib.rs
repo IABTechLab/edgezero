@@ -31,8 +31,6 @@ pub mod outbound;
 #[cfg(feature = "axum")]
 mod peer_networks;
 #[cfg(feature = "axum")]
-pub mod proxy;
-#[cfg(feature = "axum")]
 pub mod request;
 #[cfg(feature = "axum")]
 mod response;
@@ -44,6 +42,8 @@ pub mod secret_env;
 pub mod secret_store;
 #[cfg(feature = "axum")]
 mod service;
+#[cfg(feature = "axum")]
+pub mod trusted_proxy;
 
 #[cfg(all(feature = "cli", not(target_arch = "wasm32")))]
 pub mod cli;
