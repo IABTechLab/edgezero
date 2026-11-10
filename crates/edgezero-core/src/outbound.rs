@@ -408,11 +408,22 @@ pub struct ResponseBodyPolicy {
 }
 
 /// Controls use of an adapter-managed intermediary cache for one request.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+///
+/// A surrogate key is mutually exclusive with bypass: Fastly's SDK setter clears
+/// pass mode. Tagging does not override origin freshness or make private responses
+/// cacheable. Adapters without surrogate-key metadata retain platform-default
+/// behavior without emulating tagged caching or purge.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum OutboundCachePolicy {
     Bypass,
     #[default]
     PlatformDefault,
+    /// Fastly cache metadata, not an outbound `Surrogate-Key` request header.
+    ///
+    /// The value may contain space-separated keys. Fastly ignores individual
+    /// keys outside printable ASCII 0x21..=0x7e; no additional key policy is imposed.
+    /// Image Optimizer cannot retain this metadata and rejects this variant.
+    PlatformDefaultWithSurrogateKey(HeaderValue),
 }
 
 #[derive(Clone)]
@@ -1082,6 +1093,13 @@ impl OutboundRequest {
     pub fn cache_policy(mut self, policy: OutboundCachePolicy) -> Self {
         self.cache_policy = policy;
         self
+    }
+
+    /// Borrows the request-local cache selection without cloning tag metadata.
+    #[must_use]
+    #[inline]
+    pub fn cache_policy_setting(&self) -> &OutboundCachePolicy {
+        &self.cache_policy
     }
 
     #[must_use]

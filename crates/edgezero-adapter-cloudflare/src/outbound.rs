@@ -2232,6 +2232,39 @@ mod worker_impl {
         }
 
         #[wasm_bindgen_test]
+        fn tagged_default_keeps_worker_default_cache_mode_without_wire_tags() {
+            for (policy, expected) in [
+                (OutboundCachePolicy::PlatformDefault, "default"),
+                (
+                    OutboundCachePolicy::PlatformDefaultWithSurrogateKey(HeaderValue::from_static(
+                        "example-all example-reader-0123",
+                    )),
+                    "default",
+                ),
+                (OutboundCachePolicy::Bypass, "no-store"),
+            ] {
+                let request = build_worker_request(
+                    &Method::GET,
+                    "https://origin.example.com/resource",
+                    &HeaderMap::new(),
+                    None,
+                    policy,
+                )
+                .expect("Workers request");
+                let mode = Reflect::get(request.inner().as_ref(), &JsValue::from_str("cache"))
+                    .expect("cache mode");
+                assert_eq!(mode.as_string().as_deref(), Some(expected));
+                assert!(
+                    request
+                        .headers()
+                        .get("surrogate-key")
+                        .expect("header")
+                        .is_none()
+                );
+            }
+        }
+
+        #[wasm_bindgen_test]
         fn provider_diagnostics_preserve_preparation_errors_without_changing_sources() {
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -3762,6 +3795,28 @@ mod header_bridge_tests {
     use edgezero_core::http::{HeaderMap, HeaderValue};
 
     use super::*;
+
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn tagged_default_is_an_accepted_cache_noop() {
+        use edgezero_core::outbound::validate_for_dispatch;
+        let request = edgezero_core::OutboundRequest::get("https://origin.example.com/resource")
+            .expect("request")
+            .cache_policy(
+                edgezero_core::OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                    HeaderValue::from_static("example-all"),
+                ),
+            );
+        super::validate_supported_options(&request).expect("metadata ignored on Workers");
+        for mode in [
+            edgezero_core::OutboundSendMode::Send,
+            edgezero_core::OutboundSendMode::Begin,
+            edgezero_core::OutboundSendMode::Batch,
+        ] {
+            validate_for_dispatch(&request, mode).expect("valid metadata");
+        }
+        assert!(!request.headers().contains_key("surrogate-key"));
+    }
 
     #[derive(Default)]
     struct AppendSink(BTreeMap<String, Vec<String>>);
