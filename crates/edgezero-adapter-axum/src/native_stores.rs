@@ -517,6 +517,7 @@ impl NativePreparationSessions {
         not(any(feature = "aws-appconfig-agent", feature = "celld-config")),
         expect(
             clippy::unused_async,
+            clippy::unused_async_trait_impl,
             reason = "compiled-out config dispatch keeps the asynchronous boundary"
         )
     )]
@@ -583,6 +584,7 @@ impl NativePreparationSessions {
         not(any(feature = "aws-dynamodb", feature = "celld-kv")),
         expect(
             clippy::unused_async,
+            clippy::unused_async_trait_impl,
             reason = "compiled-out KV dispatch keeps the asynchronous boundary"
         )
     )]
@@ -635,6 +637,7 @@ impl NativePreparationSessions {
         not(feature = "aws-secrets-manager"),
         expect(
             clippy::unused_async,
+            clippy::unused_async_trait_impl,
             reason = "compiled-out secret dispatch keeps the asynchronous boundary"
         )
     )]
