@@ -1960,3 +1960,25 @@ mod outbound_contract_tests {
         }
     }
 }
+
+#[cfg(all(test, feature = "fastly", target_arch = "wasm32"))]
+mod timing_tests {
+    #[test]
+    fn request_timing_clock_handle_and_attachment_work_on_runtime() {
+        super::request_timing_tests::clock_handle_and_attachment_work_on_runtime();
+    }
+
+    #[test]
+    fn request_timing_clock_advances_in_viceroy_harness() {
+        use std::time::{Duration, SystemTime};
+
+        let deadline = SystemTime::now() + Duration::from_secs(2);
+        super::request_timing_tests::clock_advances_on_local_runtime(|| {
+            SystemTime::now() >= deadline
+        });
+    }
+}
+
+#[cfg(all(test, feature = "fastly", target_arch = "wasm32"))]
+#[path = "../../edgezero-core/tests/support/request_timing.rs"]
+mod request_timing_tests;

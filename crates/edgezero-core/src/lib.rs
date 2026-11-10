@@ -38,6 +38,7 @@ pub mod outbound;
 pub mod params;
 pub mod platform;
 pub mod pre_dispatch;
+pub mod request_timing;
 pub mod responder;
 pub mod response;
 pub mod response_egress;
