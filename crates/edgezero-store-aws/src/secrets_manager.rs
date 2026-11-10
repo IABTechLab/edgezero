@@ -10,12 +10,13 @@ use std::time::Duration;
 
 use aws_config::BehaviorVersion;
 use aws_sdk_secretsmanager::Client;
+use aws_sdk_secretsmanager::config::retry::RetryConfig;
 use aws_sdk_secretsmanager::config::timeout::TimeoutConfig;
-use aws_sdk_secretsmanager::config::{Region, retry::RetryConfig};
 use aws_sdk_secretsmanager::error::SdkError;
 use aws_sdk_secretsmanager::operation::get_secret_value::GetSecretValueError;
 #[cfg(test)]
 use aws_sdk_secretsmanager::primitives::Blob;
+use aws_types::region::Region;
 use bytes::Bytes;
 use edgezero_core::secret_store::SecretHandle;
 use tokio::time::timeout;
