@@ -15,6 +15,7 @@ use edgezero_store_celld::settings::{CelldAccessToken, CelldPreparationLimits};
 use log::LevelFilter;
 
 use crate::diagnostics::NativeDiagnosticsHandle;
+use crate::geo::{NativeGeo, NativeGeoCapability, NativeGeoConfigError, NativeGeoSelection};
 use crate::native_bindings::{
     NativeBindingsLimits, NativeConfigBinding, NativeKvBinding, NativePreparationPolicySources,
     NativeStoreBindings, NativeStoreBindingsInput,
@@ -73,6 +74,7 @@ pub struct AxumRunOptions {
     data_dir: Option<PathBuf>,
     diagnostics: NativeDiagnosticsHandle,
     env: EnvConfig,
+    geo: NativeGeoSelection,
     grace: Duration,
     json_body_limit: JsonBodyLimit,
     level: LevelFilter,
@@ -362,6 +364,7 @@ impl AxumRunOptions {
             data_dir: None,
             diagnostics: NativeDiagnosticsHandle::new(),
             env: EnvConfig::default(),
+            geo: NativeGeoSelection::Off,
             grace: Duration::from_secs(10),
             json_body_limit: JsonBodyLimit::DEFAULT,
             level: LevelFilter::Info,
@@ -369,6 +372,27 @@ impl AxumRunOptions {
             request_records: true,
             trusted_proxy_policy: TrustedProxyPolicy::no_trust(),
         })
+    }
+
+    /// Select geographic resolution explicitly. Validation happens before runner resources.
+    #[must_use]
+    #[inline]
+    pub fn with_geo(mut self, selection: NativeGeoSelection) -> Self {
+        self.geo = selection;
+        self
+    }
+
+    /// Validate the finalized selection and capture its startup capability.
+    ///
+    /// # Errors
+    /// Rejects unavailable implementations and invalid protected-source policies.
+    #[inline]
+    pub fn geo_capability(&self) -> Result<NativeGeoCapability, NativeGeoConfigError> {
+        self.native_geo().map(|geo| geo.capability())
+    }
+
+    pub(crate) fn native_geo(&self) -> Result<NativeGeo, NativeGeoConfigError> {
+        NativeGeo::validate(&self.geo)
     }
 
     pub(crate) fn request_records(&self) -> bool {
@@ -1521,6 +1545,26 @@ mod tests {
         }
         assert!(defaults.clone().with_json_body_limit_bytes(0).is_err());
         assert!(defaults.with_json_body_limit_bytes(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn geo_selection_replacement_preserves_clone_bounds() {
+        use crate::geo::ProtectedCloudFrontAlb;
+        let options =
+            AxumRunOptions::new("127.0.0.1:8787".parse().expect("address")).expect("options");
+        let _thread_safe_clone: Box<dyn Send + Sync> = Box::new(options.clone());
+        assert!(matches!(
+            options.geo_capability(),
+            Ok(NativeGeoCapability::Off)
+        ));
+        let selected = options.with_geo(NativeGeoSelection::CloudFront {
+            policy: ProtectedCloudFrontAlb::new(["127.0.0.1/32"], "x-origin-verify-fixture")
+                .expect("policy"),
+        });
+        assert!(matches!(
+            selected.with_geo(NativeGeoSelection::Off).geo_capability(),
+            Ok(NativeGeoCapability::Off)
+        ));
     }
 
     #[test]

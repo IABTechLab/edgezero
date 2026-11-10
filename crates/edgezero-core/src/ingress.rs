@@ -14,6 +14,7 @@ pub use fidelity::{
 
 use std::any::Any;
 use std::fmt;
+use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,6 +23,7 @@ use bytes::Bytes;
 use crate::body::Body;
 use crate::config_store::ConfigExtractionLimits;
 use crate::error::EdgeError;
+use crate::geo::GeoOutcome;
 use crate::http::{
     Authority, Extensions, HeaderMap, HeaderValue, Method, Request, RequestParts, Response,
     StatusCode, Uri, Version,
@@ -229,12 +231,14 @@ pub enum IngressDispatchOutcome {
 
 /// Proof that the application selected one request disposition with a finite read deadline.
 pub struct AdmittedIngress {
+    category_only_json_errors: bool,
     config_extraction_limits: ConfigExtractionLimits,
     dispatch_disposition: IngressDispatchDisposition,
     grant: IngressGrant,
     head_limits: IngressHeadLimits,
     monotonic_clock: MonotonicClock,
     read_deadline: Deadline,
+    request_geo: GeoOutcome,
     request_start: MonotonicInstant,
 }
 
@@ -308,10 +312,21 @@ impl AdmittedIngress {
         self.read_deadline
     }
 
+    pub(crate) fn request_context(&self) -> (GeoOutcome, bool) {
+        (self.request_geo.clone(), self.category_only_json_errors)
+    }
+
     #[must_use]
     #[inline]
     pub fn request_start(&self) -> MonotonicInstant {
         self.request_start
+    }
+
+    pub(crate) fn take_request_context(&mut self) -> (GeoOutcome, bool) {
+        (
+            mem::replace(&mut self.request_geo, GeoOutcome::NoSelection),
+            self.category_only_json_errors,
+        )
     }
 
     pub(crate) fn with_config_extraction_limits(mut self, limits: ConfigExtractionLimits) -> Self {
@@ -321,6 +336,16 @@ impl AdmittedIngress {
 
     pub(crate) fn with_head_limits(mut self, limits: IngressHeadLimits) -> Self {
         self.head_limits = limits;
+        self
+    }
+
+    pub(crate) fn with_request_context(
+        mut self,
+        geo: GeoOutcome,
+        category_only_json_errors: bool,
+    ) -> Self {
+        self.request_geo = geo;
+        self.category_only_json_errors = category_only_json_errors;
         self
     }
 }
@@ -868,6 +893,8 @@ pub(crate) fn apply_admission_policy(
     Ok(IngressAdmissionOutcome::Admitted {
         completion,
         ingress: AdmittedIngress {
+            request_geo: GeoOutcome::NoSelection,
+            category_only_json_errors: false,
             config_extraction_limits: ConfigExtractionLimits::default(),
             dispatch_disposition,
             grant,
