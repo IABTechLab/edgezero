@@ -792,6 +792,15 @@ impl HttpClient {
             .start_batch_until(OutboundPreparedBatch::new(context, slots))
     }
 
+    /// Returns the provider's paired clock and timer factory without creating a
+    /// timer or starting an exchange. Waiting retains `OutboundTime`'s existing
+    /// deadline, failure and cancellation semantics.
+    #[must_use]
+    #[inline]
+    pub fn time(&self) -> OutboundTime {
+        self.inner.time()
+    }
+
     #[inline]
     pub fn with_client<Client>(client: Client) -> Self
     where
