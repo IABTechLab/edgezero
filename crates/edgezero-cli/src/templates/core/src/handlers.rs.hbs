@@ -8,9 +8,13 @@ use edgezero_core::extractor::{Headers, Json, Path};
 use edgezero_core::http::{self, Method, Response, StatusCode, Uri};
 use edgezero_core::outbound::{
     OutboundBatchTermination, OutboundCachePolicy, OutboundCollectedSlot, OutboundFollowFailure,
-    OutboundImageFormat, OutboundImageOptimizerOptions, OutboundImageOptimizerRegion,
     OutboundRedirectAction, OutboundRedirectLimit, OutboundRequest, ResponseDecoding,
 };
+{{#if native_image_example}}
+use edgezero_core::outbound::{
+    OutboundImageFormat, OutboundImageOptimizerOptions, OutboundImageOptimizerRegion,
+};
+{{/if}}
 use edgezero_core::response::Text;
 use futures::{StreamExt as _, stream};
 use std::io::Error as IoError;
@@ -127,6 +131,7 @@ pub async fn admission(RequestContext(ctx): RequestContext) -> Result<Response, 
         route_class,
     })
 }
+{{#if native_image_example}}
 
 #[action]
 pub async fn image_demo(RequestContext(ctx): RequestContext) -> Result<Response, EdgeError> {
@@ -152,6 +157,7 @@ fn image_demo_request() -> Result<OutboundRequest, EdgeError> {
             .stream_response(),
     )
 }
+{{/if}}
 
 #[action]
 pub async fn fanout(RequestContext(ctx): RequestContext) -> Result<Response, EdgeError> {
@@ -1178,6 +1184,7 @@ mod tests {
         let response = block_on(proxy_demo(ctx)).expect("response");
         assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     }
+{{#if native_image_example}}
 
     #[test]
     fn image_demo_uses_default_cache_and_preserves_outbound_limits() {
@@ -1207,6 +1214,7 @@ mod tests {
             Some(MAX_RESPONSE_HEADER_BYTES)
         );
     }
+{{/if}}
 
     #[test]
     fn generated_outbound_http_smoke() {
