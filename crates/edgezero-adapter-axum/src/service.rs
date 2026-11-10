@@ -46,10 +46,10 @@ use crate::diagnostics::{
 #[cfg(test)]
 use crate::ingress_config::AxumIngressConfig;
 use crate::outbound::{AxumOutboundClient, native_time};
-use crate::proxy::{TrustedProxyPolicy, normalize, strip_forwarding_headers};
 use crate::request::{HttpTransport, into_core_request_parts};
 use crate::response::{AxumEgressBody, EgressConnection, prepare_egress_response};
 use crate::run_options::JsonBodyLimit;
+use crate::trusted_proxy::{TrustedProxyPolicy, normalize, strip_forwarding_headers};
 
 /// Private Hyper service error used only to close/reset an admission-aborted connection.
 #[derive(Debug, thiserror::Error)]
@@ -2682,7 +2682,7 @@ mod tests {
             NativeDiagnosticsSnapshot, NativeRequestFailure, NativeRequestObserver,
             NativeRequestOutcome, NativeRequestRecord,
         };
-        use crate::proxy::{ForwardingHeaderFamily, ForwardingResult, Scheme};
+        use crate::trusted_proxy::{ForwardingHeaderFamily, ForwardingResult, Scheme};
         use edgezero_core::extractor::ForwardedHost;
         use edgezero_core::http::{Authority, Uri};
         use edgezero_core::ingress::{CheckedEffectiveHost, CheckedHostSource, IngressHead};

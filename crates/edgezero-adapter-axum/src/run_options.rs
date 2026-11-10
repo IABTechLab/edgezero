@@ -12,7 +12,7 @@ use edgezero_core::env_config::EnvConfig;
 use log::LevelFilter;
 
 use crate::diagnostics::NativeDiagnosticsHandle;
-use crate::proxy::TrustedProxyPolicy;
+use crate::trusted_proxy::TrustedProxyPolicy;
 
 /// Validated native JSON buffering ceiling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

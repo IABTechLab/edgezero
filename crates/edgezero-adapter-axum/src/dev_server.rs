@@ -23,11 +23,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::diagnostics::{NativeDiagnosticsHandle, NativeSession};
-use crate::proxy::TrustedProxyPolicy;
 pub use crate::run_options::AxumRunOptions;
 use crate::run_options::{
     JsonBodyLimit, config_path, failure, native_limit_setting, native_settings, shutdown_grace,
 };
+use crate::trusted_proxy::TrustedProxyPolicy;
 use anyhow::Context as _;
 use edgezero_core::probe::LifecyclePhase;
 use futures_util::FutureExt as _;

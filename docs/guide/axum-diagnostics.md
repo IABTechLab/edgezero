@@ -52,7 +52,7 @@ same bounds and never silently truncate.
 ```rust
 use edgezero_adapter_axum::dev_server::AxumRunOptions;
 use edgezero_adapter_axum::diagnostics::NativeDiagnosticsHandle;
-use edgezero_adapter_axum::proxy::{ForwardingHeaderFamily, TrustedProxyPolicy};
+use edgezero_adapter_axum::trusted_proxy::{ForwardingHeaderFamily, TrustedProxyPolicy};
 
 let diagnostics = NativeDiagnosticsHandle::new();
 let policy = TrustedProxyPolicy::new(
