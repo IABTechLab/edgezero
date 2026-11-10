@@ -8,17 +8,19 @@
 )]
 
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::env::vars_os;
 use std::ffi::OsString;
 use std::fs;
 use std::future::{self, Future};
-use std::io;
+use std::io::{self, ErrorKind};
 #[cfg(test)]
 use std::iter;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,10 +58,6 @@ use edgezero_core::store_registry::{
 };
 use log::{Level, LevelFilter};
 use simple_logger::SimpleLogger;
-
-use std::collections::BTreeMap;
-use std::io::ErrorKind;
-use std::process;
 use tokio::task::yield_now;
 use tokio::time::{Instant as NativeInstant, sleep_until};
 
@@ -68,10 +66,13 @@ use crate::config_store_limits::ConfigStoreLimits;
 use crate::connection::{ConnectionExit, serve_http1_with_shutdown};
 use crate::ingress_config::AxumIngressConfig;
 use crate::key_value_store::PersistentKvStore;
+use crate::native_stores::{self, NativeSourcePlan, NativeStoreOverrides, NativeStoreSource};
 use crate::outbound::AxumOutboundClient;
 use crate::response::EgressConnection;
 use crate::secret_store::EnvSecretStore;
-use crate::service::AxumServiceState;
+use crate::service::{
+    AxumServiceState, legacy_config_registry, legacy_kv_registry, legacy_secret_registry,
+};
 
 /// Local application-owned startup work, borrowing the unshared App and prepared stores.
 pub type LocalStartupFuture<'startup> =
@@ -413,30 +414,15 @@ impl From<Stores> for PreparedStores {
     #[inline]
     fn from(stores: Stores) -> Self {
         Self {
-            config: stores.config_registry.or_else(|| {
-                stores.config_store.map(|handle| {
-                    ConfigRegistry::single_id(
-                        "default".to_owned(),
-                        ConfigStoreBinding {
-                            handle,
-                            default_key: "default".to_owned(),
-                        },
-                    )
-                })
-            }),
-            kv: stores.kv_registry.or_else(|| {
-                stores
-                    .kv
-                    .map(|handle| KvRegistry::single_id("default".to_owned(), handle))
-            }),
-            secrets: stores.secret_registry.or_else(|| {
-                stores.secrets.map(|handle| {
-                    SecretRegistry::single_id(
-                        "default".to_owned(),
-                        BoundSecretStore::new(handle, "default".to_owned()),
-                    )
-                })
-            }),
+            config: stores
+                .config_registry
+                .or_else(|| stores.config_store.map(legacy_config_registry)),
+            kv: stores
+                .kv_registry
+                .or_else(|| stores.kv.map(legacy_kv_registry)),
+            secrets: stores
+                .secret_registry
+                .or_else(|| stores.secrets.map(legacy_secret_registry)),
         }
     }
 }
@@ -992,6 +978,35 @@ fn app_logger(env: &EnvConfig) -> SimpleLogger {
         .with_module_level(BOOT_LOG_TARGET, BOOT_LOG_LEVEL)
 }
 
+/// Generated application entrypoint: retain the development runner unless an
+/// explicit native bindings file is selected. A selected file always enters
+/// strict production startup, where a provider compiled out of the binary fails
+/// closed instead of falling back to local stores.
+///
+/// # Errors
+/// Returns startup or listener errors from the selected runner.
+#[inline]
+pub fn run_generated_app<A>() -> anyhow::Result<()>
+where
+    A: Hooks,
+{
+    let bindings_selected =
+        vars_os().any(|(key, _value)| key.to_str().is_some_and(is_store_bindings_locator_key));
+    if bindings_selected {
+        // `run_production_app` captures all bootstrap settings and the selected
+        // bindings document once, then rejects unavailable compiled providers.
+        run_production_app::<A>()
+    } else {
+        // Preserve existing generated local-development behavior exactly when
+        // no native bindings locator was selected.
+        run_app::<A>()
+    }
+}
+
+fn is_store_bindings_locator_key(key: &str) -> bool {
+    config_path(key, cfg!(windows)).is_some_and(|path| path == ["store_bindings_file"])
+}
+
 /// Runs an application with the Axum development server.
 ///
 /// # Errors
@@ -1130,6 +1145,7 @@ where
 {
     run_production_selected::<A, _, _>(
         AxumRunOptions::from_env()?,
+        NativeStoreOverrides::default(),
         true,
         future::pending::<()>(),
         no_initialize,
@@ -1155,6 +1171,33 @@ where
 {
     run_production_selected::<A, _, _>(
         AxumRunOptions::from_env()?,
+        NativeStoreOverrides::default(),
+        true,
+        future::pending::<()>(),
+        initialize,
+    )
+}
+
+/// Runs strict startup with explicit options and an application-owned local initializer.
+/// Installs SIGINT and Unix SIGTERM without merging ambient hosting/store settings.
+///
+/// # Errors
+/// Returns classified startup/runner errors or non-success for forced shutdown.
+#[inline]
+pub fn run_production_app_with_options_and_initializer<A, Initialize>(
+    options: AxumRunOptions,
+    initialize: Initialize,
+) -> anyhow::Result<()>
+where
+    A: Hooks,
+    Initialize: for<'startup> FnOnce(
+        &'startup mut App,
+        &'startup PreparedStores,
+    ) -> LocalStartupFuture<'startup>,
+{
+    run_production_selected::<A, _, _>(
+        options,
+        NativeStoreOverrides::default(),
         true,
         future::pending::<()>(),
         initialize,
@@ -1194,11 +1237,41 @@ where
         &'startup PreparedStores,
     ) -> LocalStartupFuture<'startup>,
 {
-    run_production_selected::<A, _, _>(options, false, stop, initialize)
+    run_app_with_native_stores::<A, _, _>(
+        options,
+        NativeStoreOverrides::default(),
+        stop,
+        initialize,
+    )
+}
+
+/// Runs explicit native bindings and app-owned checks before accepting requests.
+/// Setup futures are polled sequentially on the existing current-thread runtime.
+///
+/// # Errors
+/// Rejects invalid sources before opening local providers or polling deferred setup.
+/// Preparation failures discard all staged handles and skip initializer/readiness.
+#[inline]
+pub fn run_app_with_native_stores<A, Initialize, Stop>(
+    options: AxumRunOptions,
+    overrides: NativeStoreOverrides,
+    stop: Stop,
+    initialize: Initialize,
+) -> anyhow::Result<()>
+where
+    A: Hooks,
+    Stop: Future<Output = ()>,
+    Initialize: for<'startup> FnOnce(
+        &'startup mut App,
+        &'startup PreparedStores,
+    ) -> LocalStartupFuture<'startup>,
+{
+    run_production_selected::<A, _, _>(options, overrides, false, stop, initialize)
 }
 
 fn run_production_selected<A, Initialize, Stop>(
     options: AxumRunOptions,
+    overrides: NativeStoreOverrides,
     signals: bool,
     stop: Stop,
     initialize: Initialize,
@@ -1219,11 +1292,11 @@ where
         stop,
         async move {
             let metadata = A::stores();
-            options.validate_stores(metadata)?;
+            let sources = NativeSourcePlan::validate(metadata, &options, overrides)?;
+            init_logging::<A>(options.logging_level())?;
             let mut app = App::build::<A>(crate::AXUM_PLATFORM)
                 .map_err(|_error| anyhow::anyhow!("application configuration failed"))?;
-            init_logging::<A>(options.logging_level())?;
-            let stores = build_production_stores(metadata, &options)?;
+            let stores = build_production_stores(metadata, &options, sources).await?;
             let transport = AxumOutboundClient::try_transport()
                 .map_err(|_error| failure("transport", "HTTP client", "initialization failed"))?;
             initialize(&mut app, &stores).await.map_err(|error| {
@@ -1276,89 +1349,151 @@ fn check_data_write_access(root: &Path) -> anyhow::Result<()> {
     Err(failure("stores", "DATA_DIR", "write-probe unavailable"))
 }
 
-fn build_production_stores(
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep all sequential staging in one ownership scope before atomic publication"
+)]
+async fn build_production_stores(
     metadata: StoresMetadata,
     options: &AxumRunOptions,
+    sources: NativeSourcePlan,
 ) -> anyhow::Result<PreparedStores> {
-    let mut stores = PreparedStores::default();
-    if let Some(meta) = metadata.config {
-        let root = options
-            .config_dir()
-            .ok_or_else(|| failure("settings", "CONFIG_DIR", "required"))?;
-        let mut by_id = BTreeMap::new();
-        let limits = ConfigStoreLimits::from_env(options.env_config())?;
-        let mut resident = 0_usize;
-        for id in meta.ids {
-            let store = AxumConfigStore::load_required_at_startup(
-                &root.join(format!("local-config-{id}.json")),
-                limits,
-                resident,
-            )
-            .map_err(|error| {
-                let category = match error {
-                    ConfigStoreError::ValueTooLarge => "snapshot size limit",
-                    ConfigStoreError::Unavailable { message }
-                        if message == "config file missing" =>
-                    {
-                        "required snapshot missing"
-                    }
-                    ConfigStoreError::Unavailable { message }
-                        if message == "config snapshot requires a regular file" =>
-                    {
-                        "snapshot requires a regular file"
-                    }
-                    ConfigStoreError::DeadlineExceeded
-                    | ConfigStoreError::Internal { .. }
-                    | ConfigStoreError::InvalidKey { .. }
-                    | ConfigStoreError::Unavailable { .. }
-                    | _ => "required snapshot unavailable or malformed",
-                };
-                failure("config", id, category)
-            })?;
-            resident = resident
-                .checked_add(store.resident_allocation_bytes())
-                .ok_or_else(|| failure("config", id, "snapshot allocation limit"))?;
-            by_id.insert(
-                (*id).to_owned(),
-                ConfigStoreBinding {
-                    handle: ConfigStoreHandle::new(Arc::new(store)),
-                    default_key: options.env_config().store_key("config", id),
-                },
-            );
-        }
-        stores.config = Some(
-            ConfigRegistry::from_parts(by_id, meta.default.to_owned()).ok_or_else(|| {
-                failure("config", meta.default, "invalid declared default binding")
-            })?,
-        );
+    let mut config = BTreeMap::new();
+    let mut kv = BTreeMap::new();
+    let mut secrets = BTreeMap::new();
+    let mut resident = 0_usize;
+    let mut aws = sources.session()?;
+    for (id, source) in sources.config {
+        let binding = match source {
+            NativeStoreSource::BuiltIn(builtin) => {
+                native_stores::prepare_aws_config(builtin, &mut aws, id).await?
+            }
+            local @ (NativeStoreSource::Local
+            | NativeStoreSource::Ready(_)
+            | NativeStoreSource::Prepare(_)) => {
+                native_stores::prepare(local, "config", id, || {
+                    let root = options
+                        .config_dir()
+                        .ok_or_else(|| failure("settings", "CONFIG_DIR", "required"))?;
+                    let store = AxumConfigStore::load_required_at_startup(
+                        &root.join(format!("local-config-{id}.json")),
+                        sources.config_limits,
+                        resident,
+                    )
+                    .map_err(|error| {
+                        let category = match error {
+                            ConfigStoreError::ValueTooLarge => "snapshot size limit",
+                            ConfigStoreError::Unavailable { message }
+                                if message == "config file missing" =>
+                            {
+                                "required snapshot missing"
+                            }
+                            ConfigStoreError::Unavailable { message }
+                                if message == "config snapshot requires a regular file" =>
+                            {
+                                "snapshot requires a regular file"
+                            }
+                            ConfigStoreError::DeadlineExceeded
+                            | ConfigStoreError::Internal { .. }
+                            | ConfigStoreError::InvalidKey { .. }
+                            | ConfigStoreError::Unavailable { .. }
+                            | _ => "required snapshot unavailable or malformed",
+                        };
+                        failure("config", id, category)
+                    })?;
+                    resident = resident
+                        .checked_add(store.resident_allocation_bytes())
+                        .ok_or_else(|| failure("config", id, "snapshot allocation limit"))?;
+                    Ok(ConfigStoreBinding {
+                        handle: ConfigStoreHandle::new(Arc::new(store)),
+                        default_key: options.env_config().store_key("config", id),
+                    })
+                })
+                .await?
+            }
+        };
+        config.insert(id.to_owned(), binding);
     }
-    if let Some(meta) = metadata.kv {
-        let root = options
-            .data_dir()
-            .ok_or_else(|| failure("settings", "DATA_DIR", "required"))?;
-        check_data_write_access(root)?;
-        let mut by_id = BTreeMap::new();
-        let mut handles: BTreeMap<String, KvHandle> = BTreeMap::new();
-        for id in meta.ids {
-            let name = options.env_config().store_name("kv", id);
-            let handle = if let Some(handle) = handles.get(&name) {
-                handle.clone()
-            } else {
-                let store = PersistentKvStore::new(root.join(kv_store_file_name(&name)))
-                    .map_err(|_error| failure("KV", id, "database unavailable or locked"))?;
-                let handle = KvHandle::new(Arc::new(store));
-                handles.insert(name, handle.clone());
-                handle
-            };
-            by_id.insert((*id).to_owned(), handle);
-        }
-        stores.kv = Some(
-            KvRegistry::from_parts(by_id, meta.default.to_owned())
-                .ok_or_else(|| failure("KV", meta.default, "invalid declared default binding"))?,
-        );
+    let mut handles: BTreeMap<String, KvHandle> = BTreeMap::new();
+    if sources
+        .kv
+        .values()
+        .any(|source| matches!(source, NativeStoreSource::Local))
+    {
+        check_data_write_access(
+            options
+                .data_dir()
+                .ok_or_else(|| failure("settings", "DATA_DIR", "required"))?,
+        )?;
     }
-    stores.secrets = build_secret_registry(metadata.secrets, options.env_config());
-    Ok(stores)
+    for (id, source) in sources.kv {
+        let handle = match source {
+            NativeStoreSource::BuiltIn(builtin) => {
+                native_stores::prepare_aws_kv(builtin, &mut aws, id).await?
+            }
+            local @ (NativeStoreSource::Local
+            | NativeStoreSource::Ready(_)
+            | NativeStoreSource::Prepare(_)) => {
+                native_stores::prepare(local, "kv", id, || {
+                    let root = options
+                        .data_dir()
+                        .ok_or_else(|| failure("settings", "DATA_DIR", "required"))?;
+                    let name = options.env_config().store_name("kv", id);
+                    if let Some(handle) = handles.get(&name) {
+                        return Ok(handle.clone());
+                    }
+                    let store = PersistentKvStore::new(root.join(kv_store_file_name(&name)))
+                        .map_err(|_error| failure("kv", id, "database unavailable or locked"))?;
+                    let handle = KvHandle::new(Arc::new(store));
+                    handles.insert(name, handle.clone());
+                    Ok(handle)
+                })
+                .await?
+            }
+        };
+        kv.insert(id.to_owned(), handle);
+    }
+    let environment_secrets = SecretHandle::new(Arc::new(EnvSecretStore::new()));
+    for (id, source) in sources.secrets {
+        let binding = match source {
+            NativeStoreSource::BuiltIn(builtin) => {
+                native_stores::prepare_aws_secrets(builtin, &mut aws, id).await?
+            }
+            local @ (NativeStoreSource::Local
+            | NativeStoreSource::Ready(_)
+            | NativeStoreSource::Prepare(_)) => {
+                native_stores::prepare(local, "secrets", id, || {
+                    Ok(BoundSecretStore::new(
+                        environment_secrets.clone(),
+                        options.env_config().store_name("secrets", id),
+                    ))
+                })
+                .await?
+            }
+        };
+        secrets.insert(id.to_owned(), binding);
+    }
+    Ok(PreparedStores {
+        config: finish_registry(metadata.config, config, "config")?,
+        kv: finish_registry(metadata.kv, kv, "kv")?,
+        secrets: finish_registry(metadata.secrets, secrets, "secrets")?,
+    })
+}
+
+fn finish_registry<H>(
+    metadata: Option<StoreMetadata>,
+    handles: BTreeMap<String, H>,
+    kind: &str,
+) -> anyhow::Result<Option<StoreRegistry<H>>>
+where
+    H: Clone,
+{
+    metadata
+        .map(|meta| {
+            StoreRegistry::from_parts(handles, meta.default.to_owned())
+                .ok_or_else(|| failure(kind, meta.default, "invalid declared default binding"))
+        })
+        .transpose()
 }
 
 /// Build the per-request KV registry from baked store metadata.
@@ -1481,8 +1616,8 @@ fn build_config_registry_at(
     Ok(StoreRegistry::from_parts(by_id, default_id))
 }
 
-/// Build the per-request secret registry. Axum is `Single` for secrets — every
-/// declared id maps to the same env-backed [`EnvSecretStore`]. Each binding
+/// Build the per-request local secret registry. Every declared ID maps to the
+/// shared env-backed [`EnvSecretStore`], without limiting the number of IDs. Each binding
 /// captures the platform store name resolved from
 /// `EDGEZERO__STORES__SECRETS__<ID>__NAME` (defaulting to the logical id);
 /// the axum env-secret backend ignores the name on lookup, so the binding
@@ -1530,6 +1665,105 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Poll;
     use tokio::time::advance;
+
+    #[test]
+    fn generated_entry_selects_native_mode_only_for_bindings_locator() {
+        assert!(is_store_bindings_locator_key(
+            "EDGEZERO__STORE_BINDINGS_FILE"
+        ));
+        assert!(is_store_bindings_locator_key(
+            "EDGEZERO__store_bindings_file"
+        ));
+        assert!(!is_store_bindings_locator_key(
+            "EDGEZERO__ADAPTER__DATA_DIR"
+        ));
+        assert!(!is_store_bindings_locator_key(
+            "EDGEZERO_STORE_BINDINGS_FILE"
+        ));
+        for key in [
+            "edgezero__store_bindings_file",
+            "EdGeZeRo__STORE_BINDINGS_FILE",
+        ] {
+            assert_eq!(is_store_bindings_locator_key(key), cfg!(windows));
+        }
+    }
+
+    #[test]
+    fn generated_bindings_locator_child() {
+        let Ok(expected) = env::var("EDGEZERO_TEST_BINDINGS_ERROR") else {
+            return;
+        };
+        // This hook fails construction even if dispatch incorrectly selects local defaults.
+        let error = run_generated_app::<FailingConfiguration>().expect_err("startup failure");
+        assert_eq!(error.to_string(), expected);
+        // Strict native capture is category-only; the unchanged dev entry retains its source.
+        assert_eq!(
+            error.chain().count(),
+            if expected.starts_with("startup ") {
+                1
+            } else {
+                2
+            }
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn generated_locator_casing_and_non_unicode_fail_closed() {
+        use std::ffi::OsString;
+        #[cfg(unix)]
+        use std::os::unix::ffi::OsStringExt as _;
+        #[cfg(windows)]
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let root = tempfile::tempdir().expect("root");
+        let missing = root.path().join("missing.toml");
+        #[cfg(unix)]
+        let non_unicode = OsString::from_vec(vec![0xff]);
+        #[cfg(windows)]
+        let non_unicode = OsString::from_wide(&[0xd800]);
+        for prefix in ["EDGEZERO__", "edgezero__", "EdGeZeRo__"] {
+            for (value, selected_error) in [
+                (
+                    missing.clone().into_os_string(),
+                    "startup settings: bindings: native bindings file unavailable",
+                ),
+                (
+                    non_unicode.clone(),
+                    "startup settings: STORE_BINDINGS_FILE: non-Unicode value",
+                ),
+            ] {
+                let recognized = prefix == "EDGEZERO__" || cfg!(windows);
+                // Non-Unicode rejection belongs to selected strict startup; do not exercise
+                // the unchanged development runner's Unicode-only environment collection.
+                if !recognized && value.to_str().is_none() {
+                    continue;
+                }
+                let expected = if recognized {
+                    selected_error
+                } else {
+                    "application configuration failed"
+                };
+                let output = Command::new(env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "dev_server::tests::generated_bindings_locator_child",
+                    ])
+                    .env_clear()
+                    .env("EDGEZERO_TEST_BINDINGS_ERROR", expected)
+                    .env(format!("{prefix}store_bindings_file"), value)
+                    .output()
+                    .expect("isolated generated entrypoint");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(output.status.success(), "{stdout}\n{stderr}");
+                assert!(
+                    stdout.contains("1 passed"),
+                    "child test must execute: {stdout}"
+                );
+            }
+        }
+    }
 
     struct FailingConfiguration;
 
@@ -1765,12 +1999,44 @@ mod tests {
         format!("{stdout}\n{stderr}")
     }
 
+    fn strict_logging_options() -> AxumRunOptions {
+        AxumRunOptions::from_vars([(
+            "EDGEZERO__LOGGING__LEVEL",
+            env::var("EDGEZERO__LOGGING__LEVEL").expect("probe logging level"),
+        )])
+        .expect("strict probe options")
+    }
+
     #[test]
     fn startup_logging_child() {
         let Ok(scenario) = env::var("EDGEZERO_TEST_LOGGING_SCENARIO") else {
             return;
         };
         let result = match scenario.as_str() {
+            "strict-managed" => run_app_with_options::<LoggingConfiguration, _>(
+                strict_logging_options(),
+                future::pending::<()>(),
+            ),
+            "strict-invalid-sources" => {
+                SimpleLogger::new().init().expect("existing logger");
+                let mut overrides = NativeStoreOverrides::default();
+                overrides
+                    .prepare_config("undeclared", async { panic!("setup must not be polled") })
+                    .expect("deferred source");
+                let result = run_app_with_native_stores::<LoggingConfiguration, _, _>(
+                    strict_logging_options(),
+                    overrides,
+                    future::pending::<()>(),
+                    no_initialize,
+                );
+                assert!(
+                    result
+                        .expect_err("source error must precede logger conflict")
+                        .to_string()
+                        .contains("undeclared binding"),
+                );
+                return;
+            }
             "invalid-ingress" => {
                 let result = run_app_with_preflight::<LoggingConfiguration, _>(|| {
                     panic!(
@@ -1785,30 +2051,50 @@ mod tests {
                 );
                 return;
             }
-            "installed" => {
+            "installed" | "strict-installed" => {
                 SimpleLogger::new()
                     .with_level(LevelFilter::Trace)
                     .init()
                     .expect("existing logger");
-                let result = run_app_with_preflight::<LoggingConfiguration, _>(|| {
-                    log::warn!(target: BOOT_LOG_TARGET, "unexpected-preflight-probe");
-                    Ok(())
-                });
+                let strict = scenario == "strict-installed";
+                let result = if strict {
+                    run_app_with_options::<LoggingConfiguration, _>(
+                        strict_logging_options(),
+                        future::pending::<()>(),
+                    )
+                } else {
+                    run_app_with_preflight::<LoggingConfiguration, _>(|| {
+                        log::warn!(target: BOOT_LOG_TARGET, "unexpected-preflight-probe");
+                        Ok(())
+                    })
+                };
+                let expected = if strict {
+                    "startup logging: application: initialization failed"
+                } else {
+                    "failed to initialize application logger"
+                };
                 assert_eq!(
                     result
                         .expect_err("logger conflict must stop startup")
                         .to_string(),
-                    "failed to initialize application logger"
+                    expected
                 );
                 return;
             }
-            "owned" => {
+            "owned" | "strict-owned" => {
                 SimpleLogger::new()
                     .with_level(LevelFilter::Trace)
                     .init()
                     .expect("owned logger");
                 log::set_max_level(LevelFilter::Debug);
-                let result = run_app::<OwnedLoggingConfiguration>();
+                let result = if scenario == "strict-owned" {
+                    run_app_with_options::<OwnedLoggingConfiguration, _>(
+                        strict_logging_options(),
+                        future::pending::<()>(),
+                    )
+                } else {
+                    run_app::<OwnedLoggingConfiguration>()
+                };
                 assert_eq!(log::max_level(), LevelFilter::Debug);
                 result
             }
@@ -1850,6 +2136,44 @@ mod tests {
                 "{output}"
             );
         }
+    }
+
+    #[test]
+    fn strict_logging_is_ready_before_configure_with_separate_boot_filter() {
+        for level in ["off", "error", "trace"] {
+            let output = logging_probe("strict-managed", level);
+            assert!(output.contains("boot-warning-probe"), "{output}");
+            assert!(!output.contains("boot-info-probe"), "{output}");
+            assert_eq!(
+                output.contains("runtime-warning-probe"),
+                level == "trace",
+                "{output}"
+            );
+            assert_eq!(
+                output.contains("runtime-debug-probe"),
+                level == "trace",
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_logger_conflict_prevents_configuration() {
+        let output = logging_probe("strict-installed", "trace");
+        assert!(!output.contains("boot-warning-probe"), "{output}");
+    }
+
+    #[test]
+    fn strict_owned_logging_preserves_backend_and_facade_filter() {
+        let output = logging_probe("strict-owned", "off");
+        assert!(output.contains("runtime-debug-probe"), "{output}");
+        assert!(output.contains("boot-info-probe"), "{output}");
+    }
+
+    #[test]
+    fn strict_source_validation_precedes_logging_and_configuration() {
+        let output = logging_probe("strict-invalid-sources", "trace");
+        assert!(!output.contains("boot-warning-probe"), "{output}");
     }
 
     #[test]
@@ -2156,6 +2480,88 @@ mod tests {
         let server = AxumDevServer::with_config(App::new(router), config);
         assert_eq!(server.config.addr.port(), 9000);
         assert!(!server.config.enable_ctrl_c);
+    }
+
+    #[test]
+    fn prepared_stores_preserve_legacy_defaults_and_explicit_registry_precedence() {
+        let temp = tempfile::tempdir().expect("database directory");
+        let config = ConfigStoreHandle::new(Arc::new(
+            AxumConfigStore::from_map([], ConfigStoreLimits::default()).expect("config store"),
+        ));
+        let kv = KvHandle::new(Arc::new(
+            PersistentKvStore::new(temp.path().join("registry.redb")).expect("KV store"),
+        ));
+        let secrets = SecretHandle::new(Arc::new(EnvSecretStore::new()));
+        let with_handles = |server: AxumDevServer| {
+            server
+                .with_config_store(config.clone())
+                .with_kv_handle(kv.clone())
+                .with_secret_handle(secrets.clone())
+        };
+        let legacy: PreparedStores = with_handles(AxumDevServer::new(App::new(
+            RouterService::builder().build(),
+        )))
+        .stores
+        .into();
+        let legacy_config = legacy.config().expect("config registry");
+        let legacy_kv = legacy.kv().expect("KV registry");
+        let legacy_secrets = legacy.secrets().expect("secret registry");
+        assert_eq!(legacy_config.ids().collect::<Vec<_>>(), ["default"]);
+        assert_eq!(legacy_config.default_id(), "default");
+        assert_eq!(
+            legacy_config.default_ref().expect("binding").default_key,
+            "default"
+        );
+        assert_eq!(legacy_kv.ids().collect::<Vec<_>>(), ["default"]);
+        assert_eq!(legacy_kv.default_id(), "default");
+        assert_eq!(legacy_secrets.ids().collect::<Vec<_>>(), ["default"]);
+        assert_eq!(legacy_secrets.default_id(), "default");
+        assert_eq!(
+            legacy_secrets.default_ref().expect("binding").store_name(),
+            "default"
+        );
+
+        let with_registries = |server: AxumDevServer| {
+            server
+                .with_config_registry(ConfigRegistry::single_id(
+                    "application".to_owned(),
+                    ConfigStoreBinding {
+                        handle: config.clone(),
+                        default_key: "settings".to_owned(),
+                    },
+                ))
+                .with_kv_registry(KvRegistry::single_id("sessions".to_owned(), kv.clone()))
+                .with_secret_registry(SecretRegistry::single_id(
+                    "runtime".to_owned(),
+                    BoundSecretStore::new(secrets.clone(), "vault".to_owned()),
+                ))
+        };
+        for registry_first in [true, false] {
+            let unwired = AxumDevServer::new(App::new(RouterService::builder().build()));
+            let server = if registry_first {
+                with_handles(with_registries(unwired))
+            } else {
+                with_registries(with_handles(unwired))
+            };
+            let prepared: PreparedStores = server.stores.into();
+            let config_registry = prepared.config().expect("config registry");
+            let kv_registry = prepared.kv().expect("KV registry");
+            let secret_registry = prepared.secrets().expect("secret registry");
+            assert_eq!(config_registry.default_id(), "application");
+            assert_eq!(
+                config_registry.default_ref().expect("binding").default_key,
+                "settings"
+            );
+            assert_eq!(kv_registry.default_id(), "sessions");
+            assert_eq!(secret_registry.default_id(), "runtime");
+            assert_eq!(
+                secret_registry.default_ref().expect("binding").store_name(),
+                "vault"
+            );
+            assert!(config_registry.named("default").is_none());
+            assert!(kv_registry.named("default").is_none());
+            assert!(secret_registry.named("default").is_none());
+        }
     }
 
     #[test]
@@ -3695,5 +4101,646 @@ mod integration_tests {
         ));
 
         server.handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod native_store_tests {
+    use super::*;
+    use crate::native_stores::NativeStorePreparationError;
+    use bytes::Bytes;
+    use edgezero_core::config_store::{ConfigStore, finish_bounded_config_read};
+    use edgezero_core::context::RequestContext;
+    use edgezero_core::extractor::State;
+    use edgezero_core::key_value_store::NoopKvStore;
+    use edgezero_core::secret_store::InMemorySecretStore;
+    use edgezero_core::{ConfigValue, EdgeError, action};
+    use futures::executor::block_on;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+
+    struct ProbeConfig {
+        drops: Arc<AtomicUsize>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+    )]
+    impl Drop for ProbeConfig {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl ConfigStore for ProbeConfig {
+        async fn get(&self, key: &str) -> Result<Option<ConfigValue>, ConfigStoreError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok((key == "owned_key").then(|| ConfigValue::from("snapshot")))
+        }
+
+        async fn get_bounded(
+            &self,
+            key: &str,
+            clock: &edgezero_core::MonotonicClock,
+            deadline: edgezero_core::Deadline,
+            max_backend_bytes: u64,
+            max_value_bytes: u64,
+        ) -> Result<edgezero_core::BoundedStoreRead<ConfigValue>, ConfigStoreError> {
+            if deadline.is_expired_at(clock.now()) {
+                return Err(ConfigStoreError::DeadlineExceeded);
+            }
+            finish_bounded_config_read(
+                self.get(key).await,
+                clock,
+                deadline,
+                max_backend_bytes,
+                max_value_bytes,
+            )
+        }
+    }
+
+    fn binding(drops: &Arc<AtomicUsize>, reads: &Arc<AtomicUsize>) -> ConfigStoreBinding {
+        ConfigStoreBinding {
+            default_key: "owned_key".to_owned(),
+            handle: ConfigStoreHandle::new(Arc::new(ProbeConfig {
+                drops: Arc::clone(drops),
+                reads: Arc::clone(reads),
+            })),
+        }
+    }
+
+    fn options() -> AxumRunOptions {
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        AxumRunOptions::new(listener.local_addr().unwrap()).unwrap()
+    }
+
+    fn metadata() -> StoresMetadata {
+        StoresMetadata {
+            config: Some(StoreMetadata {
+                ids: &["first", "second"],
+                default: "first",
+            }),
+            ..StoresMetadata::default()
+        }
+    }
+
+    struct CustomApp;
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "fixture overrides only routes, store declarations and logging ownership"
+    )]
+    impl Hooks for CustomApp {
+        fn owns_logging() -> bool {
+            true
+        }
+        fn stores() -> StoresMetadata {
+            metadata()
+        }
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().get("/", read_snapshot).build())
+        }
+    }
+
+    #[action]
+    async fn read_snapshot(
+        ctx: RequestContext,
+        State(state): State<Arc<str>>,
+    ) -> Result<String, EdgeError> {
+        let selected = ctx
+            .config_store_default_binding()
+            .ok_or_else(|| EdgeError::internal(anyhow::anyhow!("missing fixture binding")))?;
+        let value = selected
+            .handle
+            .get(&selected.default_key)
+            .await?
+            .unwrap_or_default();
+        Ok(format!("{}:{state}", value.as_str()))
+    }
+
+    #[test]
+    fn ready_and_rc_deferred_inputs_share_completed_registries_with_requests() {
+        let options = options();
+        let address = options.addr();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let initialized = Rc::new(Cell::new(false));
+        let polls = Rc::new(Cell::new(0_usize));
+        let mut overrides = NativeStoreOverrides::default();
+        let deferred = binding(&drops, &reads);
+        let counted = Rc::clone(&polls);
+        overrides
+            .prepare_config("first", async move {
+                counted.set(counted.get() + 1);
+                yield_now().await;
+                Ok(deferred)
+            })
+            .unwrap();
+        overrides
+            .insert_config("second", binding(&drops, &Arc::new(AtomicUsize::new(0))))
+            .unwrap();
+        let completed = Rc::clone(&initialized);
+        run_app_with_native_stores::<CustomApp, _, _>(
+            options,
+            overrides,
+            async {
+                timeout(Duration::from_secs(5), async {
+                    while !initialized.get() {
+                        yield_now().await;
+                    }
+                    let mut socket = loop {
+                        if let Ok(socket) = TcpStream::connect(address).await {
+                            break socket;
+                        }
+                        yield_now().await;
+                    };
+                    socket
+                        .write_all(
+                            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    let mut response = Vec::new();
+                    socket.read_to_end(&mut response).await.unwrap();
+                    assert!(response.ends_with(b"snapshot:initialized"));
+                })
+                .await
+                .unwrap();
+            },
+            move |app, stores| {
+                Box::pin(async move {
+                    let registry = stores.config().unwrap();
+                    assert_eq!(registry.default_id(), "first");
+                    let selected = registry.default_ref().unwrap();
+                    assert_eq!(selected.default_key, "owned_key");
+                    assert_eq!(
+                        selected
+                            .handle
+                            .get(&selected.default_key)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .as_str(),
+                        "snapshot"
+                    );
+                    assert!(registry.named("second").is_some());
+                    app.insert_state(Arc::<str>::from("initialized"));
+                    completed.set(true);
+                    Ok(())
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(polls.get(), 1);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn ready_and_deferred_kv_need_no_local_data_root() {
+        let opened = Rc::new(Cell::new(0_usize));
+        let tracked = Rc::clone(&opened);
+        let mut overrides = NativeStoreOverrides::default();
+        overrides
+            .insert_kv("first", KvHandle::new(Arc::new(NoopKvStore)))
+            .unwrap();
+        overrides
+            .prepare_kv("second", async move {
+                tracked.set(tracked.get() + 1);
+                Ok(KvHandle::new(Arc::new(NoopKvStore)))
+            })
+            .unwrap();
+        let metadata = StoresMetadata {
+            kv: Some(StoreMetadata {
+                ids: &["first", "second"],
+                default: "second",
+            }),
+            ..StoresMetadata::default()
+        };
+        let options = options();
+        let plan = NativeSourcePlan::validate(metadata, &options, overrides).unwrap();
+        let stores = block_on(build_production_stores(metadata, &options, plan)).unwrap();
+        assert_eq!(opened.get(), 1);
+        assert_eq!(stores.kv().unwrap().default_id(), "second");
+        assert!(stores.kv().unwrap().named("first").is_some());
+    }
+
+    #[test]
+    fn malformed_metadata_is_rejected_before_any_deferred_poll() {
+        for declaration in [
+            StoreMetadata {
+                default: "missing",
+                ids: &["first"],
+            },
+            StoreMetadata {
+                default: "first",
+                ids: &["first", "first"],
+            },
+            StoreMetadata {
+                default: "bad/id",
+                ids: &["bad/id"],
+            },
+            StoreMetadata {
+                default: "first",
+                ids: &[],
+            },
+        ] {
+            let polled = Rc::new(Cell::new(false));
+            let observed = Rc::clone(&polled);
+            let mut overrides = NativeStoreOverrides::default();
+            overrides
+                .prepare_kv("first", async move {
+                    observed.set(true);
+                    Ok(KvHandle::new(Arc::new(NoopKvStore)))
+                })
+                .unwrap();
+            let metadata = StoresMetadata {
+                kv: Some(declaration),
+                ..StoresMetadata::default()
+            };
+            assert!(NativeSourcePlan::validate(metadata, &options(), overrides).is_err());
+            assert!(!polled.get());
+        }
+    }
+
+    #[test]
+    fn duplicate_inputs_never_replace_an_existing_source_and_debug_is_redacted() {
+        let mut overrides = NativeStoreOverrides::default();
+        overrides
+            .insert_kv("SENTINEL", KvHandle::new(Arc::new(NoopKvStore)))
+            .unwrap();
+        assert_eq!(
+            overrides.prepare_kv("SENTINEL", async { panic!("must not poll") }),
+            Err(NativeStorePreparationError::DuplicateBinding)
+        );
+        let drops = Arc::new(AtomicUsize::new(0));
+        overrides
+            .insert_config("SENTINEL", binding(&drops, &drops))
+            .unwrap();
+        assert_eq!(
+            overrides.insert_config("SENTINEL", binding(&drops, &drops)),
+            Err(NativeStorePreparationError::DuplicateBinding)
+        );
+        let secret = BoundSecretStore::new(
+            SecretHandle::new(Arc::new(InMemorySecretStore::new([("right/key", "value")]))),
+            "right".to_owned(),
+        );
+        overrides
+            .insert_secrets("SENTINEL", secret.clone())
+            .unwrap();
+        assert_eq!(
+            overrides.prepare_secrets("SENTINEL", async move { Ok(secret) }),
+            Err(NativeStorePreparationError::DuplicateBinding)
+        );
+        assert!(!format!("{overrides:?}").contains("SENTINEL"));
+    }
+
+    #[test]
+    fn file_and_inline_source_errors_precede_deferred_polls_and_local_opens() {
+        use crate::native_bindings::{NativeBindingsLimits, NativeStoreBindings};
+
+        for file_input in [false, true] {
+            for invalid in ["duplicate", "undeclared", "overlay", "disabled"] {
+                if invalid == "disabled" && cfg!(feature = "aws-appconfig-agent") {
+                    continue;
+                }
+                let data = tempfile::tempdir().unwrap();
+                let bootstrap = tempfile::tempdir().unwrap();
+                let mut selected = options().with_data_dir(data.path()).unwrap();
+                if invalid == "overlay" {
+                    selected = AxumRunOptions::from_vars([(
+                        "EDGEZERO__STORES__CONFIG__FIRST__KEY",
+                        "OVERLAY_SENTINEL",
+                    )])
+                    .unwrap()
+                    .with_data_dir(data.path())
+                    .unwrap();
+                }
+                let input = "version = 1\n[config.first]\nprovider = 'aws-appconfig-agent'\ndefault_key = 'settings'\nendpoint = 'http://127.0.0.1:2772'\n[config.first.documents.settings]\napplication = 'example'\nenvironment = 'production'\nprofile = 'PROFILE_SENTINEL'\n";
+                let document = if invalid == "undeclared" {
+                    input.replace("config.first", "config.UNKNOWN_SENTINEL")
+                } else {
+                    input.to_owned()
+                };
+                if file_input {
+                    let path = bootstrap.path().join("bindings.toml");
+                    fs::write(&path, document).unwrap();
+                    selected = selected.with_store_bindings_file(&path).unwrap();
+                    fs::remove_file(path).unwrap();
+                } else {
+                    selected = selected
+                        .with_store_bindings(
+                            NativeStoreBindings::parse(&document, NativeBindingsLimits::default())
+                                .unwrap(),
+                        )
+                        .unwrap();
+                }
+                let polls = Rc::new(Cell::new(0_usize));
+                let tracked = Rc::clone(&polls);
+                let drops = Arc::new(AtomicUsize::new(0));
+                let handle = binding(&drops, &drops);
+                let mut overrides = NativeStoreOverrides::default();
+                let id = if invalid == "duplicate" {
+                    "first"
+                } else {
+                    "second"
+                };
+                overrides
+                    .prepare_config(id, async move {
+                        tracked.set(tracked.get() + 1);
+                        Ok(handle)
+                    })
+                    .unwrap();
+                let initialized = Rc::new(Cell::new(false));
+                let called = Rc::clone(&initialized);
+                let error = run_app_with_native_stores::<WithLocalKv, _, _>(
+                    selected,
+                    overrides,
+                    future::pending(),
+                    move |_, _| {
+                        called.set(true);
+                        Box::pin(future::ready(Ok(())))
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(polls.get(), 0);
+                assert!(!initialized.get());
+                assert_eq!(fs::read_dir(data.path()).unwrap().count(), 0);
+                assert_eq!(drops.load(Ordering::SeqCst), 1);
+                assert!(!format!("{error:?}").contains("SENTINEL"));
+                let expected = match invalid {
+                    "duplicate" => "duplicate",
+                    "undeclared" => "undeclared",
+                    "overlay" => "NAME/KEY",
+                    _ => "not compiled",
+                };
+                assert!(error.to_string().contains(expected), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn source_errors_do_not_poll_futures_open_databases_or_run_initializer() {
+        for invalid in ["undeclared", "name", "key", "config_root", "data_root"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut options = options().with_data_dir(root.path()).unwrap();
+            if matches!(invalid, "name" | "key") {
+                options = AxumRunOptions::from_vars([(
+                    format!(
+                        "EDGEZERO__STORES__CONFIG__FIRST__{}",
+                        invalid.to_uppercase()
+                    ),
+                    "OVERLAY_SENTINEL".to_owned(),
+                )])
+                .unwrap()
+                .with_data_dir(root.path())
+                .unwrap();
+            }
+            if invalid == "data_root" {
+                options = AxumRunOptions::new(options.addr()).unwrap();
+            }
+            let polled = Rc::new(Cell::new(0_usize));
+            let tracked = Rc::clone(&polled);
+            let drops = Arc::new(AtomicUsize::new(0));
+            let supplied = binding(&drops, &Arc::new(AtomicUsize::new(0)));
+            let mut overrides = NativeStoreOverrides::default();
+            overrides
+                .prepare_config("first", async move {
+                    tracked.set(tracked.get() + 1);
+                    Ok(supplied)
+                })
+                .unwrap();
+            if invalid != "config_root" {
+                overrides
+                    .insert_config("second", binding(&drops, &Arc::new(AtomicUsize::new(0))))
+                    .unwrap();
+            }
+            if invalid == "undeclared" {
+                overrides
+                    .insert_kv("OTHER_SENTINEL", KvHandle::new(Arc::new(NoopKvStore)))
+                    .unwrap();
+            }
+            let calls = Rc::new(Cell::new(0_usize));
+            let called = Rc::clone(&calls);
+            let result = run_app_with_native_stores::<WithLocalKv, _, _>(
+                options,
+                overrides,
+                future::pending(),
+                move |_, _| {
+                    called.set(called.get() + 1);
+                    Box::pin(future::ready(Ok(())))
+                },
+            );
+            let error = result.unwrap_err();
+            assert_eq!(polled.get(), 0, "{invalid}");
+            assert_eq!(calls.get(), 0);
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+            assert!(!format!("{error:?}").contains("SENTINEL"));
+        }
+    }
+
+    struct WithLocalKv;
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "fixture overrides only routes, store declarations and logging ownership"
+    )]
+    impl Hooks for WithLocalKv {
+        fn owns_logging() -> bool {
+            true
+        }
+        fn stores() -> StoresMetadata {
+            StoresMetadata {
+                kv: Some(StoreMetadata {
+                    ids: &["state"],
+                    default: "state",
+                }),
+                ..metadata()
+            }
+        }
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
+        }
+    }
+
+    #[test]
+    fn local_roots_are_required_only_for_remaining_local_ids() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("local-config-second.json"),
+            r#"{"second":"local"}"#,
+        )
+        .unwrap();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let config = binding(&drops, &Arc::new(AtomicUsize::new(0)));
+        let mut overrides = NativeStoreOverrides::default();
+        overrides.insert_config("first", config).unwrap();
+        overrides
+            .insert_kv("state", KvHandle::new(Arc::new(NoopKvStore)))
+            .unwrap();
+        let metadata = WithLocalKv::stores();
+        let options = options().with_config_dir(root.path()).unwrap();
+        let plan = NativeSourcePlan::validate(metadata, &options, overrides).unwrap();
+        let stores = block_on(build_production_stores(metadata, &options, plan)).unwrap();
+        let registry = stores.config().unwrap();
+        assert_eq!(
+            registry.named_ref("first").unwrap().default_key,
+            "owned_key"
+        );
+        let local = registry.named_ref("second").unwrap();
+        assert_eq!(local.default_key, "second");
+        assert_eq!(
+            block_on(local.handle.get("second"))
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "local"
+        );
+        assert!(stores.kv().unwrap().named("state").is_some());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn supplied_secret_namespace_is_preserved_and_wrong_namespaces_miss() {
+        let handle =
+            SecretHandle::new(Arc::new(InMemorySecretStore::new([("right/key", "value")])));
+        let mut overrides = NativeStoreOverrides::default();
+        overrides
+            .insert_secrets(
+                "first",
+                BoundSecretStore::new(handle.clone(), "right".to_owned()),
+            )
+            .unwrap();
+        overrides
+            .prepare_secrets("second", async move {
+                Ok(BoundSecretStore::new(handle, "wrong".to_owned()))
+            })
+            .unwrap();
+        let metadata = StoresMetadata {
+            secrets: Some(StoreMetadata {
+                ids: &["first", "second"],
+                default: "second",
+            }),
+            ..StoresMetadata::default()
+        };
+        let options = options();
+        let plan = NativeSourcePlan::validate(metadata, &options, overrides).unwrap();
+        let stores = block_on(build_production_stores(metadata, &options, plan)).unwrap();
+        let registry = stores.secrets().unwrap();
+        assert_eq!(registry.default_id(), "second");
+        assert_eq!(
+            block_on(registry.named("first").unwrap().get_bytes("key")).unwrap(),
+            Some(Bytes::from("value"))
+        );
+        assert_eq!(
+            block_on(registry.default().unwrap().get_bytes("key")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn later_failure_drops_staged_handles_and_unpolled_futures_without_readiness() {
+        let options = options();
+        let address = options.addr();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let order = Rc::new(Cell::new(0_usize));
+        let first = binding(&drops, &Arc::new(AtomicUsize::new(0)));
+        let recorded = Rc::clone(&order);
+        let mut overrides = NativeStoreOverrides::default();
+        overrides
+            .prepare_config("first", async move {
+                assert_eq!(recorded.get(), 0);
+                recorded.set(1);
+                Ok(first)
+            })
+            .unwrap();
+        let failing_order = Rc::clone(&order);
+        overrides
+            .prepare_config("second", async move {
+                assert_eq!(failing_order.get(), 1);
+                failing_order.set(2);
+                Err(NativeStorePreparationError::Unavailable)
+            })
+            .unwrap();
+        let unused = binding(&drops, &Arc::new(AtomicUsize::new(0)));
+        overrides
+            .prepare_secrets("third", async move {
+                let _retained = unused;
+                panic!("later future must not poll after preparation failure")
+            })
+            .unwrap();
+        let result = run_app_with_native_stores::<WithSecrets, _, _>(
+            options,
+            overrides,
+            future::pending(),
+            |_, _| panic!("initializer must not run after failed preparation"),
+        );
+        assert!(result.is_err());
+        assert_eq!(order.get(), 2);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        StdTcpListener::bind(address).unwrap();
+    }
+
+    struct WithSecrets;
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "fixture overrides only routes, store declarations and logging ownership"
+    )]
+    impl Hooks for WithSecrets {
+        fn owns_logging() -> bool {
+            true
+        }
+        fn stores() -> StoresMetadata {
+            StoresMetadata {
+                secrets: Some(StoreMetadata {
+                    ids: &["third"],
+                    default: "third",
+                }),
+                ..metadata()
+            }
+        }
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
+        }
+    }
+
+    #[test]
+    fn stop_during_pending_preparation_drops_staged_state_without_binding() {
+        let options = options();
+        let address = options.addr();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut overrides = NativeStoreOverrides::default();
+        overrides
+            .insert_config("first", binding(&drops, &Arc::new(AtomicUsize::new(0))))
+            .unwrap();
+        let entered = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&entered);
+        overrides
+            .prepare_config("second", async move {
+                observed.set(true);
+                future::pending().await
+            })
+            .unwrap();
+        run_app_with_native_stores::<CustomApp, _, _>(
+            options,
+            overrides,
+            async {
+                while !entered.get() {
+                    yield_now().await;
+                }
+            },
+            |_, _| panic!("initializer must not run after startup stop"),
+        )
+        .unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        StdTcpListener::bind(address).unwrap();
     }
 }

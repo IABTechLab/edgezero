@@ -1928,6 +1928,24 @@ git = "https://github.com/stackpop/spin-rust-sdk"
     }
 
     fn assert_generated_axum_entrypoint(project_dir: &Path) {
+        let axum_cargo =
+            fs::read_to_string(project_dir.join("crates/demo-app-adapter-axum/Cargo.toml"))
+                .expect("read generated axum Cargo.toml");
+        for feature in [
+            "aws-appconfig-agent",
+            "aws-secrets-manager",
+            "aws-stores",
+            "aws-dynamodb",
+        ] {
+            assert!(
+                axum_cargo.contains(feature),
+                "missing generated native feature {feature}"
+            );
+        }
+        assert!(
+            axum_cargo.contains("default = []"),
+            "AWS features must be opt-in"
+        );
         let axum_main =
             fs::read_to_string(project_dir.join("crates/demo-app-adapter-axum/src/main.rs"))
                 .expect("read axum main.rs");
@@ -1935,7 +1953,7 @@ git = "https://github.com/stackpop/spin-rust-sdk"
             !axum_main.contains("process::exit")
                 && !axum_main.contains("EdgeZeroAxumService")
                 && !axum_main.contains("into_axum_response")
-                && axum_main.contains("run_app::<demo_app_core::App>()"),
+                && axum_main.contains("run_generated_app::<demo_app_core::App>()"),
             "generated Axum entrypoint must use the connection-owning runner",
         );
     }

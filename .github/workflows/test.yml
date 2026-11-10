@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-
+    # Native-store PRs are currently stacked on the outbound HTTP specification.
+    branches: [main, docs/outbound-http-spec]
 permissions:
   contents: read
 
@@ -183,6 +184,19 @@ jobs:
         if: matrix.suite == 'workspace'
         run: cargo test --workspace --all-targets
 
+      - name: Native store dependency isolation
+        if: matrix.suite == 'workspace'
+        run: bash scripts/check_native_store_dependency_contract.sh
+
+      - name: Native AWS provider and startup contracts (loopback only)
+        if: matrix.suite == 'workspace'
+        run: |
+          cargo test --offline --locked -p edgezero-store-aws --no-default-features --features appconfig-agent --lib
+          cargo test --offline --locked -p edgezero-store-aws --no-default-features --features secrets-manager --lib
+          cargo test --offline --locked -p edgezero-store-aws --no-default-features --features dynamodb-kv --lib
+          cargo test --offline --locked -p edgezero-store-aws --all-features --lib
+          scripts/run_test_nonzero.sh production_runner_loads_envelope_and_real_sdk_secret_before_serving_mixed_stores cargo test --offline --locked -p edgezero-adapter-axum --features aws-stores,test-utils --test native_aws_startup
+
       - name: Bundled demo logging and fallback TCP contracts
         if: matrix.suite == 'cli'
         run: |
@@ -223,6 +237,28 @@ jobs:
           for adapter in axum cloudflare fastly spin; do
             bash scripts/check_adapter_feature_matrix.sh "${adapter}" native
           done
+
+      - name: Generated native AWS startup (loopback only)
+        if: matrix.suite == 'cli'
+        env:
+          EDGEZERO_GENERATED_TEST_TARGET_DIR: ${{ github.workspace }}/target
+        run: scripts/run_test_nonzero.sh --ignored generated_cli_build_features_and_native_aws_startup_are_proven_together cargo test --offline --locked -p edgezero-cli --test native_store_generated_proof
+
+      - name: Generated native DynamoDB KV (loopback only)
+        if: matrix.suite == 'cli'
+        env:
+          EDGEZERO_GENERATED_TEST_TARGET_DIR: ${{ github.workspace }}/target
+        run: scripts/run_test_nonzero.sh --ignored generated_cli_default_off_and_enabled_dynamodb_crud_list_ttl_restart cargo test --offline --locked -p edgezero-cli --test dynamodb_generated_proof
+
+      - name: Native AWS integration runner tests
+        if: matrix.suite == 'cli'
+        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs
+
+      - name: Generated native AWS independent service contracts
+        if: matrix.suite == 'cli'
+        env:
+          EDGEZERO_GENERATED_TEST_TARGET_DIR: ${{ github.workspace }}/target
+        run: node scripts/run_native_aws_integration.mjs
 
       - name: Verify generated project builds and fallback TCP policy
         if: matrix.suite == 'cli'
