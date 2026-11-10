@@ -1129,8 +1129,12 @@ mod fastly_impl {
         for (name, value) in headers {
             request.append_header(name.as_str(), value.as_bytes());
         }
-        if cache_policy == OutboundCachePolicy::Bypass {
-            request.set_pass(true);
+        match cache_policy {
+            OutboundCachePolicy::Bypass => request.set_pass(true),
+            OutboundCachePolicy::PlatformDefault => {}
+            OutboundCachePolicy::PlatformDefaultWithSurrogateKey(value) => {
+                request.set_surrogate_key(value);
+            }
         }
         request
     }
@@ -2033,9 +2037,80 @@ mod fastly_impl {
             }
         }
 
+        #[test]
+        fn tagged_cache_metadata_reaches_sdk_from_send_begin_and_batch_without_ttl() {
+            let trace = NativeSdkTrace::new(Duration::ZERO);
+            for mode in [
+                OutboundSendMode::Send,
+                OutboundSendMode::Begin,
+                OutboundSendMode::Batch,
+            ] {
+                let request =
+                    OutboundRequest::get("https://origin.example.com/resource?signature=a%2Fb")
+                        .expect("request")
+                        .header("authorization", "fixture-signature")
+                        .expect("signature")
+                        .cache_policy(OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                            HeaderValue::from_static("example-all example-reader-0123"),
+                        ));
+                let dispatch = match mode {
+                    OutboundSendMode::Send => testing::dispatch(request, trace.time()),
+                    OutboundSendMode::Begin => testing::begin_dispatch(request, trace.time()),
+                    OutboundSendMode::Batch => testing::batch_dispatch(
+                        request,
+                        trace.time(),
+                        Deadline::after(Duration::from_secs(1)),
+                    ),
+                    OutboundSendMode::Follow => panic!("covered by redirect replay tests"),
+                };
+                let (parts, context) = dispatch.into_parts();
+                assert_eq!(context.mode(), mode);
+                let native = build_fastly_request(
+                    &parts.method,
+                    &parts.uri,
+                    &parts.headers,
+                    parts.cache_policy,
+                );
+                assert!(native.get_header("surrogate-key").is_none());
+                assert_eq!(
+                    native
+                        .get_header("authorization")
+                        .expect("signature")
+                        .as_bytes(),
+                    b"fixture-signature"
+                );
+                let rendered = format!("{native:?}");
+                assert!(rendered.contains("cache_override: Override"), "{rendered}");
+                assert!(
+                    rendered.contains("example-all example-reader-0123"),
+                    "{rendered}"
+                );
+                assert!(rendered.contains("ttl: None"), "{rendered}");
+                assert!(
+                    rendered.contains("stale_while_revalidate: None"),
+                    "{rendered}"
+                );
+                assert!(rendered.contains("stale_if_error: None"), "{rendered}");
+                assert!(!rendered.contains("cache_override: Pass"), "{rendered}");
+            }
+            for (policy, expected) in [
+                (OutboundCachePolicy::Bypass, "cache_override: Pass"),
+                (OutboundCachePolicy::PlatformDefault, "cache_override: None"),
+            ] {
+                let native = build_fastly_request(
+                    &Method::HEAD,
+                    &"https://origin.example.com/".parse().expect("URI"),
+                    &HeaderMap::new(),
+                    policy,
+                );
+                assert!(format!("{native:?}").contains(expected));
+                assert!(native.get_header("surrogate-key").is_none());
+            }
+        }
+
         fn sdk_cache_selection(
             mode: OutboundSendMode,
-            policy: OutboundCachePolicy,
+            policy: &OutboundCachePolicy,
             method: Method,
         ) {
             use edgezero_core::OutboundScopeOwner;
@@ -2053,7 +2128,7 @@ mod fastly_impl {
                     .expect("target"),
             )
             .expect("request")
-            .cache_policy(policy)
+            .cache_policy(policy.clone())
             .timeout(Duration::from_secs(1));
             let dispatch = callback.with(|| match mode {
                 OutboundSendMode::Batch => testing::batch_dispatch(
@@ -2078,7 +2153,7 @@ mod fastly_impl {
                 &prepared.parts.method,
                 &prepared.parts.uri,
                 &prepared.parts.headers,
-                policy,
+                policy.clone(),
             );
             native.set_before_send(|_| Ok(()));
             native.set_body(Vec::<u8>::new());
@@ -2097,7 +2172,8 @@ mod fastly_impl {
                 cause: FastlyFailureCause::HttpCacheApiUnsupported,
             });
             match policy {
-                OutboundCachePolicy::PlatformDefault => {
+                OutboundCachePolicy::PlatformDefault
+                | OutboundCachePolicy::PlatformDefaultWithSurrogateKey(_) => {
                     let error = outcome
                         .expect("SDK rejects unsupported guest caching")
                         .expect_err("cache API unavailable in pinned Viceroy");
@@ -2127,7 +2203,18 @@ mod fastly_impl {
         fn buffered_send_and_batch_preserve_sdk_cache_selection() {
             for mode in [OutboundSendMode::Send, OutboundSendMode::Batch] {
                 for method in [Method::HEAD, Method::GET] {
-                    sdk_cache_selection(mode, OutboundCachePolicy::PlatformDefault, method);
+                    sdk_cache_selection(
+                        mode,
+                        &OutboundCachePolicy::PlatformDefault,
+                        method.clone(),
+                    );
+                    sdk_cache_selection(
+                        mode,
+                        &OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                            HeaderValue::from_static("example-all"),
+                        ),
+                        method,
+                    );
                 }
             }
         }
@@ -2136,7 +2223,7 @@ mod fastly_impl {
         fn buffered_send_and_batch_bypass_unsupported_guest_cache_hooks() {
             for mode in [OutboundSendMode::Send, OutboundSendMode::Batch] {
                 for method in [Method::HEAD, Method::GET] {
-                    sdk_cache_selection(mode, OutboundCachePolicy::Bypass, method);
+                    sdk_cache_selection(mode, &OutboundCachePolicy::Bypass, method);
                 }
             }
         }
@@ -4306,7 +4393,7 @@ mod fastly_impl {
                     &plan.parts.method,
                     &plan.parts.uri,
                     &plan.parts.headers,
-                    plan.parts.cache_policy,
+                    plan.parts.cache_policy.clone(),
                 );
                 assert_eq!(native.get_method(), &method);
                 assert_eq!(native.get_url_str(), target);
