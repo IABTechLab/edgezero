@@ -17,7 +17,7 @@ use crate::diagnostics::NativeDiagnosticsHandle;
 use crate::native_bindings::{
     NativeBindingsLimits, NativeConfigBinding, NativeStoreBindings, NativeStoreBindingsInput,
 };
-use crate::proxy::TrustedProxyPolicy;
+use crate::trusted_proxy::TrustedProxyPolicy;
 
 /// Validated native JSON buffering ceiling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
