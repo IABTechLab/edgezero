@@ -182,13 +182,12 @@ test("tooling dependencies are locked and installed before CI and local guards",
     readFileSync(join(root, "scripts/package-lock.json"), "utf8"),
   );
   assert.equal(manifest.private, true);
-  assert.deepEqual(Object.keys(manifest.dependencies), ["yaml"]);
-  assert.match(manifest.dependencies.yaml, /^\d+\.\d+\.\d+$/);
-  assert.equal(
-    lock.packages["node_modules/yaml"].version,
-    manifest.dependencies.yaml,
-  );
-  assert.match(lock.packages["node_modules/yaml"].integrity, /^sha512-/);
+  assert.deepEqual(Object.keys(manifest.dependencies), ["smol-toml", "yaml"]);
+  for (const [name, version] of Object.entries(manifest.dependencies)) {
+    assert.match(version, /^\d+\.\d+\.\d+$/);
+    assert.equal(lock.packages[`node_modules/${name}`].version, version);
+    assert.match(lock.packages[`node_modules/${name}`].integrity, /^sha512-/);
+  }
 });
 
 test("tooling install failure prevents the Node guard from running", (t) => {
