@@ -190,7 +190,7 @@ pub fn resolve_cargo_target_dir(
         }
         dir = current.parent();
     }
-    if let Some(home) = cargo_home(ctx)
+    if let Some(home) = cargo_home(ctx).map(|home| resolve_dir_against(crate_dir, &home))
         && let Some(target) = selected_config_target_dir(&home)
     {
         return CargoTargetDir::Explicit(resolve_dir_against(&home, &target));
@@ -224,6 +224,7 @@ fn env_value(ctx: &AdapterExecContext<'_>, key: &str) -> Option<OsString> {
 /// directory cargo actually used.
 fn cargo_home(ctx: &AdapterExecContext<'_>) -> Option<PathBuf> {
     env_value(ctx, "CARGO_HOME")
+        .filter(|home| !home.is_empty())
         .map(PathBuf::from)
         .or_else(|| env_value(ctx, "HOME").map(|home| PathBuf::from(home).join(".cargo")))
 }
@@ -1000,6 +1001,73 @@ mod tests {
         match resolve_cargo_target_dir(crate_dir, &args, &ctx) {
             CargoTargetDir::Explicit(path) => assert_eq!(path, crate_dir.join("inline-inc-out")),
             CargoTargetDir::Conventional => panic!("expected explicit from inline include"),
+        }
+    }
+
+    #[test]
+    fn relative_cargo_home_resolves_global_config_and_includes_from_build_directory() {
+        for (filename, included) in [
+            ("config", false),
+            ("config.toml", false),
+            ("config.toml", true),
+        ] {
+            let dir = tempdir().unwrap();
+            let project = dir.path().join("project");
+            let crate_dir = project.join("server");
+            let home = project.join("cargo-home");
+            fs::create_dir_all(&crate_dir).unwrap();
+            fs::create_dir_all(home.join("nested")).unwrap();
+            let expected = if included {
+                fs::write(home.join(filename), "include='nested/global.toml'\n").unwrap();
+                fs::write(
+                    home.join("nested/global.toml"),
+                    "[build]\ntarget-dir='artifacts'\n",
+                )
+                .unwrap();
+                home.join("artifacts")
+            } else {
+                fs::write(home.join(filename), "[build]\ntarget-dir='artifacts'\n").unwrap();
+                project.join("artifacts")
+            };
+            fs::create_dir_all(&expected).unwrap();
+            for cargo_home in [
+                "../cargo-home".to_owned(),
+                home.to_str().unwrap().to_owned(),
+            ] {
+                let environment = [("CARGO_HOME".to_owned(), cargo_home.clone())];
+                let context = AdapterExecContext::new().with_env(&environment);
+                match resolve_cargo_target_dir(&crate_dir, &[], &context) {
+                    CargoTargetDir::Explicit(path) => assert_eq!(
+                        path.canonicalize().unwrap(),
+                        expected.canonicalize().unwrap(),
+                        "home={cargo_home}, config={filename}, included={included}"
+                    ),
+                    CargoTargetDir::Conventional => panic!("missed global config for {cargo_home}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn empty_cargo_home_falls_back_to_user_config() {
+        let dir = tempdir().unwrap();
+        let crate_dir = dir.path().join("server");
+        let user_dir = dir.path().join("user");
+        fs::create_dir_all(&crate_dir).unwrap();
+        fs::create_dir_all(user_dir.join(".cargo")).unwrap();
+        fs::write(
+            user_dir.join(".cargo/config.toml"),
+            "[build]\ntarget-dir='artifacts'\n",
+        )
+        .unwrap();
+        let environment = [
+            ("CARGO_HOME".to_owned(), String::new()),
+            ("HOME".to_owned(), user_dir.to_str().unwrap().to_owned()),
+        ];
+        let context = AdapterExecContext::new().with_env(&environment);
+        match resolve_cargo_target_dir(&crate_dir, &[], &context) {
+            CargoTargetDir::Explicit(path) => assert_eq!(path, user_dir.join("artifacts")),
+            CargoTargetDir::Conventional => panic!("empty CARGO_HOME must use the user config"),
         }
     }
 

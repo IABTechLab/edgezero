@@ -4445,6 +4445,61 @@ serve = "echo"
 ids = ["default"]
 "#;
 
+    #[cfg(feature = "edgezero-adapter-cloudflare")]
+    #[test]
+    fn provision_root_cloudflare_crate_with_nested_manifest_through_all_local_modes() {
+        let _lock = manifest_guard().lock().unwrap();
+        for crate_decl in [".", "./"] {
+            for typed in [false, true] {
+                for dry_run in [true, false] {
+                    let temp = TempDir::new().unwrap();
+                    let root = temp.path();
+                    fs::write(
+                        root.join("Cargo.toml"),
+                        "[package]\nname='custom-cf'\nversion='0.1.0'\n",
+                    )
+                    .unwrap();
+                    fs::write(root.join("demo-app.toml"), TYPED_APP_CONFIG).unwrap();
+                    let manifest = root.join("edgezero.toml");
+                    fs::write(&manifest, format!(
+                        "[app]\nname='demo-app'\n[adapters.cloudflare.adapter]\ncrate='{crate_decl}'\nmanifest='config/wrangler.toml'\n[stores.secrets]\nids=['default']\n"
+                    )).unwrap();
+                    let before = snapshot_dir(root);
+                    let args = ProvisionArgs {
+                        adapter: "cloudflare".to_owned(),
+                        local: true,
+                        dry_run,
+                        manifest,
+                    };
+                    if typed {
+                        run_provision_typed::<TypedTestConfig>(&args).unwrap();
+                    } else {
+                        run_provision(&args).unwrap();
+                    }
+                    if dry_run {
+                        assert_eq!(
+                            snapshot_dir(root),
+                            before,
+                            "dry-run must preserve the project"
+                        );
+                    } else {
+                        let body = fs::read_to_string(root.join("config/wrangler.toml")).unwrap();
+                        let doc: toml::Value = toml::from_str(&body).unwrap();
+                        assert_eq!(doc["main"].as_str(), Some("../build/worker/shim.mjs"));
+                        assert_eq!(doc["build"]["watch_dir"].as_str(), Some("../src"));
+                        if typed {
+                            assert!(
+                                fs::read_to_string(root.join("config/.dev.vars"))
+                                    .unwrap()
+                                    .contains("demo_api_token")
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn run_provision_typed_cloud_short_circuits_without_loading_app_config() {
         // Cloud mode has no typed writeback (Cloudflare's `wrangler

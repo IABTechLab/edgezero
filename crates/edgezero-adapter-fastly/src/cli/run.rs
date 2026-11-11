@@ -363,6 +363,48 @@ mod tests {
     }
 
     #[test]
+    fn locate_artifact_honors_relative_cargo_home_without_stale_fallback() {
+        for has_fresh_artifact in [true, false] {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path();
+            let crate_dir = workspace.join("service");
+            let cargo_home = workspace.join("cargo-home");
+            fs::create_dir_all(&crate_dir).unwrap();
+            fs::create_dir_all(&cargo_home).unwrap();
+            fs::write(
+                cargo_home.join("config.toml"),
+                "[build]\ntarget-dir='artifacts'\n",
+            )
+            .unwrap();
+            for base in [workspace, crate_dir.as_path()] {
+                let stale = base.join("target/wasm32-wasip1/release/demo.wasm");
+                fs::create_dir_all(stale.parent().unwrap()).unwrap();
+                fs::write(stale, "stale").unwrap();
+            }
+            let fresh = workspace.join("artifacts/wasm32-wasip1/release/demo.wasm");
+            if has_fresh_artifact {
+                fs::create_dir_all(fresh.parent().unwrap()).unwrap();
+                fs::write(&fresh, "fresh").unwrap();
+            }
+            let environment = [("CARGO_HOME".to_owned(), "../cargo-home".to_owned())];
+            let context = AdapterExecContext::new().with_env(&environment);
+            let result = locate_artifact(workspace, &crate_dir, "demo", &[], &context);
+            if has_fresh_artifact {
+                let located = result.unwrap();
+                assert_eq!(
+                    located.canonicalize().unwrap(),
+                    fresh.canonicalize().unwrap()
+                );
+                assert_eq!(fs::read_to_string(located).unwrap(), "fresh");
+            } else {
+                let error =
+                    result.expect_err("a missing explicit artifact must not select stale WASM");
+                assert!(error.contains("stale"), "{error}");
+            }
+        }
+    }
+
+    #[test]
     fn locate_artifact_honors_target_dir_build_arg_over_stale_default() {
         // A `--target-dir` build arg redirects cargo. Discovery must look
         // ONLY there, even when a STALE artifact sits at the conventional

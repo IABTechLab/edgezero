@@ -75,6 +75,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resolve relative Cargo homes from the adapter build directory and treat an
+  empty `CARGO_HOME` as unset, avoiding stale WASM selection across adapters.
+- Generate correct Cloudflare entrypoint and source-watch paths for root crates,
+  optional `./` prefixes, and nested Wrangler manifests.
 - Keep Fastly's temporary startup manifests private and use Spin's guarded
   normalized destination for component copies. Infer Spin-compatible component
   IDs independently of Cargo artifact names and validate explicit selectors.

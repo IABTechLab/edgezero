@@ -10,6 +10,8 @@ use walkdir::WalkDir;
 
 use super::TARGET_TRIPLE;
 
+const WORKER_SHIM: &str = "build/worker/shim.mjs";
+
 /// # Errors
 /// Returns an error if the Cloudflare wrangler build command fails.
 pub(super) fn build(
@@ -249,22 +251,24 @@ fn locate_artifact(
 /// where wrangler runs it). So for a manifest nested BELOW the crate root the
 /// value must climb back up with `../` before `build/worker/shim.mjs`.
 pub(super) fn wrangler_main_relpath(manifest_rel: &Path, crate_rel: Option<&str>) -> String {
-    const SHIM: &str = "build/worker/shim.mjs";
-    let manifest_dir = manifest_rel.parent().unwrap_or_else(|| Path::new(""));
+    let manifest_parent = manifest_rel.parent().unwrap_or_else(|| Path::new(""));
+    let manifest_dir = manifest_parent.strip_prefix(".").unwrap_or(manifest_parent);
     let Some(crate_root) = crate_rel else {
-        return SHIM.to_owned();
+        return WORKER_SHIM.to_owned();
     };
+    let crate_path = Path::new(crate_root);
+    let normalized_crate = crate_path.strip_prefix(".").unwrap_or(crate_path);
     // How far the manifest dir sits BELOW the crate root.
-    let Ok(suffix) = manifest_dir.strip_prefix(Path::new(crate_root)) else {
+    let Ok(suffix) = manifest_dir.strip_prefix(normalized_crate) else {
         // Manifest not under the declared crate (unusual layout) -- fall back
         // to the crate-root-adjacent default rather than guess.
-        return SHIM.to_owned();
+        return WORKER_SHIM.to_owned();
     };
     let depth = suffix.components().count();
     if depth == 0 {
-        return SHIM.to_owned();
+        return WORKER_SHIM.to_owned();
     }
-    format!("{}{SHIM}", "../".repeat(depth))
+    format!("{}{WORKER_SHIM}", "../".repeat(depth))
 }
 
 pub(super) fn synthesise_wrangler_toml(crate_name: &str, main_rel: &str) -> String {
@@ -296,6 +300,12 @@ pub(super) fn synthesise_wrangler_toml(crate_name: &str, main_rel: &str) -> Stri
     // with `--config`) get the shim built for them.
     let mut build_table = toml_edit::Table::new();
     build_table.insert("command", value("worker-build --release"));
+    // Wrangler resolves watch paths against the config directory, too.
+    if let Some(prefix) = main_rel.strip_suffix(WORKER_SHIM)
+        && !prefix.is_empty()
+    {
+        build_table.insert("watch_dir", value(format!("{prefix}src")));
+    }
     doc.insert("build", toml_edit::Item::Table(build_table));
 
     doc.to_string()
@@ -307,6 +317,54 @@ mod tests {
     use tempfile::tempdir;
 
     // ---------- locate_artifact ----------
+
+    #[test]
+    fn locate_artifact_honors_relative_cargo_home_without_stale_fallback() {
+        for has_fresh_artifact in [true, false] {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path();
+            let crate_dir = workspace.join("service");
+            let cargo_home = workspace.join("cargo-home");
+            fs::create_dir_all(&crate_dir).unwrap();
+            fs::create_dir_all(&cargo_home).unwrap();
+            fs::write(
+                cargo_home.join("config.toml"),
+                "[build]\ntarget-dir='artifacts'\n",
+            )
+            .unwrap();
+            for base in [workspace, crate_dir.as_path()] {
+                let stale = base
+                    .join("target")
+                    .join(TARGET_TRIPLE)
+                    .join("release/demo.wasm");
+                fs::create_dir_all(stale.parent().unwrap()).unwrap();
+                fs::write(stale, "stale").unwrap();
+            }
+            let fresh = workspace
+                .join("artifacts")
+                .join(TARGET_TRIPLE)
+                .join("release/demo.wasm");
+            if has_fresh_artifact {
+                fs::create_dir_all(fresh.parent().unwrap()).unwrap();
+                fs::write(&fresh, "fresh").unwrap();
+            }
+            let environment = [("CARGO_HOME".to_owned(), "../cargo-home".to_owned())];
+            let context = AdapterExecContext::new().with_env(&environment);
+            let result = locate_artifact(workspace, &crate_dir, "demo", &[], &context);
+            if has_fresh_artifact {
+                let located = result.unwrap();
+                assert_eq!(
+                    located.canonicalize().unwrap(),
+                    fresh.canonicalize().unwrap()
+                );
+                assert_eq!(fs::read_to_string(located).unwrap(), "fresh");
+            } else {
+                let error =
+                    result.expect_err("a missing explicit artifact must not select stale WASM");
+                assert!(error.contains("stale"), "{error}");
+            }
+        }
+    }
 
     #[test]
     fn locate_artifact_honors_target_dir_build_arg_over_stale_default() {

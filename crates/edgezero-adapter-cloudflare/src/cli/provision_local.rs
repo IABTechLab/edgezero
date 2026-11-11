@@ -1375,6 +1375,72 @@ mod tests {
     }
 
     #[test]
+    fn synthesised_wrangler_paths_resolve_to_declared_crate_with_optional_dot_prefixes() {
+        for (crate_decl, crate_location) in [
+            (".", ""),
+            ("./", ""),
+            ("././", ""),
+            ("", ""),
+            ("crates/cf", "crates/cf"),
+            ("./crates/cf", "crates/cf"),
+            (".hidden", ".hidden"),
+        ] {
+            for prefix in ["", "./"] {
+                for nested in ["", "config", "config/deep"] {
+                    let dir = tempdir().unwrap();
+                    let root = dir.path();
+                    let crate_dir = root.join(crate_location);
+                    let manifest_rel = Path::new(prefix)
+                        .join(crate_location)
+                        .join(nested)
+                        .join("wrangler.toml");
+                    let manifest_dir = root.join(&manifest_rel).parent().unwrap().to_path_buf();
+                    fs::create_dir_all(&manifest_dir).unwrap();
+                    fs::create_dir_all(crate_dir.join("src")).unwrap();
+                    fs::create_dir_all(crate_dir.join("build/worker")).unwrap();
+                    fs::write(
+                        crate_dir.join("Cargo.toml"),
+                        "[package]\nname='custom-cf'\nversion='0.1.0'\n",
+                    )
+                    .unwrap();
+                    let shim = crate_dir.join("build/worker/shim.mjs");
+                    fs::write(&shim, "export default {};\n").unwrap();
+                    let outcome = CloudflareCliAdapter
+                        .synthesise_baseline_manifest(
+                            root,
+                            manifest_rel.to_str(),
+                            Some(crate_decl),
+                            None,
+                            "demo",
+                            None,
+                            &[],
+                        )
+                        .unwrap();
+                    let (relative, body) = outcome.into_iter().next().unwrap();
+                    assert_eq!(relative, manifest_rel);
+                    let doc: toml_edit::DocumentMut = body.parse().unwrap();
+                    assert_eq!(doc["name"].as_str(), Some("custom-cf"));
+                    let main = doc["main"].as_str().unwrap();
+                    assert_eq!(
+                        manifest_dir.join(main).canonicalize().unwrap(),
+                        shim.canonicalize().unwrap(),
+                        "crate={crate_decl:?}, manifest={manifest_rel:?}, main={main}"
+                    );
+                    let watch = doc["build"]
+                        .get("watch_dir")
+                        .and_then(toml_edit::Item::as_str)
+                        .unwrap_or("./src");
+                    assert_eq!(
+                        manifest_dir.join(watch).canonicalize().unwrap(),
+                        crate_dir.join("src").canonicalize().unwrap(),
+                        "crate={crate_decl:?}, manifest={manifest_rel:?}, watch_dir={watch}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn synthesised_wrangler_toml_honors_renamed_adapter_crate() {
         // Reviewer regression: with
         // `[adapters.cloudflare.adapter].manifest = "crates/cf-worker/wrangler.toml"`
