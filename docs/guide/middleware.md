@@ -24,7 +24,7 @@ impl Middleware for RequestLogger {
     ) -> Result<Response, EdgeError> {
         let method = ctx.request().method().clone();
         let path = ctx.request().uri().path().to_string();
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
 
         let response = next.run(ctx).await?;
 
@@ -42,6 +42,8 @@ impl Middleware for RequestLogger {
 }
 ```
 
+Add `web-time = "1"` to your crate's dependencies for this portable clock.
+
 ## Registering Middleware
 
 ### Via Manifest
@@ -58,7 +60,8 @@ middleware = [
 ]
 ```
 
-Middleware runs in registration order after a route matches, before its handler.
+Middleware runs in registration order after a route matches, before its handler;
+unmatched 404/405 requests bypass the middleware chain.
 Use a pre-dispatch hook for work that must happen before route lookup.
 
 ### Programmatically
@@ -165,30 +168,214 @@ impl Middleware for CorsMiddleware {
 
 ### Request Timing
 
+`RequestTimingMiddleware<N, D>` attaches a fresh `RequestTimings<N, D>` only when
+that exact type is absent. All clones share one immutable clock origin and one
+state mutex, including the application-owned payload. Register it before timing
+consumers. The default excludes no paths; static exclusions compare exact URI paths
+for every method, including `/health?check=1`, without removing preinstalled handles.
+Calling `with_excluded_paths` replaces any previous list.
+
+On [deployed Cloudflare Workers](https://developers.cloudflare.com/workers/runtime-apis/performance/),
+timers advance only after I/O, so CPU-only phases may record zero. Local
+Wrangler/workerd and browser tests do not reproduce that restriction.
+
+Applications own their phase enum and map it to bounded slots through a facade:
+
 ```rust
-pub struct TimingMiddleware;
+use std::time::Duration;
+use edgezero_core::context::RequestContext;
+use edgezero_core::middleware::RequestTimingMiddleware;
+use edgezero_core::request_timing::{RequestTimings, TimingError};
+use edgezero_core::router::RouterService;
 
-#[async_trait(?Send)]
-impl Middleware for TimingMiddleware {
-    async fn handle(
-        &self,
-        ctx: RequestContext,
-        next: Next<'_>,
-    ) -> Result<Response, EdgeError> {
-        let start = std::time::Instant::now();
+#[derive(Default)]
+pub struct AppData {
+    attempts: u32,
+    started: Option<Duration>,
+}
 
-        let mut response = next.run(ctx).await?;
+type Handle = RequestTimings<1, AppData>;
+type TimingMiddleware = RequestTimingMiddleware<1, AppData>;
 
-        let duration = start.elapsed();
-        response.headers_mut().insert(
-            "x-response-time",
-            format!("{}ms", duration.as_millis()).parse().unwrap(),
-        );
+enum Phase {
+    Fetch,
+}
 
-        Ok(response)
+impl Phase {
+    fn slot(self) -> usize {
+        match self {
+            Self::Fetch => 0,
+        }
     }
 }
+
+struct AppTimings(Handle);
+
+impl AppTimings {
+    fn from_context(ctx: &RequestContext) -> Option<Self> {
+        ctx.request().extensions().get::<Handle>().cloned().map(Self)
+    }
+
+    fn record(&self, phase: Phase, duration: Duration) -> Result<(), TimingError> {
+        self.0.record_with(phase.slot(), duration, |data, elapsed| {
+            data.attempts = data.attempts.saturating_add(1);
+            data.started.get_or_insert(elapsed);
+        })
+    }
+}
+
+let router = RouterService::builder()
+    .middleware(TimingMiddleware::new().with_excluded_paths(&["/health"]))
+    .build();
 ```
+
+Register application routes on that builder. Keep the handle and middleware
+aliases paired: a different `N` or `D` produces a different extension type and
+lookup returns `None`. The facade reads `Handle` from extensions; it is not a
+second installed extension or clock. Do not use `RouterBuilder::with_state` for
+collectors: router state is shared across requests and overwrites same-type
+request extensions. Avoid `State<Handle>` too: a missing handle fails the request
+with a 500 and its generic error suggests `with_state`. Use optional extension
+lookup for best-effort timing instead. Middleware payloads need only
+`Default + Send + 'static`; manual `with_data(data)` construction needs no `Default`.
+
+For manifest registration, export a named const from your core crate's timing module:
+
+```rust
+pub const TIMING: TimingMiddleware =
+    TimingMiddleware::new().with_excluded_paths(&["/health"]);
+```
+
+```toml
+[app]
+middleware = ["my_app_core::timing::TIMING"]
+```
+
+The const holds configuration, not a collector. Each eligible request still gets
+fresh data. The manifest names values; it cannot call constructors itself.
+
+- `record(slot, duration)` saturating-adds; absent and recorded zero stay distinct.
+  Overlapping spans on one slot sum and may exceed wall-clock time. Use one span
+  around a join to measure concurrent latency.
+  `let _span = timings.span(slot).ok();` records work on drop, including cancelled
+  work, but not completion. Bind the span to a named variable; `let _ = ...` drops
+  it immediately. Destructor execution is not guaranteed in panic-abort environments.
+- `record_with` updates phase and payload together; `update_data` updates payload
+  alone using elapsed time from the same origin. `snapshot(|view| ...)` projects
+  generic fields and borrowed payload under that same lock, without cloning it.
+  Borrowed payload cannot escape the projection.
+- `elapsed()` reads the immutable origin without locking and remains available
+  during contention and inside callbacks. `TimingError` and `TimingSnapshot` are
+  non-exhaustive; downstream matches need a fallback and snapshot destructuring
+  needs `..`.
+- Invalid slots return `TimingError::InvalidSlot` before mutation or callbacks.
+  Contention returns `TimingError::Unavailable`, dropping the whole operation
+  without invoking its callback. There is no blocking or retry. Span drop discards
+  an unavailable sample. Missing facts must not be interpreted as zero.
+- Callbacks must be short, synchronous and non-reentrant: never call a lock-taking
+  collector operation inside one. Panics propagate and may leave partial state;
+  poisoned locks recover best-effort, **without rollback or payload validation**.
+  Application callbacks must keep data valid even on unwind.
+- Call `mark_headers_ready()` and `mark_request_complete()` at explicit application
+  boundaries, first successful write wins; `set_response_bytes(bytes)` is last-write.
+  T0 is collector creation at the chosen boundary, not socket ingress or browser
+  navigation. Wrapping or reattaching a handle never resets that origin.
+
+Attachment does not finalize a request, consume a streamed body, render
+`Server-Timing`, or change cache/privacy policy. Header rendering and exposure
+remain application-owned. Unmatched routes bypass middleware, and
+`RouterService::oneshot` renders handler errors outside the chain. The available
+measurement boundary depends on the adapter. On every adapter, a
+[pre-dispatch hook](./routing#intercepting-before-dispatch) can install or reuse
+request extensions after adapter conversion but before route lookup, router state
+injection and middleware. This includes unmatched 404/405 requests. The hook
+cannot observe downstream results or mark their completion.
+
+- **Fastly:** `run_app_with_request_extensions` and
+  `serve_app_with_request_extensions` can preinstall a handle. Applications that
+  own dispatch and delivery can use `lifecycle::run_custom`. See
+  [Fastly request extensions](./adapters/fastly.md#capturing-raw-request-signals-ja4-h2-fingerprint).
+- **Axum:** wrap `RouterService` in an application-owned tower service to retain
+  the handle across dispatch, including unmatched routes and rendered errors.
+- **Cloudflare and Spin:** use `PreDispatchHook` for installation within standard
+  dispatch and application middleware for matched-route result marks. Their
+  registry-aware dispatchers remain private; manually converting and dispatching
+  a platform request does not preserve manifest store bindings automatically.
+
+The following hook and boundary reuse the `Handle` alias above. A newly created
+handle starts T0 in the hook, not at socket ingress; an existing handle keeps its
+original T0. The boundary retains a clone across both successful and failed
+downstream results and also works without the hook:
+
+![The adapter converts the request, then the hook installs or reuses a handle. Matched routes run middleware and the handler before the boundary marks headers ready. Unmatched routes render 404 or 405 without a mark.](./assets/request-timing-flow.svg)
+
+```rust
+use async_trait::async_trait;
+use edgezero_core::error::EdgeError;
+use edgezero_core::http::{Request, Response};
+use edgezero_core::middleware::{Middleware, Next};
+use edgezero_core::router::PreDispatchHook;
+
+struct TimingHook;
+
+#[async_trait(?Send)]
+impl PreDispatchHook for TimingHook {
+    async fn handle(&self, request: &mut Request) -> Result<Option<Response>, EdgeError> {
+        let existing = request.extensions().get::<Handle>().cloned();
+        let timings = existing.unwrap_or_else(Handle::new);
+        request.extensions_mut().insert(timings);
+        Ok(None)
+    }
+}
+
+struct TimingBoundary;
+
+#[async_trait(?Send)]
+impl Middleware for TimingBoundary {
+    async fn handle(&self, mut ctx: RequestContext, next: Next<'_>) -> Result<Response, EdgeError> {
+        let existing = ctx.request().extensions().get::<Handle>().cloned();
+        let timings = existing.unwrap_or_else(Handle::new);
+        ctx.request_mut().extensions_mut().insert(timings.clone());
+        let result = next.run(ctx).await;
+        let _ = timings.mark_headers_ready();
+        result
+    }
+}
+
+let router = RouterService::builder()
+    .pre_dispatch_hook(TimingHook)
+    .middleware(TimingBoundary)
+    .middleware(TimingMiddleware::new())
+    .build();
+```
+
+Register application routes on that builder and add `async-trait = "0.1"` to
+compile this example. A router accepts only one pre-dispatch hook; incorporate
+installation into an existing hook rather than registering a second one. Keep
+collectors request-local, not in the shared hook value or router state.
+
+`app!` cannot register a hook or modify its built router. Use a hand-written
+`Hooks` implementation as shown in the
+[routing guide](./routing#intercepting-before-dispatch), preserving routes,
+middleware, state, introspection and application metadata. Point every adapter
+entry point at that implementation.
+
+This example deliberately installs a handle on **every path**, including `/health`
+and unmatched routes. An exclusion on the later attachment middleware does not
+remove a preinstalled handle. Applications that exclude paths must apply the
+same creation policy in the hook, boundary middleware and attachment middleware;
+skipping installation in only one of them is not sufficient.
+
+The mark records when the downstream result becomes available. For a handler
+error it precedes `oneshot`'s error-response rendering; it does not observe that
+final response or add its headers. Unmatched 404/405 requests bypass this boundary,
+and returning a streamed body does not measure its consumption, delivery or
+completion. Request completion must still be marked where it is actually
+observable. An after-dispatch hook that observes final responses remains deferred;
+pre-dispatch installation is available today.
+
+Outer layers must retain a clone of the handle they preinstall; attachment does
+not copy the handle into response extensions.
 
 ## Early Returns
 
@@ -221,10 +408,11 @@ impl Middleware for RateLimiter {
 
 EdgeZero provides these middleware out of the box:
 
-| Middleware      | Purpose                                                                                                                                                              |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RequestLogger` | Logs request method, path, and response status                                                                                                                       |
-| `FnMiddleware`  | Wraps a closure `Fn(RequestContext, Next<'_>) -> impl Future<Output = Result<Response, EdgeError>>`; build one with `middleware_fn(...)` or `FnMiddleware::new(...)` |
+| Middleware                      | Purpose                                                                                                                                                              |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RequestTimingMiddleware<N, D>` | Attaches a per-request timing collector if absent; configurable exact-path exclusions                                                                                |
+| `RequestLogger`                 | Logs request method, path, and response status                                                                                                                       |
+| `FnMiddleware`                  | Wraps a closure `Fn(RequestContext, Next<'_>) -> impl Future<Output = Result<Response, EdgeError>>`; build one with `middleware_fn(...)` or `FnMiddleware::new(...)` |
 
 If you already hold an `Arc<dyn Middleware>` (`BoxMiddleware`), register it with
 `.middleware_arc(...)` instead of `.middleware(...)`.

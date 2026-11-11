@@ -156,6 +156,15 @@ fn serve(
         stream.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial",
         )?;
+        stream.flush()?;
+        // Abort only after the downstream client observes the prefix. Closing
+        // immediately can race with Viceroy forwarding the headers/body, which
+        // would exercise a pre-commit failure instead of the intended case.
+        let (ready, _) = signal
+            .1
+            .wait_timeout_while(signal.0.lock().unwrap(), Duration::from_secs(8), |v| !*v)
+            .map_err(|_| "release poisoned")?;
+        require(*ready, "abort prefix was not observed by the client")?;
     } else {
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?;
     }
@@ -338,12 +347,54 @@ mod tests {
         let backend = Backend::start().unwrap();
         let result = request(backend.port, "/chunks", "x", None, Some(&backend.release)).unwrap();
         assert_eq!(result["body"], "firstsecond");
-        let failure = request(backend.port, "/abort", "x", None, None).unwrap_err();
+        *backend.release.0.lock().unwrap() = false;
+        let failure =
+            request(backend.port, "/abort", "x", None, Some(&backend.release)).unwrap_err();
         let partial = failure
             .downcast_ref::<InterruptedResponse>()
             .expect("response started");
         assert_eq!(partial.status, 200);
         assert_eq!(partial.body, b"partial");
+    }
+
+    #[test]
+    fn abort_waits_for_client_release() {
+        let backend = Backend::start().unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", backend.port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .write_all(b"GET /abort HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut prefix = [0; 7];
+        reader.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"partial");
+        reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut next = [0];
+        let error = reader.read(&mut next).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        release(&backend.release);
+        reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(reader.read(&mut next).unwrap(), 0);
     }
 
     #[test]

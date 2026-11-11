@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 600" role="img" aria-labelledby="title description">
+  <title id="title">Request timing hook and boundary flow</title>
+  <desc id="description">The adapter converts the request, then the hook installs or reuses a handle. Matched routes run middleware and the handler before the boundary marks headers ready. Unmatched routes render 404 or 405 without a mark.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 Z" fill="#475569"/>
+    </marker>
+  </defs>
+  <rect width="760" height="600" rx="12" fill="#fff"/>
+  <g fill="#eef2ff" stroke="#6366f1" stroke-width="2">
+    <rect x="50" y="16" width="400" height="48" rx="8"/>
+    <rect x="20" y="100" width="460" height="48" rx="8"/>
+    <path d="M 250 184 L 345 234 L 250 284 L 155 234 Z"/>
+    <rect x="40" y="324" width="420" height="56" rx="8"/>
+    <rect x="80" y="424" width="340" height="48" rx="8"/>
+    <rect x="40" y="520" width="420" height="56" rx="8"/>
+    <rect x="500" y="324" width="240" height="96" rx="8"/>
+  </g>
+  <g fill="none" stroke="#475569" stroke-width="2" marker-end="url(#arrow)">
+    <path d="M 250 64 V 94"/>
+    <path d="M 250 148 V 178"/>
+    <path d="M 250 284 V 318"/>
+    <path d="M 250 380 V 418"/>
+    <path d="M 250 472 V 514"/>
+    <path d="M 345 234 H 620 V 318"/>
+  </g>
+  <g fill="#1e293b" font-family="system-ui, sans-serif" font-size="18" text-anchor="middle">
+    <text x="250" y="46">Adapter converts request</text>
+    <text x="250" y="130">Hook installs or reuses handle</text>
+    <text x="250" y="240">Route matches?</text>
+    <text x="250" y="358">Boundary and attachment middleware</text>
+    <text x="250" y="454">Handler result</text>
+    <text x="250" y="554">Boundary marks headers ready</text>
+    <text x="620" y="356">Router renders</text>
+    <text x="620" y="380">404 or 405</text>
+    <text x="620" y="404">without a mark</text>
+    <text x="274" y="310" font-size="16">Yes</text>
+    <text x="480" y="222" font-size="16">No</text>
+  </g>
+</svg>
