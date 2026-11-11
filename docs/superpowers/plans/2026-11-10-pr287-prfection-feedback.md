@@ -50,6 +50,7 @@
 **Findings:** 4533588111, 4533588282, 4533588430, 4533588572, 4533588721, 4533588871, 4533593140.
 
 - [x] Emit inactive secret hints so fresh typed provisioning does not manufacture an empty credential. Audit sibling placeholder paths and update their documented fresh-secret policy without redefining arbitrary explicit empty secret-store values.
+- [x] Declare fresh Spin secrets with `required = true, secret = true`. The real Spin 4.1 smoke rejected a variable lacking both `required` and `default`; strengthen the existing semantic regression and document the valid migration from older empty defaults.
 - [x] Validate Spin manifest LowerSnakeId grammar by underscore-separated words; update matching diagnostics/docs and validate direct local provision before any writes. Test foo__bar, token_2, trailing underscore, valid digit suffixes and no-mutation rejection.
 - [x] Restore main's SDK7/Spin4.1 provenance and two compatibility guard tests without claiming the SDK pin constrains an independently installed runtime.
 - [x] Exclude the Axum EDGEZERO__SECRETS__ namespace from guest argv for both overlay and inherited inputs; preserve other documented overrides, parent precedence, SPIN_VARIABLE child env and non-Unicode handling.

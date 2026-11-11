@@ -281,7 +281,7 @@ infer. The generated shape is:
 ```toml
 # spin.toml
 [variables]
-api_token = { secret = true }
+api_token = { required = true, secret = true }
 
 [component.my-app.variables]
 api_token = "{{ api_token }}"

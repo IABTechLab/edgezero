@@ -33,10 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preview IDs, then record them in the corresponding tracked deployed maps.
   Local provisioning can then restore them without creating duplicates.
 - **Unset typed secrets.** Fresh Axum and Cloudflare secret hints are commented;
-  Spin secret variables have no default and require a provider value. Uncomment
+  Spin secret variables set `required = true`, have no default and require a
+  provider value. Uncomment
   and fill hints or export the documented variable before serving. Existing
   operator values remain untouched; remove old generated empty assignments or
-  empty Spin defaults manually when the credential should remain unset.
+  replace empty Spin defaults with `required = true` when the credential should
+  remain unset. Add that flag to earlier generated Spin variables lacking both
+  `required` and `default`.
 - **Deployed manifest construction.** `ManifestAdapterDeployed` is now
   `#[non_exhaustive]`; external callers construct it through `Default` and set
   its public fields.

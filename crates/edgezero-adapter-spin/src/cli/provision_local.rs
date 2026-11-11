@@ -392,11 +392,11 @@ fn rename_component(
 
 /// Local-mode `provision_typed` arm: for each typed secret declared
 /// on the app, edit `spin.toml` to add a lowercased `[variables]`
-/// entry (`{ default = "", secret = true }`) plus a
+/// entry (`{ required = true, secret = true }`) plus a
 /// `[component.<id>.variables]` binding that references it via the
 /// `{{ spin_var }}` template placeholder, then write a
-/// `SPIN_VARIABLE_<UPPER>=` line into `<spin_dir>/.env` so `spin up`
-/// resolves the secret from the environment at runtime.
+/// commented `# SPIN_VARIABLE_<UPPER>=` hint in `<spin_dir>/.env`.
+/// Supply the variable before `spin up` resolves the required secret.
 ///
 /// Casing: Spin's schema requires lowercase variable names
 /// (`^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)*$`); the Spin runtime reads variables from
@@ -474,7 +474,7 @@ pub(super) fn provision_typed(
     Ok(ProvisionOutcome::from_status_lines(status_lines))
 }
 
-/// Insert `[variables].<spin_var> = { secret = true }`
+/// Insert `[variables].<spin_var> = { required = true, secret = true }`
 /// into `doc` if the key is absent. If a `[variables].<spin_var>`
 /// entry already exists — commonly because the operator has
 /// customised the `default` fallback or added extra metadata —
@@ -498,6 +498,7 @@ fn upsert_variables_entry(
         return Ok(false);
     }
     let mut inline = InlineTable::new();
+    inline.insert("required", Value::from(true));
     inline.insert("secret", Value::from(true));
     variables_tbl.insert(spin_var, Item::Value(Value::InlineTable(inline)));
     Ok(true)
@@ -1752,10 +1753,15 @@ mod tests {
             spin_after.contains("[variables]"),
             "root [variables] header: {spin_after}"
         );
-        assert!(
-            spin_after.contains("demo_api_token = { secret = true }"),
-            "required secret variable: {spin_after}"
+        let parsed: toml::Value = toml::from_str(&spin_after).unwrap();
+        let variable = &parsed["variables"]["demo_api_token"];
+        assert_eq!(
+            variable.get("required").and_then(toml::Value::as_bool),
+            Some(true),
+            "Spin requires an explicit required flag when no default is present"
         );
+        assert_eq!(variable["secret"].as_bool(), Some(true));
+        assert!(variable.get("default").is_none());
         assert!(
             spin_after.contains("[component.demo.variables]"),
             "component variables header: {spin_after}"

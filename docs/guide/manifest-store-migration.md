@@ -293,6 +293,8 @@ verified the data.
 Fresh typed secret hints are inactive until filled. Uncomment and populate
 Axum's `# EDGEZERO__SECRETS__<KEY>=` or Cloudflare's `# <key>=""` hint, or export
 the corresponding variable. Spin writes `# SPIN_VARIABLE_<NAME>=` and a secret
-variable without a default, so supply a value before starting Spin. Existing
-values are preserved: comment out old empty assignments and remove old empty
-Spin defaults if they represent an unset credential.
+variable with `required = true` and `secret = true`, without a default, so supply
+a value before starting Spin. Existing values are preserved: comment out old
+empty assignments if they represent an unset credential. For old generated Spin
+variables, replace `default = ""` with `required = true`; if no default is present,
+add `required = true`. Spin requires one of those two declarations.

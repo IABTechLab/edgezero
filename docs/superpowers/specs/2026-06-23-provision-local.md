@@ -20,7 +20,8 @@ reads, while write/diff operations validate the complete declared layout.
 
 Fresh secret hints are inactive: Axum writes
 `# EDGEZERO__SECRETS__<KEY_UPPER>=`, Cloudflare writes `# <key>=""`, and Spin
-writes `# SPIN_VARIABLE_<NAME>=` plus a secret variable without a default.
+writes `# SPIN_VARIABLE_<NAME>=` plus a variable with `required = true` and
+`secret = true`, without a default.
 Existing explicit values and defaults are preserved. Spin variable names obey
 `^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)*$`; Axum secret values never enter Spin guest
 arguments. Fastly augments inline arrays or arrays of tables and leaves
@@ -991,7 +992,7 @@ that comes out of the typed walk:
 | Axum | `.edgezero/.env` hint: `# EDGEZERO__SECRETS__<KEY_VALUE_UPPER>=`. Uncomment and fill, or export the variable; an untouched hint stays missing. |
 | Cloudflare | `.dev.vars` hint: `# <key_value>=""`. Uncomment and fill before serving; existing operator values remain unchanged. |
 | Fastly     | `fastly.toml` `[[local_server.secret_stores.<store_id>]]` array entry: `key = "<key_value>"`, `env = "<KEY_VALUE_UPPER>"`. The array NAME is the entry's `store_id` (NOT hardcoded `default`) so `#[secret(store_ref = "field")]` routes to the correct `[stores.secrets]` id. Append IFF the array entry with the same `key` is absent.                                                                                                       |
-| Spin | Canonicalize `key_value` to lowercase, validate its Spin variable name and reject collisions before writing. Add `[variables].<name> = { secret = true }` and its selected component binding only when absent; append `# SPIN_VARIABLE_<NAME_UPPER>=` to the sibling `.env` only when its logical key is absent. Supply a provider value before starting Spin. Existing operator defaults and env records survive. |
+| Spin | Canonicalize `key_value` to lowercase, validate its Spin variable name and reject collisions before writing. Add `[variables].<name> = { required = true, secret = true }` and its selected component binding only when absent; append `# SPIN_VARIABLE_<NAME_UPPER>=` to the sibling `.env` only when its logical key is absent. Supply a provider value before starting Spin. Existing operator defaults and env records survive. |
 
 Existing values are preserved (the merge mechanics above
 apply): an operator who pre-filled a placeholder with a real
