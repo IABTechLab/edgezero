@@ -290,7 +290,10 @@ api_token = "{{ api_token }}"
 A variable without a default blocks `spin up` until a provider or
 `SPIN_VARIABLE_<NAME>` supplies it. Uncomment and fill the `.env` hint before
 using `edgezero serve`, or export the variable. Provision preserves existing
-operator defaults; remove an old empty default if the credential is unset.
+operator defaults. When the credential should be unset, replace an old
+`default = ""` with `required = true`. For an earlier generated variable with
+neither `required` nor `default`, add `required = true`; Spin requires one of
+these declarations.
 
 `config validate` runs a within-secrets canonicalisation check: each
 `#[secret]` field value is lowercased to mirror the runtime

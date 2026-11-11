@@ -266,7 +266,7 @@ you. For each one it adds a lowercased `[variables]` entry plus a
 
 ```toml
 [variables]
-api_token = { default = "", secret = true }
+api_token = { required = true, secret = true }
 
 [component.myapp.variables]
 api_token = "{{ api_token }}"
