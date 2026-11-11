@@ -1,5 +1,35 @@
 # `provision --local`: write per-adapter local emulator state
 
+## Implementation amendment: adapter ownership and review repairs
+
+The [adapter-owned CLI design](2026-10-19-adapter-owned-cli-design.md) amends
+the original orchestration described below. Each adapter owns its CLI commands,
+local layout, artifact sensitivity, serve environment input and scaffold defaults.
+The production CLI consumes those neutral contracts without switching on provider
+identity. Its serve overlay applies only to children; parent exports take
+precedence and the parent environment remains unchanged.
+
+The [review repair plan](../plans/2026-11-10-pr287-prfection-feedback.md) specifies
+the current safety contract: preserve existing env records by logical key,
+including commented and duplicate records; redact untrusted preview comments and
+malformed prefixes; stage only declared artifacts and Cargo/application metadata
+in a private directory; propagate preview write errors; atomically replace env
+files and changed deployed state. Before a cloud mutation, verify the canonical
+manifest target's sibling-file write capability. Serve validates the inputs it
+reads, while write/diff operations validate the complete declared layout.
+
+Fresh secret hints are inactive: Axum writes
+`# EDGEZERO__SECRETS__<KEY_UPPER>=`, Cloudflare writes `# <key>=""`, and Spin
+writes `# SPIN_VARIABLE_<NAME>=` plus a secret variable without a default.
+Existing explicit values and defaults are preserved. Spin variable names obey
+`^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)*$`; Axum secret values never enter Spin guest
+arguments. Fastly augments inline arrays or arrays of tables and leaves
+file-backed secret stores externally managed.
+
+These corrections supersede conflicting historical descriptions below. This
+records implementation scope and contracts; independent acceptance of the amended
+planning scope remains part of the requested re-review.
+
 ## Motivation
 
 `edgezero provision --adapter <name>` today creates **platform**
@@ -953,15 +983,15 @@ exit, regardless of whether either inner call errored.
 
 #### Per-adapter `provision_typed` output
 
-For each `TypedSecretEntry { store_id, field_name, key_value }`
+For each reflected `TypedSecretEntry`
 that comes out of the typed walk:
 
 | Adapter    | Where the per-secret placeholder lands                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Axum       | `.edgezero/.env` line: `<key_value>=` (empty placeholder; operator fills). One line per entry.                                                                                                                                                                                                                                                                                                                                                  |
-| Cloudflare | `.dev.vars` line: `<key_value>=""` (quoted empty placeholder, wrangler convention).                                                                                                                                                                                                                                                                                                                                                             |
+| Axum | `.edgezero/.env` hint: `# EDGEZERO__SECRETS__<KEY_VALUE_UPPER>=`. Uncomment and fill, or export the variable; an untouched hint stays missing. |
+| Cloudflare | `.dev.vars` hint: `# <key_value>=""`. Uncomment and fill before serving; existing operator values remain unchanged. |
 | Fastly     | `fastly.toml` `[[local_server.secret_stores.<store_id>]]` array entry: `key = "<key_value>"`, `env = "<KEY_VALUE_UPPER>"`. The array NAME is the entry's `store_id` (NOT hardcoded `default`) so `#[secret(store_ref = "field")]` routes to the correct `[stores.secrets]` id. Append IFF the array entry with the same `key` is absent.                                                                                                       |
-| Spin       | Two writes per entry, both using `spin_var = key_value.to_ascii_lowercase()` (canonicalised exactly as `crates/edgezero-adapter-spin/src/cli.rs:535` does, matching the runtime lookup at `crates/edgezero-adapter-spin/src/secret_store.rs:51`). (1) `spin.toml` -- `[variables].<spin_var> = { default = "", secret = true }` plus `[component.<component_id>.variables].<spin_var> = "{{ <spin_var> }}"`. (2) `.env` next to `spin.toml` -- a `SPIN_VARIABLE_<spin_var.to_ascii_uppercase()>=` line for the operator to populate. Both writes are merge-only (append IFF absent). Spin's flat variable namespace means `store_id` is informational only -- there's no per-store routing. Mixed-case operator-typed key values (`api_token` vs `API_TOKEN` vs `Api_Token`) all canonicalise to the same `api_token` spin var; the lowercased-collision check that catches this lives in Spin's `validate_typed_secrets` at `crates/edgezero-adapter-spin/src/cli.rs:514`, which provision reaches via the `run_adapter_typed_checks` call documented in the "Validation" section above (NOT via `typed_secret_checks`, which only covers cross-adapter-agnostic rules). Both helpers must run; provision's two-helper preflight pattern (also documented in "Validation") catches the collision before the merge step. |
+| Spin | Canonicalize `key_value` to lowercase, validate its Spin variable name and reject collisions before writing. Add `[variables].<name> = { secret = true }` and its selected component binding only when absent; append `# SPIN_VARIABLE_<NAME_UPPER>=` to the sibling `.env` only when its logical key is absent. Supply a provider value before starting Spin. Existing operator defaults and env records survive. |
 
 Existing values are preserved (the merge mechanics above
 apply): an operator who pre-filled a placeholder with a real
@@ -1623,74 +1653,20 @@ AFTER this spec lands (the scaffold `.gitignore` discussed below).
 
 | File                              | What `provision --local` writes                                                                                                                                                                                                                                   | Already gitignored? |
 | --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| `.edgezero/.env`                  | **Base `provision --local`** writes one `EDGEZERO__STORES__<KIND>__<ID>__NAME` line per `StoresMetadata` id (KV / CONFIG / SECRETS), set to the **platform-resolved name** (same value the adapter manifest's binding uses; see "Env-file `__NAME` values match adapter bindings" below), plus one `EDGEZERO__STORES__CONFIG__<ID>__KEY` line per CONFIG id only -- `__KEY` is config-only at runtime (Cloudflare's `env_config_from_worker` at `crates/edgezero-adapter-cloudflare/src/lib.rs:55` derives `__KEY` only for CONFIG; KV/SECRETS have no per-id key override). **Generated `<app-cli> provision --local` (`provision_typed`)** appends one `<key_value>=` line per `#[secret]` field in the typed `C` (key NAME → empty string placeholder for the operator to fill in). Base writes store env labels; typed appends secret placeholders -- bundled `edgezero` has no typed `C`, so it cannot walk `#[secret]` fields. See the "Per-adapter `provision_typed` output" table above for the typed path. | yes (`.edgezero/`)  |
+| `.edgezero/.env`                  | **Base `provision --local`** writes one `EDGEZERO__STORES__<KIND>__<ID>__NAME` line per `StoresMetadata` id (KV / CONFIG / SECRETS), set to the **platform-resolved name** (same value the adapter manifest's binding uses; see "Env-file `__NAME` values match adapter bindings" below), plus one `EDGEZERO__STORES__CONFIG__<ID>__KEY` line per CONFIG id only -- `__KEY` is config-only at runtime (Cloudflare's `env_config_from_worker` at `crates/edgezero-adapter-cloudflare/src/lib.rs:55` derives `__KEY` only for CONFIG; KV/SECRETS have no per-id key override). **Generated `<app-cli> provision --local` (`provision_typed`)** appends one `# EDGEZERO__SECRETS__<KEY_VALUE_UPPER>=` hint per `#[secret]` field in the typed `C` (key name → inactive hint for the operator to uncomment and fill). Base writes store env labels; typed appends secret placeholders -- bundled `edgezero` has no typed `C`, so it cannot walk `#[secret]` fields. See the "Per-adapter `provision_typed` output" table above for the typed path. | yes (`.edgezero/`)  |
 | `.edgezero/local-config-<id>.json` | Not created by provision (`config push --local` owns this file). Provision only ensures `.edgezero/` exists.                                                                                                                                                  | yes                 |
 
-Axum reads secrets via `EnvSecretStore` from process env. The
-implementing PR extends `crates/edgezero-cli/src/lib.rs`'s
-`run_serve` (the CLI orchestrator at `lib.rs:179`) with an
-**adapter-scoped** env-file load: at most ONE env file is
-loaded per invocation, selected by the resolved adapter
-name. Each `<key>=<value>` line is set in the current
-process env BEFORE dispatching to either the
-manifest-defined serve command OR the adapter registry's
-`serve`. `run_serve` is shared across adapters, so loading
-both files unconditionally would let Axum's
-`.edgezero/.env` preempt Spin's `EDGEZERO__STORES__*__NAME`
-lines via the "existing env wins" rule below, silently
-opening the wrong store labels on every Spin serve.
+Axum reads secrets via `EnvSecretStore` from its process environment. The
+selected adapter supplies an optional `serve_env` path through its local layout;
+the CLI parses that file into a child overlay used by both manifest-command and
+registry dispatch. The parent environment remains unchanged and already-exported
+keys win. There is no provider-name dispatch table in the CLI.
 
-Dispatch table (MUST):
-
-| `args.adapter` | File loaded                                              |
-| -------------- | -------------------------------------------------------- |
-| `axum`         | `<manifest_root>/.edgezero/.env`                         |
-| `spin`         | `<spin_crate_dir>/.env`                                  |
-| `cloudflare`   | none (operator's `wrangler dev` reads `.dev.vars` itself) |
-| `fastly`       | none (Viceroy reads `[local_server.config_stores.*]` itself) |
-| any other name | none                                                     |
-
-`<spin_crate_dir>` resolves via the same path the adapter
-dispatch uses (the parent of `[adapters.spin.adapter].manifest`,
-defaulting to the in-tree per-adapter crate when unset).
-The Spin file load is required because the default serve
-command at `crates/edgezero-adapter-spin/src/cli.rs:54`
-is `spin up --from {crate_dir} --runtime-config-file
-{crate_dir}/runtime-config.toml`, which `run_serve`
-executes from the workspace root via the manifest command
-path at `crates/edgezero-cli/src/lib.rs:182`. Spin's env
-provider reads `.env` from the spawning process's
-current working directory; that's the workspace root,
-NOT `{crate_dir}`. So the operator's
-`<spin_crate_dir>/.env` would never reach Spin without
-the CLI loading it explicitly first.
-
-Contract test (MUST): create a fixture with conflicting
-values -- `<manifest_root>/.edgezero/.env` containing
-`EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=axum_only`,
-`<spin_crate_dir>/.env` containing
-`EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=spin_only` --
-run `edgezero serve --adapter spin`, intercept the env
-vars passed to the spawned `spin up` child via a fake
-`spin` shim on `PATH`, and assert the child saw
-`spin_only` (NOT `axum_only`). Mirror test for
-`--adapter axum` asserting it saw `axum_only`.
-
-The CLI layer is chosen (not
-`crates/edgezero-adapter-axum/src/cli.rs`'s `serve`)
-because `edgezero serve` honours manifest-defined serve
-commands at `crates/edgezero-cli/src/adapter.rs:97`
-BEFORE the adapter dispatch -- generated and app-demo
-manifests define serve commands, so an adapter-layer
-`.env` load would be bypassed. Loading in the CLI
-ensures both paths see the env vars.
-
-Operator-set env vars on the shell take precedence (the
-`.env` load is best-effort: existing
-`std::env::var(<key>).is_ok()` skips the line). Without this,
-the runtime never sees the placeholders provision wrote. The
-smoke harness drops its inline `demo_api_token=...` env shim
-once this lands.
+Bundled layouts select project-root `.edgezero/.env` for Axum and the manifest's
+sibling `.env` for Spin. Cloudflare and Fastly select no CLI-loaded env file;
+their native runtimes own local configuration. A custom adapter may select its
+own path. Tests must prove selected/custom paths, parent precedence, and absence
+of cross-adapter file loading.
 
 Lines in `.edgezero/.env` look like:
 
@@ -1730,7 +1706,7 @@ blocks that cloud-mode provision writes are NOT touched in
 | File                                                  | What `provision --local` writes                                                                                                                                                                                                                                                                              |
 | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `runtime-config.toml` (next to `spin.toml`)           | A `[key_value_store.<platform>]` block per declared config/kv id with `type = "spin"` and a default `path = ".spin/sqlite_key_value.db"`. Created when absent; existing blocks preserved. **No** `[variables_provider]` block -- Spin's runtime-config does not have a variables-provider concept (verified against the official `spinframework.dev/v3/dynamic-configuration` page); variables resolve from `[variables]` defaults in `spin.toml` plus `SPIN_VARIABLE_*` process env. |
-| `.env` (next to `spin.toml`)                          | Two groups of lines (line-wise dedup applies to all): (1) `EDGEZERO__STORES__<KIND>__<LOGICAL_ID>__NAME=<platform_name>` for every KV / CONFIG / SECRETS store id (same shape as Axum / Cloudflare emit; required because Spin's runtime resolves labels through the env overlay at `crates/edgezero-adapter-spin/src/request.rs:258`, `:301`); (2) `# EDGEZERO__STORES__CONFIG__<LOGICAL_ID>__KEY=<logical_id>` for CONFIG ids only, commented out by default (operator uncomments and edits per-environment override per spec 12.7). **The `SPIN_VARIABLE_*` lines are NOT written by base `provision --local`** -- they require typed-`C` reflection over `#[secret]` fields, which only the generated `<app-cli>`'s `run_provision_typed` path has. See the "Spin" row of the "Per-adapter `provision_typed` output" table above for the typed-CLI's `SPIN_VARIABLE_<SPIN_VAR_UPPER>=` emission. The base/typed split mirrors the Cloudflare and Fastly split: base writes adapter-level bindings + env labels; typed writes per-secret placeholders. Consumption: `edgezero serve` loads this file into the spawning process env BEFORE exec'ing the Spin serve command (`crates/edgezero-cli/src/lib.rs:182`); see the adapter-scoped `run_serve` env-file table described after the Axum row above. **CRUCIAL Spin env model:** a wasip2 Spin component does NOT inherit the `spin` host process environment -- the guest reads its own sandboxed WASI env (`std::env`), which Spin populates only from `spin up --env <k>=<v>` or `[component.<id>.environment]`. So loading the `.env` into the host process is NOT sufficient for Spin: `run::serve` additionally forwards every `EDGEZERO__*` line to the guest via `spin up --env` (verified against Spin 4.0.2 -- a `__KEY` override set only on the host process is invisible to the component and every store silently falls back to its logical id). Operators invoking `spin up` directly from a third-party shell must therefore pass the overrides via `--env` too (sourcing the `.env` into their shell only sets the HOST env, which the guest can't see): e.g. `spin up --from <spin_crate_dir>/spin.toml --runtime-config-file <spin_crate_dir>/runtime-config.toml --env EDGEZERO__STORES__CONFIG__<ID>__KEY=<value>`. The `SPIN_VARIABLE_*` secret lines are the exception -- those DO travel as Spin application variables from the host env, not via `--env`. |
+| `.env` (next to `spin.toml`)                          | Two groups of lines (line-wise dedup applies to all): (1) `EDGEZERO__STORES__<KIND>__<LOGICAL_ID>__NAME=<platform_name>` for every KV / CONFIG / SECRETS store id (same shape as Axum / Cloudflare emit; required because Spin's runtime resolves labels through the env overlay at `crates/edgezero-adapter-spin/src/request.rs:258`, `:301`); (2) `# EDGEZERO__STORES__CONFIG__<LOGICAL_ID>__KEY=<logical_id>` for CONFIG ids only, commented out by default (operator uncomments and edits per-environment override per spec 12.7). **The `SPIN_VARIABLE_*` lines are NOT written by base `provision --local`** -- they require typed-`C` reflection over `#[secret]` fields, which only the generated `<app-cli>`'s `run_provision_typed` path has. See the "Spin" row of the "Per-adapter `provision_typed` output" table above for the typed-CLI's `SPIN_VARIABLE_<SPIN_VAR_UPPER>=` emission. The base/typed split mirrors the Cloudflare and Fastly split: base writes adapter-level bindings + env labels; typed writes per-secret placeholders. Consumption: `edgezero serve` loads this file into a child-process overlay before executing the Spin serve command (`crates/edgezero-cli/src/lib.rs:182`); see the adapter-scoped `run_serve` env-file table described after the Axum row above. **CRUCIAL Spin env model:** a wasip2 Spin component does NOT inherit the `spin` host process environment -- the guest reads its own sandboxed WASI env (`std::env`), which Spin populates only from `spin up --env <k>=<v>` or `[component.<id>.environment]`. So loading the `.env` into the host process is NOT sufficient for Spin: `run::serve` additionally forwards `EDGEZERO__*` overrides except the Axum-only `EDGEZERO__SECRETS__*` namespace to the guest via `spin up --env` (verified against Spin 4.0.2 -- a `__KEY` override set only on the host process is invisible to the component and every store silently falls back to its logical id). Operators invoking `spin up` directly from a third-party shell must therefore pass the overrides via `--env` too (sourcing the `.env` into their shell only sets the HOST env, which the guest can't see): e.g. `spin up --from <spin_crate_dir>/spin.toml --runtime-config-file <spin_crate_dir>/runtime-config.toml --env EDGEZERO__STORES__CONFIG__<ID>__KEY=<value>`. The `SPIN_VARIABLE_*` secret lines are the exception -- those DO travel as Spin application variables from the host env, not via `--env`. |
 | `spin.toml`                                           | Synthesised from primitives when absent (first-run bootstrap; see "Primitive synthesiser output" below). When present, the component's `key_value_stores` array gets the missing store ids appended. Everything else operator-owned is preserved by `toml_edit::DocumentMut`. **`[variables]` declarations and `[component.<name>.variables]` mappings are NOT written by base `provision --local`** -- they require typed-`C` reflection over `#[secret]` fields and live in `provision_typed` (the generated `<app-cli>` path). See the "Spin" row of the "Per-adapter `provision_typed` output" table above. |
 | `.spin/sqlite_key_value.db`                           | Not created; `spin up` initialises it on first read.                                                                                                                                                                                                                                                       |
 

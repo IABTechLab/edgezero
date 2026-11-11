@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking changes
 
+- **Generated adapter manifests.** `axum.toml`, `wrangler.toml`, `fastly.toml`,
+  `spin.toml`, and `runtime-config.toml` are local, gitignored outputs. Back up
+  custom contents before pulling their removal: Git deletes teammates' clean
+  tracked copies. After cloning, run the project CLI's `provision --local` for
+  each adapter. Preserve shared customizations in supported tracked declarations
+  or templates; provisioning regenerates defaults, not arbitrary old settings.
+- **Declared local paths.** Local provision and config operations require both
+  `[adapters.<name>.adapter].manifest` and `.crate`. Adapter manifest validation
+  now receives `allow_component_refresh: bool`; update external implementations
+  and callers of `Adapter::validate_adapter_manifest`.
+- **Scaffold adapter defaults.** `ManifestSpec` literals require
+  `adapter_defaults`; use `""` when no tracked defaults are needed. Spin scaffolds
+  declare HTTPS outbound access for their proxy route. Existing applications
+  without `allowed_outbound_hosts` retain deny-all on regeneration; declare the
+  required hosts in tracked `edgezero.toml`.
+- **Axum KV location.** Runtime KV databases now live under the application
+  project root's `.edgezero/`, rather than the launch directory. Stop the old
+  runtime, back up its databases, and copy their existing filenames into the
+  project's `.edgezero/` before restarting.
+- **Cloudflare namespace adoption.** Cloud provision refuses unverified IDs
+  held only in local Wrangler state. Verify the account, binding and primary/
+  preview IDs, then record them in the corresponding tracked deployed maps.
+  Local provisioning can then restore them without creating duplicates.
+- **Unset typed secrets.** Fresh Axum and Cloudflare secret hints are commented;
+  Spin secret variables have no default and require a provider value. Uncomment
+  and fill hints or export the documented variable before serving. Existing
+  operator values remain untouched; remove old generated empty assignments or
+  empty Spin defaults manually when the credential should remain unset.
+- **Deployed manifest construction.** `ManifestAdapterDeployed` is now
+  `#[non_exhaustive]`; external callers construct it through `Default` and set
+  its public fields.
+
 - **Fallible CLI payload writes.** `edgezero_cli::stream::stdout_line` now
   returns `io::Result<()>`; propagate or handle its write errors. Config diff
   and push previews fail when output cannot be written.
@@ -64,6 +96,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`provision --local`.** Generate adapter manifests, local store bindings and
+  typed secret hints from tracked application configuration. Dry-run uses
+  private, bounded staging and redacted previews without modifying the project.
+
 - **`edgezero provision` / `edgezero config push` cross-process advisory
   lock** (`.edgezero/provision.lock` under the manifest's project root).
   Serialises concurrent invocations against the same tree so
@@ -74,6 +110,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is running.
 
 ### Fixed
+
+- Preserve operator-authored env records during re-provision, including commented
+  hints, custom values, duplicates and multiline quoted values. Redact untrusted
+  preview comments and malformed prefixes, and propagate preview output errors.
+- Atomically replace env files and deployed manifest state. Check the canonical
+  manifest target's directory before creating cloud resources; skip unchanged
+  writeback and retain supported top-level manifest symlinks and permissions.
 
 - Resolve relative Cargo homes from the adapter build directory and treat an
   empty `CARGO_HOME` as unset, avoiding stale WASM selection across adapters.

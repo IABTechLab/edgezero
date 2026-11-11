@@ -227,10 +227,25 @@ source of truth is `edgezero.toml` (which stays tracked).
 
 ## Un-tracking manifests already committed to your repo
 
+::: warning Back up before the removal is pulled
+`git rm --cached` keeps the working copy only for the person running it.
+When teammates pull the committed deletion, Git removes their clean tracked
+copies. Before anyone pulls, back up all custom adapter settings and filled
+secret files outside the repository. Do not rely on a local modification to
+protect a file from deletion or a checkout conflict.
+
+Provisioning recreates supported defaults and declared bindings; it cannot
+recover custom provider sections, backends, routes, or outbound permissions from
+a deleted manifest. Move supported settings into tracked `edgezero.toml`;
+maintain reviewed shared templates for other non-secret settings. Transfer
+credentials separately. After regeneration, restore the required local
+customizations from the backup.
+:::
+
 If your project committed these manifests before the cutover, add them
 to `.gitignore` and then untrack them **without deleting your working
 copy** (`--cached`), so provision can own them going forward. Match the
-five adapter manifests plus the Cloudflare `.dev.vars` secrets file at the
+five adapter manifests plus the Cloudflare `.dev.vars` secrets file and `.env` / `.dev.vars` environment variants at the
 repo root **and** any subdirectory (a `**/name.toml` pathspec silently
 skips files at the repo root), and guard the removal so it's a no-op when
 nothing is tracked:
@@ -240,19 +255,44 @@ nothing is tracked:
 # and `adapters/wrangler.toml` match. `.dev.vars` (Cloudflare) and `.env`
 # (Spin's `<crate>/.env`, Axum's `.edgezero/.env`) are secret-bearing and
 # must be untracked too.
-matcher='(^|/)(axum|wrangler|fastly|spin|runtime-config)\.toml$|(^|/)\.dev\.vars$|(^|/)\.env$'
+matcher='(^|/)(axum|wrangler|fastly|spin|runtime-config)\.toml$|(^|/)\.(dev\.vars|env)(\..*)?$'
+example='(^|/)\.env\.example$'
 
 # Untrack matching files without touching your working copy. NUL-delimited
 # end-to-end (`-z` / `-0`) so paths with spaces or newlines survive; the
 # `grep -q` pre-check keeps `git rm` from running on an empty list.
-if git ls-files -z | grep -qzE "$matcher"; then
-  git ls-files -z | grep -zE "$matcher" | xargs -0 git rm --cached --
+if git ls-files -z | grep -zE "$matcher" | grep -qzEv "$example"; then
+  git ls-files -z | grep -zE "$matcher" | grep -zEv "$example" | xargs -0 git rm --cached --
 fi
 
 # Verify none remain tracked (expect no output):
-git ls-files -z | grep -zE "$matcher" | tr '\0' '\n'
+git ls-files -z | grep -zE "$matcher" | grep -zEv "$example" | tr '\0' '\n'
 ```
 
 Commit the `.gitignore` change plus the `git rm --cached` removals
-together. Your local files stay on disk; teammates regenerate theirs
-with `provision --local` after pulling.
+together after coordinating backups. The author retains local files; teammates
+regenerate theirs with `provision --local` after pulling and restore custom
+settings from their backups.
+
+## Existing Cloudflare namespace IDs
+
+Cloud provisioning does not adopt IDs merely because they appear in a local
+`wrangler.toml`. In the intended Cloudflare account, verify the namespace and
+binding with `wrangler kv namespace list`. Record the verified primary IDs in
+`[adapters.cloudflare.deployed.kv_namespaces]` and preview IDs in the separate
+`preview_kv_namespaces` table, each keyed by the logical store ID. Commit that
+tracked state, then run local provision to restore it into Wrangler configuration.
+
+## Axum runtime data and unset secrets
+
+Stop Axum before migrating its KV data. Back up the old launch directory's
+`.edgezero/`, then copy the existing database filenames into the application
+project root's `.edgezero/`. Keep the backup until the restarted runtime has
+verified the data.
+
+Fresh typed secret hints are inactive until filled. Uncomment and populate
+Axum's `# EDGEZERO__SECRETS__<KEY>=` or Cloudflare's `# <key>=""` hint, or export
+the corresponding variable. Spin writes `# SPIN_VARIABLE_<NAME>=` and a secret
+variable without a default, so supply a value before starting Spin. Existing
+values are preserved: comment out old empty assignments and remove old empty
+Spin defaults if they represent an unset credential.

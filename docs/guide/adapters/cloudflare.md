@@ -66,9 +66,9 @@ same gitignored-generated model — `axum.toml`, `wrangler.toml`,
 treated as regenerable local state.
 
 `provision_typed` additionally writes `.dev.vars`
-placeholders — one line per `#[secret]` field on your typed
-`MyAppConfig` — so `wrangler dev` resolves them locally. Fill in
-real values before running the dev server; `.dev.vars` is
+commented hints — one `# <key>=""` line per `#[secret]` field on your typed
+`MyAppConfig`. Uncomment and fill the hint before running the dev server;
+provisioning leaves existing operator values unchanged. `.dev.vars` is
 gitignored so the placeholders stay per-developer.
 :::
 

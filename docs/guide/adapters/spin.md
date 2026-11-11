@@ -102,25 +102,24 @@ cargo build --target wasm32-wasip2 --release -p my-app-adapter-spin
 
 ## Local Development
 
+`edgezero serve --adapter spin` loads the selected adapter's `.env` into a
+child-process overlay. It leaves the parent environment unchanged; variables
+already exported by the parent take precedence. The adapter passes store
+overrides to the guest with `spin up --env`. `SPIN_VARIABLE_*` secrets reach
+Spin through its child environment, while `EDGEZERO__SECRETS__*` values are
+excluded from guest arguments.
+
 ```bash
-# Using the CLI (recommended -- it passes the runtime config and the
-# provision-written .env for you)
 edgezero serve --adapter spin
 
-# Or directly. Pass the runtime-config file (it declares the non-`default`
-# KV stores) and source the provision-written .env for the SPIN_VARIABLE_*
-# secrets (Spin reads those from the host env as application variables):
+# Direct Spin invocation must supply both application variables and guest
+# overrides explicitly; exporting a store override alone affects only the host.
 cd crates/my-app-adapter-spin
-set -a; . ./.env; set +a
-spin up --from spin.toml --runtime-config-file runtime-config.toml
+SPIN_VARIABLE_API_TOKEN=local-secret spin up --from spin.toml \
+  --runtime-config-file runtime-config.toml \
+  --env EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=app_config \
+  --env EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY=app_config_staging
 ```
-
-> **Store overrides need `--env`, not the host env.** A Spin component reads
-> its own sandboxed WASI env, which does NOT inherit the `spin` host process
-> environment. So an `EDGEZERO__STORES__…` store-name or per-environment
-> `__KEY` override must be passed with `spin up --env KEY=VALUE` (sourcing it
-> into your shell only sets the host env, which the guest can't see).
-> `edgezero serve --adapter spin` forwards these for you.
 
 ## Deployment
 
@@ -263,7 +262,7 @@ SET <key> <value>`). Native-CLI dispatch for redis / azure is
 Schema-coupling note: the SQLite writer uses the exact `spin_key_value`
 schema and `INSERT … ON CONFLICT DO UPDATE` statement vendored from
 spinframework/spin's `crates/key-value-spin/src/store.rs`. A contract
-test in `edgezero-adapter-spin/src/cli/push_sqlite.rs` asserts
+test in `edgezero-adapter-spin/src/cli/push_local.rs` asserts
 byte-equality against the upstream string, and the workspace's
 `spin-sdk = "~7.0"` pin blocks any Spin minor bump that would change
 the schema until the operator opts in.
@@ -287,28 +286,28 @@ by `config validate --strict`.
 `provision --adapter spin --local` declares your typed `#[secret]` fields
 for you — it appends the `[variables]` entry and the
 `[component.<id>.variables]` binding to `spin.toml` (and a
-`SPIN_VARIABLE_<NAME>=` placeholder to the crate's `.env`). You only declare
+`# SPIN_VARIABLE_<NAME>=` hint to the crate's `.env`). You only declare
 a variable by hand for a code-local `#[secret(store_ref)]` key the CLI can't
 infer. The generated shape is:
 
 ```toml
 # spin.toml
 [variables]
-api_token = { default = "", secret = true }
+api_token = { secret = true }
 
 [component.my-app.variables]
 api_token = "{{ api_token }}"
 ```
 
-`required = true` blocks `spin up` until the variable is supplied by a provider or
-`SPIN_VARIABLE_<NAME>`. For local development, declare `default = ""` with
-`secret = true` instead so the component starts without one; that is the form the
-demo's `spin.toml` uses.
+A variable without a default blocks `spin up` until a provider or
+`SPIN_VARIABLE_<NAME>` supplies it. Uncomment and fill the `.env` hint before
+using `edgezero serve`, or export the variable. Provision preserves existing
+operator defaults; remove an old empty default if the credential is unset.
 
 `config validate` runs a within-secrets canonicalisation check: each
 `#[secret]` field value is lowercased to mirror the runtime
 `SpinSecretStore::get_bytes` lookup, must be a valid Spin variable name
-(`^[a-z][a-z0-9_]*$`), and must not collide with another `#[secret]`
+(`^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)*$`), and must not collide with another `#[secret]`
 value that lowercases to the same form.
 
 ## Spin component discovery
@@ -351,6 +350,17 @@ let response = ProxyService::new(SpinProxyClient).forward(request).await?;
 Proxied responses carry `x-edgezero-proxy: spin`. Every upstream host must be listed
 in the component's `allowed_outbound_hosts` in `spin.toml` or the send fails at
 runtime.
+
+Track regeneration settings in `edgezero.toml`:
+
+```toml
+[adapters.spin.adapter]
+allowed_outbound_hosts = ["https://*:*"]
+```
+
+New scaffolds declare HTTPS access for their `/proxy` route. Existing apps
+without this declaration regenerate with deny-all; specify the hosts your app
+needs. Existing local manifest edits are preserved during re-provision.
 
 ## Context Access
 

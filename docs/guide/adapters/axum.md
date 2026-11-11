@@ -171,6 +171,11 @@ only one secrets id may be declared:
 EDGEZERO__SECRETS__API_KEY=mysecret edgezero serve --adapter axum
 ```
 
+Typed project-CLI provisioning writes inactive `# EDGEZERO__SECRETS__<KEY>=`
+hints into the project root's `.edgezero/.env`. Uncomment and fill them, or
+export the variable, before serving. An untouched hint remains a missing
+credential. Re-provision preserves existing operator values.
+
 ## Config Store
 
 For local development, each declared `[stores.config]` id resolves to a
