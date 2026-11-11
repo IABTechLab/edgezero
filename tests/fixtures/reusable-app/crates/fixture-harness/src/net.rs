@@ -156,6 +156,19 @@ fn serve(
         stream.write_all(
             b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\npartial",
         )?;
+        if path.split('?').next() == Some("/abort-after-first-byte") {
+            stream.flush()?;
+            // Inject EOF only after the downstream client observes body bytes.
+            // Failed probes remain bounded by the client timeout; Backend::drop
+            // releases this waiter during cleanup. Keep plain /abort immediate
+            // for faults that occur before any downstream response exists.
+            drop(
+                signal
+                    .1
+                    .wait_while(signal.0.lock().unwrap(), |ready| !*ready)
+                    .map_err(|_| "release poisoned")?,
+            );
+        }
     } else {
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")?;
     }
@@ -344,6 +357,85 @@ mod tests {
             .expect("response started");
         assert_eq!(partial.status, 200);
         assert_eq!(partial.body, b"partial");
+    }
+
+    #[test]
+    fn controlled_abort_waits_for_body_observation_before_closing() {
+        let backend = Backend::start().unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", backend.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .write_all(b"GET /abort-after-first-byte HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        loop {
+            let mut line = String::new();
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut prefix = [0; 7];
+        reader.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"partial");
+        reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let error = reader
+            .read(&mut [0])
+            .expect_err("origin must stay open until the client acknowledges body bytes");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        reader
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        release(&backend.release);
+        assert_eq!(reader.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn controlled_abort_preserves_the_observed_partial_response() {
+        let backend = Backend::start().unwrap();
+        let failure = request(
+            backend.port,
+            "/abort-after-first-byte",
+            "x",
+            None,
+            Some(&backend.release),
+        )
+        .unwrap_err();
+        let partial = failure
+            .downcast_ref::<InterruptedResponse>()
+            .expect("response body should precede the controlled abort");
+        assert_eq!(partial.status, 200);
+        assert_eq!(partial.body, b"partial");
+        assert!(*backend.release.0.lock().unwrap());
+    }
+
+    #[test]
+    fn connection_closed_before_headers_is_not_an_interrupted_response() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+        });
+        let failure = request(port, "/abort", "x", None, None).unwrap_err();
+        server.join().unwrap();
+        assert!(failure.downcast_ref::<InterruptedResponse>().is_none());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::delivery_compression::finalize_response;
 use edgezero_core::body::Body;
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::{Response, Uri};
@@ -9,7 +10,8 @@ use std::io::Write as _;
 /// # Errors
 /// Returns [`EdgeError::Internal`] if the response body cannot be streamed to the Fastly send-channel.
 #[inline]
-pub fn from_core_response(response: Response) -> Result<FastlyResponse, EdgeError> {
+pub fn from_core_response(mut response: Response) -> Result<FastlyResponse, EdgeError> {
+    finalize_response(&mut response);
     let (parts, body) = response.into_parts();
     let mut fastly_response = FastlyResponse::from_status(parts.status.as_u16());
 
