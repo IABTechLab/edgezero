@@ -24,7 +24,8 @@ reset_fixture() {
 
 replace() {
   local file="$1" old="$2" new="$3"
-  awk -v old="$old" -v new="$new" '
+  OLD="$old" NEW="$new" awk '
+    BEGIN { old = ENVIRON["OLD"]; new = ENVIRON["NEW"] }
     { position = index($0, old) }
     position { $0 = substr($0, 1, position - 1) new substr($0, position + length(old)) }
     { print }

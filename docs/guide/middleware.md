@@ -307,15 +307,7 @@ handle starts T0 in the hook, not at socket ingress; an existing handle keeps it
 original T0. The boundary retains a clone across both successful and failed
 downstream results and also works without the hook:
 
-```mermaid
-flowchart TD
-    A[Adapter converts request] --> B[Hook installs or reuses handle]
-    B --> C{Route matches?}
-    C -->|Yes| D[Boundary and attachment middleware]
-    D --> E[Handler result]
-    E --> F[Boundary marks headers ready]
-    C -->|No| G[Router renders 404 or 405 without a mark]
-```
+![The adapter converts the request, then the hook installs or reuses a handle. Matched routes run middleware and the handler before the boundary marks headers ready. Unmatched routes render 404 or 405 without a mark.](./assets/request-timing-flow.svg)
 
 ```rust
 use async_trait::async_trait;
