@@ -28,8 +28,8 @@ use edgezero_adapter::registry::{
     self as adapter_registry, ReadConfigEntry, ResolvedStoreId, TypedSecretEntry,
 };
 use edgezero_core::app_config::{
-    self, AppConfigError, AppConfigLoadOptions, AppConfigMeta, SecretField, SecretKind,
-    SecretPathSegment,
+    self, AppConfigError, AppConfigLoadOptions, AppConfigMeta, ImplicitSecretLookup, SecretField,
+    SecretKind, SecretPathSegment,
 };
 use edgezero_core::blob_envelope::{BlobEnvelope, BlobEnvelopeError, ENVELOPE_VERSION_V1};
 use edgezero_core::env_config::{EnvConfig, merge_env_defaults};
@@ -264,8 +264,7 @@ where
     app_config::validate_excluding_secrets(&typed)
         .map_err(|err| format!("typed app-config failed validation: {err}"))?;
 
-    typed_secret_checks(&typed, &ctx)?;
-    run_adapter_typed_checks::<C>(&ctx, AdapterValidationScope::All)?;
+    typed_secret_checks(&typed, &ctx, AdapterValidationScope::All)?;
 
     log::info!(
         "[edgezero] config validate (typed): {} + {} OK{}",
@@ -467,8 +466,7 @@ where
     .map_err(|err| format_app_config_error(&err))?;
     app_config::validate_excluding_secrets(&typed)
         .map_err(|err| format!("typed app-config failed validation: {err}"))?;
-    typed_secret_checks(&typed, &ctx.validation)?;
-    run_adapter_typed_checks::<C>(&ctx.validation, validation_scope)?;
+    typed_secret_checks(&typed, &ctx.validation, validation_scope)?;
 
     // Resolve adapter paths.
     let (manifest_root, adapter_manifest_path, component_selector, push_ctx) =
@@ -610,9 +608,8 @@ pub fn run_config_diff_typed<C>(args: &ConfigDiffArgs) -> Result<DiffExit, Strin
 where
     C: DeserializeOwned + Serialize + Validate + AppConfigMeta,
 {
-    // Load + validate (diff runs the same structural
-    // checks as push — validate_excluding_secrets + typed_secret_checks +
-    // adapter_typed_checks; no consent gate, no re-fetch).
+    // Load + validate using the same typed preflight as push;
+    // no consent gate or re-fetch.
     let validate_args = ConfigValidateArgs {
         app_config: args.app_config.clone(),
         manifest: args.manifest.clone(),
@@ -640,8 +637,7 @@ where
     .map_err(|err| format_app_config_error(&err))?;
     app_config::validate_excluding_secrets(&typed)
         .map_err(|err| format!("local validation failed: {err}"))?;
-    typed_secret_checks(&typed, &ctx)?;
-    run_adapter_typed_checks::<C>(&ctx, validation_scope)?;
+    typed_secret_checks(&typed, &ctx, validation_scope)?;
 
     // Build the local envelope.
     let local_data: serde_json::Value = serde_json::to_value(&typed)
@@ -1389,7 +1385,11 @@ fn load_push_context(args: &ConfigPushArgs) -> Result<PushContext, String> {
     })
 }
 
-pub(crate) fn effective_manifest_environment<I, K, V>(
+/// Merge adapter-scoped manifest variable defaults with parent environment
+/// overrides using the same rules as deployment and typed config commands.
+#[must_use]
+#[inline]
+pub fn effective_manifest_environment<I, K, V>(
     manifest: &Manifest,
     adapter: &str,
     parent: I,
@@ -1833,18 +1833,40 @@ fn collect_secret_leaves<'raw>(
     Ok(out)
 }
 
-/// Typed-only adapter dispatch: feed each adapter in the requested scope the `#[secret]`
-/// (`KeyInDefault` and `KeyInNamedStore` — `StoreRef` values are
-/// runtime store ids, not flat-namespace candidates) so adapters
-/// whose secret store has a flat-namespace constraint (Spin) can
-/// detect within-secrets collisions.
-fn run_adapter_typed_checks<C>(
+/// Compile and validate implicit lookup metadata once before adapter checks.
+/// Applications that do not opt in retain the legacy leaf and store checks.
+fn typed_secret_checks<C>(
+    typed: &C,
     ctx: &ValidationContext,
     adapter_scope: AdapterValidationScope,
 ) -> Result<(), String>
 where
     C: AppConfigMeta,
 {
+    if let Some(lookups) = typed.implicit_secret_lookups()? {
+        check_implicit_metadata(&lookups, ctx)?;
+        return match adapter_scope {
+            AdapterValidationScope::All => {
+                for name in ctx.manifest().adapters.keys() {
+                    if let Some(adapter) = adapter_registry::get_adapter(name) {
+                        let environment = effective_manifest_environment(
+                            ctx.manifest(),
+                            adapter.name(),
+                            env::vars(),
+                        );
+                        check_implicit_adapter(typed, &lookups, adapter, &environment)?;
+                    }
+                }
+                Ok(())
+            }
+            AdapterValidationScope::Selected(adapter) => {
+                let environment =
+                    effective_manifest_environment(ctx.manifest(), adapter.name(), env::vars());
+                check_implicit_adapter(typed, &lookups, adapter, &environment)
+            }
+        };
+    }
+    check_legacy_typed_secrets::<C>(ctx)?;
     let default_store_id = ctx
         .manifest()
         .stores
@@ -1894,7 +1916,108 @@ where
 // Typed secret checks
 // -------------------------------------------------------------------
 
-fn typed_secret_checks<C>(_typed: &C, ctx: &ValidationContext) -> Result<(), String>
+fn check_implicit_metadata(
+    lookups: &[ImplicitSecretLookup],
+    ctx: &ValidationContext,
+) -> Result<(), String> {
+    let mut owners = BTreeMap::new();
+    for lookup in lookups {
+        if lookup.descriptor_id.is_empty()
+            || lookup.field_path.is_empty()
+            || lookup.store_id.is_empty()
+            || lookup.key.is_empty()
+        {
+            return Err(
+                "implicit secret lookup has incomplete descriptor/path/store/key metadata"
+                    .to_owned(),
+            );
+        }
+        let declared = ctx
+            .manifest()
+            .stores
+            .secrets
+            .as_ref()
+            .is_some_and(|stores| stores.ids.iter().any(|id| id == &lookup.store_id));
+        if !declared {
+            return Err(format!(
+                "implicit secret lookup `{}` at `{}` requires a declared logical secret store",
+                lookup.descriptor_id, lookup.field_path
+            ));
+        }
+        let owner = (&lookup.descriptor_id, &lookup.field_path);
+        if let Some(previous) = owners.insert(owner, (&lookup.store_id, &lookup.key))
+            && previous != (&lookup.store_id, &lookup.key)
+        {
+            return Err(format!(
+                "implicit secret lookup `{}` has conflicting owning metadata",
+                lookup.descriptor_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_implicit_adapter<C>(
+    typed: &C,
+    lookups: &[ImplicitSecretLookup],
+    adapter: &dyn adapter_registry::Adapter,
+    environment: &EnvConfig,
+) -> Result<(), String>
+where
+    C: AppConfigMeta,
+{
+    let mut entries = Vec::new();
+    let mut seen_requests = BTreeMap::new();
+    let mut native_owners = BTreeMap::new();
+    for lookup in lookups {
+        let name = typed.render_implicit_secret_name(adapter.name(), lookup, environment)?;
+        if name.is_empty() {
+            return Err(format!(
+                "empty native secret identity for `{}`",
+                lookup.descriptor_id
+            ));
+        }
+        // Compare physical namespaces, not logical aliases. Distinct requests
+        // must never merge merely because their rendered names happen to match.
+        let namespace = if adapter.secret_names_scoped_per_store() {
+            environment
+                .store_name_checked("secrets", &lookup.store_id)
+                .map_err(|error| {
+                    format!(
+                        "invalid implicit {} secret store selector: {error}",
+                        adapter.name()
+                    )
+                })?
+        } else {
+            String::new()
+        };
+        let identity = (&lookup.descriptor_id, &lookup.store_id, &lookup.key);
+        if let Some(previous) = native_owners.insert((namespace, name.clone()), identity)
+            && previous != identity
+        {
+            return Err(format!(
+                "native secret identity collision at `{}` for adapter `{}`",
+                lookup.field_path,
+                adapter.name()
+            ));
+        }
+        // Repeated identical requests can have different owning array positions.
+        // Rendering still occurs before deduplication so inconsistent renderers fail.
+        if let Some(previous) = seen_requests.insert(identity, name.clone()) {
+            if previous != name {
+                return Err("identical secret request has inconsistent native rendering".to_owned());
+            }
+            continue;
+        }
+        entries.push(
+            TypedSecretEntry::new(&lookup.store_id, &lookup.field_path, &lookup.key)
+                .with_native_name(name),
+        );
+    }
+    adapter.validate_typed_secrets(&entries)
+}
+
+fn check_legacy_typed_secrets<C>(ctx: &ValidationContext) -> Result<(), String>
 where
     C: AppConfigMeta,
 {
@@ -2087,6 +2210,10 @@ fn format_app_config_error(err: &AppConfigError) -> String {
     clippy::default_numeric_fallback,
     reason = "test module groups items by subject (PathPrepend co-located with its fake-spin consumers, fixtures with their tests) rather than by item kind; `range(min = 100, max = 60_000)` bounds default to the field's int type"
 )]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "legacy app-config fixtures intentionally exercise the default-compatible implicit lookup hooks"
+)]
 mod tests {
     use super::*;
     use crate::test_support::{EnvOverride, manifest_guard};
@@ -2094,6 +2221,8 @@ mod tests {
     use edgezero_core::test_env::PathPrepend;
     use serde::{Deserialize, Serialize};
     use std::borrow::Cow;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use std::fs;
     use tempfile::TempDir;
@@ -3198,7 +3327,7 @@ api_key = ""
     #[test]
     fn validate_typed_rejects_missing_required_nested_leaf_at_deserialize() {
         // A MISSING required nested leaf fails serde DESERIALIZATION
-        // before `typed_secret_checks`/`run_adapter_typed_checks` ever run — so
+        // before `typed_secret_checks` ever runs — so
         // this is deserialize-path coverage, NOT proof of the path-aware
         // collector. The direct collector test below covers that.
         let app_config = r#"
@@ -5320,7 +5449,7 @@ ids = ["default"]
     }
 
     // -------------------------------------------------------------------
-    // diff runs typed_secret_checks + adapter_typed_checks
+    // diff runs the shared typed secret preflight
     // -------------------------------------------------------------------
 
     /// A NESTED `#[secret]` that is present but empty must be caught by the
@@ -5398,6 +5527,482 @@ ids = ["default"]
             err.contains("integrations.server_side_key") && err.contains("non-empty"),
             "error names the nested dotted secret path: {err}"
         );
+    }
+
+    #[derive(Debug, Deserialize, Serialize, Validate)]
+    #[serde(deny_unknown_fields)]
+    struct ImplicitConfig {
+        #[serde(skip)]
+        lookup_compiled: Cell<bool>,
+        #[serde(default)]
+        inactive: bool,
+        #[serde(default)]
+        subjects: Vec<String>,
+        #[serde(default)]
+        bad: String,
+    }
+
+    impl AppConfigMeta for ImplicitConfig {
+        fn secret_fields() -> Vec<SecretField> {
+            Vec::new()
+        }
+
+        fn implicit_secret_lookups(&self) -> Result<Option<Vec<ImplicitSecretLookup>>, String> {
+            if self.lookup_compiled.replace(true) {
+                return Err("implicit secret plan compiled more than once".to_owned());
+            }
+            if self.inactive {
+                return Ok(Some(Vec::new()));
+            }
+            // An omitted subject uses the application's effective ordinary default.
+            let subjects = if self.subjects.is_empty() {
+                vec!["default".to_owned()]
+            } else {
+                self.subjects.clone()
+            };
+            Ok(Some(
+                subjects
+                    .iter()
+                    .enumerate()
+                    .map(|(index, subject)| {
+                        ImplicitSecretLookup::new(
+                            if self.bad == "metadata" {
+                                ""
+                            } else {
+                                "fictional.pull"
+                            },
+                            format!("subjects[{index}]"),
+                            if self.bad == "store" {
+                                "undeclared"
+                            } else {
+                                "default"
+                            },
+                            format!("ts1_{subject}"),
+                        )
+                    })
+                    .collect(),
+            ))
+        }
+
+        fn render_implicit_secret_name(
+            &self,
+            adapter: &str,
+            lookup: &ImplicitSecretLookup,
+            environment: &EnvConfig,
+        ) -> Result<String, String> {
+            if self.bad == "collision" {
+                return Ok("native_collision".to_owned());
+            }
+            if self.bad == "native" {
+                return Ok("native-hyphen".to_owned());
+            }
+            if self.bad == "native_slash" {
+                return Ok("invalid/native/name".to_owned());
+            }
+            if self.bad == "descriptor_name" {
+                return Ok(lookup.descriptor_id.replace('.', "_").to_ascii_uppercase());
+            }
+            if self.bad == "path_name" {
+                return Ok(lookup.field_path.clone());
+            }
+            let store = environment
+                .store_name_checked("secrets", &lookup.store_id)
+                .map_err(|_error| "invalid secret store selector".to_owned())?;
+            if self.bad == "manifest_store" && store != "fictional_manifest_store" {
+                return Err("renderer did not receive effective manifest defaults".to_owned());
+            }
+            Ok(match adapter {
+                "spin" => format!("secret_{}_{}", store, lookup.key),
+                "axum" => format!("TS_SECRET_{}_{}", store, lookup.key).to_ascii_uppercase(),
+                _ => lookup.key.clone(),
+            })
+        }
+    }
+
+    fn implicit_diff_args(manifest: &Path) -> ConfigDiffArgs {
+        ConfigDiffArgs {
+            adapter: "axum".to_owned(),
+            app_config: None,
+            exit_code: false,
+            format: DiffFormat::Unified,
+            key: None,
+            local: false,
+            manifest: manifest.to_path_buf(),
+            no_env: true,
+            runtime_config: None,
+            store: None,
+            staging: false,
+        }
+    }
+
+    #[test]
+    fn implicit_validate_push_diff_compile_once_without_reference_leaves() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let (dir, manifest, _) = setup_project(PUSH_MANIFEST, "");
+        run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
+            .expect("default role validates");
+        let mut push = push_args(&manifest, "axum");
+        push.yes = true;
+        run_config_push_typed::<ImplicitConfig>(&push).expect("implicit push");
+        run_config_diff_typed::<ImplicitConfig>(&implicit_diff_args(&manifest))
+            .expect("implicit diff");
+        let body = fs::read_to_string(dir.path().join(".edgezero/local-config-app_config.json"))
+            .expect("local envelope");
+        let stored: serde_json::Value = serde_json::from_str(&body).expect("store");
+        let encoded = stored["app_config"].as_str().expect("encoded envelope");
+        let envelope: BlobEnvelope = serde_json::from_str(encoded).expect("envelope");
+        assert_eq!(
+            envelope.data,
+            serde_json::json!({"inactive":false,"subjects":[],"bad":""})
+        );
+        assert!(!body.contains("ts1_"));
+        assert!(!body.contains("fictional.pull"));
+    }
+
+    #[test]
+    fn implicit_consumers_pass_effective_manifest_environment_to_native_renderer() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let source = format!(
+            "{PUSH_MANIFEST}\n[[environment.variables]]\nname = \"SECRET_STORE\"\nenv = \"EDGEZERO__STORES__SECRETS__DEFAULT__NAME\"\nvalue = \"fictional_manifest_store\"\nadapters = [\"axum\"]\n"
+        );
+        let (_dir, manifest, _) = setup_project(&source, "bad = \"manifest_store\"");
+        run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
+            .expect("manifest environment in validate");
+        let mut push = push_args(&manifest, "axum");
+        push.yes = true;
+        run_config_push_typed::<ImplicitConfig>(&push).expect("manifest environment in push");
+        run_config_diff_typed::<ImplicitConfig>(&implicit_diff_args(&manifest))
+            .expect("manifest environment in diff");
+    }
+
+    struct CountingImplicitAdapter {
+        count: AtomicUsize,
+        scoped: bool,
+    }
+
+    impl adapter_registry::Adapter for CountingImplicitAdapter {
+        fn name(&self) -> &'static str {
+            "counting_implicit"
+        }
+
+        fn execute(
+            &self,
+            _action: adapter_registry::AdapterAction,
+            _args: &[String],
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn secret_names_scoped_per_store(&self) -> bool {
+            self.scoped
+        }
+
+        fn validate_typed_secrets(&self, entries: &[TypedSecretEntry<'_>]) -> Result<(), String> {
+            self.count.store(entries.len(), Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn implicit_deduplication_uses_complete_request_identity() {
+        let mut typed = ImplicitConfig {
+            lookup_compiled: Cell::default(),
+            inactive: false,
+            subjects: Vec::new(),
+            bad: "descriptor_name".to_owned(),
+        };
+        let adapter = CountingImplicitAdapter {
+            count: AtomicUsize::new(0),
+            scoped: false,
+        };
+        let first = ImplicitSecretLookup::new("purpose.first", "owners[0]", "default", "shared");
+        let mut repeated = first.clone();
+        repeated.field_path = "owners[1]".to_owned();
+        check_implicit_adapter(
+            &typed,
+            &[first.clone(), repeated.clone()],
+            &adapter,
+            &EnvConfig::default(),
+        )
+        .expect("identical request renders once per owner and is deduplicated");
+        assert_eq!(adapter.count.load(Ordering::SeqCst), 1);
+
+        let second = ImplicitSecretLookup::new("purpose.second", "owners[1]", "default", "shared");
+        check_implicit_adapter(
+            &typed,
+            &[first.clone(), second.clone()],
+            &adapter,
+            &EnvConfig::default(),
+        )
+        .expect("different purposes can select distinct native identities");
+        assert_eq!(adapter.count.load(Ordering::SeqCst), 2);
+
+        typed.bad = "collision".to_owned();
+        let error = check_implicit_adapter(
+            &typed,
+            &[first.clone(), second],
+            &adapter,
+            &EnvConfig::default(),
+        )
+        .expect_err("different purposes cannot share one physical credential");
+        assert!(
+            error.contains("native secret identity collision"),
+            "{error}"
+        );
+
+        typed.bad = "path_name".to_owned();
+        let inconsistent_error =
+            check_implicit_adapter(&typed, &[first, repeated], &adapter, &EnvConfig::default())
+                .expect_err("one request cannot render differently by owner path");
+        assert_eq!(
+            inconsistent_error,
+            "identical secret request has inconsistent native rendering"
+        );
+    }
+
+    #[test]
+    fn implicit_metadata_rejects_conflicting_owner_mappings() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let (_dir, manifest, _) = setup_project(PUSH_MANIFEST, "");
+        let context = load_validation_context(&args_for(&manifest)).expect("context");
+        let lookups = [
+            ImplicitSecretLookup::new("purpose", "owner", "default", "first"),
+            ImplicitSecretLookup::new("purpose", "owner", "default", "second"),
+        ];
+        let error = check_implicit_metadata(&lookups, &context).expect_err("conflicting owner");
+        assert!(error.contains("conflicting owning metadata"), "{error}");
+    }
+
+    #[test]
+    fn implicit_namespace_policy_is_adapter_owned() {
+        let typed = ImplicitConfig {
+            lookup_compiled: Cell::default(),
+            inactive: false,
+            subjects: Vec::new(),
+            bad: "collision".to_owned(),
+        };
+        let mut adapter = CountingImplicitAdapter {
+            count: AtomicUsize::new(0),
+            scoped: true,
+        };
+        let lookups = [
+            ImplicitSecretLookup::new("first", "first", "first", "key"),
+            ImplicitSecretLookup::new("second", "second", "second", "key"),
+        ];
+        check_implicit_adapter(&typed, &lookups, &adapter, &EnvConfig::default())
+            .expect("non-Fastly adapter can expose per-store namespaces");
+        adapter.scoped = false;
+        let error = check_implicit_adapter(&typed, &lookups, &adapter, &EnvConfig::default())
+            .expect_err("flat namespace collides");
+        assert!(error.contains("collision"), "{error}");
+    }
+
+    #[derive(Debug, Deserialize, Serialize, Validate)]
+    struct ReplacingLegacyConfig {
+        key: String,
+        vault: String,
+        #[serde(default)]
+        legacy_mode: bool,
+    }
+
+    impl AppConfigMeta for ReplacingLegacyConfig {
+        fn secret_fields() -> Vec<SecretField> {
+            vec![
+                SecretField {
+                    kind: SecretKind::KeyInDefault,
+                    path: vec![SecretPathSegment::Field(Cow::Borrowed("key"))],
+                    optional: false,
+                },
+                SecretField {
+                    kind: SecretKind::StoreRef,
+                    path: vec![SecretPathSegment::Field(Cow::Borrowed("vault"))],
+                    optional: false,
+                },
+            ]
+        }
+
+        fn implicit_secret_lookups(&self) -> Result<Option<Vec<ImplicitSecretLookup>>, String> {
+            Ok((!self.legacy_mode).then(Vec::new))
+        }
+    }
+
+    #[test]
+    fn implicit_empty_plan_replaces_legacy_leaf_checks_in_all_consumers() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        for source in [
+            PUSH_MANIFEST.to_owned(),
+            PUSH_MANIFEST.replace("[stores.secrets]\nids = [\"default\"]", ""),
+        ] {
+            let (_dir, manifest, config) =
+                setup_project(&source, "key = \"\"\nvault = \"undeclared\"");
+            run_config_validate_typed::<ReplacingLegacyConfig>(&args_for(&manifest))
+                .expect("Some([]) skips legacy leaf checks");
+            let mut push = push_args(&manifest, "axum");
+            push.yes = true;
+            run_config_push_typed::<ReplacingLegacyConfig>(&push).expect("replacement push");
+            run_config_diff_typed::<ReplacingLegacyConfig>(&implicit_diff_args(&manifest))
+                .expect("replacement diff");
+
+            for (values, expected) in [
+                ("key = \"\"\nvault = \"undeclared\"", "must be non-empty"),
+                (
+                    "key = \"token\"\nvault = \"undeclared\"",
+                    if source.contains("[stores.secrets]") {
+                        "is not in [stores.secrets].ids"
+                    } else {
+                        "requires `[stores.secrets]`"
+                    },
+                ),
+            ] {
+                fs::write(&config, format!("{values}\nlegacy_mode = true"))
+                    .expect("legacy configuration");
+                let error =
+                    run_config_validate_typed::<ReplacingLegacyConfig>(&args_for(&manifest))
+                        .expect_err("None preserves legacy checks");
+                assert!(error.contains(expected), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn implicit_active_plan_requires_an_application_renderer() {
+        struct NoRenderer;
+        impl AppConfigMeta for NoRenderer {
+            fn secret_fields() -> Vec<SecretField> {
+                Vec::new()
+            }
+        }
+        let lookup = ImplicitSecretLookup::new("purpose", "owner", "default", "key");
+        let adapter = adapter_registry::get_adapter("axum").expect("Axum registered");
+        let error = check_implicit_adapter(&NoRenderer, &[lookup], adapter, &EnvConfig::default())
+            .expect_err("renderer required for active requests");
+        assert_eq!(
+            error,
+            "implicit secret lookups require an application native renderer"
+        );
+    }
+
+    #[test]
+    fn implicit_fastly_detects_physical_store_alias_collisions() {
+        let typed = ImplicitConfig {
+            lookup_compiled: Cell::default(),
+            inactive: false,
+            subjects: Vec::new(),
+            bad: String::new(),
+        };
+        let lookups = ["first", "second"].map(|store| {
+            ImplicitSecretLookup::new(format!("fictional.{store}"), store, store, "ts1_identical")
+        });
+        let environment = EnvConfig::from_vars([
+            (
+                "EDGEZERO__STORES__SECRETS__FIRST__NAME",
+                "same-physical-store",
+            ),
+            (
+                "EDGEZERO__STORES__SECRETS__SECOND__NAME",
+                "same-physical-store",
+            ),
+        ]);
+        let adapter = adapter_registry::get_adapter("fastly").expect("Fastly registered");
+        let error = check_implicit_adapter(&typed, &lookups, adapter, &environment)
+            .expect_err("distinct logical stores share the physical namespace");
+        assert!(error.contains("collision"));
+        check_implicit_adapter(&typed, &lookups, adapter, &EnvConfig::default())
+            .expect("distinct physical stores have independent namespaces");
+    }
+
+    #[test]
+    fn implicit_preflight_metadata_and_collisions_reject_in_all_consumers() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        for (bad, expected) in [
+            ("metadata", "incomplete descriptor/path/store/key metadata"),
+            ("store", "requires a declared logical secret store"),
+            ("collision", "native secret identity collision"),
+            ("native", "invalid native environment name"),
+        ] {
+            let subjects = if bad == "native" {
+                "[\"first\"]"
+            } else {
+                "[\"first\", \"second\"]"
+            };
+            let config = format!("bad = {bad:?}\nsubjects = {subjects}\n");
+            let (dir, manifest, _) = setup_project(PUSH_MANIFEST, &config);
+            let mut push = push_args(&manifest, "axum");
+            push.yes = true;
+            for error in [
+                run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
+                    .expect_err("validate preflight"),
+                run_config_push_typed::<ImplicitConfig>(&push).expect_err("push preflight"),
+                run_config_diff_typed::<ImplicitConfig>(&implicit_diff_args(&manifest))
+                    .expect_err("diff preflight"),
+            ] {
+                assert!(error.contains(expected), "{bad}: {error}");
+            }
+            assert!(!dir.path().join(".edgezero").exists());
+        }
+    }
+
+    #[test]
+    fn implicit_fastly_rejects_invalid_native_names_in_all_consumers() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let source = PUSH_MANIFEST
+            .replace("[adapters.axum.", "[adapters.fastly.")
+            .replace(
+                "crate = \"crates/demo-app-adapter-axum\"",
+                "crate = \"crates/demo-app-adapter-fastly\"\nmanifest = \"fastly.toml\"",
+            );
+        let (dir, manifest, config) = setup_project(&source, "bad = \"native_slash\"");
+        fs::write(dir.path().join("fastly.toml"), "name = \"fictional\"\n")
+            .expect("Fastly manifest");
+
+        let mut push = push_args(&manifest, "fastly");
+        push.local = true;
+        push.dry_run = true;
+        let mut diff = implicit_diff_args(&manifest);
+        diff.adapter = "fastly".to_owned();
+        diff.local = true;
+        for error in [
+            run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
+                .expect_err("validate rejects invalid native name"),
+            run_config_push_typed::<ImplicitConfig>(&push)
+                .expect_err("push rejects invalid native name"),
+            run_config_diff_typed::<ImplicitConfig>(&diff)
+                .expect_err("diff rejects invalid native name"),
+        ] {
+            assert!(error.contains("invalid native Fastly secret name"));
+            assert!(!error.contains("invalid/native/name"));
+        }
+        assert!(!dir.path().join(".edgezero").exists());
+
+        fs::write(&config, "inactive = true\nbad = \"native_slash\"").expect("inactive credential");
+        run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
+            .expect("inactive credential is not rendered");
+    }
+
+    #[test]
+    fn implicit_spin_uses_native_renderer_deduplicates_and_retains_name_validation() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let manifest_source = PUSH_MANIFEST
+            .replace("[adapters.axum.adapter]", "[adapters.spin.adapter]")
+            .replace("[adapters.axum.commands]", "[adapters.spin.commands]")
+            .replace(
+                "crate = \"crates/demo-app-adapter-axum\"",
+                "crate = \"crates/demo-spin\"\nmanifest = \"spin.toml\"",
+            );
+        let (dir, manifest, config) = setup_project(
+            &manifest_source,
+            "subjects = [\"identical\", \"identical\", \"distinct\"]",
+        );
+        fs::write(dir.path().join("spin.toml"), VALID_SPIN_TOML).expect("spin manifest");
+        run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
+            .expect("duplicate identical contexts allowed");
+        fs::write(&config, "bad = \"native\"").expect("invalid native name");
+        let error = run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
+            .expect_err("native hyphen rejected");
+        assert!(error.contains("Spin variable"));
+        fs::write(&config, "inactive = true\nbad = \"native\"").expect("inactive cleanup");
+        run_config_validate_typed::<ImplicitConfig>(&args_for(&manifest))
+            .expect("inactive role not rendered");
     }
 
     /// `run_config_diff_typed` must run the same

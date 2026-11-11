@@ -29,6 +29,9 @@ mod config;
 mod demo_server;
 #[cfg(feature = "cli")]
 mod diff;
+/// Shared Fastly resource resolution and secure secret writes.
+#[cfg(all(feature = "cli", feature = "edgezero-adapter-fastly"))]
+pub mod fastly_secrets;
 #[cfg(feature = "cli")]
 mod generator;
 #[cfg(feature = "cli")]
@@ -48,9 +51,11 @@ pub mod args;
 pub use auth::run_auth;
 #[cfg(feature = "cli")]
 pub use config::{
-    DiffExit, run_config_diff_typed, run_config_gc, run_config_push, run_config_push_typed,
-    run_config_validate, run_config_validate_typed,
+    DiffExit, effective_manifest_environment, run_config_diff_typed, run_config_gc,
+    run_config_push, run_config_push_typed, run_config_validate, run_config_validate_typed,
 };
+#[cfg(all(feature = "cli", feature = "edgezero-adapter-spin"))]
+pub use edgezero_adapter_spin::cli::resolve_spin_component;
 #[cfg(feature = "cli")]
 pub use provision::run_provision;
 
@@ -187,39 +192,18 @@ pub fn run_deploy(args: &DeployArgs) -> Result<(), String> {
 
     let manifest = load_manifest_optional()?;
     ensure_adapter_defined(&args.adapter, manifest.as_ref())?;
-    let manifest_stores = manifest.as_ref().map(|loader| &loader.manifest().stores);
-    let declared_ids = |declaration: Option<&StoreDeclaration>| {
-        declaration
-            .map(|store| store.ids.clone())
-            .unwrap_or_default()
-    };
-    let deploy_stores = DeployStoreIds {
-        config: declared_ids(manifest_stores.and_then(|declared| declared.config.as_ref())),
-        kv: declared_ids(manifest_stores.and_then(|declared| declared.kv.as_ref())),
-        secrets: declared_ids(manifest_stores.and_then(|declared| declared.secrets.as_ref())),
-    };
-    let variable_defaults = manifest
-        .as_ref()
-        .map(|loader| manifest_variable_defaults(loader.manifest(), &args.adapter))
-        .unwrap_or_default();
-    let (adapter_manifest_path, adapter_manifest_path_error) =
-        match resolve_adapter_manifest_path(manifest.as_ref(), &args.adapter) {
-            Ok(path) => (path.map(PathBuf::from), None),
-            Err(err) => (None, Some(err)),
-        };
     let application_manifest_path = loaded_application_manifest_path(manifest.as_ref())?;
+    let (base_context, adapter_manifest_path_error) =
+        deploy_context_from_loader(manifest.as_ref(), &args.adapter, application_manifest_path);
     let application_release_root = resolve_application_release_root(
         args.application_release.as_deref(),
-        application_manifest_path.as_deref(),
+        base_context.application_manifest_path.as_deref(),
     )?;
     let context = AdapterDeployContext {
-        adapter_manifest_path,
-        application_manifest_path,
         application_release_root,
         service_id: args.service_id.clone(),
-        stores: deploy_stores,
         staging: args.staging,
-        variable_defaults,
+        ..base_context
     };
 
     adapter::deploy(
@@ -228,6 +212,43 @@ pub fn run_deploy(args: &DeployArgs) -> Result<(), String> {
         adapter_manifest_path_error.as_deref(),
         manifest.as_ref(),
         &args.adapter_args,
+    )
+}
+
+/// Shared deployment-selected paths and public store/default metadata.
+/// Adapter path failures stay deferred so deploy ownership can decide whether
+/// that path is needed. Secret helpers require the path and return the error.
+#[cfg(feature = "cli")]
+fn deploy_context_from_loader(
+    loader: Option<&ManifestLoader>,
+    adapter: &str,
+    application_manifest_path: Option<PathBuf>,
+) -> (AdapterDeployContext, Option<String>) {
+    let manifest_stores = loader.map(|loaded| &loaded.manifest().stores);
+    let declared_ids = |declaration: Option<&StoreDeclaration>| {
+        declaration
+            .map(|store| store.ids.clone())
+            .unwrap_or_default()
+    };
+    let (adapter_manifest_path, path_error) = match resolve_adapter_manifest_path(loader, adapter) {
+        Ok(path) => (path.map(PathBuf::from), None),
+        Err(error) => (None, Some(error)),
+    };
+    (
+        AdapterDeployContext {
+            adapter_manifest_path,
+            application_manifest_path,
+            stores: DeployStoreIds {
+                config: declared_ids(manifest_stores.and_then(|stores| stores.config.as_ref())),
+                kv: declared_ids(manifest_stores.and_then(|stores| stores.kv.as_ref())),
+                secrets: declared_ids(manifest_stores.and_then(|stores| stores.secrets.as_ref())),
+            },
+            variable_defaults: loader
+                .map(|loaded| manifest_variable_defaults(loaded.manifest(), adapter))
+                .unwrap_or_default(),
+            ..Default::default()
+        },
+        path_error,
     )
 }
 
@@ -250,6 +271,11 @@ fn loaded_application_manifest_path(
     }
     let path = env::var("EDGEZERO_MANIFEST")
         .map_or_else(|_| PathBuf::from("edgezero.toml"), PathBuf::from);
+    checked_application_manifest_path(&path).map(Some)
+}
+
+#[cfg(feature = "cli")]
+fn checked_application_manifest_path(path: &Path) -> Result<PathBuf, String> {
     let canonical = path.canonicalize().map_err(|error| {
         format!(
             "could not resolve loaded application manifest {}: {error}",
@@ -262,7 +288,7 @@ fn loaded_application_manifest_path(
             canonical.display()
         ));
     }
-    Ok(Some(canonical))
+    Ok(canonical)
 }
 
 #[cfg(feature = "cli")]
