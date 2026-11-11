@@ -58,6 +58,11 @@ action="$ACTION_DIR/action.yml"
 [[ "$(yq -r '.inputs."save-target".default' "$action")" == false ]] || fail 'target saves are not opt-in'
 [[ "$(yq -r '.runs.steps[] | select(.id == "cargo-target") | .uses' "$action")" == actions/cache/restore@v5 ]] || fail 'default target step is not restore-only'
 [[ "$(yq -r '.runs.steps[] | select(.id == "cargo-target-save") | .uses' "$action")" == actions/cache@v5 ]] || fail 'writer does not use the post-job save hook'
+[[ "$(yq -r '.runs.steps[] | select(.id == "cargo-target-save") | .if' "$action")" == *"inputs['save-target'] == 'true'"* ]] || fail 'writer is not selected by save-target'
+target_hit=$(yq -r '.outputs."target-cache-hit".value' "$action")
+for step in cargo-target cargo-target-save; do
+  [[ "$target_hit" == *"steps.$step.outputs.cache-hit == 'true'"* ]] || fail "target-cache-hit ignores $step"
+done
 for step in cargo-target cargo-target-save; do
   STEP_ID="$step" yq -e '.runs.steps[] | select(.id == strenv(STEP_ID)) | .with."restore-keys" == null' "$action" >/dev/null || fail 'target fallback weakens revision isolation'
 done
