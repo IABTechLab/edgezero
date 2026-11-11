@@ -44,30 +44,18 @@ cargo run -p my-app-cli -- provision --adapter spin --local
 ```
 
 `provision --local` synthesises `spin.toml` + `runtime-config.toml`
-if either is missing, merges `key_value_stores` labels into the
-resolved `[component.<id>]`, and appends `[variables]` + matching
-`SPIN_VARIABLE_<NAME>=...` placeholder lines to `<spin_crate>/.env`
-— one line per `#[secret]` field on your typed `MyAppConfig`.
-`[variables]` lives inside the generated `spin.toml`, so any operator
-edits (extra bindings, tuned scheduler settings, etc.) stay local
-until you hand-share them. All adapter manifests follow the same
-gitignored-generated model — `axum.toml` included.
+when missing and merges store labels into the selected component. The project
+CLI’s typed provision also declares reflected secret variables and appends
+inactive `# SPIN_VARIABLE_<NAME>=` hints to the sibling `.env`. Fill and
+uncomment hints before serving; existing operator values and defaults survive.
+Shared custom provider settings need supported tracked declarations or a
+reviewed template, since regenerated files contain defaults.
 
-The `edgezero serve --adapter spin` path loads
-`<spin_crate>/.env` into the parent process environment before
-spawning `spin up`, so the placeholders reach the child. If you
-prefer to invoke `spin up` yourself, export the crate-local `.env`
-into your shell first — `spin up` does not itself source dotenv
-files:
+`edgezero serve --adapter spin` applies that `.env` only to the spawned child;
+the parent environment remains unchanged. Parent exports take precedence.
+Use the [local development workflow](#local-development) below for either the
+CLI or a complete direct invocation with explicit guest `--env` overrides.
 
-```bash
-cd crates/my-app-adapter-spin
-set -a && source .env && set +a
-spin up --runtime-config-file runtime-config.toml
-```
-
-(Or use a dotenv-aware wrapper like `direnv` / `dotenvx`. `edgezero
-serve` handles this for you.)
 :::
 
 ### Entrypoint

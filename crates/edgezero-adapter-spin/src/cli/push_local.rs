@@ -471,8 +471,8 @@ fn read_spin_application_name(spin_path: &Path) -> Result<String, String> {
 ///    fire — even when the manifest's deploy command would otherwise
 ///    trip it. This lets the operator push into a local KV without
 ///    needing to authenticate with Fermyon Cloud first.
-/// 2. **Deploy command auto-detects Fermyon Cloud** (`spin deploy` /
-///    `spin cloud deploy`): shell out to `spin cloud key-value set`.
+/// 2. **Explicit cloud target** (`push_ctx.cloud_target`): shell out to
+///    `spin cloud key-value set`. Deploy-command text does not select a backend.
 /// 3. **`runtime-config.toml` exists and declares this label's
 ///    backend**: dispatch on `type` — `spin` → SQLite-direct, `redis`
 ///    / `azure_cosmos` / `Unknown` → clear error pointing at the
@@ -552,8 +552,7 @@ pub(super) fn dispatch_push(
         );
     }
 
-    // 2. Else, if the manifest deploy command shells to `spin deploy`,
-    //    treat as Fermyon Cloud. Cloud's `set` subcommand addresses
+    // 2. An explicit cloud target selects Fermyon Cloud. Its `set` addresses
     //    the cloud KV store via Fermyon's app-scoped label model
     //    (`--app <app> --label <label>`), so we need the spin app
     //    name from spin.toml. We DO NOT read `runtime-config.toml`
