@@ -1,3 +1,12 @@
+#![expect(
+    clippy::mod_module_files,
+    reason = "keep each adapter CLI root and its subcommands together under cli/"
+)]
+#![expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "group adapter CLI lifecycle methods and their helpers by responsibility"
+)]
+
 use crate::secret_env::secret_env_var;
 use std::collections::BTreeMap;
 use std::fs;
@@ -86,6 +95,7 @@ static AXUM_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
     extra_dirs: &["src"],
     dependencies: AXUM_DEPENDENCIES,
     manifest: ManifestSpec {
+        adapter_defaults: "",
         manifest_filename: "axum.toml",
         build_target: "native",
         build_profile: "dev",
@@ -242,7 +252,7 @@ impl Adapter for AxumCliAdapter {
         Ok(())
     }
 
-    /// Axum writes each typed secret as an `EDGEZERO__SECRETS__<KEY>=` line into
+    /// Axum writes each typed secret as a `# EDGEZERO__SECRETS__<KEY>=` hint into
     /// `.edgezero/.env`. A key that cannot round-trip through that format
     /// would emit a line meaning something else: `partner=token` becomes
     /// `partner=token=`, which every `.env` reader parses back as the key
@@ -367,9 +377,9 @@ impl Adapter for AxumCliAdapter {
         dry_run: bool,
     ) -> Result<ProvisionOutcome, String> {
         // Axum has no cloud secret store: cloud is a documented no-op.
-        // Local mode appends `EDGEZERO__SECRETS__<KEY_UPPER>=` lines to `.edgezero/.env`
-        // (unquoted empty value — the loosest `.env` form). The
-        // operator fills in the actual secret by editing the file.
+        // Local mode appends inactive `# EDGEZERO__SECRETS__<KEY_UPPER>=`
+        // hints to `.edgezero/.env`. The operator uncomments and fills a hint;
+        // an untouched file must leave the credential missing.
         // `append_lines_dedup` handles parent-dir creation so
         // `.edgezero/` gets auto-created on the first-run case.
         if !matches!(mode, ProvisionMode::Local) {
@@ -378,7 +388,7 @@ impl Adapter for AxumCliAdapter {
         let env_path = manifest_root.join(".edgezero").join(".env");
         let lines: Vec<String> = typed_secrets
             .iter()
-            .map(|entry| secret_env_var(entry.key_value).map(|name| format!("{name}=")))
+            .map(|entry| secret_env_var(entry.key_value).map(|name| format!("# {name}=")))
             .collect::<Result<_, _>>()?;
         let wrote = append_lines_dedup_with_header(
             &env_path,
@@ -732,6 +742,7 @@ fn register_ctor() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use edgezero_adapter::env_records;
     use std::fs;
     use tempfile::tempdir;
 
@@ -808,7 +819,7 @@ mod tests {
         let raw = fs::read_to_string(dir.path().join(".edgezero/.env")).expect("secret env file");
         assert!(
             raw.lines()
-                .any(|line| line == "EDGEZERO__SECRETS__DEMO_API_TOKEN="),
+                .any(|line| line == "# EDGEZERO__SECRETS__DEMO_API_TOKEN="),
             "placeholder must match the runtime secret reader: {raw}"
         );
     }
@@ -938,7 +949,7 @@ mod tests {
             let expected = secret_env_var(key).unwrap();
             let body = fs::read_to_string(dir.path().join(".edgezero/.env")).unwrap();
             assert!(
-                body.lines().any(|line| line == format!("{expected}=")),
+                body.lines().any(|line| line == format!("# {expected}=")),
                 "{body}"
             );
             assert!(
@@ -1163,7 +1174,7 @@ mod tests {
         );
         // 2. Operator fills the placeholder with a real value.
         let filled = fs::read_to_string(&env_path).unwrap().replace(
-            "EDGEZERO__SECRETS__DEMO_API_TOKEN=",
+            "# EDGEZERO__SECRETS__DEMO_API_TOKEN=",
             "EDGEZERO__SECRETS__DEMO_API_TOKEN=real-secret-value",
         );
         fs::write(&env_path, &filled).expect("operator edit");
@@ -1460,8 +1471,16 @@ mod tests {
         assert!(env_path.exists(), ".env exists: {}", env_path.display());
         let env = fs::read_to_string(&env_path).unwrap();
         assert!(
+            env_records::records(&env).iter().all(|record| {
+                record.assignment.is_none_or(|entry| {
+                    entry.key != "EDGEZERO__SECRETS__DEMO_API_TOKEN" || entry.commented
+                })
+            }),
+            "fresh provision must keep an unset secret missing: {env}"
+        );
+        assert!(
             env.lines()
-                .any(|line| line == "EDGEZERO__SECRETS__DEMO_API_TOKEN="),
+                .any(|line| line == "# EDGEZERO__SECRETS__DEMO_API_TOKEN="),
             "unquoted empty-value placeholder present: {env}"
         );
         assert!(
@@ -1621,9 +1640,9 @@ mod tests {
             .unwrap();
         let env = fs::read_to_string(dir.path().join(".edgezero/.env")).unwrap();
         for expected in [
-            "EDGEZERO__SECRETS__DEMO_API_TOKEN=",
-            "EDGEZERO__SECRETS__DEMO_HMAC_KEY=",
-            "EDGEZERO__SECRETS__AUDIT_SECRET=",
+            "# EDGEZERO__SECRETS__DEMO_API_TOKEN=",
+            "# EDGEZERO__SECRETS__DEMO_HMAC_KEY=",
+            "# EDGEZERO__SECRETS__AUDIT_SECRET=",
         ] {
             let count = env.lines().filter(|line| *line == expected).count();
             assert_eq!(

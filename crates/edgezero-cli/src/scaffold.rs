@@ -21,15 +21,15 @@ pub enum ScaffoldError {
         #[source]
         source: io::Error,
     },
-    /// The Handlebars renderer rejected the template or its data.
-    #[error("template '{name}' failed to render: {message}")]
-    Render { message: String, name: String },
     /// One of the compile-time-embedded templates failed Handlebars
     /// parsing. Only possible via a build-time programmer bug --
     /// `include_str!` sources are validated by the CI test
     /// `register_templates_registers_all_known_templates`.
     #[error("template registration failed: {0}")]
     Registration(#[from] handlebars::TemplateError),
+    /// The Handlebars renderer rejected the template or its data.
+    #[error("template '{name}' failed to render: {message}")]
+    Render { message: String, name: String },
 }
 
 impl ScaffoldError {

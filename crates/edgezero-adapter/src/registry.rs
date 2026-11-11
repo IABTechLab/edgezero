@@ -77,7 +77,6 @@ pub struct AdapterDeployedState {
 #[non_exhaustive]
 pub struct ProvisionOutcome {
     pub deployed: Option<AdapterDeployedState>,
-    pub status_lines: Vec<String>,
     /// A partial-failure error. When `Some`, provision did NOT fully
     /// succeed, but `deployed` still carries the DURABLE identifiers
     /// created before the failure (e.g. Cloudflare namespaces already
@@ -86,6 +85,7 @@ pub struct ProvisionOutcome {
     /// into tracked `edgezero.toml` and not lost -- THEN propagates
     /// this error. Adapters that fully succeed leave it `None`.
     pub error: Option<String>,
+    pub status_lines: Vec<String>,
 }
 
 impl ProvisionOutcome {
@@ -124,8 +124,6 @@ impl ProvisionOutcome {
     }
 }
 
-/// A single declared store id, paired with the platform name the
-/// runtime will resolve via `EDGEZERO__STORES__<KIND>__<ID>__NAME`.
 /// Logical store ids declared by the application manifest for a deploy.
 ///
 /// This stays platform-neutral: each adapter decides whether and how its
@@ -329,13 +327,17 @@ impl ProvisionStores<'_> {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct AdapterExecContext<'ctx> {
+    adapter_component: Option<&'ctx str>,
+    adapter_crate: Option<&'ctx Path>,
+    adapter_manifest: Option<&'ctx Path>,
     cwd: Option<&'ctx Path>,
     env: &'ctx [(String, String)],
-    adapter_manifest: Option<&'ctx Path>,
-    adapter_crate: Option<&'ctx Path>,
-    adapter_component: Option<&'ctx str>,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "group context construction and fluent setters before the matching accessors"
+)]
 impl<'ctx> AdapterExecContext<'ctx> {
     /// Empty context: no cwd override, no env overrides. Adapters
     /// behave exactly as they did before the context existed.
@@ -480,17 +482,17 @@ impl<'ctx> AdapterExecContext<'ctx> {
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct AdapterPushContext<'ctx> {
-    /// `true` when the operator passed `--local`. Adapters that
-    /// have a separate local-emulator path use this to pick the
-    /// right writeback target; adapters where local == default
-    /// can ignore it.
-    pub local: bool,
     /// `true` when `[adapters.<name>.adapter].cloud = true` -- the SOLE
     /// signal that config `push`/`diff` should target the platform CLOUD
     /// store (Spin's Fermyon Cloud KV). There is no deploy-command heuristic
     /// and no backward-compatibility fallback: a project reaches cloud only
     /// when it sets this flag explicitly.
     pub cloud_target: bool,
+    /// `true` when the operator passed `--local`. Adapters that
+    /// have a separate local-emulator path use this to pick the
+    /// right writeback target; adapters where local == default
+    /// can ignore it.
+    pub local: bool,
     /// Already-resolved path to the adapter's runtime configuration
     /// file (e.g. Spin's `runtime-config.toml`, which declares the
     /// `[key_value_store.<label>]` backends `config push --adapter
@@ -500,6 +502,10 @@ pub struct AdapterPushContext<'ctx> {
     pub runtime_config_path: Option<&'ctx Path>,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "keep the local-mode builder adjacent to construction, followed by target-specific options"
+)]
 impl<'ctx> AdapterPushContext<'ctx> {
     /// Construct a default context: no runtime-config path, prod
     /// (not local). Rust rejects struct-literal construction of
@@ -546,18 +552,14 @@ pub struct TypedSecretEntry<'entry> {
     pub field_name: String,
     /// Blob value — i.e. the secret-store KEY NAME.
     pub key_value: &'entry str,
+    /// Selected provider resource name after the logical store's env override.
+    /// Each adapter decides how that selection is exposed at runtime; Fastly
+    /// retains the logical alias while selecting physical cloud resources.
+    pub platform: String,
     /// Logical secret-store id this key targets (the id declared in
     /// `[stores.secrets].ids`). Used for human-facing wording and the
     /// flat-namespace collision checks.
     pub store_id: &'entry str,
-    /// Platform store name the runtime actually opens — the logical id
-    /// after the `EDGEZERO__STORES__SECRETS__<ID>__NAME` env override
-    /// is applied, or the logical id itself when unset. Adapters that
-    /// seed a local emulator store (Fastly's Viceroy
-    /// `[[local_server.secret_stores.<name>]]`) MUST key it by this,
-    /// not by `store_id` -- the runtime resolves the same override and
-    /// would otherwise open a store the seed never created.
-    pub platform: String,
 }
 
 impl<'entry> TypedSecretEntry<'entry> {
@@ -922,8 +924,7 @@ pub trait Adapter: Sync + Send {
     /// from `C::SECRET_FIELDS` (the generic CLI walks them; bundled
     /// `edgezero` cannot).
     ///
-    /// The default impl is a no-op so existing adapters compile
-    /// untouched while the per-adapter overrides land in Section 5.
+    /// The default is a no-op for adapters that own no typed-secret placeholders.
     ///
     /// # Errors
     /// The default impl never errors. Adapter overrides may return
@@ -1092,10 +1093,8 @@ pub trait Adapter: Sync + Send {
     /// bundled adapters (axum, cloudflare, fastly, spin) override
     /// this — the `Ok(Vec::new())` default is retained only for
     /// downstream / experimental adapters that own no synthesised
-    /// local state. The 2026-07 amendment folded `axum.toml` into
-    /// the same gitignored / provision-generated model as the
-    /// other three, so the earlier "Axum has no synthesised local
-    /// state" carve-out no longer applies.
+    /// local state. Axum's manifest follows the same generated, gitignored
+    /// model as the other adapter manifests.
     ///
     /// Each `(relative_path, contents)` tuple is written by the CLI
     /// under `manifest_root` BEFORE `validate_adapter_manifest`
@@ -1239,6 +1238,10 @@ pub fn registered_adapters() -> Vec<String> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "keep the fake registry adapters and their state together with the registration cases"
+)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -3,6 +3,7 @@
 //! Deploy shells hold no project lock. Every Rust-owned write transaction
 //! acquires the same real OS lock, with no inherited lock advertisement.
 use crate::path_safety::reject_symlink_components;
+use crate::stream;
 use fs4::fs_std::FileExt as _;
 use std::fs::{self, File, OpenOptions};
 use std::path::Path;
@@ -29,8 +30,17 @@ impl ProvisionLock {
             .truncate(false)
             .open(&path)
             .map_err(|err| format!("open {}: {err}", path.display()))?;
-        file.lock_exclusive()
-            .map_err(|err| format!("lock {}: {err}", path.display()))?;
+        if !file
+            .try_lock_exclusive()
+            .map_err(|err| format!("lock {}: {err}", path.display()))?
+        {
+            stream::info_line(&format!(
+                "[edgezero] waiting for provision lock {}",
+                path.display()
+            ));
+            file.lock_exclusive()
+                .map_err(|err| format!("lock {}: {err}", path.display()))?;
+        }
         Ok(Self {
             _file: file,
             #[cfg(test)]

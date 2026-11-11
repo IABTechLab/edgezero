@@ -10,7 +10,6 @@ use toml_edit::DocumentMut;
 
 use edgezero_adapter::env_file::{
     EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header, reject_symlinked_target,
-    upsert_lines_with_header,
 };
 use edgezero_adapter::registry::{ProvisionOutcome, ProvisionStores, TypedSecretEntry};
 
@@ -137,7 +136,7 @@ pub(super) fn provision(
     // reprovision after a platform-name change lands the new value. The
     // commented `__KEY` placeholders are operator-owned and stay on the
     // insert-only append path (an uncommented + edited one survives).
-    let name_written = upsert_lines_with_header(
+    let name_written = append_lines_dedup_with_header(
         &env_path,
         Some(EDGEZERO_PROVISION_HEADER),
         &name_lines,
@@ -400,7 +399,7 @@ fn rename_component(
 /// resolves the secret from the environment at runtime.
 ///
 /// Casing: Spin's schema requires lowercase variable names
-/// (`^[a-z][a-z0-9_]*$`); the Spin runtime reads variables from
+/// (`^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)*$`); the Spin runtime reads variables from
 /// upper-cased `SPIN_VARIABLE_*` env vars. `spin_var` is the
 /// canonicalised (`to_ascii_lowercase`) secret key.
 ///
@@ -453,7 +452,7 @@ pub(super) fn provision_typed(
             spin_changed = true;
         }
 
-        env_lines.push(format!("{env_var}="));
+        env_lines.push(format!("# {env_var}="));
         status_lines.push(format!(
             "spin: variable `{spin_var}` on component `{component_id}` (env `{env_var}`) in {}",
             spin_path.display()
@@ -475,7 +474,7 @@ pub(super) fn provision_typed(
     Ok(ProvisionOutcome::from_status_lines(status_lines))
 }
 
-/// Insert `[variables].<spin_var> = { default = "", secret = true }`
+/// Insert `[variables].<spin_var> = { secret = true }`
 /// into `doc` if the key is absent. If a `[variables].<spin_var>`
 /// entry already exists — commonly because the operator has
 /// customised the `default` fallback or added extra metadata —
@@ -499,7 +498,6 @@ fn upsert_variables_entry(
         return Ok(false);
     }
     let mut inline = InlineTable::new();
-    inline.insert("default", Value::from(""));
     inline.insert("secret", Value::from(true));
     variables_tbl.insert(spin_var, Item::Value(Value::InlineTable(inline)));
     Ok(true)
@@ -1244,7 +1242,7 @@ mod tests {
     /// Seed BOTH baseline files (spin.toml + runtime-config.toml) at
     /// `dir`, matching the `synthesise_baseline_manifest` output.
     ///
-    /// The 2026-07 spin.toml synth derives its component id from
+    /// The Spin manifest synthesiser derives its component id from
     /// `<app_name>-adapter-spin` when no explicit component override
     /// is supplied. Tests want the resulting `[component.<id>]`
     /// header to be spelt `<component_id>` verbatim (so lookups by
@@ -1602,12 +1600,8 @@ mod tests {
     }
 
     #[test]
-    fn spin_local_provision_env_converges_changed_platform_name() {
-        // Operator changes a store's platform NAME (app_config ->
-        // prod_config) and REPROVISIONS. The `__NAME` overlay line in
-        // `.env` must CONVERGE to the new value with no stale
-        // `=app_config` line lingering, while an operator-added sibling
-        // line survives.
+    fn spin_local_provision_env_preserves_operator_name_records() {
+        // Re-provision must preserve active, commented, duplicate and quoted records.
         let dir = tempdir().expect("tempdir");
         seed_baseline(dir.path(), TEST_COMPONENT_ID);
         let env_path = dir.path().join(".env");
@@ -1631,8 +1625,8 @@ mod tests {
             .expect("first local provision succeeds");
         // Operator hand-adds a sibling secret line.
         let first = fs::read_to_string(&env_path).expect("read .env");
-        fs::write(&env_path, format!("{first}OPERATOR_SECRET=keepme\n"))
-            .expect("append operator line");
+        let operator = first.replace("EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=app_config", "# EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=disabled\r\nEDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=operator\r\nEDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=duplicate\r\nTOKEN=\"first\r\nEDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=inside secret\r\nlast\"");
+        fs::write(&env_path, &operator).unwrap();
 
         // Reprovision with the platform renamed to `prod_config`.
         let second_ids = vec![ResolvedStoreId::new(TEST_CONFIG_ID, "prod_config")];
@@ -1653,20 +1647,7 @@ mod tests {
             .expect("reprovision succeeds");
 
         let after = fs::read_to_string(&env_path).expect("read .env");
-        assert!(
-            after.contains("EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=prod_config"),
-            "reprovision must converge the __NAME value to prod_config: {after}"
-        );
-        assert!(
-            !after
-                .lines()
-                .any(|line| line == "EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=app_config"),
-            "no stale =app_config __NAME line may linger: {after}"
-        );
-        assert!(
-            after.contains("OPERATOR_SECRET=keepme"),
-            "operator-added sibling line must survive: {after}"
-        );
+        assert_eq!(after, operator, "operator bytes must survive unchanged");
     }
 
     #[test]
@@ -1764,12 +1745,16 @@ mod tests {
 
         let spin_after = fs::read_to_string(dir.path().join("spin.toml")).unwrap();
         assert!(
+            !spin_after.contains("default = \"\""),
+            "a fresh secret variable must be required: {spin_after}"
+        );
+        assert!(
             spin_after.contains("[variables]"),
             "root [variables] header: {spin_after}"
         );
         assert!(
-            spin_after.contains("demo_api_token = { default = \"\", secret = true }"),
-            "inline variables entry with default=\"\" and secret=true: {spin_after}"
+            spin_after.contains("demo_api_token = { secret = true }"),
+            "required secret variable: {spin_after}"
         );
         assert!(
             spin_after.contains("[component.demo.variables]"),
@@ -1784,9 +1769,38 @@ mod tests {
         assert!(
             env_after
                 .lines()
-                .any(|line| line == "SPIN_VARIABLE_DEMO_API_TOKEN="),
+                .any(|line| line == "# SPIN_VARIABLE_DEMO_API_TOKEN="),
             "SPIN_VARIABLE_<UPPER>= placeholder line: {env_after}"
         );
+    }
+
+    #[test]
+    fn direct_typed_provision_rejects_invalid_variables_without_mutation() {
+        for key in ["foo__bar", "token_2", "foo_"] {
+            let dir = tempdir().unwrap();
+            seed_baseline(dir.path(), TEST_COMPONENT_ID);
+            let manifest = dir.path().join("spin.toml");
+            let original = fs::read(&manifest).unwrap();
+            let env = dir.path().join(".env");
+            fs::write(&env, "# operator data\r\nTOKEN=keep\r\n").unwrap();
+            let error = SpinCliAdapter
+                .provision_typed(
+                    dir.path(),
+                    Some("spin.toml"),
+                    None,
+                    &[TypedSecretEntry::new("default", "credential", key)],
+                    ProvisionMode::Local,
+                    false,
+                )
+                .unwrap_err();
+            assert!(error.contains("credential") && error.contains("redacted"));
+            assert!(!error.contains(key));
+            assert_eq!(fs::read(&manifest).unwrap(), original);
+            assert_eq!(
+                fs::read_to_string(&env).unwrap(),
+                "# operator data\r\nTOKEN=keep\r\n"
+            );
+        }
     }
 
     #[test]
@@ -2189,10 +2203,7 @@ mod tests {
         assert_eq!(env_first, env_second, ".env byte-identical");
     }
 
-    /// Renamed 2026-07 (deep self-review finding P1-f): the prior
-    /// name `provision_local_push_after_provision_preserves_*`
-    /// promised a push→provision integration test but the body
-    /// re-runs `provision_typed` twice.
+    /// Re-provision preserves the operator's filled-in secret and its mapping.
     #[test]
     fn provision_typed_local_re_run_preserves_operator_spin_variable_value() {
         // Operator installs a real secret value into a
@@ -2234,13 +2245,13 @@ mod tests {
         assert!(
             after_first
                 .lines()
-                .any(|line| line == "SPIN_VARIABLE_DEMO_API_TOKEN="),
+                .any(|line| line == "# SPIN_VARIABLE_DEMO_API_TOKEN="),
             "first provision emits the empty SPIN_VARIABLE_ placeholder: {after_first}"
         );
 
         // Operator uncomments-value: fills in the real value.
         let operator_edited = after_first.replace(
-            "SPIN_VARIABLE_DEMO_API_TOKEN=",
+            "# SPIN_VARIABLE_DEMO_API_TOKEN=",
             "SPIN_VARIABLE_DEMO_API_TOKEN=real_secret_value",
         );
         fs::write(&env_path, &operator_edited).unwrap();
@@ -2298,7 +2309,7 @@ mod tests {
 
     #[test]
     fn synthesised_spin_toml_honors_renamed_adapter_crate() {
-        // Regression: reviewer verified that a project with
+        // A project with
         // `[adapters.spin.adapter].manifest = "crates/spin-server/spin.toml"`
         // + `[package].name = "spin-server"` in
         // `crates/spin-server/Cargo.toml` ended up with
@@ -2357,7 +2368,7 @@ mod tests {
 
     #[test]
     fn synthesised_spin_toml_honors_renamed_adapter_crate_with_nested_manifest() {
-        // Reviewer regression #1: the adapter manifest may live at
+        // the adapter manifest may live at
         // a nested path (`crates/spin-server/config/spin.toml`) with
         // the Cargo.toml at the crate root one level up. The
         // synthesiser must walk from the manifest parent up to find
@@ -2415,7 +2426,7 @@ mod tests {
 
     #[test]
     fn synthesised_spin_toml_component_selector_does_not_leak_into_wasm_basename() {
-        // Reviewer regression #2: `[adapters.spin.adapter].component`
+        // `[adapters.spin.adapter].component`
         // is a Spin runtime selector, NOT the Cargo package name.
         // With `[package].name = "spin-server"` and
         // `[adapters.spin.adapter].component = "worker"`, the

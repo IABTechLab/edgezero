@@ -4,6 +4,7 @@
 //! OR uncommented entry is skipped. See spec §"Merge mechanics"
 //! → "Line-oriented".
 
+use crate::atomic_file;
 use crate::env_records::records;
 use std::collections::BTreeSet;
 use std::fs;
@@ -152,19 +153,11 @@ pub fn append_lines_dedup_with_header(
         combined.push('\n');
     }
     combined.push_str(&to_append);
-    fs::write(path, combined).map_err(|err| format!("write {}: {err}", path.display()))?;
+    atomic_file::replace(path, combined.as_bytes(), None)
+        .map_err(|err| format!("write {}: {err}", path.display()))?;
 
-    // Restrictive permissions: `.env` / `.dev.vars` / `.edgezero/.env`
-    // are the operator's secret-carriage files (Cloudflare runtime
-    // secrets, Spin SPIN_VARIABLE_* placeholders, Axum
-    // `<key_value>=` seeds). fs::write creates with mode 0666 & ~umask
-    // which is typically 0644 on Unix -- readable by every other UID
-    // on the host. Tighten to 0600 after the write so only the
-    // invoking user can read the placeholders and any real values the
-    // operator later fills in. Best-effort: a permission-set failure
-    // is not fatal (some filesystems, e.g. NFS mounts, may reject
-    // chmod), but we surface the error string so the operator can
-    // investigate.
+    // The sibling file starts private. Ensure the final mode is exactly 0600,
+    // including when a restrictive umask masked creation bits. Surface failures.
     #[cfg(unix)]
     set_restrictive_mode(path)?;
     Ok(true)
@@ -183,10 +176,8 @@ pub fn append_lines_dedup_with_header(
 /// key with an earlier one is ignored (the FIRST is authoritative,
 /// matching [`append_lines_dedup_with_header`]'s within-batch dedup).
 ///
-/// Unlike [`append_lines_dedup_with_header`], which is insert-only by
-/// key, this is used for the provision-generated `__NAME` overlay lines
-/// so that reprovisioning after an operator changes a store's platform
-/// name lands the new value rather than retaining the stale one.
+/// This helper deliberately owns the supplied values. Provision hints use
+/// [`append_lines_dedup_with_header`] instead, preserving operator overrides.
 ///
 /// Returns `Ok(true)` when the file content actually changed and
 /// `Ok(false)` on a no-op (content already current, or `dry_run`). Like
@@ -295,7 +286,8 @@ pub fn upsert_lines_with_header(
     {
         fs::create_dir_all(parent).map_err(|err| format!("create {}: {err}", parent.display()))?;
     }
-    fs::write(path, &combined).map_err(|err| format!("write {}: {err}", path.display()))?;
+    atomic_file::replace(path, combined.as_bytes(), None)
+        .map_err(|err| format!("write {}: {err}", path.display()))?;
     #[cfg(unix)]
     set_restrictive_mode(path)?;
     Ok(true)
@@ -451,6 +443,22 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    #[test]
+    fn append_atomically_replaces_the_file_without_changing_existing_links() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        let link = dir.path().join("old-env");
+        fs::write(&path, "TOKEN=operator-secret\n").unwrap();
+        fs::hard_link(&path, &link).unwrap();
+        append_lines_dedup(&path, &["NEW_KEY=value".to_owned()], false).unwrap();
+        assert_eq!(fs::read_to_string(link).unwrap(), "TOKEN=operator-secret\n");
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
     #[test]
     fn managed_upsert_preserves_quoted_records_and_line_endings() {
         for quote in ['\'', '"', '`'] {

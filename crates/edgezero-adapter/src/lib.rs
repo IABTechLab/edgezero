@@ -4,12 +4,16 @@
              `edgezero_adapter::TypeName` instead of `edgezero_adapter::registry::TypeName`"
 )]
 
+pub mod atomic_file;
 pub mod env_file;
 pub mod env_records;
 
 pub mod local;
 
 pub mod registry;
+
+#[cfg(feature = "cli")]
+pub mod release;
 
 pub mod scaffold;
 
@@ -24,5 +28,3 @@ pub use registry::{
     Adapter, AdapterDeployedState, ProvisionMode, ProvisionOutcome, ProvisionStores,
     ResolvedStoreId, TypedSecretEntry, get_adapter,
 };
-#[cfg(feature = "cli")]
-pub mod release;

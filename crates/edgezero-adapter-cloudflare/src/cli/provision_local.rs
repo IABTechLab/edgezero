@@ -3,9 +3,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use edgezero_adapter::env_file::{
-    EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header, upsert_lines_with_header,
-};
+use edgezero_adapter::env_file::{EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header};
 use edgezero_adapter::registry::{AdapterDeployedState, ProvisionOutcome, ProvisionStores};
 
 use super::provision_cloud::is_real_namespace_id;
@@ -355,7 +353,7 @@ pub(super) fn provision(
     // reprovision after a platform-name change lands the new value. The
     // commented `__KEY` placeholders are operator-owned and stay on the
     // insert-only append path (an uncommented + edited one survives).
-    upsert_lines_with_header(
+    append_lines_dedup_with_header(
         &dev_vars_path,
         Some(EDGEZERO_PROVISION_HEADER),
         &name_lines,
@@ -1260,11 +1258,8 @@ mod tests {
     }
 
     #[test]
-    fn cloudflare_local_provision_dev_vars_converges_changed_platform_name() {
-        // Operator changes a store's platform NAME (app_config ->
-        // prod_config) and REPROVISIONS. The `__NAME` overlay line must
-        // CONVERGE to the new value with no stale `="app_config"` line
-        // lingering, while an operator-added sibling line survives.
+    fn cloudflare_local_provision_dev_vars_preserves_operator_name_records() {
+        // Re-provision must preserve active, commented, duplicate and quoted records.
         let dir = tempdir().expect("tempdir");
         write_wrangler(
             dir.path(),
@@ -1291,11 +1286,8 @@ mod tests {
             .expect("first local provision succeeds");
         // Operator hand-adds a sibling secret line.
         let first = fs::read_to_string(&dev_vars_path).expect("read .dev.vars");
-        fs::write(
-            &dev_vars_path,
-            format!("{first}OPERATOR_SECRET=\"keepme\"\n"),
-        )
-        .expect("append operator line");
+        let operator = first.replace("EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=\"app_config\"", "# EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=disabled\r\nEDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=operator\r\nEDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=duplicate\r\nTOKEN=\"first\r\nEDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=inside secret\r\nlast\"");
+        fs::write(&dev_vars_path, &operator).unwrap();
 
         // Reprovision with the platform renamed to `prod_config`.
         let second_ids = vec![ResolvedStoreId::new(TEST_CONFIG_ID, "prod_config")];
@@ -1316,20 +1308,7 @@ mod tests {
             .expect("reprovision succeeds");
 
         let after = fs::read_to_string(&dev_vars_path).expect("read .dev.vars");
-        assert!(
-            after.contains(r#"EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME="prod_config""#),
-            "reprovision must converge the __NAME value to prod_config: {after}"
-        );
-        assert!(
-            !after
-                .lines()
-                .any(|line| line == r#"EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME="app_config""#),
-            "no stale =app_config __NAME line may linger: {after}"
-        );
-        assert!(
-            after.contains(r#"OPERATOR_SECRET="keepme""#),
-            "operator-added sibling line must survive: {after}"
-        );
+        assert_eq!(after, operator, "operator bytes must survive unchanged");
     }
 
     #[test]
@@ -1442,7 +1421,7 @@ mod tests {
 
     #[test]
     fn synthesised_wrangler_toml_honors_renamed_adapter_crate() {
-        // Reviewer regression: with
+        // with
         // `[adapters.cloudflare.adapter].manifest = "crates/cf-worker/wrangler.toml"`
         // + `[package].name = "cf-worker"`, clean-clone provision
         // must emit `name = "cf-worker"` — NOT the fallback
@@ -1496,8 +1475,7 @@ mod tests {
         //
         // Contract: `wrangler.toml` lands at the resolved path;
         // `.dev.vars` lands next to it; BOTH files carry the
-        // `# edgezero-provision: v1` schema header (Section 5 review
-        // fix); wrangler.toml has a `[[kv_namespaces]]` entry bound to
+        // `# edgezero-provision: v1` schema header; wrangler.toml has a `[[kv_namespaces]]` entry bound to
         // `sessions`; `.dev.vars` has the __NAME overlay line.
         let dir = tempdir().expect("tempdir");
         let wrangler_path = dir.path().join("wrangler.toml");

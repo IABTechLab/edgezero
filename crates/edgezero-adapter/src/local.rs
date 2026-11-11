@@ -6,11 +6,15 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, Default)]
 #[non_exhaustive]
 pub struct AdapterLocalContext<'ctx> {
-    manifest: Option<&'ctx str>,
-    crate_path: Option<&'ctx str>,
     component: Option<&'ctx str>,
+    crate_path: Option<&'ctx str>,
+    manifest: Option<&'ctx str>,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "the constructor precedes its related read-only accessors"
+)]
 impl<'ctx> AdapterLocalContext<'ctx> {
     /// Describe the selected adapter without introducing core manifest types.
     #[must_use]
@@ -21,9 +25,9 @@ impl<'ctx> AdapterLocalContext<'ctx> {
         component: Option<&'ctx str>,
     ) -> Self {
         Self {
-            manifest,
-            crate_path,
             component,
+            crate_path,
+            manifest,
         }
     }
 
@@ -53,20 +57,20 @@ impl<'ctx> AdapterLocalContext<'ctx> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum LocalArtifactKind {
-    /// Ordinary text, such as a generated TOML document.
-    Text,
     /// Environment assignments whose values must be redacted in previews.
     Env,
     /// TOML whose scalar values and comments must be removed from previews.
     SensitiveToml,
+    /// Ordinary text, such as a generated TOML document.
+    Text,
 }
 
 /// A local provision output, relative to the application root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct LocalArtifact {
-    pub path: PathBuf,
     pub kind: LocalArtifactKind,
+    pub path: PathBuf,
 }
 
 impl LocalArtifact {
@@ -91,8 +95,8 @@ impl LocalArtifact {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct AdapterLocalLayout {
-    pub manifest: Option<PathBuf>,
     pub artifacts: Vec<LocalArtifact>,
+    pub manifest: Option<PathBuf>,
     pub serve_env: Option<PathBuf>,
 }
 

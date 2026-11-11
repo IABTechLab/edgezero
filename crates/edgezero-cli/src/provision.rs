@@ -1,3 +1,8 @@
+#![expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "keep transaction contexts and fixtures adjacent to the provisioning flows they describe"
+)]
+
 //! `provision` command.
 //!
 //! Thin delegate to the adapter registry. The CLI loads the manifest,
@@ -11,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::io::{self, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 
 use similar::TextDiff;
@@ -23,20 +29,20 @@ use crate::config::{
     reject_merged_id_collisions, resolve_app_config_path_primitive, run_typed_preflight,
     strict_handler_paths, validate_deployed_field_ownership,
 };
-use crate::copy_tree::copy_dir_recursive;
 use crate::ensure_adapter_defined;
 use crate::path_safety::{
     assert_provision_paths_contained, assert_provision_paths_safe, local_layout,
     reject_symlink_components,
 };
 use crate::provision_lock::ProvisionLock;
-use edgezero_adapter::AdapterDeployedState;
+use crate::stream;
 use edgezero_adapter::env_file::EDGEZERO_PROVISION_HEADER;
 use edgezero_adapter::env_records::redaction_records;
 use edgezero_adapter::local::{AdapterLocalContext, LocalArtifactKind};
 use edgezero_adapter::registry::{
     self as adapter_registry, ProvisionOutcome, ProvisionStores, ResolvedStoreId, TypedSecretEntry,
 };
+use edgezero_adapter::{AdapterDeployedState, atomic_file};
 use edgezero_core::app_config::{self, AppConfigLoadOptions, AppConfigMeta};
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::manifest::{Manifest, ManifestAdapter, ManifestLoader, StoreDeclaration};
@@ -59,8 +65,6 @@ pub(crate) struct DryRunAllowList {
     pub kinds: BTreeMap<PathBuf, LocalArtifactKind>,
 }
 
-/// # Errors
-///
 /// Manifest-shape gates run before the dispatch matrix: capability
 /// gate, handler-path shape, and deployed-field ownership. The
 /// ownership check exists here for parity with `run_shared_checks` in
@@ -91,16 +95,6 @@ fn manifest_root_from(manifest_path: &Path) -> &Path {
         .unwrap_or_else(|| Path::new("."))
 }
 
-/// # Errors
-///
-/// Returns an error string if the manifest can't be loaded, the
-/// adapter isn't declared in `[adapters.*]`, the adapter isn't
-/// registered in this build, or the adapter's `provision` impl
-/// reports a failure.
-#[inline]
-/// Acquire the cross-process provision lock when the invocation
-/// will actually write. Returns `None` for dry-run so a long
-/// staging + diff doesn't starve real writers.
 /// Reject absolute paths + `..` traversal in the adapter-declared
 /// manifest / crate strings UNCONDITIONALLY. Cloud provision also
 /// joins `manifest_root` with the adapter-declared manifest path to
@@ -135,7 +129,11 @@ fn enforce_adapter_path_guard(
     }
 }
 
+/// Acquire one cross-process lock for the complete live transaction.
+/// Dry-run stages independently and creates no lock sentinel.
 fn acquire_provision_lock(args: &ProvisionArgs) -> Result<Option<ProvisionLock>, String> {
+    fs::metadata(&args.manifest)
+        .map_err(|err| format!("inspect {}: {err}", args.manifest.display()))?;
     if args.dry_run {
         // A dry-run stays truly non-mutating: it must NOT create the
         // `.edgezero/provision.lock` sentinel in the worktree. Snapshot
@@ -230,14 +228,12 @@ fn run_provision_inner(
 
     // Fallback to "" when [app].name is unset: today's synthesiser
     // default is a no-op so the value isn't consulted; per-adapter
-    // overrides (Tasks 17/21/24) that DO use it treat empty as the
+    // overrides that DO use it treat empty as the
     // "operator hasn't set app.name yet" case.
     let app_name = manifest.app.name.clone().unwrap_or_default();
 
     // Translate the manifest's deployed block into the neutral
-    // `AdapterDeployedState` for the synthesiser call site. The typed
-    // deployed struct makes this a real translation;
-    // today it's always `None`.
+    // `AdapterDeployedState` for the synthesiser call site.
     let deployed = deployed_state_for(manifest, &args.adapter);
 
     let outcome = match (args.local, args.dry_run) {
@@ -468,7 +464,7 @@ where
         &entries,
     )?;
     if !report.is_empty() {
-        log::info!("{report}");
+        write_preview(&report)?;
     }
     // A partial-failure error from the staged provision must fail the
     // dry-run AFTER the report is logged -- otherwise a broken provision
@@ -844,29 +840,6 @@ fn deployed_state_for(
     }
 }
 
-/// Merge `state` into `[adapters.<adapter_name>.deployed]` inside
-/// `manifest_path`, preserving all sibling content and adjacent
-/// operator comments via `toml_edit`. `adapter_name` MUST be the
-/// canonical operator-spelled key (result of
-/// `manifest.adapter_entry(...)`); passing the raw `args.adapter`
-/// risks creating a parallel lowercased `[adapters.cloudflare.deployed]`
-/// beside an operator-spelled `[adapters.Cloudflare]` table.
-///
-/// `state.fields` become scalar leaves; `state.sub_tables` become
-/// nested `[<sub_name>]` sub-tables under `.deployed`. When
-/// `dry_run` is true the helper builds the doc in memory then
-/// returns without writing — used by callers who want the write
-/// gated on the same `--dry-run` semantic as the surrounding
-/// dispatch.
-///
-/// **Adapter-emitted schema check**: every key in `state.fields` and
-/// `state.sub_tables` MUST be in the known `ManifestAdapterDeployed`
-/// schema AND in `owned_fields`. `validate_deployed_field_ownership`
-/// gates operator-written manifests before dispatch; this gate does
-/// the same for adapter-emitted output before writing back. Without
-/// it, a buggy adapter's `AdapterDeployedState` could persist
-/// unknown or non-owned keys into `edgezero.toml`, breaking future
-/// manifest loads.
 /// Set `table[key] = new` in place, preserving the existing value's
 /// decor (trailing inline comments survive) per the spec's
 /// byte-preserving merge contract. `Table::insert` would replace the
@@ -905,28 +878,49 @@ fn get_or_insert_table_like<'parent>(
         })
 }
 
-/// Prove the manifest can be opened for writing BEFORE a cloud provision
-/// mutates the account. `merge_deployed_into_manifest` records created
-/// resource ids here with a truncating `fs::write` AFTER the account
-/// mutation; opening the file `O_WRONLY` (without truncating) is a faithful
-/// proxy for that write succeeding, so a read-only manifest / directory is
-/// caught while nothing has been created yet.
+/// Check the existing file and its canonical parent's sibling-file capability
+/// before creating cloud resources whose identifiers must be checkpointed.
 fn assert_manifest_writable(manifest_path: &Path) -> Result<(), String> {
-    fs::OpenOptions::new()
-        .write(true)
-        .open(manifest_path)
-        .map(drop)
-        .map_err(|err| {
-            format!(
-                "manifest {} is not writable ({err}); cloud provision records the ids of resources \
-                 it creates back into this file, so an unwritable manifest would leave a created \
-                 remote resource UNTRACKED. Fix the manifest (or its directory) permissions and \
-                 re-run.",
-                manifest_path.display()
-            )
-        })
+    let probe = || -> io::Result<()> {
+        let _file = fs::OpenOptions::new().write(true).open(manifest_path)?;
+        let target = fs::canonicalize(manifest_path)?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| io::Error::other("manifest has no parent"))?;
+        tempfile::Builder::new()
+            .prefix(".edgezero-write-probe-")
+            .tempfile_in(parent)?
+            .close()
+    };
+    probe().map_err(|err| format!(
+        "manifest {} is not writable for atomic writeback ({err}); cloud provision records created resource ids here. An unwritable manifest or target directory would leave remote resources UNTRACKED. Fix the file and target-directory permissions and re-run.",
+        manifest_path.display()
+    ))
 }
 
+/// Merge `state` into `[adapters.<adapter_name>.deployed]` inside
+/// `manifest_path`, preserving all sibling content and adjacent
+/// operator comments via `toml_edit`. `adapter_name` MUST be the
+/// canonical operator-spelled key (result of
+/// `manifest.adapter_entry(...)`); passing the raw `args.adapter`
+/// risks creating a parallel lowercased `[adapters.cloudflare.deployed]`
+/// beside an operator-spelled `[adapters.Cloudflare]` table.
+///
+/// `state.fields` become scalar leaves; `state.sub_tables` become
+/// nested `[<sub_name>]` sub-tables under `.deployed`. When
+/// `dry_run` is true the helper builds the doc in memory then
+/// returns without writing — used by callers who want the write
+/// gated on the same `--dry-run` semantic as the surrounding
+/// dispatch.
+///
+/// **Adapter-emitted schema check**: every key in `state.fields` and
+/// `state.sub_tables` MUST be in the known `ManifestAdapterDeployed`
+/// schema AND in `owned_fields`. `validate_deployed_field_ownership`
+/// gates operator-written manifests before dispatch; this gate does
+/// the same for adapter-emitted output before writing back. Without
+/// it, a buggy adapter's `AdapterDeployedState` could persist
+/// unknown or non-owned keys into `edgezero.toml`, breaking future
+/// manifest loads.
 pub(crate) fn merge_deployed_into_manifest(
     manifest_path: &Path,
     adapter_name: &str,
@@ -1021,46 +1015,37 @@ pub(crate) fn merge_deployed_into_manifest(
     }
 
     let updated = doc.to_string();
-    if dry_run {
-        // Regression: dry-run used to
-        // return silently here. Adapters like Fastly can emit a
-        // freshly-discovered `service_id` during cloud dry-run (the
-        // adapter shells `fastly service describe --json` which
-        // works read-only in dry-run), and the corresponding real
-        // run would then mutate tracked `edgezero.toml` with that
-        // value — WITHOUT the diff appearing in the operator's
-        // preview. Render the original-vs-updated unified diff so
-        // dry-run tells the truth about every write it would
-        // perform.
-        if updated == raw {
-            log::info!(
+    if updated == raw {
+        if dry_run {
+            stream::info_line(&format!(
                 "[edgezero] dry-run: `{}` already carries the same deployed writeback for adapter `{adapter_name}`; no change",
                 manifest_path.display()
-            );
-        } else {
-            let diff = TextDiff::from_lines(&raw, &updated);
-            let path_display = manifest_path.display().to_string();
-            log::info!(
-                "[edgezero] dry-run: would rewrite `{}` with deployed writeback for adapter `{adapter_name}`:\n{}",
-                manifest_path.display(),
-                diff.unified_diff()
-                    .context_radius(3)
-                    .header(&path_display, &path_display),
-            );
+            ));
         }
         return Ok(());
     }
-    fs::write(manifest_path, updated)
+    if dry_run {
+        let diff = TextDiff::from_lines(&raw, &updated);
+        let path_display = manifest_path.display().to_string();
+        return write_preview(&format!(
+            "[edgezero] dry-run: would rewrite `{}` with deployed writeback for adapter `{adapter_name}`:\n{}",
+            manifest_path.display(),
+            diff.unified_diff()
+                .context_radius(3)
+                .header(&path_display, &path_display),
+        ));
+    }
+    // Preserve supported top-level manifest symlinks and the target's mode.
+    let target = fs::canonicalize(manifest_path)
+        .map_err(|err| format!("resolve {}: {err}", manifest_path.display()))?;
+    let permissions = fs::metadata(&target)
+        .map_err(|err| format!("inspect {}: {err}", manifest_path.display()))?
+        .permissions();
+    atomic_file::replace(&target, updated.as_bytes(), Some(permissions))
         .map_err(|err| format!("write {}: {err}", manifest_path.display()))?;
     Ok(())
 }
 
-/// Shared validate + env-overlay + collision-check + resolve-stores +
-/// dispatch tail for both cloud and local live-mode arms. Baseline
-/// synthesis (local only) fires BEFORE this helper — the tail after
-/// synthesis is identical between the two arms, so factoring it here
-/// keeps `run_provision` under the module's function-length lint AND
-/// removes the copy-paste risk of two arms drifting out of sync.
 /// Bundles the adapter identity + paths + root that both
 /// `validate_and_dispatch` and its dry-run typed sibling need. Cuts
 /// their argument lists from 8-9 down to a single ctx + the arm-
@@ -1073,6 +1058,7 @@ struct DispatchContext<'dispatch> {
     manifest_root: &'dispatch Path,
 }
 
+/// Validate the selected manifest, resolve stores and dispatch the live transaction.
 fn validate_and_dispatch(
     ctx: &DispatchContext<'_>,
 
@@ -1296,7 +1282,7 @@ pub(crate) fn render_dry_run_report(
         // diff reflects one consistent worktree instant even if an external
         // process rewrites the live file mid-run; an absent key means the
         // file did not exist at T1 (empty "before"). The snapshot was taken
-        // from the staged copy, which `copy_dir_recursive` builds WITHOUT
+        // from the staged copy, which artifact staging builds WITHOUT
         // following symlinks, so no external target's bytes can leak in.
         //
         // Legacy mode (`None`, unit tests only) reads the live project file.
@@ -1409,7 +1395,11 @@ fn redact_toml_values(value: &mut toml::Value) {
     }
 }
 
-/// Redact entire logical values, including malformed and stashed multiline values.
+fn write_preview(report: &str) -> Result<(), String> {
+    stream::stdout_line(report).map_err(|err| format!("write provision preview: {err}"))
+}
+
+/// Redact entire logical values, malformed prefixes, and untrusted comments.
 fn redact_env_body_for_diff(body: &str) -> String {
     let mut out = String::new();
     for record in redaction_records(body) {
@@ -1418,15 +1408,19 @@ fn redact_env_body_for_diff(body: &str) -> String {
             continue;
         }
         if let Some(entry) = record.assignment {
-            out.push_str(entry.prefix);
+            // A comment may contain a credential which merely resembles a key.
+            out.push_str(if entry.commented { "# " } else { entry.prefix });
             out.push_str("<redacted>");
             // Preserve the number of physical lines without copying their contents.
             for _ in 0..record.raw.bytes().filter(|ch| *ch == b'\n').count() {
                 out.push('\n');
             }
-        } else if record.raw.trim_start().starts_with('#') || record.raw.trim().is_empty() {
+        } else if record.raw.trim().is_empty() {
             out.push_str(record.raw);
         } else {
+            if record.raw.trim_start().starts_with('#') {
+                out.push_str("# ");
+            }
             out.push_str("<redacted>");
             if record.raw.ends_with('\n') {
                 out.push('\n');
@@ -1438,7 +1432,7 @@ fn redact_env_body_for_diff(body: &str) -> String {
 
 /// The `(true, true)` dispatch arm: synthesise the baseline manifest
 /// (bytes only — no I/O against the real worktree), then stage the
-/// adapter crate + `.edgezero/` + `edgezero.toml` into a tempdir and
+/// declared artifacts and Cargo/application metadata into a private tempdir and
 /// run validate + build stores + dispatch entirely against the staged
 /// root. The real worktree is never mutated.
 ///
@@ -1555,7 +1549,7 @@ fn run_local_dry_run(
     // log lines when the adapter status_lines are empty and no
     // allow-list file differs).
     if !report.is_empty() {
-        log::info!("{report}");
+        write_preview(&report)?;
     }
     // Clear status_lines: the sanitized report already includes the
     // rewritten "would write ..." lines with staged-tempdir paths
@@ -1610,23 +1604,19 @@ fn stage_local_artifacts(
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|err| err.to_string())?;
             }
-            fs::copy(&source, &target)
-                .map_err(|err| format!("stage {}: {err}", source.display()))?;
+            match fs::copy(&source, &target) {
+                Ok(_) => {}
+                Err(err) if err.kind() == ErrorKind::NotFound => {}
+                Err(err) => return Err(format!("stage {}: {err}", source.display())),
+            }
         }
     }
     Ok(())
 }
 
-/// Stage a real recursive copy of the adapter crate dir AND the
-/// `.edgezero/` dir (if present) under a fresh `TempDir`, then invoke
-/// `body` with the staged paths. The original project worktree is
-/// never mutated. Caller is responsible for diffing the staged tree
-/// against the project tree before the returned `TempDir` drops. See
-/// spec §"Dry-run".
-///
-/// Called by the `(true, true)` arm of the `run_provision` dispatch
-/// matrix — local dry-run stages everything into a tempdir and
-/// discards it after `body` completes.
+/// Stage application/Cargo metadata in a private directory. The body stages
+/// adapter-declared artifacts before dispatch; unrelated source and runtime
+/// state are never copied.
 pub(crate) fn run_with_staging<F, R>(
     project_root: &Path,
     adapter_crate_rel: &Path,
@@ -1635,23 +1625,38 @@ pub(crate) fn run_with_staging<F, R>(
 where
     F: FnOnce(&Path, &Path) -> Result<R, String>,
 {
-    let tempdir = tempfile::TempDir::new()
+    run_with_staging_in(project_root, adapter_crate_rel, &env::temp_dir(), body)
+}
+
+fn run_with_staging_in<F, R>(
+    project_root: &Path,
+    adapter_crate_rel: &Path,
+    temp_parent: &Path,
+    body: F,
+) -> Result<(R, tempfile::TempDir), String>
+where
+    F: FnOnce(&Path, &Path) -> Result<R, String>,
+{
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        builder.permissions(fs::Permissions::from_mode(0o700))
+    };
+    let tempdir = builder
+        .tempdir_in(temp_parent)
         .map_err(|err| format!("failed to create staging tempdir: {err}"))?;
     let staged_root = tempdir.path();
 
-    // The staging tempdir MUST NOT live INSIDE the project tree. `TempDir`
-    // honours `TMPDIR`; when that points into a `crate = "."` project,
-    // `staged_root` becomes a DESCENDANT of `project_root`, and the crate copy
-    // below (`src_crate == project_root`) then recurses into its own
-    // destination -- an unbounded self-copy that fills the disk. Refuse with
-    // guidance instead.
+    // Keep transient copies of secrets outside the project, including when
+    // the caller's temporary-directory setting points into the source tree.
     let project_canon =
         fs::canonicalize(project_root).unwrap_or_else(|_| project_root.to_path_buf());
     let staged_canon = fs::canonicalize(staged_root).unwrap_or_else(|_| staged_root.to_path_buf());
     if staged_canon.starts_with(&project_canon) {
         return Err(format!(
             "staging tempdir {} is inside the project tree {} -- `TMPDIR` points into the \
-             project, so a dry-run would recursively copy the project into its own descendant. \
+             project. Temporary secret-bearing files must stay outside the project. \
              Set `TMPDIR` to a directory OUTSIDE the project and re-run.",
             staged_canon.display(),
             project_canon.display()
@@ -1678,39 +1683,32 @@ where
             .map_err(|err| format!("failed to stage edgezero.toml: {err}"))?;
     }
 
-    // Real-copy the adapter crate dir (mutable). `adapter_crate_rel`
-    // is project-relative (e.g. "crates/cf" or "."), so no
-    // `strip_prefix` is needed — the earlier draft that computed
-    // `crate_rel` via `strip_prefix(project_root)` silently failed for
-    // the default `project_root == "."` shape.
-    let src_crate = project_root.join(adapter_crate_rel);
     let staged_crate = staged_root.join(adapter_crate_rel);
-    copy_dir_recursive(&src_crate, &staged_crate)
-        .map_err(|err| format!("failed to stage adapter crate dir: {err}"))?;
+    fs::create_dir_all(&staged_crate)
+        .map_err(|err| format!("create staged crate directory: {err}"))?;
+    // Crate-name discovery and workspace-inherited package metadata need only
+    // Cargo manifests along this ancestry, never source/build/cache trees.
+    for relative in adapter_crate_rel.ancestors() {
+        let cargo = relative.join("Cargo.toml");
+        let source = project_root.join(&cargo);
+        reject_symlink_components(project_root, &source, "Cargo metadata")?;
+        match fs::copy(&source, staged_root.join(&cargo)) {
+            Ok(_) => {}
+            Err(err) if err.kind() == ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("stage {}: {err}", source.display())),
+        }
+    }
 
-    // Real-copy `.edgezero/` if present; otherwise create empty. Some
-    // adapters own `.edgezero/local-config-*.json` state files (axum);
-    // staging must preserve them, and their absence in a green-clone
-    // case must still yield a mountable dir.
+    // Create an empty state directory; only declared artifacts are staged.
     let dot_edgezero = project_root.join(".edgezero");
     let staged_dot = staged_root.join(".edgezero");
-    // `copy_dir_recursive` skips symlinked entries INSIDE the tree it
-    // walks, but it cannot vet the root it is handed: `.exists()`
-    // follows links, so a symlinked `.edgezero` would have us walk and
-    // copy whatever it points at (e.g. `~/.aws`) into the staging dir
-    // that the dry-run then surfaces to the operator.
     reject_symlink_components(
         project_root,
         &dot_edgezero,
         "the local-state directory `<project>/.edgezero`",
     )?;
-    if dot_edgezero.exists() {
-        copy_dir_recursive(&dot_edgezero, &staged_dot)
-            .map_err(|err| format!("failed to stage .edgezero/: {err}"))?;
-    } else {
-        fs::create_dir_all(&staged_dot)
-            .map_err(|err| format!("failed to create staged .edgezero/: {err}"))?;
-    }
+    fs::create_dir_all(&staged_dot)
+        .map_err(|err| format!("failed to create staged .edgezero/: {err}"))?;
 
     let result = body(staged_root, &staged_crate)?;
     Ok((result, tempdir))
@@ -1792,6 +1790,7 @@ serve = "echo"
     // ran, so a dry-run test can prove it is skipped after a base failure.
     static PROVISION_SHOULD_ERROR: AtomicBool = AtomicBool::new(false);
     static TYPED_CALLED: AtomicBool = AtomicBool::new(false);
+    static PROVISION_CALLED: AtomicBool = AtomicBool::new(false);
     // Captures the (staged) manifest root the fake's `provision` saw when it
     // returned a partial-failure error, so a dry-run test can assert the
     // staged tempdir path is stripped from the surfaced error.
@@ -1863,6 +1862,7 @@ serve = "echo"
             dry_run: bool,
         ) -> Result<ProvisionOutcome, String> {
             RECORDED_DRY_RUN.store(dry_run, Ordering::SeqCst);
+            PROVISION_CALLED.store(true, Ordering::SeqCst);
             if PROVISION_SHOULD_ERROR.load(Ordering::SeqCst) {
                 if let Ok(mut slot) = RECORDED_PROVISION_ROOT.lock() {
                     *slot = Some(manifest_root.to_path_buf());
@@ -1993,6 +1993,7 @@ serve = "echo"
         VALIDATE_SAW_FILE.store(false, Ordering::SeqCst);
         PROVISION_SHOULD_ERROR.store(false, Ordering::SeqCst);
         TYPED_CALLED.store(false, Ordering::SeqCst);
+        PROVISION_CALLED.store(false, Ordering::SeqCst);
         if let Ok(mut slot) = RECORDED_PROVISION_ROOT.lock() {
             *slot = None;
         }
@@ -2041,7 +2042,7 @@ serve = "echo"
                 snapshot_walk(base, &path, excluded_dir_names, out)?;
             } else if !file_type.is_symlink() {
                 // Regular files only — symlinks are intentionally
-                // skipped so the snapshot mirrors `copy_dir_recursive`'s
+                // skipped so the snapshot excludes symlinks just like artifact staging's
                 // regular-files-only semantics.
                 let rel = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
                 let content = fs::read(&path)?;
@@ -2196,7 +2197,7 @@ adapters = ["axum"]
         fs::write(&manifest_path, PROVISION_MANIFEST).expect("write manifest");
         // spin.toml with NO [component.*] table. PROVISION_MANIFEST
         // declares Spin's manifest at `crates/demo-spin/spin.toml`
-        // (nested inside the crate dir per the 2026-07 strict-local
+        // (nested inside the crate dir under the strict-local
         // containment requirement).
         let spin_manifest = temp.path().join("crates/demo-spin/spin.toml");
         fs::create_dir_all(spin_manifest.parent().unwrap()).expect("mkdir demo-spin");
@@ -2912,6 +2913,188 @@ ids = ["default"]
 
     // ---------- run_with_staging dry-run helper ----------
 
+    #[cfg(unix)]
+    #[test]
+    fn provision_previews_propagate_closed_stdout() {
+        use std::process::{Command, Stdio};
+        use std::thread;
+        use std::time::{Duration, Instant};
+        const CHILD: &str = "EDGEZERO_PROVISION_OUTPUT_CHILD";
+        if let Some(child_root) = env::var_os(CHILD) {
+            let root = Path::new(&child_root);
+            let manifest = root.join("edgezero.toml");
+            fs::write(&manifest, TYPED_FAKE_MANIFEST_BODY).unwrap();
+            fs::write(root.join("demo-app.toml"), TYPED_APP_CONFIG).unwrap();
+            register_adapter(&FAKE_ADAPTER);
+            let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", &manifest);
+            let args = ProvisionArgs {
+                manifest,
+                adapter: FAKE_ADAPTER.name().to_owned(),
+                local: true,
+                dry_run: true,
+            };
+            fs::write(root.join("ready"), "").unwrap();
+            while !root.join("release").exists() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            let result = match env::var("EDGEZERO_PROVISION_OUTPUT_KIND").unwrap().as_str() {
+                "typed" => run_provision_typed::<TypedTestConfig>(&args),
+                "writeback" => {
+                    let mut state = AdapterDeployedState::default();
+                    state
+                        .fields
+                        .insert("service_id".to_owned(), "test-service".to_owned());
+                    merge_deployed_into_manifest(
+                        &args.manifest,
+                        FAKE_ADAPTER.name(),
+                        &state,
+                        &["service_id"],
+                        true,
+                    )
+                }
+                _ => run_provision(&args),
+            };
+            fs::write(root.join("outcome"), format!("{result:?}")).unwrap();
+            return;
+        }
+        let _guard = manifest_guard().lock().unwrap();
+        for kind in ["untyped", "typed", "writeback"] {
+            let dir = TempDir::new().unwrap();
+            let test = format!(
+                "{}::provision_previews_propagate_closed_stdout",
+                module_path!().split_once("::").unwrap().1
+            );
+            let mut child = Command::new(env::current_exe().unwrap())
+                .args(["--exact", &test])
+                .env(CHILD, dir.path())
+                .env("EDGEZERO_PROVISION_OUTPUT_KIND", kind)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let started = Instant::now();
+            while !dir.path().join("ready").exists() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "preview child did not start"
+                );
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "preview child exited before ready"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            drop(child.stdout.take());
+            fs::write(dir.path().join("release"), "").unwrap();
+            let _status = child.wait().unwrap();
+            let result = fs::read_to_string(dir.path().join("outcome")).unwrap();
+            assert!(
+                result.starts_with("Err(\"write provision preview:"),
+                "{kind}: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn staging_copies_metadata_without_unrelated_source_or_state() {
+        for crate_rel in [".", "crates/worker"] {
+            let project = TempDir::new().unwrap();
+            let crate_dir = project.path().join(crate_rel);
+            fs::create_dir_all(&crate_dir).unwrap();
+            fs::write(project.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+            fs::write(crate_dir.join("Cargo.toml"), "[package]\nname = 'worker'\n").unwrap();
+            for unwanted in [
+                "target/cache",
+                ".git/index",
+                "node_modules/cache",
+                ".wrangler/state",
+                ".spin/state",
+                "src/private.rs",
+            ] {
+                let path = crate_dir.join(unwanted);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, "unrelated").unwrap();
+            }
+            fs::create_dir_all(project.path().join(".edgezero")).unwrap();
+            fs::write(project.path().join(".edgezero/unrelated-state"), "private").unwrap();
+            run_with_staging(
+                project.path(),
+                Path::new(crate_rel),
+                |root, staged_crate| {
+                    assert!(root.join("Cargo.toml").is_file());
+                    assert!(staged_crate.join("Cargo.toml").is_file());
+                    for unwanted in [
+                        "target",
+                        ".git",
+                        "node_modules",
+                        ".wrangler",
+                        ".spin",
+                        "src",
+                    ] {
+                        assert!(!staged_crate.join(unwanted).exists(), "copied {unwanted}");
+                    }
+                    assert!(!root.join(".edgezero/unrelated-state").exists());
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_is_private_under_permissive_umask() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::process::Command;
+        const CHILD: &str = "EDGEZERO_PRIVATE_STAGING_CHILD";
+        if env::var_os(CHILD).is_none() {
+            let test = format!(
+                "{}::staging_is_private_under_permissive_umask",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = Command::new("sh")
+                .args(["-c", "umask 022; exec \"$@\"", "sh"])
+                .arg(env::current_exe().unwrap())
+                .args(["--exact", &test])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("test result: ok. 1 passed; 0 failed;")
+            );
+            return;
+        }
+        let project = TempDir::new().unwrap();
+        run_with_staging(project.path(), Path::new("."), |root, _| {
+            assert_eq!(
+                fs::metadata(root).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn missing_manifest_does_not_create_provision_lock_directories() {
+        let project = TempDir::new().unwrap();
+        let args = ProvisionArgs {
+            manifest: project.path().join("typo/edgezero.toml"),
+            adapter: "axum".to_owned(),
+            local: true,
+            dry_run: false,
+        };
+        assert!(run_provision(&args).is_err());
+        assert!(!project.path().join("typo").exists());
+    }
+
     #[test]
     fn run_with_staging_drops_tempdir_after_body() {
         let project = tempfile::TempDir::new().unwrap();
@@ -2940,29 +3123,104 @@ ids = ["default"]
 
     #[test]
     fn run_with_staging_refuses_a_tempdir_inside_the_project() {
-        // When TMPDIR points into a `crate = "."` project, the staging tempdir
-        // would be a DESCENDANT of the project, so copying the crate (== the
-        // project) into it recurses without bound. It must be refused.
-        // `TMPDIR` is process-global AND `TempDir::new()` reads it, so an
-        // unsynchronised override here silently redirects every CONCURRENT
-        // test's tempdir into `inside` -- which this test then deletes,
-        // making their `fs::write` fail with ENOENT. `env_lock()` is a
-        // DIFFERENT mutex from the `manifest_guard()` the other env-mutating
-        // tests in this binary hold, so it provides no exclusion against
-        // them. Take `manifest_guard()` to actually serialise.
-        use edgezero_core::test_env::EnvOverride;
-        let _lock = manifest_guard().lock().expect("manifest guard");
         let project = tempfile::TempDir::new().unwrap();
         fs::write(project.path().join("edgezero.toml"), "x").unwrap();
         let inside = project.path().join("inside-tmp");
         fs::create_dir_all(&inside).unwrap();
-        let _tmp = EnvOverride::set("TMPDIR", &inside);
-        let err = run_with_staging(project.path(), Path::new("."), |_root, _crate| Ok(()))
-            .expect_err("a staging tempdir inside the project must be refused");
+        let err = run_with_staging_in(project.path(), Path::new("."), &inside, |_root, _crate| {
+            Ok(())
+        })
+        .expect_err("a staging tempdir inside the project must be refused");
         assert!(
             err.contains("inside the project tree"),
             "error explains the containment failure: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cloud_provision_checks_atomic_writeback_parent_before_dispatch() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let _guard = manifest_guard().lock().unwrap();
+        for through_link in [false, true] {
+            reset_fake_state();
+            register_adapter(&FAKE_ADAPTER);
+            let project = TempDir::new().unwrap();
+            let restricted = project.path().join("restricted");
+            fs::create_dir_all(&restricted).unwrap();
+            let target = restricted.join("edgezero.toml");
+            fs::write(&target, FAKE_MANIFEST_BODY).unwrap();
+            let manifest = if through_link {
+                let link = project.path().join("edgezero.toml");
+                symlink(&target, &link).unwrap();
+                link
+            } else {
+                target.clone()
+            };
+            let root = manifest.parent().unwrap();
+            fs::create_dir_all(root.join(".edgezero")).unwrap();
+            fs::create_dir_all(root.join("crates/spin")).unwrap();
+            fs::write(root.join("crates/spin/spin.toml"), "# stub\n").unwrap();
+            let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", &manifest);
+            fs::set_permissions(&restricted, fs::Permissions::from_mode(0o555)).unwrap();
+            let result = run_provision(&ProvisionArgs {
+                manifest: manifest.clone(),
+                adapter: FAKE_ADAPTER.name().to_owned(),
+                local: false,
+                dry_run: false,
+            });
+            fs::set_permissions(&restricted, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                !PROVISION_CALLED.load(Ordering::SeqCst),
+                "provider ran before atomic writeback was possible"
+            );
+            let error = result.expect_err(
+                "an unwritable target parent must fail before creating cloud resources",
+            );
+            assert!(error.contains("writeback"), "{error}");
+            assert_eq!(fs::read_to_string(&target).unwrap(), FAKE_MANIFEST_BODY);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writeback_preserves_manifest_symlink_mode_and_unchanged_timestamp() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+        use std::time::UNIX_EPOCH;
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("tracked.toml");
+        let manifest = dir.path().join("edgezero.toml");
+        let old_link = dir.path().join("old-version");
+        let original = "# operator comment\n[app]\nname='demo'\n";
+        fs::write(&target, original).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+        fs::hard_link(&target, &old_link).unwrap();
+        symlink(&target, &manifest).unwrap();
+        let mut state = AdapterDeployedState::default();
+        state
+            .fields
+            .insert("service_id".to_owned(), "test-service".to_owned());
+        merge_deployed_into_manifest(&manifest, "fake", &state, &["service_id"], false).unwrap();
+        assert!(
+            fs::symlink_metadata(&manifest)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(fs::read_to_string(old_link).unwrap(), original);
+        fs::File::open(&target)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH))
+            .unwrap();
+        let before = fs::metadata(&target).unwrap();
+        merge_deployed_into_manifest(&manifest, "fake", &state, &["service_id"], false).unwrap();
+        let after = fs::metadata(&target).unwrap();
+        assert_eq!(before.ino(), after.ino());
+        assert_eq!(after.modified().unwrap(), UNIX_EPOCH);
     }
 
     #[cfg(unix)]
@@ -3064,7 +3322,7 @@ ids = ["default"]
     #[test]
     fn provision_local_no_dry_run_writes_to_worktree() {
         // Non-dry-run local mode DOES write. axum can't demonstrate
-        // that until Section 5 lands, so use the fake adapter — its
+        // the dispatch shape alone, so use the fake adapter — its
         // synthesise_baseline_manifest returns a stub file at the
         // configured manifest path. In (true, false) mode, the CLI
         // calls write_baseline_to_disk which materialises that file
@@ -3915,7 +4173,7 @@ manifest = "crates/x/m.toml"
     #[test]
     fn provision_local_threads_deployed_state_into_synthesiser() {
         // Regression: `deployed_state_for` was left returning None
-        // through the whole of Section 4. Result: real deployed IDs
+        // instead of the tracked state. Real deployed IDs
         // in edgezero.toml never reached the adapter's
         // synthesise_baseline_manifest call, defeating the "teammates
         // regenerate local manifests from tracked durable IDs" spec
@@ -4920,7 +5178,7 @@ ids = ["default"]
 
     #[test]
     fn dry_run_diff_redacts_env_values_and_never_leaks_context() {
-        // The pre-2026-07 dry-run renderer emitted the raw `.env`
+        // An unredacted dry-run renderer emits the raw `.env`
         // pre-image around each hunk with a 2-line context radius.
         // When provision appends new lines at EOF, the LAST two
         // real operator secret lines surface as unchanged context —
@@ -5053,6 +5311,45 @@ ids = ["default"]
     }
 
     #[test]
+    fn dry_run_redacts_untrusted_comments_and_malformed_prefixes() {
+        let project = TempDir::new().unwrap();
+        let staged = TempDir::new().unwrap();
+        let before = project.path().join(".env");
+        let after = staged.path().join(".env");
+        let body = concat!(
+            "# edgezero-provision: v1\n",
+            "# https://user:SENTINEL_ONE@host/?token=secret\n",
+            "# U0VOVElORUxfVFdP==\n",
+            "https://user:SENTINEL_THREE@host/?token=secret\n",
+            "# SENTINEL_FOUR without an assignment\n",
+        );
+        fs::write(&before, body).unwrap();
+        fs::write(&after, format!("{body}NEW_KEY=value\n")).unwrap();
+        let allow_list = DryRunAllowList {
+            pairs: vec![(before.clone(), after)],
+            kinds: [(before, LocalArtifactKind::Env)].into_iter().collect(),
+        };
+        let report = render_dry_run_report(
+            project.path(),
+            staged.path(),
+            &allow_list,
+            &ProvisionOutcome::default(),
+            None,
+        );
+        for output in [redact_env_body_for_diff(body), report] {
+            for sentinel in [
+                "SENTINEL_ONE",
+                "U0VOVElORUxfVFdP",
+                "SENTINEL_THREE",
+                "SENTINEL_FOUR",
+            ] {
+                assert!(!output.contains(sentinel), "secret prefix leaked: {output}");
+            }
+        }
+        assert!(redact_env_body_for_diff(body).contains(EDGEZERO_PROVISION_HEADER));
+    }
+
+    #[test]
     fn redact_env_body_redacts_commented_key_value_lines() {
         // Regression: the pre-fix filter treated ANY `#`-starting
         // line as a pure comment and passed it through verbatim.
@@ -5060,8 +5357,7 @@ ids = ["default"]
         // env entries (e.g. `# EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY=`)
         // and operators frequently stash real values behind a
         // leading `#` for later use. Both shapes must be redacted.
-        // Pure comments (no `=`) still pass through so structural
-        // context stays readable in the diff.
+        // Comments are untrusted data too; only the framework header survives.
         //
         // Concatenate line-by-line via `format!` (not string
         // continuation `\`) so leading whitespace on indented lines
@@ -5085,24 +5381,24 @@ ids = ["default"]
             "SECURITY: commented `# KEY=value` MUST be redacted: {redacted}"
         );
         assert!(
-            redacted.contains("# API_TOKEN=<redacted>"),
-            "commented KEY=value line still surfaces as a commented redacted line: {redacted}"
+            redacted.contains("# <redacted>"),
+            "commented data is hidden: {redacted}"
         );
         assert!(
             !redacted.contains("some_value"),
             "SECURITY: no-space `#KEY=value` MUST also be redacted: {redacted}"
         );
         assert!(
-            redacted.contains("#EDGEZERO__STORES__SECRETS__DEFAULT__NAME=<redacted>"),
-            "no-space form redacts: {redacted}"
+            !redacted.contains("EDGEZERO__STORES__SECRETS__DEFAULT__NAME"),
+            "comment prefixes are hidden too: {redacted}"
         );
         assert!(
             !redacted.contains("postgres://"),
             "SECURITY: indented commented `KEY=value` MUST be redacted: {redacted}"
         );
         assert!(
-            redacted.contains("  # DATABASE_URL=<redacted>"),
-            "indented commented line preserves its indent + `#` shape: {redacted}"
+            !redacted.contains("# DATABASE_URL="),
+            "indented comment content is hidden: {redacted}"
         );
         assert!(
             !redacted.contains("live-secret"),
@@ -5139,7 +5435,7 @@ GREETING=hello\n";
     }
 
     #[test]
-    fn redact_env_body_preserves_comments_and_blank_lines() {
+    fn redact_env_body_hides_comments_and_preserves_blank_lines() {
         let body = "\
 # A comment\n\
 \n\
@@ -5149,11 +5445,12 @@ API_TOKEN=very-secret-value\n\
 DATABASE_URL=postgres://user:pass@host/db\n\
 ";
         let redacted = redact_env_body_for_diff(body);
-        assert!(redacted.contains("# A comment"), "comment preserved");
+        assert!(!redacted.contains("# A comment"), "comment hidden");
         assert!(
-            redacted.contains("# another comment"),
-            "second comment preserved"
+            !redacted.contains("# another comment"),
+            "second comment hidden"
         );
+        assert_eq!(redacted.lines().count(), body.lines().count());
         assert!(
             redacted.contains("API_TOKEN=<redacted>"),
             "value redacted, key preserved: {redacted}"

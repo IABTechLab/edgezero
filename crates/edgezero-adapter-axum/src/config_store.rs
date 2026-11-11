@@ -97,18 +97,6 @@ impl AxumConfigStore {
     /// exists but cannot be read or parsed.
     #[inline]
     pub fn from_path(path: &Path) -> Result<Self, ConfigStoreError> {
-        // Reject a symlinked final component before reading. `config push
-        // --adapter axum` / provision refuse to WRITE these files through a
-        // symlink; a legitimately-provisioned local config is therefore
-        // never a symlink, so one appearing here is anomalous. Rejecting it
-        // on the read path too keeps a single consistent final-path policy
-        // and stops a planted symlink from redirecting the runtime read.
-        if fs::symlink_metadata(path).is_ok_and(|md| md.file_type().is_symlink()) {
-            return Err(ConfigStoreError::unavailable(format!(
-                "refusing to read `{}`: it is a symlink; EdgeZero-owned local config is never a symlink",
-                path.display()
-            )));
-        }
         let raw = match fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -241,13 +229,14 @@ mod tests {
     });
 
     use super::*;
-    use edgezero_core::test_env::{EnvOverride, env_lock};
+    use crate::test_utils::env_guard;
+    use edgezero_core::test_env::EnvOverride;
     use futures::executor::block_on;
     use tempfile::tempdir;
 
     #[cfg(unix)]
     #[test]
-    fn from_path_rejects_symlinked_config_file() {
+    fn from_path_reads_symlinked_config_file() {
         use std::os::unix::fs::symlink;
         // A planted symlink where the local config is expected must be
         // refused on the READ path, matching the write side.
@@ -256,13 +245,9 @@ mod tests {
         fs::write(&real, "{\"k\":\"v\"}").expect("write real");
         let link = temp.path().join("local-config-app.json");
         symlink(&real, &link).expect("symlink");
-        let Err(err) = AxumConfigStore::from_path(&link) else {
-            panic!("symlinked config must be refused, not silently followed");
-        };
-        assert!(
-            matches!(err, ConfigStoreError::Unavailable { .. }),
-            "symlinked config is Unavailable"
-        );
+        let store = AxumConfigStore::from_path(&link)
+            .expect("ConfigMap-style symlinks are valid runtime inputs");
+        assert_eq!(block_on(store.get("k")).unwrap(), Some("v".to_owned()));
     }
 
     #[test]
@@ -334,15 +319,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn find_project_root_dir_honors_renamed_manifest_env() {
+    #[tokio::test]
+    async fn find_project_root_dir_honors_renamed_manifest_env() {
         // A renamed top-level manifest (`EDGEZERO_MANIFEST=<dir>/project.local.toml`)
         // must anchor the runtime `.edgezero` directory on that
         // manifest's parent — the same root `provision --local` writes
         // under — NOT the `edgezero.toml` upward-search fallback. Note
         // the tempdir deliberately has NO `edgezero.toml`, so a fallback
         // would resolve somewhere else entirely.
-        let _lock = env_lock().lock().expect("env lock");
+        let _lock = env_guard().lock().await;
         let temp = tempdir().expect("tempdir");
         let manifest = temp.path().join("project.local.toml");
         let _env = EnvOverride::set("EDGEZERO_MANIFEST", &manifest);
@@ -355,8 +340,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn find_project_root_dir_anchors_bare_manifest_env_to_cwd() {
+    #[tokio::test]
+    async fn find_project_root_dir_anchors_bare_manifest_env_to_cwd() {
         // A BARE relative `EDGEZERO_MANIFEST=project.local.toml` must
         // anchor the runtime `.edgezero` on the ABSOLUTE launch cwd, not
         // a relative `.`. The Axum runtime relaunches the child with cwd
@@ -367,7 +352,7 @@ mod tests {
         // regardless of the later cwd change. Setting cwd in a test is
         // racy, so assert on absoluteness + equality with the current
         // cwd under the env lock rather than mutating cwd.
-        let _lock = env_lock().lock().expect("env lock");
+        let _lock = env_guard().lock().await;
         let _env = EnvOverride::set("EDGEZERO_MANIFEST", "project.local.toml");
 
         let resolved = find_project_root_dir().expect("bare manifest env must resolve a root");

@@ -9,20 +9,6 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 
-/// Reject absolute paths and `..` traversal for the
-/// `[adapters.<name>.adapter].manifest` and `.crate` strings, then
-/// assert:
-///   1. each path resolves under the project root (defence in depth);
-///   2. when both `.crate` and `.manifest` are set, the manifest
-///      path resolves under the crate path -- the spec's
-///      stronger promise that local provision never creates
-///      files outside the adapter crate or its gitignored
-///      local-state dirs.
-///
-/// Callers SHOULD pass the absolute manifest-loader root when
-/// they have it, but the helper defensively normalises so a
-/// relative `args.manifest.parent()` ("" or "examples/app-demo")
-/// compares correctly.
 /// Security-only subset of [`assert_provision_paths_contained`]:
 /// runs Step 1 (absolute-path rejection, `..` traversal rejection,
 /// under-project-root containment) but skips Step 2 (manifest must
@@ -46,6 +32,20 @@ pub(crate) fn assert_provision_paths_safe(
     )
 }
 
+/// Reject absolute paths and `..` traversal for the
+/// `[adapters.<name>.adapter].manifest` and `.crate` strings, then
+/// assert:
+///   1. each path resolves under the project root (defence in depth);
+///   2. when both `.crate` and `.manifest` are set, the manifest
+///      path resolves under the crate path -- the spec's
+///      stronger promise that local provision never creates
+///      files outside the adapter crate or its gitignored
+///      local-state dirs.
+///
+/// Callers SHOULD pass the absolute manifest-loader root when
+/// they have it, but the helper defensively normalises so a
+/// relative `args.manifest.parent()` ("" or "examples/app-demo")
+/// compares correctly.
 pub(crate) fn assert_provision_paths_contained(
     project_root: &Path,
     adapter_manifest_path: Option<&str>,
@@ -301,8 +301,7 @@ pub(crate) fn reject_symlink_components(
                     "{label} resolves through a symlink at `{}`; \
                      a symlink here would let EdgeZero's `fs::write` follow the link \
                      off the project tree. Replace the \
-                     symlink with a regular directory (or a symlink to a path INSIDE \
-                     the project root — the guard walks each component individually)",
+                     symlink with a regular file or directory",
                     walk.display()
                 ));
             }
@@ -375,28 +374,47 @@ pub(crate) fn local_layout(
         .chain(layout.manifest.iter())
         .chain(layout.serve_env.iter())
     {
-        let relative = path
-            .to_str()
-            .ok_or_else(|| "adapter layout path is not UTF-8".to_owned())?;
-        assert_provision_paths_safe(root, Some(relative), None)?;
-        reject_symlink_components(root, &root.join(path), "an adapter-declared local artifact")?;
-        match fs::symlink_metadata(root.join(path)) {
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(format!(
-                    "adapter artifact {} must be a regular file",
-                    path.display()
-                ));
-            }
-            Err(error) if error.kind() != ErrorKind::NotFound => {
-                return Err(format!(
-                    "inspect adapter artifact {}: {error}",
-                    path.display()
-                ));
-            }
-            Ok(_) | Err(_) => {}
-        }
+        validate_local_path(root, path)?;
     }
     Ok(layout)
+}
+
+/// Resolve only the inputs which serve reads; provider-owned runtime files
+/// remain the provider's responsibility until a CLI write/diff operation.
+pub(crate) fn local_serve_env(
+    root: &Path,
+    adapter: &dyn Adapter,
+    context: &AdapterLocalContext<'_>,
+) -> Result<Option<PathBuf>, String> {
+    let layout = adapter.local_layout(context)?;
+    for path in layout.manifest.iter().chain(layout.serve_env.iter()) {
+        validate_local_path(root, path)?;
+    }
+    Ok(layout.serve_env.map(|path| root.join(path)))
+}
+
+fn validate_local_path(root: &Path, path: &Path) -> Result<(), String> {
+    let relative = path
+        .to_str()
+        .ok_or_else(|| "adapter layout path is not UTF-8".to_owned())?;
+    assert_provision_paths_safe(root, Some(relative), None)?;
+    reject_symlink_components(root, &root.join(path), "an adapter-declared local artifact")?;
+    match fs::symlink_metadata(root.join(path)) {
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(format!(
+                "adapter artifact {} must be a regular file",
+                path.display()
+            ));
+        }
+        Err(error) if error.kind() != ErrorKind::NotFound => {
+            return Err(format!(
+                "inspect adapter artifact {}: {error}",
+                path.display()
+            ));
+        }
+        Ok(_) | Err(_) => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -504,8 +522,8 @@ mod tests {
     fn rejects_missing_manifest_when_crate_declared_in_local_mode() {
         // Regression: an operator who declares `[adapters.<x>.adapter].crate
         // = "crates/server"` but forgets `.manifest = "..."` would slip past
-        // the pre-2026-07 containment guard (Step 2 short-circuited on the
-        // missing `.manifest`). Downstream, `Adapter::synthesise_baseline_manifest`
+        // a containment guard that short-circuits on the
+        // missing `.manifest`. Downstream, `Adapter::synthesise_baseline_manifest`
         // falls back to `PathBuf::from("axum.toml")` at the project root —
         // OUTSIDE `crates/server` — and `read_adapter_crate_name` cannot walk
         // up to the crate's Cargo.toml (it has no manifest path to start from),
@@ -572,7 +590,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rejects_symlinked_adapter_crate_directory() {
-        // Reviewer regression: `crate = "crates/worker"` passes the
+        // `crate = "crates/worker"` passes the
         // lexical check when `crates/worker` is a symlink to a
         // directory outside the project — subsequent adapter
         // `fs::write` calls follow the symlink and mutate the

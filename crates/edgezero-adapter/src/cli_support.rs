@@ -12,6 +12,23 @@ use std::process::Command;
 
 use crate::registry::AdapterExecContext;
 
+/// Depth bound on `include` chains, guarding against cyclic or pathological
+/// config includes.
+const MAX_CONFIG_INCLUDE_DEPTH: usize = 16;
+
+/// The effective cargo target directory for build-artifact discovery.
+pub enum CargoTargetDir {
+    /// No override; use the conventional crate/workspace `target/` search.
+    Conventional,
+    /// An explicit override was requested -- via a `--target-dir` build
+    /// argument, `CARGO_TARGET_DIR`, or a `.cargo/config.toml`
+    /// `[build] target-dir`. Artifact discovery must look ONLY here:
+    /// falling back to the conventional `target/` directories could select
+    /// a STALE artifact from an earlier default-target build after a
+    /// successful custom-target one.
+    Explicit(PathBuf),
+}
+
 /// Directory an adapter's manifest discovery should start from.
 ///
 /// When the CLI reached the registry fallback with a manifest loaded,
@@ -128,19 +145,6 @@ pub fn find_workspace_root(dir: &Path) -> PathBuf {
     candidate.unwrap_or_else(|| dir.to_path_buf())
 }
 
-/// The effective cargo target directory for build-artifact discovery.
-pub enum CargoTargetDir {
-    /// An explicit override was requested -- via a `--target-dir` build
-    /// argument, `CARGO_TARGET_DIR`, or a `.cargo/config.toml`
-    /// `[build] target-dir`. Artifact discovery must look ONLY here:
-    /// falling back to the conventional `target/` directories could select
-    /// a STALE artifact from an earlier default-target build after a
-    /// successful custom-target one.
-    Explicit(PathBuf),
-    /// No override; use the conventional crate/workspace `target/` search.
-    Conventional,
-}
-
 /// Resolve cargo's effective target directory for locating a build
 /// artifact, mirroring cargo's own precedence: an explicit `--target-dir`
 /// build argument, then `CARGO_TARGET_DIR`, a `--config build.target-dir=…`
@@ -162,18 +166,27 @@ pub fn resolve_cargo_target_dir(
     build_args: &[String],
     ctx: &AdapterExecContext<'_>,
 ) -> CargoTargetDir {
+    resolve_cargo_target_dir_with(crate_dir, build_args, ctx, &|key| env::var_os(key))
+}
+
+fn resolve_cargo_target_dir_with(
+    crate_dir: &Path,
+    build_args: &[String],
+    ctx: &AdapterExecContext<'_>,
+    ambient: &dyn Fn(&str) -> Option<OsString>,
+) -> CargoTargetDir {
     // Cargo lets the LAST occurrence of an argument override win.
     if let Some(dir) = target_dir_from_args(build_args) {
         return CargoTargetDir::Explicit(resolve_dir_against(crate_dir, &dir));
     }
-    if let Some(dir) = env_value(ctx, "CARGO_TARGET_DIR").map(PathBuf::from) {
+    if let Some(dir) = env_value(ctx, "CARGO_TARGET_DIR", ambient).map(PathBuf::from) {
         return CargoTargetDir::Explicit(resolve_dir_against(crate_dir, &dir));
     }
     if let Some(dir) = config_target_dir_from_args(crate_dir, build_args) {
         return CargoTargetDir::Explicit(resolve_dir_against(crate_dir, &dir));
     }
     // The build.* alias has lower precedence than explicit --config values.
-    if let Some(dir) = env_value(ctx, "CARGO_BUILD_TARGET_DIR").map(PathBuf::from) {
+    if let Some(dir) = env_value(ctx, "CARGO_BUILD_TARGET_DIR", ambient).map(PathBuf::from) {
         return CargoTargetDir::Explicit(resolve_dir_against(crate_dir, &dir));
     }
     // 3. `.cargo/config` (or `.cargo/config.toml`) `[build] target-dir`,
@@ -190,7 +203,7 @@ pub fn resolve_cargo_target_dir(
         }
         dir = current.parent();
     }
-    if let Some(home) = cargo_home(ctx).map(|home| resolve_dir_against(crate_dir, &home))
+    if let Some(home) = cargo_home(ctx, ambient).map(|home| resolve_dir_against(crate_dir, &home))
         && let Some(target) = selected_config_target_dir(&home)
     {
         return CargoTargetDir::Explicit(resolve_dir_against(&home, &target));
@@ -210,23 +223,30 @@ fn selected_config_target_dir(directory: &Path) -> Option<PathBuf> {
 
 /// Read an env var the build actually ran with: the ctx-applied overlay
 /// (mirroring `command.env`) takes precedence over the process env.
-fn env_value(ctx: &AdapterExecContext<'_>, key: &str) -> Option<OsString> {
+fn env_value(
+    ctx: &AdapterExecContext<'_>,
+    key: &str,
+    ambient: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<OsString> {
     ctx.env()
         .iter()
         .find(|(candidate, _)| candidate == key)
         .map(|(_, value)| OsString::from(value))
-        .or_else(|| env::var_os(key))
+        .or_else(|| ambient(key))
 }
 
 /// `$CARGO_HOME` (or `~/.cargo`), where cargo keeps its global config.
 /// Honours a ctx-provided `CARGO_HOME` / `HOME` (the env the build ran
 /// with) before the process env, so the global-config lookup matches the
 /// directory cargo actually used.
-fn cargo_home(ctx: &AdapterExecContext<'_>) -> Option<PathBuf> {
-    env_value(ctx, "CARGO_HOME")
+fn cargo_home(
+    ctx: &AdapterExecContext<'_>,
+    ambient: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    env_value(ctx, "CARGO_HOME", ambient)
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .or_else(|| env_value(ctx, "HOME").map(|home| PathBuf::from(home).join(".cargo")))
+        .or_else(|| env_value(ctx, "HOME", ambient).map(|home| PathBuf::from(home).join(".cargo")))
 }
 
 /// Extract the value of a `--target-dir` build argument (`--target-dir X`
@@ -363,10 +383,6 @@ fn resolve_dir_against(base: &Path, dir: &Path) -> PathBuf {
     }
 }
 
-/// Depth bound on `include` chains, guarding against cyclic or pathological
-/// config includes.
-const MAX_CONFIG_INCLUDE_DEPTH: usize = 16;
-
 /// Read `[build] target-dir` from a cargo config file, following `include`
 /// directives, and RESOLVE a relative value the way cargo does: a
 /// config-relative path is relative to the PARENT of the directory that
@@ -462,34 +478,6 @@ pub fn run_native_cli(program: &str, args: &[&str], install_hint: &str) -> Resul
     }
 }
 
-/// Resolve the ADAPTER CRATE package name for the manifest being
-/// synthesised. Walks from the manifest's parent directory upward
-/// (toward `manifest_root`) looking for the nearest `Cargo.toml`,
-/// then reads its `[package].name`. The spec allows the adapter
-/// manifest to resolve anywhere inside the adapter crate — including
-/// nested paths like `crates/server/config/axum.toml` — so a
-/// parent-only lookup misses the crate's actual Cargo.toml when the
-/// operator organises manifests under a sub-directory (spec
-/// §"[adapters.<name>.adapter]").
-///
-/// Used by `Adapter::synthesise_baseline_manifest` impls to write
-/// runtime-authoritative fields — Axum's `[adapter].crate`, the
-/// Spin `[application].name` / wasm source path, Cloudflare's
-/// `wrangler.toml` `name`, Fastly's `fastly.toml` `name`. The
-/// synthesised value MUST match the Cargo package the adapter
-/// actually builds; hardcoding a `<app>-adapter-<id>` convention
-/// silently mispoints the wasm source path on any project that
-/// renames the adapter crate.
-///
-/// Returns `None` when:
-/// - `adapter_manifest_path` is `None` (no adapter manifest path
-///   declared in `edgezero.toml`), OR
-/// - no ancestor from the manifest's parent up to `manifest_root`
-///   (inclusive) has a readable `Cargo.toml` with `[package].name`.
-///
-/// Callers fall back to a scaffold-convention crate name in that
-/// case (e.g. `<app_name>-adapter-<id>`) so the synthesis is
-/// still deterministic on a fresh scaffold.
 /// Read the crate name from the DECLARED `.crate` directory's
 /// `Cargo.toml`, resolved against `manifest_root`.
 ///
@@ -528,6 +516,34 @@ pub fn read_crate_name_at(
     })
 }
 
+/// Resolve the ADAPTER CRATE package name for the manifest being
+/// synthesised. Walks from the manifest's parent directory upward
+/// (toward `manifest_root`) looking for the nearest `Cargo.toml`,
+/// then reads its `[package].name`. The spec allows the adapter
+/// manifest to resolve anywhere inside the adapter crate — including
+/// nested paths like `crates/server/config/axum.toml` — so a
+/// parent-only lookup misses the crate's actual Cargo.toml when the
+/// operator organises manifests under a sub-directory (spec
+/// §"[adapters.<name>.adapter]").
+///
+/// Used by `Adapter::synthesise_baseline_manifest` impls to write
+/// runtime-authoritative fields — Axum's `[adapter].crate`, the
+/// Spin `[application].name` / wasm source path, Cloudflare's
+/// `wrangler.toml` `name`, Fastly's `fastly.toml` `name`. The
+/// synthesised value MUST match the Cargo package the adapter
+/// actually builds; hardcoding a `<app>-adapter-<id>` convention
+/// silently mispoints the wasm source path on any project that
+/// renames the adapter crate.
+///
+/// Returns `None` when:
+/// - `adapter_manifest_path` is `None` (no adapter manifest path
+///   declared in `edgezero.toml`), OR
+/// - no ancestor from the manifest's parent up to `manifest_root`
+///   (inclusive) has a readable `Cargo.toml` with `[package].name`.
+///
+/// Callers fall back to a scaffold-convention crate name in that
+/// case (e.g. `<app_name>-adapter-<id>`) so the synthesis is
+/// still deterministic on a fresh scaffold.
 #[inline]
 #[must_use]
 pub fn read_adapter_crate_name(
@@ -633,6 +649,27 @@ mod tests {
     use crate::registry::AdapterExecContext;
     use tempfile::tempdir;
 
+    // Unit fixtures supply their entire environment without mutating the process.
+    fn resolve_cargo_target_dir(
+        crate_dir: &Path,
+        args: &[String],
+        ctx: &AdapterExecContext<'_>,
+    ) -> CargoTargetDir {
+        resolve_cargo_target_dir_with(crate_dir, args, ctx, &|_| None)
+    }
+
+    #[test]
+    fn target_resolution_accepts_injected_ambient_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let ambient = |key: &str| (key == "CARGO_TARGET_DIR").then(|| OsString::from("ambient"));
+        assert!(
+            matches!(resolve_cargo_target_dir_with(dir.path(), &[], &AdapterExecContext::new(), &ambient), CargoTargetDir::Explicit(path) if path == dir.path().join("ambient"))
+        );
+        let overlay = [("CARGO_TARGET_DIR".to_owned(), "overlay".to_owned())];
+        assert!(
+            matches!(resolve_cargo_target_dir_with(dir.path(), &[], &AdapterExecContext::new().with_env(&overlay), &ambient), CargoTargetDir::Explicit(path) if path == dir.path().join("overlay"))
+        );
+    }
     #[test]
     fn target_dir_environment_and_argument_precedence_matches_cargo() {
         let dir = tempdir().unwrap();

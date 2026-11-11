@@ -389,9 +389,6 @@ fn locate_artifact(
     }
 }
 
-/// # Errors
-/// Returns an error if the Spin CLI up command fails.
-#[inline]
 /// The `KEY=VALUE` strings to hand `spin up --env` so the EDGEZERO__*
 /// runtime-config overrides reach the GUEST's WASI env. A wasip2 component
 /// reads its own sandboxed `std::env`, which Spin populates from `--env` /
@@ -411,13 +408,13 @@ fn locate_artifact(
 fn guest_env_forwards(overlay: &[(String, String)], parent: &[(String, String)]) -> Vec<String> {
     let mut merged: BTreeMap<&str, &str> = BTreeMap::new();
     for (key, value) in overlay {
-        if key.starts_with("EDGEZERO__") {
+        if key.starts_with("EDGEZERO__") && !key.starts_with("EDGEZERO__SECRETS__") {
             merged.insert(key, value);
         }
     }
     // Parent shell overrides the provisioned overlay (last write wins).
     for (key, value) in parent {
-        if key.starts_with("EDGEZERO__") {
+        if key.starts_with("EDGEZERO__") && !key.starts_with("EDGEZERO__SECRETS__") {
             merged.insert(key, value);
         }
     }
@@ -427,6 +424,9 @@ fn guest_env_forwards(overlay: &[(String, String)], parent: &[(String, String)])
         .collect()
 }
 
+/// # Errors
+/// Returns an error if the Spin CLI up command fails.
+#[inline]
 pub fn serve(extra_args: &[String], ctx: &AdapterExecContext<'_>) -> Result<(), String> {
     let manifest = cli_support::declared_or_discovered_manifest(ctx, || {
         find_spin_manifest(cli_support::discovery_base(ctx)?.as_path())
@@ -508,6 +508,29 @@ pub(crate) fn synthesise_runtime_config_toml() -> String {
     String::from("# edgezero-provision: v1\n")
 }
 
+/// Compute the `../` prefix that walks from a manifest sitting
+/// at `manifest_rel` (relative to the workspace root) back up to
+/// the workspace root itself. The synthesised
+/// `[component.<id>].source` joins this prefix with `target/...`
+/// so the emitted wasm path reaches the workspace target dir
+/// regardless of how deeply the operator nests `spin.toml`.
+///
+/// A two-deep scaffold needs `../../target/...`; a nested manifest such as
+/// `crates/spin-server/config/spin.toml` needs `../../../target/...`.
+///
+/// Empty `manifest_rel` (bare `spin.toml` at the workspace root)
+/// yields an empty prefix, so the source becomes plain
+/// `target/wasm32-wasip2/release/<crate>.wasm`.
+pub(crate) fn workspace_relative_target_prefix(manifest_rel: &Path) -> String {
+    use std::path::Component;
+    let parent = manifest_rel.parent().unwrap_or_else(|| Path::new(""));
+    let depth = parent
+        .components()
+        .filter(|comp| matches!(comp, Component::Normal(_)))
+        .count();
+    "../".repeat(depth)
+}
+
 /// Synthesised baseline `spin.toml` for scaffold-time and clean-clone
 /// bootstrap (single source — the Spin blueprint has no scaffold
 /// `.hbs` template for `spin.toml`, so scaffold and clean-clone
@@ -533,41 +556,11 @@ pub(crate) fn synthesise_runtime_config_toml() -> String {
 ///   `[adapters.spin.adapter].component`. The operator's runtime
 ///   discriminator for a multi-component `spin.toml`. Drives
 ///   `[[trigger.http]].component` AND the `[component.<id>]`
-///   table key. Defaults to `crate_name` when unset (single-
+///   table key. Defaults to a normalized `crate_name` when unset (single-
 ///   component projects).
 ///
-/// A pre-2026-07-v3 shape derived the wasm basename from the
-/// component id, which broke when the operator set
-/// `[adapters.spin.adapter].component = "worker"` on a Cargo
-/// package named `spin-server`: the synthesiser emitted
-/// `source = ".../worker.wasm"` while Cargo produced
-/// `spin_server.wasm`.
-/// Compute the `../` prefix that walks from a manifest sitting
-/// at `manifest_rel` (relative to the workspace root) back up to
-/// the workspace root itself. The synthesised
-/// `[component.<id>].source` joins this prefix with `target/...`
-/// so the emitted wasm path reaches the workspace target dir
-/// regardless of how deeply the operator nests `spin.toml`.
-///
-/// Pre-2026-07-13 the synthesiser hard-coded `../../target/...`
-/// (correct for the scaffold convention
-/// `crates/<crate>/spin.toml` — parent has 2 components), which
-/// silently mispointed on nested layouts like
-/// `crates/spin-server/config/spin.toml` (needs `../../../target/...`).
-///
-/// Empty `manifest_rel` (bare `spin.toml` at the workspace root)
-/// yields an empty prefix, so the source becomes plain
-/// `target/wasm32-wasip2/release/<crate>.wasm`.
-pub(crate) fn workspace_relative_target_prefix(manifest_rel: &Path) -> String {
-    use std::path::Component;
-    let parent = manifest_rel.parent().unwrap_or_else(|| Path::new(""));
-    let depth = parent
-        .components()
-        .filter(|comp| matches!(comp, Component::Normal(_)))
-        .count();
-    "../".repeat(depth)
-}
-
+/// The wasm basename always follows Cargo's package, independently of the
+/// selected runtime component.
 pub(crate) fn synthesise_spin_toml(
     crate_name: &str,
     component: Option<&str>,
@@ -666,6 +659,38 @@ pub(crate) fn synthesise_spin_toml(
 
 #[cfg(test)]
 mod tests {
+
+    // Child-only environment changes keep these tests independent of both Cargo
+    // configuration and concurrent environment-mutating tests in this binary.
+    fn artifact_test_in_child(name: &str) -> bool {
+        use std::env;
+        const CHILD: &str = "EDGEZERO_ARTIFACT_TEST_CHILD";
+        let test = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
+        if env::var(CHILD).ok().as_deref() == Some(test.as_str()) {
+            return false;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let output = Command::new(env::current_exe().unwrap())
+            .args(["--exact", &test])
+            .env(CHILD, &test)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
+            .env("CARGO_HOME", home.path().join("cargo-home"))
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed; 0 failed;"),
+            "selected artifact test did not execute: {stdout}"
+        );
+        true
+    }
     use super::*;
     use tempfile::tempdir;
 
@@ -777,6 +802,10 @@ mod tests {
         // must NOT leak into the sandbox.
         let env = vec![
             (
+                "EDGEZERO__SECRETS__TOKEN".to_owned(),
+                "overlay-secret".to_owned(),
+            ),
+            (
                 "EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY".to_owned(),
                 "app_config_staging".to_owned(),
             ),
@@ -790,7 +819,13 @@ mod tests {
             ),
             ("HOME".to_owned(), "/home/dev".to_owned()),
         ];
-        let forwards = guest_env_forwards(&env, &[]);
+        let forwards = guest_env_forwards(
+            &env,
+            &[(
+                "EDGEZERO__SECRETS__TOKEN".to_owned(),
+                "parent-secret".to_owned(),
+            )],
+        );
         assert_eq!(
             forwards,
             vec![
@@ -867,6 +902,9 @@ mod tests {
 
     #[test]
     fn locate_artifact_considers_workspace_target() {
+        if artifact_test_in_child("locate_artifact_considers_workspace_target") {
+            return;
+        }
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         let manifest_dir = workspace.join("service");
@@ -888,6 +926,9 @@ mod tests {
 
     #[test]
     fn locate_artifact_honors_ctx_env_cargo_target_dir() {
+        if artifact_test_in_child("locate_artifact_honors_ctx_env_cargo_target_dir") {
+            return;
+        }
         // The build runs with `CARGO_TARGET_DIR` applied from `ctx.env()`
         // (manifest `[environment]`), so artifact discovery must read the
         // SAME source -- not just the process env. A relative value is
@@ -942,6 +983,11 @@ mod tests {
 
     #[test]
     fn refresh_conventional_source_copies_custom_artifact_to_source_path() {
+        if artifact_test_in_child(
+            "refresh_conventional_source_copies_custom_artifact_to_source_path",
+        ) {
+            return;
+        }
         // A custom-target build leaves the fresh artifact outside the
         // conventional target/ that spin.toml `source` reads. The refresh
         // must copy it there so serve/deploy don't use a stale module.
@@ -969,6 +1015,9 @@ mod tests {
 
     #[test]
     fn refresh_conventional_source_is_a_noop_when_already_at_source() {
+        if artifact_test_in_child("refresh_conventional_source_is_a_noop_when_already_at_source") {
+            return;
+        }
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         let source = workspace
@@ -984,6 +1033,11 @@ mod tests {
 
     #[test]
     fn locate_artifact_honors_relative_cargo_home_without_stale_fallback() {
+        if artifact_test_in_child(
+            "locate_artifact_honors_relative_cargo_home_without_stale_fallback",
+        ) {
+            return;
+        }
         for has_fresh_artifact in [true, false] {
             let dir = tempdir().unwrap();
             let workspace = dir.path();
@@ -1032,6 +1086,10 @@ mod tests {
 
     #[test]
     fn locate_artifact_honors_target_dir_build_arg_over_stale_default() {
+        if artifact_test_in_child("locate_artifact_honors_target_dir_build_arg_over_stale_default")
+        {
+            return;
+        }
         // A `--target-dir` build arg redirects cargo's output. Discovery
         // must look ONLY there, even when a STALE artifact sits at the
         // conventional workspace target from an earlier default build.
@@ -1062,6 +1120,10 @@ mod tests {
 
     #[test]
     fn locate_artifact_errors_when_explicit_target_dir_has_no_artifact() {
+        if artifact_test_in_child("locate_artifact_errors_when_explicit_target_dir_has_no_artifact")
+        {
+            return;
+        }
         // An explicit target dir with no artifact must error rather than
         // silently fall back to a stale conventional artifact.
         let dir = tempdir().unwrap();
@@ -1086,6 +1148,9 @@ mod tests {
 
     #[test]
     fn locate_artifact_honors_cargo_config_target_dir() {
+        if artifact_test_in_child("locate_artifact_honors_cargo_config_target_dir") {
+            return;
+        }
         // `.cargo/config.toml` `[build] target-dir` also redirects cargo.
         let dir = tempdir().unwrap();
         let workspace = dir.path();
@@ -1113,6 +1178,9 @@ mod tests {
 
     #[test]
     fn locate_artifact_converts_hyphens_to_underscores() {
+        if artifact_test_in_child("locate_artifact_converts_hyphens_to_underscores") {
+            return;
+        }
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         let manifest_dir = workspace.join("crates/my-cool-crate");
@@ -1160,7 +1228,7 @@ mod tests {
 
     #[test]
     fn synthesises_spin_toml_uses_renamed_crate_name() {
-        // Regression for the reviewer-flagged renamed-adapter bug:
+        // The declared Cargo package determines the generated wasm basename:
         // when the operator sets `[adapters.spin.adapter].crate =
         // "crates/spin-server"`, the synth must emit the wasm
         // source path Cargo actually produces (`spin_server.wasm`),
@@ -1213,7 +1281,7 @@ mod tests {
 
     #[test]
     fn synthesised_spin_toml_component_selector_does_not_leak_into_wasm_basename() {
-        // Reviewer-flagged regression: with
+        // With
         // `[package].name = "spin-server"` and
         // `[adapters.spin.adapter].component = "worker"`, the
         // previous synth emitted `source = ".../worker.wasm"`

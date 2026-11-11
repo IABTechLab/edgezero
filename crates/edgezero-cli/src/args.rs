@@ -547,6 +547,10 @@ impl Default for ConfigDiffArgs {
 )]
 #[derive(clap::Args, Debug)]
 #[non_exhaustive]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "keep related selection, runtime, and consent flags together in CLI help"
+)]
 pub struct ConfigPushArgs {
     /// Target adapter name.
     #[arg(long, required = true)]

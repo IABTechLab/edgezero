@@ -1027,7 +1027,6 @@ id = "00112233445566778899aabbccddeeff"
     /// `wrangler.toml` rather than create a duplicate namespace.
     #[test]
     fn provision_restores_tracked_id_into_fresh_wrangler_instead_of_creating() {
-        let _guard = path_mutation_guard().lock().expect("path guard");
         let dir = tempdir().expect("tempdir");
         // Placeholder id (fresh scaffold) -> not a "real" id.
         write_wrangler(
@@ -1076,7 +1075,6 @@ id = "00112233445566778899aabbccddeeff"
         // A malformed tracked id (hand-edited / corrupt -- e.g. `abc`) must
         // NOT be restored verbatim: that would make provision report success
         // while every later read/push against the fake id fails. Refuse it.
-        let _guard = path_mutation_guard().lock().expect("path guard");
         let dir = tempdir().expect("tempdir");
         write_wrangler(
             dir.path(),

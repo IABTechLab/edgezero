@@ -527,10 +527,12 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn run_cargo_lets_ctx_env_host_port_win_over_axum_resolution() {
+    #[tokio::test]
+    async fn run_cargo_lets_ctx_env_host_port_win_over_axum_resolution() {
+        use crate::test_utils::env_guard;
         use edgezero_core::test_env::PathPrepend;
         use std::os::unix::fs::PermissionsExt as _;
+        let _guard = env_guard().lock().await;
         let dir = tempdir().unwrap();
         let crate_dir = dir.path().join("crate");
         fs::create_dir_all(&crate_dir).unwrap();

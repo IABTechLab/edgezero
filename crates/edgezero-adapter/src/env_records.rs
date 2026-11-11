@@ -22,21 +22,21 @@ static ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
 /// One logical record, including its original line endings.
 #[derive(Clone, Copy, Debug)]
 pub struct EnvRecord<'record> {
-    pub raw: &'record str,
-    pub line: usize,
     pub assignment: Option<EnvAssignment<'record>>,
+    pub line: usize,
+    pub raw: &'record str,
 }
 
 /// Parsed spans retain the consumer's complete quoted value, rather than
 /// interpreting physical lines inside it as assignments.
 #[derive(Clone, Copy, Debug)]
 pub struct EnvAssignment<'record> {
+    pub commented: bool,
     pub key: &'record str,
     pub prefix: &'record str,
-    pub value: &'record str,
-    pub commented: bool,
-    pub terminated: bool,
     pub quoted: bool,
+    pub terminated: bool,
+    pub value: &'record str,
 }
 
 /// Scan logical records without changing bytes or evaluating shell syntax.
@@ -129,7 +129,8 @@ fn scan(body: &str, redact: bool) -> Vec<EnvRecord<'_>> {
             }
             assignment = Some(EnvAssignment {
                 key,
-                prefix: &rest[..prefix_end],
+                // Malformed prefixes may themselves contain credentials.
+                prefix: "",
                 value,
                 commented,
                 terminated: true,
@@ -140,9 +141,9 @@ fn scan(body: &str, redact: bool) -> Vec<EnvRecord<'_>> {
         }
         let raw = &rest[..end];
         result.push(EnvRecord {
-            raw,
-            line,
             assignment,
+            line,
+            raw,
         });
         offset += end;
         line += raw.matches('\n').count() + raw.matches('\r').count() - raw.matches("\r\n").count();

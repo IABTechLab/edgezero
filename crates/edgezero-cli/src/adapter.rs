@@ -341,24 +341,6 @@ where
     execute(&ctx)
 }
 
-/// Resolve the declared, project-root-resolved
-/// `[adapters.<name>.adapter]` `manifest` / `crate` paths for the
-/// registry-fallback dispatch.
-///
-/// Both `.manifest` AND `.crate` are REQUIRED whenever a manifest is
-/// loaded and declares this adapter (the post-2026-07 hard cutoff).
-/// Without `.manifest` the adapter falls back to a recursive,
-/// symlink-following workspace scan that can select an unrelated or
-/// out-of-tree project. Without `.crate` the adapter can only guess the
-/// crate root as the platform manifest's parent, which mis-resolves
-/// `Cargo.toml` for a nested manifest such as
-/// `crates/server/config/spin.toml`. Refusing here keeps the two fields
-/// consistent rather than silently retaining the pre-cutoff
-/// parent-fallback compatibility behaviour.
-///
-/// Returns `(None, None)` when no manifest is loaded or the adapter
-/// isn't declared in it: the adapter then runs standalone and its own
-/// discovery is the only thing available.
 /// Reject a PARTIALLY-declared adapter (`.manifest` set without `.crate`
 /// or the reverse) on every dispatch path. A fully commands-only adapter
 /// (neither field) is left valid -- it owns its own build and never
@@ -395,6 +377,24 @@ fn assert_adapter_declaration_consistent(
     Ok(())
 }
 
+/// Resolve the declared, project-root-resolved
+/// `[adapters.<name>.adapter]` `manifest` / `crate` paths for the
+/// registry-fallback dispatch.
+///
+/// Both `.manifest` AND `.crate` are REQUIRED whenever a manifest is
+/// loaded and declares this adapter (the post-2026-07 hard cutoff).
+/// Without `.manifest` the adapter falls back to a recursive,
+/// symlink-following workspace scan that can select an unrelated or
+/// out-of-tree project. Without `.crate` the adapter can only guess the
+/// crate root as the platform manifest's parent, which mis-resolves
+/// `Cargo.toml` for a nested manifest such as
+/// `crates/server/config/spin.toml`. Refusing here keeps the two fields
+/// consistent rather than silently retaining the pre-cutoff
+/// parent-fallback compatibility behaviour.
+///
+/// Returns `(None, None)` when no manifest is loaded or the adapter
+/// isn't declared in it: the adapter then runs standalone and its own
+/// discovery is the only thing available.
 #[cfg(feature = "cli")]
 fn resolve_declared_adapter_paths(
     manifest_loader: Option<&ManifestLoader>,

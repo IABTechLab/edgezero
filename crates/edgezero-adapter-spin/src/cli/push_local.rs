@@ -23,9 +23,9 @@
 //!    A unit test (`vendored_schema_matches_upstream_byte_for_byte`)
 //!    pins both strings; a PRAGMA-shape test pins the resulting table
 //!    columns. Drift in OUR copy fails CI.
-//! 2. **Build-time SDK pin** — `Cargo.toml` pins `spin-sdk = "~6.0"`,
-//!    so a Spin minor bump that touches the schema fails the build
-//!    until the operator opts in and re-verifies.
+//! 2. **Build-time SDK pin** — `Cargo.toml` pins `spin-sdk = "~7.0"`,
+//!    selecting the component API line that requires Spin 4.1+. This does
+//!    not constrain the separately installed Spin CLI or its database schema.
 //! 3. **Run-time CLI check** — [`verify_spin_runtime_compat`] shells
 //!    `spin --version` before the first write of a session and
 //!    `log::warn!`s if the major version is outside our verified
@@ -33,9 +33,9 @@
 //!    is optional from the writer's perspective — but the operator
 //!    is told if their runtime is unknown.
 //!
-//! What the layered guards CANNOT catch: a Spin point-release that
-//! changes the schema WITHOUT bumping past `~6.0` AND with a
-//! same-major CLI version. Operators must verify with `spin up`
+//! These guards cannot detect schema drift within a runtime major version.
+//! The SDK dependency cannot pin an independently installed runtime.
+//! Operators must verify with `spin up`
 //! after the first push against a new Spin runtime; the warning
 //! above is a heads-up, not a guarantee.
 
@@ -56,13 +56,22 @@ use super::runtime_config;
 /// `spin_key_value` schema against. Spin's `crates/key-value-spin`
 /// has used this schema since at least Spin 2.x; we last verified
 /// against Spin 3.x (CLI 3.6.3, factor-key-value 3.x on
-/// spinframework/spin main, 2026-06-04).
+/// spinframework/spin main, 2026-06-04) and re-checked against the
+/// v4.1.0 tag on 2026-09-07, where the statement is byte-identical.
 ///
-/// When Spin 4.0 (or whichever major-version-bump touches the
-/// schema) lands, expect the verification to be repeated and this
-/// constant updated. Until then, an operator running a Spin CLI
-/// outside this range gets a `log::warn!` on first SQLite-direct
-/// push.
+/// When a major-version bump touches the schema, expect the
+/// verification to be repeated and this constant updated. Until then,
+/// an operator running a Spin CLI outside this range gets a
+/// `log::warn!` on first SQLite-direct push.
+///
+/// This is deliberately wider than the Spin 4.1 floor that
+/// `.tool-versions`, the adapter guide and `spin_version_guard.sh`
+/// state. Those describe what it takes to *run* a spin-sdk 7
+/// component; this describes which runtimes' on-disk KV schema we
+/// have compared ours against. `config push --adapter spin --local`
+/// only writes that file, so it stays correct on Spin 2.x/3.x even
+/// though such a runtime could never boot the component. Narrowing
+/// this to `&[4]` would warn operators whose push is fine.
 const VERIFIED_SPIN_MAJOR_RANGE: &[u32] = &[2, 3, 4];
 
 /// EXACT `CREATE TABLE IF NOT EXISTS spin_key_value (…)` statement
@@ -538,6 +547,7 @@ pub(super) fn dispatch_push(
             platform,
             logical,
             entries,
+            push_ctx.local,
             dry_run,
         );
     }
@@ -607,6 +617,7 @@ pub(super) fn dispatch_push(
             platform,
             logical,
             entries,
+            push_ctx.local,
             dry_run,
         ),
         None => {
@@ -625,6 +636,7 @@ pub(super) fn dispatch_push(
                 platform,
                 logical,
                 entries,
+                push_ctx.local,
                 dry_run,
             )
         }
@@ -707,12 +719,13 @@ fn write_sqlite(
     platform: &str,
     logical: &str,
     entries: &[(String, String)],
+    local: bool,
     dry_run: bool,
 ) -> Result<Vec<String>, String> {
     // `--local` writes MUST stay in-tree: refuse an absolute `path` before
     // it reaches SQLite (a relative `..` that stays in-crate is fine and is
     // validated by the containment check below).
-    if let Some(custom) = explicit_path {
+    if local && let Some(custom) = explicit_path {
         reject_offtree_sqlite_path(custom)?;
     }
     // Resolve the db path (default anchors at the manifest dir per Spin;
@@ -729,7 +742,9 @@ fn write_sqlite(
     // BASE it anchors against is external -- e.g. `--runtime-config
     // /tmp/runtime-config.toml` with `path = "config.db"` resolves to
     // `/tmp/config.db`. Reject a resolved db that lands outside the crate.
-    assert_sqlite_write_in_tree(crate_root, &db_path)?;
+    if local {
+        assert_sqlite_write_in_tree(crate_root, &db_path)?;
+    }
     if dry_run {
         let mut out = Vec::with_capacity(entries.len().saturating_add(1));
         out.push(format!(
@@ -1044,6 +1059,36 @@ mod tests {
     // ---------- Spin runtime-compat parsing ----------
 
     #[test]
+    fn verified_range_covers_the_spin_majors_the_sdk_supports() {
+        // spin-sdk ~7 needs a Spin 4.1+ runtime, so major 4 has to be
+        // inside the verified range: an operator on a supported runtime
+        // must not be told their setup is unverified. The 4.1.0 tag's
+        // `spin_key_value` statement is byte-identical to the vendored
+        // one (checked 2026-09-07), which is what makes 4 verifiable
+        // rather than merely assumed.
+        assert!(
+            VERIFIED_SPIN_MAJOR_RANGE.contains(&4),
+            "Spin 4.x is the supported runtime line and must be verified"
+        );
+        // 5.x has not been checked against the vendored schema, so it
+        // should still warn until someone repeats the comparison.
+        assert!(
+            !VERIFIED_SPIN_MAJOR_RANGE.contains(&5),
+            "unverified majors must keep warning"
+        );
+    }
+
+    #[test]
+    fn parse_spin_major_version_reads_the_supported_four_line() {
+        // Real output from `spin --version` on the 4.1.0 release, the
+        // floor spin-sdk 7 requires.
+        assert_eq!(
+            parse_spin_major_version("spin 4.1.0 (c0b3726 2026-08-25)\n"),
+            Some(4)
+        );
+    }
+
+    #[test]
     fn parse_spin_major_version_handles_cli_default_format() {
         // Real output from `spin --version` on 3.6.3.
         assert_eq!(
@@ -1102,6 +1147,56 @@ mod tests {
             ("greeting".to_owned(), "hello".to_owned()),
             ("svc.timeout".to_owned(), "1500".to_owned()),
         ]
+    }
+
+    #[test]
+    fn non_local_push_accepts_operator_declared_external_sqlite_paths() {
+        for absolute in [false, true] {
+            let dir = tempdir().unwrap();
+            let root = dir.path().join("crate");
+            fs::create_dir_all(&root).unwrap();
+            write_minimal_spin_toml(&root);
+            let database = dir.path().join("operator.db");
+            let selected = if absolute {
+                database.clone()
+            } else {
+                PathBuf::from("../operator.db")
+            };
+            let mut table = toml::Table::new();
+            table.insert("type".to_owned(), toml::Value::String("spin".to_owned()));
+            table.insert(
+                "path".to_owned(),
+                toml::Value::String(selected.to_str().unwrap().to_owned()),
+            );
+            fs::write(
+                root.join("runtime-config.toml"),
+                format!(
+                    "[key_value_store.app_config]\n{}",
+                    toml::to_string(&table).unwrap()
+                ),
+            )
+            .unwrap();
+            let entries = entries_two();
+            for local in [true, false] {
+                let result = dispatch_push(
+                    &root,
+                    Some("spin.toml"),
+                    &store("app_config", "app_config"),
+                    &entries,
+                    &AdapterPushContext::new().with_local(local),
+                    false,
+                );
+                if local {
+                    assert!(result.is_err());
+                    assert!(!database.exists());
+                } else {
+                    result.unwrap();
+                    let db = Connection::open(&database).unwrap();
+                    let value: Vec<u8> = db.query_row("SELECT value FROM spin_key_value WHERE store='app_config' AND key='greeting'", [], |row| row.get(0)).unwrap();
+                    assert_eq!(value, b"hello");
+                }
+            }
+        }
     }
 
     fn store(logical: &str, platform: &str) -> ResolvedStoreId {
@@ -1772,6 +1867,7 @@ mod tests {
                 "settings",
                 "settings",
                 &[("key".to_owned(), "value".to_owned())],
+                true,
                 dry_run,
             )
             .expect_err("relative runtime-config must not skip component checks");

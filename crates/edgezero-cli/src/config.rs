@@ -1,3 +1,8 @@
+#![expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "keep validation and config transaction helpers next to the flow that uses them"
+)]
+
 //! `config validate`.
 //!
 //! Two entry points share the same checks against the manifest, the

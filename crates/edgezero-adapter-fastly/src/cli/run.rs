@@ -306,6 +306,117 @@ pub(super) fn has_non_interactive(args: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn deploy_honours_threaded_manifest_path_and_strips_it_from_the_fastly_argv() {
+        use edgezero_core::test_env::{EnvOverride, PathPrepend};
+        use std::os::unix::fs::PermissionsExt as _;
+        let _guard = super::super::path_mutation_guard().lock().unwrap();
+        let _service = EnvOverride::remove("FASTLY_SERVICE_ID");
+        let app = tempfile::tempdir().unwrap();
+        let manifest = app.path().join("selected-fastly.toml");
+        let original = "name = 'selected-app'\n";
+        fs::write(&manifest, original).unwrap();
+        let fake = tempfile::tempdir().unwrap();
+        fs::write(
+            fake.path().join("fastly"),
+            r#"#!/bin/sh
+printf '%s\n' "$PWD" > "$EDGEZERO_DEPLOY_RECORD/cwd"
+printf '%s\n' "$@" > "$EDGEZERO_DEPLOY_RECORD/invocation"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dir) shift; dir="$1" ;;
+    --env) shift; environment="$1" ;;
+  esac
+  shift
+done
+cp "$dir/fastly.$environment.toml" "$EDGEZERO_DEPLOY_RECORD/selected"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(
+            fake.path().join("fastly"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let _path = PathPrepend::new(fake.path());
+        let record = tempfile::tempdir().unwrap();
+        let environment = [(
+            "EDGEZERO_DEPLOY_RECORD".to_owned(),
+            record.path().to_str().unwrap().to_owned(),
+        )];
+        let args = [
+            "--manifest-path".to_owned(),
+            manifest.display().to_string(),
+            "--service-id".to_owned(),
+            "SVC1".to_owned(),
+        ];
+        deploy(&args, &AdapterExecContext::new().with_env(&environment)).unwrap();
+        let raw = fs::read_to_string(record.path().join("invocation")).unwrap();
+        let invocation: Vec<_> = raw.lines().collect();
+        assert_eq!(
+            &invocation[..5],
+            [
+                "compute",
+                "deploy",
+                "--service-id",
+                "SVC1",
+                "--non-interactive"
+            ]
+        );
+        assert!(
+            !invocation
+                .iter()
+                .any(|arg| arg.starts_with("--manifest-path"))
+        );
+        let selected_dir = fs::canonicalize(app.path()).unwrap();
+        assert!(invocation.windows(2).any(|pair| {
+            pair.first() == Some(&"--dir")
+                && pair
+                    .get(1)
+                    .is_some_and(|dir| Path::new(dir) == selected_dir)
+        }));
+        assert_eq!(
+            fs::read_to_string(record.path().join("selected")).unwrap(),
+            original
+        );
+        assert_eq!(fs::read_to_string(&manifest).unwrap(), original);
+        let startup = fs::read_to_string(record.path().join("cwd")).unwrap();
+        assert_ne!(Path::new(startup.trim()), selected_dir);
+    }
+
+    // Child-only environment changes keep these tests independent of both Cargo
+    // configuration and concurrent environment-mutating tests in this binary.
+    fn artifact_test_in_child(name: &str) -> bool {
+        use std::env;
+        const CHILD: &str = "EDGEZERO_ARTIFACT_TEST_CHILD";
+        let test = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
+        if env::var(CHILD).ok().as_deref() == Some(test.as_str()) {
+            return false;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let output = Command::new(env::current_exe().unwrap())
+            .args(["--exact", &test])
+            .env(CHILD, &test)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
+            .env("CARGO_HOME", home.path().join("cargo-home"))
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed; 0 failed;"),
+            "selected artifact test did not execute: {stdout}"
+        );
+        true
+    }
     use super::*;
     use edgezero_adapter::cli_support::read_package_name;
     use tempfile::tempdir;
@@ -343,6 +454,9 @@ mod tests {
 
     #[test]
     fn locate_artifact_considers_workspace_target() {
+        if artifact_test_in_child("locate_artifact_considers_workspace_target") {
+            return;
+        }
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         let manifest_dir = workspace.join("service");
@@ -364,6 +478,11 @@ mod tests {
 
     #[test]
     fn locate_artifact_honors_relative_cargo_home_without_stale_fallback() {
+        if artifact_test_in_child(
+            "locate_artifact_honors_relative_cargo_home_without_stale_fallback",
+        ) {
+            return;
+        }
         for has_fresh_artifact in [true, false] {
             let dir = tempdir().unwrap();
             let workspace = dir.path();
@@ -406,6 +525,10 @@ mod tests {
 
     #[test]
     fn locate_artifact_honors_target_dir_build_arg_over_stale_default() {
+        if artifact_test_in_child("locate_artifact_honors_target_dir_build_arg_over_stale_default")
+        {
+            return;
+        }
         // A `--target-dir` build arg redirects cargo. Discovery must look
         // ONLY there, even when a STALE artifact sits at the conventional
         // workspace target from an earlier default build.
@@ -434,6 +557,10 @@ mod tests {
 
     #[test]
     fn locate_artifact_errors_when_explicit_target_dir_has_no_artifact() {
+        if artifact_test_in_child("locate_artifact_errors_when_explicit_target_dir_has_no_artifact")
+        {
+            return;
+        }
         // An explicit target dir with no artifact must error rather than
         // silently fall back to a stale conventional artifact.
         let dir = tempdir().unwrap();

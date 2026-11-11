@@ -4384,12 +4384,12 @@ printf '[]\n200'
                 .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
         )
         .expect("test PATH");
+        let test_name = format!(
+            "{}::adapter_deploy_discovers_and_rejects_invalid_service_id_before_provider_cli",
+            module_path!().split_once("::").expect("test module path").1
+        );
         let output = Command::new(env::current_exe().expect("current test binary"))
-            .args([
-                "--exact",
-                "cli::tests::adapter_deploy_discovers_and_rejects_invalid_service_id_before_provider_cli",
-                "--nocapture",
-            ])
+            .args(["--exact", &test_name, "--nocapture"])
             .current_dir(dir.path())
             .env(CHILD_ENV, "1")
             .env(MARKER_ENV, &marker)
@@ -4397,6 +4397,13 @@ printf '[]\n200'
             .env_remove(FASTLY_SERVICE_ID_ENV)
             .output()
             .expect("run isolated discovery regression");
+
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("test result: ok. 1 passed; 0 failed;"),
+            "child test did not execute: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
 
         assert!(
             output.status.success(),

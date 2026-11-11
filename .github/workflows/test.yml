@@ -94,8 +94,8 @@ jobs:
       - name: Enforce adapter manifests and secret env files are not tracked
         run: |
           if git ls-files |
-            grep -E '(^|/)(axum|fastly|spin|wrangler|runtime-config)\.toml$|(^|/)\.dev\.vars$|(^|/)\.env$' |
-            grep -Ev '^tests/fixtures/request-fidelity/(fastly|spin|wrangler)\.toml$'; then
+            grep -E '(^|/)(axum|fastly|spin|wrangler|runtime-config)\.toml$|(^|/)\.(dev\.vars|env)(\..*)?$|(^|/)\.edgezero-write-' |
+            grep -Ev '^tests/fixtures/request-fidelity/(fastly|spin|wrangler)\.toml$|(^|/)\.env\.example$'; then
             echo "::error::These adapter manifests AND secret-bearing env files (.dev.vars / .env) must be gitignored (spec §'Adapter manifests are gitignored' + §'Migration for downstream projects'). They carry operator secret values and must NEVER be committed."
             exit 1
           fi
@@ -114,10 +114,21 @@ jobs:
             crates/demo/spin.toml \
             crates/demo/runtime-config.toml \
             crates/demo/.dev.vars \
+            crates/demo/.dev.vars.production \
+            crates/demo/.dev.vars.local \
             crates/demo/.env \
+            crates/demo/.env.production \
+            crates/demo/.env.local \
+            crates/demo/.edgezero-write-probe \
             .edgezero/.env; do
             if ! git check-ignore -q "$probe"; then
               echo "::error::'$probe' is NOT gitignored. Add the pattern to .gitignore so provision-generated adapter state and secret-bearing env files can never be committed by accident."
+              exit 1
+            fi
+          done
+          for probe in .env.example crates/demo/.env.example crates/demo/src/bin/main.rs; do
+            if git check-ignore -q "$probe"; then
+              echo "::error::'$probe' must remain available for source control."
               exit 1
             fi
           done

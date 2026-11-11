@@ -577,7 +577,6 @@ pub(super) fn effective_fastly_service_id(
 #[cfg(test)]
 mod tests {
     use super::super::FastlyCliAdapter;
-    #[cfg(unix)]
     use super::super::path_mutation_guard;
     #[cfg(unix)]
     use super::super::provision_local::write_fastly_local_config_store;
@@ -588,6 +587,7 @@ mod tests {
     use edgezero_adapter::registry::{
         Adapter as _, AdapterDeployedState, ProvisionMode, ResolvedStoreId, TypedSecretEntry,
     };
+    use edgezero_core::test_env::EnvOverride;
     #[cfg(unix)]
     use edgezero_core::test_env::PathPrepend;
     use tempfile::tempdir;
@@ -1125,6 +1125,8 @@ mod tests {
     /// overwrite the team's committed id.
     #[test]
     fn cloud_provision_never_writes_back_service_id() {
+        let _guard = path_mutation_guard().lock().expect("guard");
+        let _service = EnvOverride::remove("FASTLY_SERVICE_ID");
         let dir = tempdir().expect("tempdir");
         // fastly.toml declares a service_id (as it would after a first
         // successful `fastly compute deploy`) -- and cloud provision
@@ -1196,6 +1198,8 @@ mod tests {
 
     #[test]
     fn provision_skip_path_emits_resource_link_note_on_existing_service() {
+        let _guard = path_mutation_guard().lock().expect("guard");
+        let _service = EnvOverride::remove("FASTLY_SERVICE_ID");
         // A store already declared in `[setup]` on an already-deployed
         // service (service_id present) is SKIPPED -- but `[setup]` is never
         // re-run, so the store stays unlinked. The skip line must re-emit
@@ -1336,6 +1340,18 @@ mod tests {
 
     #[test]
     fn provision_cloud_refuses_service_id_conflict_before_any_mutation() {
+        let _guard = path_mutation_guard().lock().expect("guard");
+        let _service = EnvOverride::remove("FASTLY_SERVICE_ID");
+        #[cfg(unix)]
+        let provider_log = tempdir().expect("provider log");
+        #[cfg(unix)]
+        let fake = fake_fastly_runtime_mapping(&[], &provider_log.path().join("calls"));
+        #[cfg(unix)]
+        let _path = PathPrepend::new(fake.path());
+        #[cfg(not(unix))]
+        let providerless = tempdir().expect("empty provider path");
+        #[cfg(not(unix))]
+        let _path = EnvOverride::set("PATH", providerless.path());
         // The conflict must abort in preflight -- BEFORE any store is
         // created or fastly.toml is edited -- and in dry-run too.
         let dir = tempdir().expect("tempdir");
@@ -1363,6 +1379,11 @@ mod tests {
             .expect_err("a service_id conflict must abort provision");
             assert!(err.contains("conflict"), "dry_run={dry_run}: {err}");
         }
+        #[cfg(unix)]
+        assert!(
+            !provider_log.path().join("calls").exists(),
+            "provider must not be invoked"
+        );
         // fastly.toml must be byte-identical -- no mutation happened.
         assert_eq!(
             fs::read_to_string(&path).expect("read"),

@@ -165,8 +165,12 @@ pub(super) fn provision_typed(
     for entry in typed_secrets {
         // Viceroy exposes the same logical alias as a production resource link.
         let added = upsert_secret_store_entry(&mut doc, entry.store_id, entry.key_value)?;
-        if added {
+        if added == Some(true) {
             appended = appended.saturating_add(1);
+        }
+        if added.is_none() {
+            status_lines.push(format!("fastly: secret_store `{}` is externally managed; leaving its file-backed entries unchanged in {path_display}", entry.store_id));
+            continue;
         }
         // Logical id in the human wording, platform name only when it
         // differs (an env override is in play) so the operator can see
@@ -176,8 +180,13 @@ pub(super) fn provision_typed(
         } else {
             format!("{} (platform `{}`)", entry.store_id, entry.platform)
         };
+        let action = if added == Some(true) {
+            "wrote"
+        } else {
+            "already contains"
+        };
         status_lines.push(format!(
-            "fastly: wrote secret_store `{store_label}` key `{}` (env `{}`) in {path_display}",
+            "fastly: {action} secret_store `{store_label}` key `{}` (env `{}`) in {path_display}",
             entry.key_value,
             entry.key_value.to_ascii_uppercase(),
         ));
@@ -315,20 +324,18 @@ fn upsert_local_config_store(
 /// local runtime exposes it under. Idempotent: if the target array
 /// already contains an entry with matching `key = "<key_value>"` we
 /// skip and leave sibling entries (including operator-adjusted `env`
-/// values) alone. Returns `Ok(true)` when a new entry was appended,
-/// `Ok(false)` when a matching key was already present.
+/// values) alone. Returns `Some(true)` when appended, `Some(false)` when a
+/// matching key exists, and `None` for an externally managed file-backed table.
 ///
-/// Refuses to clobber non-standard values: if the target
-/// `secret_stores.<store_id>` node exists but isn't an array of
-/// tables, or if `local_server` / `local_server.secret_stores`
-/// exist but aren't tables, the helper errors with a "refusing to
-/// edit in place" diagnostic.
+/// Inline arrays and arrays of tables are supported. File-backed tables are
+/// preserved without inserting entries; unsupported shapes return an error
+/// before the edited document is persisted.
 fn upsert_secret_store_entry(
     doc: &mut toml_edit::DocumentMut,
     store_id: &str,
     key_value: &str,
-) -> Result<bool, String> {
-    use toml_edit::{ArrayOfTables, Item, Table, value};
+) -> Result<Option<bool>, String> {
+    use toml_edit::{ArrayOfTables, InlineTable, Item, Table, Value, value};
 
     let local_server_entry = doc
         .entry("local_server")
@@ -346,21 +353,44 @@ fn upsert_secret_store_entry(
     let store_entry = secret_stores_tbl
         .entry(store_id)
         .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
+    if store_entry
+        .as_table_like()
+        .is_some_and(|table| table.get("file").and_then(Item::as_str).is_some())
+    {
+        return Ok(None);
+    }
+    if let Some(array) = store_entry.as_array_mut() {
+        if !array.iter().all(|entry| entry.as_inline_table().is_some()) {
+            return Err(format!(
+                "`local_server.secret_stores.{store_id}` contains non-table entries; refusing to edit in place"
+            ));
+        }
+        if array
+            .iter()
+            .filter_map(Value::as_inline_table)
+            .any(|entry| entry.get("key").and_then(Value::as_str) == Some(key_value))
+        {
+            return Ok(Some(false));
+        }
+        let mut row = InlineTable::new();
+        row.insert("key", Value::from(key_value));
+        row.insert("env", Value::from(key_value.to_ascii_uppercase()));
+        array.push(Value::InlineTable(row));
+        return Ok(Some(true));
+    }
     let store_arr = store_entry.as_array_of_tables_mut().ok_or_else(|| {
-        format!(
-            "`local_server.secret_stores.{store_id}` exists but is not an array of tables; refusing to edit in place"
-        )
+        format!("`local_server.secret_stores.{store_id}` must be an inline array, an array of tables, or a file-backed table; refusing to edit in place")
     })?;
     for existing in store_arr.iter() {
         if existing.get("key").and_then(|item| item.as_str()) == Some(key_value) {
-            return Ok(false);
+            return Ok(Some(false));
         }
     }
     let mut row = Table::new();
     row.insert("key", value(key_value));
     row.insert("env", value(key_value.to_ascii_uppercase()));
     store_arr.push(row);
-    Ok(true)
+    Ok(Some(true))
 }
 
 /// The error `config push --local` reports when the provision-owned
@@ -605,6 +635,65 @@ mod tests {
     use edgezero_core::test_env::PathPrepend;
     use tempfile::tempdir;
 
+    #[test]
+    fn write_fastly_local_config_store_refuses_incompatible_format() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("fastly.toml");
+        let before = format!(
+            "name = \"demo\"\n\n[local_server.config_stores.{TEST_CONFIG_ID}]\nformat = \"json\"\nfile = \"cfg.json\"\n",
+        );
+        fs::write(&path, &before).expect("write");
+        let err = write_fastly_local_config_store(
+            &path,
+            TEST_CONFIG_ID,
+            &[("greeting".to_owned(), "hello".to_owned())],
+            &[],
+        )
+        .expect_err("a non-inline store must be refused, not converted");
+        assert!(
+            err.contains("refusing to push") && err.contains("inline-toml"),
+            "must refuse and point at migration: {err}"
+        );
+        // The manifest is left exactly as it was.
+        let after = fs::read_to_string(&path).expect("read back");
+        assert_eq!(after, before, "the manifest must be untouched on refusal");
+    }
+
+    #[test]
+    fn typed_provision_preserves_supported_secret_store_representations() {
+        let entries = [
+            TypedSecretEntry::new("default", "existing", "existing"),
+            TypedSecretEntry::new("default", "new", "new_key"),
+        ];
+        for raw in [
+            "name = 'demo'\n[local_server.secret_stores]\ndefault = [{key='existing',env='OPERATOR_ENV'}]\n",
+            "name = 'demo'\n[local_server.secret_stores.default]\nfile = 'operator-secrets.json'\nformat = 'json'\n",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("fastly.toml");
+            fs::write(&path, raw).unwrap();
+            let outcome =
+                provision_typed(dir.path(), Some("fastly.toml"), &entries, false).unwrap();
+            let after = fs::read_to_string(&path).unwrap();
+            if raw.contains("file =") {
+                assert_eq!(after, raw);
+                assert!(
+                    outcome
+                        .status_lines
+                        .iter()
+                        .all(|line| line.contains("externally managed")),
+                    "{:?}",
+                    outcome.status_lines
+                );
+            } else {
+                assert!(after.contains("OPERATOR_ENV"));
+                assert!(after.contains("new_key"));
+                provision_typed(dir.path(), Some("fastly.toml"), &entries, false).unwrap();
+                assert_eq!(fs::read_to_string(&path).unwrap(), after);
+            }
+        }
+    }
+
     // Shared fixture names. Pinning these as consts (instead of
     // inline `"sessions"` / `"app_config"` per call site) keeps the
     // setup-vs-assertion pair in sync -- a typo in one place no
@@ -841,7 +930,7 @@ mod tests {
     fn synthesised_fastly_toml_honors_renamed_adapter_crate() {
         use std::path::PathBuf;
 
-        // Reviewer regression: with
+        // with
         // `[adapters.fastly.adapter].manifest = "crates/fast-edge/svc/fastly.toml"`
         // + `[package].name = "fast-edge"`, clean-clone provision
         // must emit `name = "fast-edge"` — NOT the fallback
@@ -1363,7 +1452,7 @@ mod tests {
         );
     }
 
-    // ---------- Section 9: provision_local_* contract suite ----------
+    // ---------- provision_local_* contract suite ----------
     //
     // Cross-adapter contract for `provision(mode=Local)`. Mirrors the
     // Cloudflare/Spin/Axum suites so the four adapters share a single
@@ -1377,7 +1466,7 @@ mod tests {
     // `fastly_local_provision_additively_merges_new_stores_into_existing_runtime_env`
     // above — not re-implemented here to avoid duplicate coverage.
 
-    /// Section 9.1 — First run: empty fixture with one KV and one
+    /// First run: empty fixture with one KV and one
     /// CONFIG store yields a `fastly.toml` with the edgezero-provision
     /// header, per-kind `[local_server.*_stores.*]` blocks in their
     /// expected shape, and an `edgezero_runtime_env.contents`
@@ -1461,7 +1550,7 @@ mod tests {
         );
     }
 
-    /// Section 9.2 — Re-provision must be byte-identical. This is the
+    /// Re-provision must be byte-identical. This is the
     /// operator's contract that `provision --adapter fastly` is safe
     /// to re-run: no drift in whitespace, no reordering, no re-emit of
     /// entries that were already present.
@@ -1507,7 +1596,7 @@ mod tests {
         );
     }
 
-    /// Section 9.3 — Fastly-specific: after the base `fastly.toml` is
+    /// Fastly-specific: after the base `fastly.toml` is
     /// provisioned and the operator hand-edits a
     /// `[[local_server.secret_stores.default]]` entry with a custom
     /// `env` mapping, a subsequent `provision_typed` call that adds a
@@ -1519,11 +1608,7 @@ mod tests {
     /// store `key` to an OS env var via the `env` field; the writer
     /// MUST NOT clobber that mapping when appending new keys.
     ///
-    /// Renamed 2026-07 (deep self-review finding P1-f): the prior
-    /// name `provision_local_push_after_provision_preserves_*`
-    /// promised a push→provision integration test but the body only
-    /// re-runs `provision_typed` twice; the invariant is
-    /// re-provision idempotency, not push semantics.
+    /// Re-provision preserves the operator's filled-in secret and its mapping.
     #[test]
     fn provision_typed_local_re_run_preserves_operator_env_mapping_on_secret_store_entry() {
         let dir = tempdir().expect("tempdir");
@@ -1634,7 +1719,7 @@ mod tests {
         );
     }
 
-    /// Section 9.4 — Zero cloud calls. Local-mode provision is a pure
+    /// Zero cloud calls. Local-mode provision is a pure
     /// file writer; it must NEVER shell out to `fastly`. Install
     /// `fake_fastly_panicking()` (a script that exits 42 on any call)
     /// on `$PATH` before invoking provision. If provision ever calls

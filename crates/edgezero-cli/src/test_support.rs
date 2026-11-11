@@ -1,3 +1,8 @@
+#![expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "keep shared test adapters and their state grouped by fixture"
+)]
+
 //! Test-only fixtures shared across `auth`, `provision`, `build`,
 //! `deploy`, `serve`, and `config` test modules.
 //!

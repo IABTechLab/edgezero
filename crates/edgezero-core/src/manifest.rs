@@ -384,6 +384,7 @@ pub struct ManifestAdapter {
 /// §"Where durable identifiers live".
 #[derive(Debug, Default, Deserialize, Serialize, Validate)]
 #[serde(deny_unknown_fields)]
+#[non_exhaustive]
 pub struct ManifestAdapterDeployed {
     /// Primary namespace ids, keyed by logical
     /// `[stores.kv]` / `[stores.config]` id (Cloudflare only).
@@ -452,13 +453,6 @@ pub struct ManifestAdapterDefinition {
     /// byte-identical across the two paths regardless of this value.
     #[serde(default)]
     pub allowed_outbound_hosts: Vec<String>,
-    /// Spin component id, when the adapter's `manifest` (`spin.toml`) declares
-    /// more than one `[component.*]`. Read by `provision` and
-    /// `config push`; ignored at runtime. `config validate --strict`
-    /// requires it when `spin.toml` declares multiple components.
-    #[serde(default)]
-    #[validate(length(min = 1_u64))]
-    pub component: Option<String>,
     /// Whether config `push` / `diff` targets the platform's CLOUD store
     /// rather than the local emulator store. Currently only the Spin adapter
     /// reads it: `true` routes `config push`/`diff --adapter spin` to Fermyon
@@ -468,6 +462,13 @@ pub struct ManifestAdapterDefinition {
     /// hard-cutoff manifest no longer emits.
     #[serde(default)]
     pub cloud: Option<bool>,
+    /// Spin component id, when the adapter's `manifest` (`spin.toml`) declares
+    /// more than one `[component.*]`. Read by `provision` and
+    /// `config push`; ignored at runtime. `config validate --strict`
+    /// requires it when `spin.toml` declares multiple components.
+    #[serde(default)]
+    #[validate(length(min = 1_u64))]
+    pub component: Option<String>,
     #[serde(rename = "crate")]
     #[serde(default)]
     #[validate(length(min = 1_u64))]
@@ -1849,8 +1850,7 @@ manifest = "fastly.toml"
     // shared schema — it doesn't branch on the adapter name. These
     // tests name the fixture adapter `demo` so their coverage is
     // read as "the shared struct captures each field kind" rather
-    // than "the parser knows about a specific adapter." Section 6
-    // is where individual adapters read the field subset they use.
+    // than "the parser knows about a specific adapter." Individual adapters read the field subset they use.
 
     #[test]
     fn adapter_deployed_block_captures_kv_namespace_maps() {

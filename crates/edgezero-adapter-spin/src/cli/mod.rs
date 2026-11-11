@@ -1,3 +1,12 @@
+#![expect(
+    clippy::mod_module_files,
+    reason = "keep each adapter CLI root and its subcommands together under cli/"
+)]
+#![expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "group adapter CLI lifecycle methods and their helpers by responsibility"
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -46,6 +55,7 @@ static SPIN_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
     extra_dirs: &["src"],
     dependencies: SPIN_DEPENDENCIES,
     manifest: ManifestSpec {
+        adapter_defaults: "allowed_outbound_hosts = [\"https://*:*\"]\n",
         manifest_filename: "spin.toml",
         build_target: "wasm32-wasip2",
         build_profile: "release",
@@ -224,7 +234,7 @@ impl Adapter for SpinCliAdapter {
         &[]
     }
 
-    // KV-backed config dropped Spin's `^[a-z][a-z0-9_]*$`
+    // KV-backed config dropped Spin's `^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)*$`
     // key rule and the config-vs-secret collision check. No adapter-
     // specific check applies to raw config keys.
     #[inline]
@@ -381,6 +391,7 @@ impl Adapter for SpinCliAdapter {
         if !matches!(mode, ProvisionMode::Local) {
             return Ok(ProvisionOutcome::default());
         }
+        self.validate_typed_secrets(typed_secrets)?;
         provision_local::provision_typed(
             manifest_root,
             adapter_manifest_path,
@@ -678,7 +689,7 @@ impl Adapter for SpinCliAdapter {
         // `synthesise_spin_toml` needs the manifest's relative path
         // so it can compute the correct `../` prefix from
         // `[component.<id>].source` back to the workspace `target/`
-        // dir. Pre-2026-07-13 it hard-coded `../../target/...`,
+        // dir. A hard-coded `../../target/...`,
         // which mispointed for anything but the scaffold-convention
         // `crates/<crate>/spin.toml` layout (2-deep). Nested paths
         // like `crates/spin-server/config/spin.toml` (3-deep) need
@@ -818,19 +829,16 @@ impl Adapter for SpinCliAdapter {
 }
 
 fn is_valid_spin_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !first.is_ascii_lowercase() {
-        return false;
-    }
-    chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    key.split('_').all(|word| {
+        let mut chars = word.chars();
+        chars.next().is_some_and(|first| first.is_ascii_lowercase())
+            && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+    })
 }
 
 /// Return a per-failure-mode diagnostic for a key that failed
 /// `is_valid_spin_key`. Spin's variable-name rule
-/// (`^[a-z][a-z0-9_]*$`) is one regex but the operator usually
+/// (`^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)*$`) is one regex but the operator usually
 /// wants to know WHICH bit they broke: digit-leading, uppercase,
 /// or stray punctuation. Returns a short phrase to splice into
 /// the caller's full error.
@@ -869,11 +877,18 @@ fn spin_key_rule_violation(key: &str) -> &'static str {
             return "Spin variable names may only contain lowercase letters, digits, and underscores";
         }
     }
+    if key
+        .split('_')
+        .skip(1)
+        .any(|word| !word.starts_with(|ch: char| ch.is_ascii_lowercase()))
+    {
+        return "Spin variable names require a lowercase letter after each underscore";
+    }
     debug_assert!(
         false,
         "spin_key_rule_violation called with key `{key}` that satisfies the regex; check is_valid_spin_key + caller agreement"
     );
-    "Spin variable names must match `^[a-z][a-z0-9_]*$`"
+    "Spin variable names must match `^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)*$`"
 }
 
 fn validate_component_id(id: &str) -> Result<(), String> {
@@ -1330,7 +1345,7 @@ mod tests {
     fn is_valid_spin_key_accepts_lowercase_with_digits_and_underscores() {
         assert!(is_valid_spin_key("foo"));
         assert!(is_valid_spin_key("foo_bar"));
-        assert!(is_valid_spin_key("foo__bar"));
+        assert!(is_valid_spin_key("a1_b2"));
         assert!(is_valid_spin_key("a1b2"));
     }
 
@@ -1341,6 +1356,10 @@ mod tests {
         assert!(!is_valid_spin_key("1foo"));
         assert!(!is_valid_spin_key("foo-bar"));
         assert!(!is_valid_spin_key("_foo"));
+        for invalid in ["foo__bar", "token_2", "foo_"] {
+            assert!(!is_valid_spin_key(invalid));
+            assert!(spin_key_rule_violation(invalid).contains("underscore"));
+        }
     }
 
     #[test]

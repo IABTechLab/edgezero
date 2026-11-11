@@ -283,18 +283,6 @@ fn anchor_at_project_root(relative: PathBuf) -> PathBuf {
 
 fn kv_handle_from_path(kv_path: &Path) -> anyhow::Result<KvHandle> {
     if let Some(parent) = kv_path.parent() {
-        // Refuse to write THROUGH a symlinked `.edgezero`: EdgeZero-owned
-        // local state is never a symlink, and following one would drop the
-        // redb outside the project tree. Mirrors the provision-side
-        // symlink rejection.
-        if let Ok(meta) = fs::symlink_metadata(parent)
-            && meta.file_type().is_symlink()
-        {
-            anyhow::bail!(
-                "refusing to open KV store: `{}` is a symlink; EdgeZero-owned local state (`.edgezero/`) is never a symlink -- replace it with a regular directory",
-                parent.display()
-            );
-        }
         fs::create_dir_all(parent).context("failed to create KV store directory")?;
     }
     let kv_store = Arc::new(PersistentKvStore::new(kv_path).context("failed to create KV store")?);
@@ -697,7 +685,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn kv_handle_refuses_a_symlinked_dot_edgezero_dir() {
+    fn kv_handle_opens_a_symlinked_persistent_volume() {
         use std::os::unix::fs::symlink;
         use tempfile::tempdir;
         // A planted symlink where `.edgezero/` is expected must be refused,
@@ -708,14 +696,11 @@ mod tests {
         let dot = temp.path().join(".edgezero");
         symlink(&outside, &dot).expect("symlink .edgezero");
         let kv_path = dot.join("kv-sessions-0000000000000000.redb");
-        let err = kv_handle_from_path(&kv_path).expect_err("a symlinked .edgezero must be refused");
+        let _handle =
+            kv_handle_from_path(&kv_path).expect("runtime may use a symlinked persistent volume");
         assert!(
-            err.to_string().contains("symlink"),
-            "error names the symlink: {err}"
-        );
-        assert!(
-            !outside.join("kv-sessions-0000000000000000.redb").exists(),
-            "the refused open must not have created the db through the link"
+            outside.join("kv-sessions-0000000000000000.redb").is_file(),
+            "the database must be created on the persistent volume"
         );
     }
 

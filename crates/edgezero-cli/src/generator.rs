@@ -494,8 +494,12 @@ fn render_manifest_section(
     let mut out = String::new();
     writeln!(
         out,
-        "[adapters.{}.adapter]\ncrate = \"crates/{}\"\nmanifest = \"crates/{}/{}\"\n",
-        blueprint.id, crate_name, crate_name, blueprint.manifest.manifest_filename,
+        "[adapters.{}.adapter]\ncrate = \"crates/{}\"\nmanifest = \"crates/{}/{}\"\n{}",
+        blueprint.id,
+        crate_name,
+        crate_name,
+        blueprint.manifest.manifest_filename,
+        blueprint.manifest.adapter_defaults,
     )?;
     writeln!(
         out,
@@ -870,6 +874,10 @@ fn initialize_git_repo(out_dir: &Path) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "keep test fixture types together with the cases that exercise them"
+)]
 mod tests {
     use super::*;
     #[cfg(unix)]
@@ -920,7 +928,10 @@ mod tests {
             display_name: base.display_name,
             extra_dirs: base.extra_dirs,
             files: base.files,
-            manifest: base.manifest,
+            manifest: scaffold::ManifestSpec {
+                adapter_defaults: "component = \"custom-component\"\n",
+                ..base.manifest
+            },
             readme: base.readme,
             run_module: base.run_module,
             template_registrations: base.template_registrations,
@@ -939,6 +950,11 @@ mod tests {
         .unwrap();
         let section =
             render_manifest_section(&layout, custom, "custom-crate", "crates/custom").unwrap();
+        let manifest: toml::Value = toml::from_str(&section).unwrap();
+        assert_eq!(
+            manifest["adapters"][custom.id]["adapter"]["component"].as_str(),
+            Some("custom-component")
+        );
         assert!(
             section.contains("custom_app/custom-crate/crates/custom/crates/custom/"),
             "{section}"
@@ -1424,7 +1440,7 @@ mod tests {
         // per-machine ids / operator-set defaults. All five adapter
         // manifests are provision-generated; `axum.toml` joined the
         // list when Axum's `synthesise_baseline_manifest` was wired
-        // up (2026-07 refactor).
+        // up.
         for entry in [
             "axum.toml",
             "fastly.toml",
@@ -2000,6 +2016,24 @@ mod tests {
         let spin_crate = project_dir.join("crates/demo-app-adapter-spin");
         let axum_crate = project_dir.join("crates/demo-app-adapter-axum");
 
+        let tracked: toml::Value =
+            toml::from_str(&fs::read_to_string(project_dir.join("edgezero.toml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            tracked["adapters"]["spin"]["adapter"]["allowed_outbound_hosts"][0].as_str(),
+            Some("https://*:*")
+        );
+        let spin: toml::Value =
+            toml::from_str(&fs::read_to_string(spin_crate.join("spin.toml")).unwrap()).unwrap();
+        assert!(
+            spin["component"]
+                .as_table()
+                .unwrap()
+                .values()
+                .all(|component| component["allowed_outbound_hosts"][0].as_str()
+                    == Some("https://*:*"))
+        );
+
         assert!(
             cf_crate.join("wrangler.toml").exists(),
             "cloudflare wrangler.toml must be synthesised at scaffold time"
@@ -2055,7 +2089,7 @@ mod tests {
         // That is exactly the "single source of truth" invariant:
         // `edgezero new`'s provision loop and a clean-clone
         // `provision --local` write identical output. The
-        // pre-2026-07 divergence — most severely on Spin, where
+        // scaffold/synthesis divergence — most severely on Spin, where
         // the scaffold template pointed at `<crate>_adapter_spin.wasm`
         // and the synth pointed at `<app>.wasm` (a non-existent
         // artefact) — is exactly what this asserts against.

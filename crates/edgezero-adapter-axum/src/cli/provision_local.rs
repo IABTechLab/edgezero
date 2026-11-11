@@ -2,9 +2,7 @@ use edgezero_adapter::env_records::encode_value;
 use std::fs;
 use std::path::Path;
 
-use edgezero_adapter::env_file::{
-    EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header, upsert_lines_with_header,
-};
+use edgezero_adapter::env_file::{EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header};
 use edgezero_adapter::registry::{ProvisionOutcome, ProvisionStores};
 
 /// Local-mode `provision` arm.
@@ -48,7 +46,7 @@ pub(super) fn provision(
     // of retaining the stale one. The commented `__KEY` placeholders are
     // operator-owned and stay on the insert-only append path so an
     // operator who uncommented + edited one is never clobbered.
-    upsert_lines_with_header(
+    append_lines_dedup_with_header(
         &env_path,
         Some(EDGEZERO_PROVISION_HEADER),
         &name_lines,
@@ -395,10 +393,7 @@ mod tests {
 
     #[test]
     fn provision_local_preserves_existing_axum_toml() {
-        // Renamed from `provision_local_does_not_touch_axum_toml`
-        // (2026-07 refactor). Axum's manifest joined the provision-
-        // generated set when `synthesise_baseline_manifest` was wired
-        // up. Provision synthesises a baseline `axum.toml` only when
+        // Provision synthesises a baseline `axum.toml` only when
         // the file is missing (via `write_baseline_to_disk`); the
         // adapter's merge path is a no-op because Axum has no cloud
         // identifiers. Operator edits therefore survive re-runs
@@ -437,7 +432,7 @@ mod tests {
 
     #[test]
     fn synthesised_axum_toml_honors_renamed_adapter_crate() {
-        // Regression: reviewer verified that a project with
+        // A project with
         // `[adapters.axum.adapter].manifest = "crates/server/axum.toml"`
         // + `[package].name = "server"` in `crates/server/Cargo.toml`
         // ended up with `crate = "demo-app-adapter-axum"` on
@@ -484,7 +479,7 @@ mod tests {
 
     #[test]
     fn synthesised_axum_toml_honors_renamed_adapter_crate_with_nested_manifest() {
-        // Reviewer regression: the manifest may live at a nested
+        // the manifest may live at a nested
         // path like `crates/server/config/axum.toml`, and the
         // package `[package].name` sits one level up at
         // `crates/server/Cargo.toml`. The synthesiser must walk up
@@ -578,7 +573,7 @@ mod tests {
     fn provision_local_writes_env_name_lines() {
         // Fixture: one store per kind. Local provision must:
         //   - write `.edgezero/.env` starting with the provenance
-        //     header (Section 5 review fix — `# edgezero-provision: v1`);
+        //     header (`# edgezero-provision: v1`);
         //   - emit one `__NAME` line per kind (KV / CONFIG / SECRETS);
         //   - emit a commented `__KEY` placeholder for CONFIG only.
         let dir = tempdir().unwrap();
@@ -625,11 +620,8 @@ mod tests {
     }
 
     #[test]
-    fn re_provision_converges_changed_platform_name() {
-        // Operator changes a store's platform NAME (app_config ->
-        // prod_config) and REPROVISIONS. The `__NAME` overlay line must
-        // CONVERGE to the new value -- no stale `=app_config` line may
-        // linger -- while an operator-added sibling line survives.
+    fn re_provision_preserves_operator_name_records() {
+        // Re-provision must preserve active, commented, duplicate and quoted records.
         let dir = tempdir().unwrap();
         let dot_edgezero = dir.path().join(".edgezero");
         fs::create_dir_all(&dot_edgezero).unwrap();
@@ -654,7 +646,8 @@ mod tests {
             .unwrap();
         // Operator hand-adds a sibling secret line.
         let first = fs::read_to_string(&env_path).unwrap();
-        fs::write(&env_path, format!("{first}OPERATOR_SECRET=keepme\n")).unwrap();
+        let operator = first.replace("EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=app_config", "# EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=disabled\r\nEDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=operator\r\nEDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=duplicate\r\nTOKEN=\"first\r\nEDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=inside secret\r\nlast\"");
+        fs::write(&env_path, &operator).unwrap();
 
         // Reprovision with the platform renamed to `prod_config`.
         let second_ids = vec![ResolvedStoreId::new("app_config", "prod_config")];
@@ -675,20 +668,7 @@ mod tests {
             .unwrap();
 
         let after = fs::read_to_string(&env_path).unwrap();
-        assert!(
-            after.contains("EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=prod_config"),
-            "reprovision must converge the __NAME value to prod_config: {after}"
-        );
-        assert!(
-            !after
-                .lines()
-                .any(|line| line == "EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=app_config"),
-            "no stale =app_config __NAME line may linger: {after}"
-        );
-        assert!(
-            after.contains("OPERATOR_SECRET=keepme"),
-            "operator-added sibling line must survive the reprovision: {after}"
-        );
+        assert_eq!(after, operator, "operator bytes must survive unchanged");
     }
 
     #[test]

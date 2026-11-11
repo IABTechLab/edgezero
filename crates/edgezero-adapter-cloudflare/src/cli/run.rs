@@ -226,24 +226,6 @@ fn locate_artifact(
     ))
 }
 
-/// Synthesised baseline `wrangler.toml` for scaffold-time and
-/// clean-clone bootstrap (single source — the Cloudflare blueprint
-/// has no scaffold `.hbs` template for `wrangler.toml`, so
-/// `edgezero new` and clean-clone `provision --local` produce
-/// byte-identical output; see the "Generated Adapter manifests"
-/// note in the spec).
-///
-/// The `name` field spells the adapter crate's Cargo package name.
-/// The caller in `cli/mod.rs` reads this from the `Cargo.toml`
-/// adjacent to the adapter manifest (honouring the operator's
-/// `[adapters.cloudflare.adapter].crate` rename) and falls back
-/// to the scaffold convention `<app_name>-adapter-cloudflare`
-/// only when no Cargo.toml is discoverable. `worker-build` reads
-/// this field and expects it to match the Cargo package it builds.
-///
-/// Built via `toml_edit::DocumentMut` (NOT raw `format!`) so any
-/// legal name — including values with TOML-significant characters
-/// like `"`, `\`, or newlines — is escaped correctly.
 /// The `main` value for a wrangler.toml at `manifest_rel` (relative to the
 /// project root) whose crate root is `crate_rel`. Wrangler resolves `main`
 /// against the config-file's directory, while `worker-build` emits
@@ -271,6 +253,24 @@ pub(super) fn wrangler_main_relpath(manifest_rel: &Path, crate_rel: Option<&str>
     format!("{}{WORKER_SHIM}", "../".repeat(depth))
 }
 
+/// Synthesised baseline `wrangler.toml` for scaffold-time and
+/// clean-clone bootstrap (single source — the Cloudflare blueprint
+/// has no scaffold `.hbs` template for `wrangler.toml`, so
+/// `edgezero new` and clean-clone `provision --local` produce
+/// byte-identical output; see the "Generated Adapter manifests"
+/// note in the spec).
+///
+/// The `name` field spells the adapter crate's Cargo package name.
+/// The caller in `cli/mod.rs` reads this from the `Cargo.toml`
+/// adjacent to the adapter manifest (honouring the operator's
+/// `[adapters.cloudflare.adapter].crate` rename) and falls back
+/// to the scaffold convention `<app_name>-adapter-cloudflare`
+/// only when no Cargo.toml is discoverable. `worker-build` reads
+/// this field and expects it to match the Cargo package it builds.
+///
+/// Built via `toml_edit::DocumentMut` (NOT raw `format!`) so any
+/// legal name — including values with TOML-significant characters
+/// like `"`, `\`, or newlines — is escaped correctly.
 pub(super) fn synthesise_wrangler_toml(crate_name: &str, main_rel: &str) -> String {
     use toml_edit::{DocumentMut, value};
 
@@ -313,6 +313,38 @@ pub(super) fn synthesise_wrangler_toml(crate_name: &str, main_rel: &str) -> Stri
 
 #[cfg(test)]
 mod tests {
+
+    // Child-only environment changes keep these tests independent of both Cargo
+    // configuration and concurrent environment-mutating tests in this binary.
+    fn artifact_test_in_child(name: &str) -> bool {
+        use std::env;
+        const CHILD: &str = "EDGEZERO_ARTIFACT_TEST_CHILD";
+        let test = format!("{}::{name}", module_path!().split_once("::").unwrap().1);
+        if env::var(CHILD).ok().as_deref() == Some(test.as_str()) {
+            return false;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let output = Command::new(env::current_exe().unwrap())
+            .args(["--exact", &test])
+            .env(CHILD, &test)
+            .env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
+            .env("CARGO_HOME", home.path().join("cargo-home"))
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("test result: ok. 1 passed; 0 failed;"),
+            "selected artifact test did not execute: {stdout}"
+        );
+        true
+    }
     use super::*;
     use tempfile::tempdir;
 
@@ -320,6 +352,11 @@ mod tests {
 
     #[test]
     fn locate_artifact_honors_relative_cargo_home_without_stale_fallback() {
+        if artifact_test_in_child(
+            "locate_artifact_honors_relative_cargo_home_without_stale_fallback",
+        ) {
+            return;
+        }
         for has_fresh_artifact in [true, false] {
             let dir = tempdir().unwrap();
             let workspace = dir.path();
@@ -368,6 +405,10 @@ mod tests {
 
     #[test]
     fn locate_artifact_honors_target_dir_build_arg_over_stale_default() {
+        if artifact_test_in_child("locate_artifact_honors_target_dir_build_arg_over_stale_default")
+        {
+            return;
+        }
         // A `--target-dir` build arg redirects cargo. Discovery must look
         // ONLY there, even when a STALE artifact sits at the conventional
         // workspace target from an earlier default build.
@@ -402,6 +443,10 @@ mod tests {
 
     #[test]
     fn locate_artifact_errors_when_explicit_target_dir_has_no_artifact() {
+        if artifact_test_in_child("locate_artifact_errors_when_explicit_target_dir_has_no_artifact")
+        {
+            return;
+        }
         // An explicit target dir with no artifact must error rather than
         // silently fall back to a stale conventional artifact.
         let dir = tempdir().unwrap();
@@ -429,6 +474,9 @@ mod tests {
 
     #[test]
     fn locate_artifact_conventional_search_still_works() {
+        if artifact_test_in_child("locate_artifact_conventional_search_still_works") {
+            return;
+        }
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         let crate_dir = workspace.join("service");

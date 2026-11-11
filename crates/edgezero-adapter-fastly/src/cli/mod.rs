@@ -1,3 +1,12 @@
+#![expect(
+    clippy::mod_module_files,
+    reason = "keep each adapter CLI root and its subcommands together under cli/"
+)]
+#![expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "group adapter CLI lifecycle methods and their helpers by responsibility"
+)]
+
 use std::collections::HashSet;
 use std::fs;
 use std::io::{ErrorKind, Write as _};
@@ -61,6 +70,7 @@ static FASTLY_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
     extra_dirs: &["src", ".cargo"],
     dependencies: FASTLY_DEPENDENCIES,
     manifest: ManifestSpec {
+        adapter_defaults: "",
         manifest_filename: "fastly.toml",
         build_target: "wasm32-wasip1",
         build_profile: "release",
@@ -1061,10 +1071,10 @@ fn register_ctor() {
 // submodule test suite in this crate. Tests in `provision_local`, `push_cloud`,
 // etc. all install shell shims via `PathPrepend` and would otherwise race on
 // the environment variable.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 use std::sync::Mutex as PathMutationMutex;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn path_mutation_guard() -> &'static PathMutationMutex<()> {
     use std::sync::OnceLock;
     static GUARD: OnceLock<PathMutationMutex<()>> = OnceLock::new();

@@ -29,7 +29,6 @@ mod auth;
 #[cfg(feature = "cli")]
 mod config;
 #[cfg(feature = "cli")]
-mod copy_tree;
 #[cfg(all(feature = "cli", feature = "demo-example"))]
 mod demo_server;
 #[cfg(feature = "cli")]
@@ -595,14 +594,15 @@ fn resolve_serve_env_file(
     let Some(adapter) = get_adapter(adapter_name) else {
         return Ok(None);
     };
-    let layout = path_safety::local_layout(
+    path_safety::local_serve_env(
         manifest_root,
         adapter,
-        cfg.adapter.manifest.as_deref(),
-        cfg.adapter.crate_path.as_deref(),
-        cfg.adapter.component.as_deref(),
-    )?;
-    Ok(layout.serve_env.map(|path| manifest_root.join(path)))
+        &edgezero_adapter::local::AdapterLocalContext::new(
+            cfg.adapter.manifest.as_deref(),
+            cfg.adapter.crate_path.as_deref(),
+            cfg.adapter.component.as_deref(),
+        ),
+    )
 }
 
 /// Create a new `EdgeZero` app skeleton.
@@ -701,6 +701,10 @@ fn load_manifest_optional() -> Result<Option<ManifestLoader>, String> {
 
 #[cfg(test)]
 #[cfg(feature = "cli")]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "keep test fixture types together with the cases that exercise them"
+)]
 mod tests {
     use super::*;
     use crate::test_support::{
@@ -1849,6 +1853,35 @@ ids = ["MY_SECRETS"]
                 .expect("valid adapter layout")
                 .is_none()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serve_does_not_inspect_cloudflare_dev_vars() {
+        use std::os::unix::fs::symlink;
+        let dir = TempDir::new().unwrap();
+        let crate_dir = dir.path().join("crates/demo-cf");
+        fs::create_dir_all(&crate_dir).unwrap();
+        symlink(
+            dir.path().join("operator-vars"),
+            crate_dir.join(".dev.vars"),
+        )
+        .unwrap();
+        let loader = ManifestLoader::load_from_str(PROVISION_MANIFEST);
+        assert_eq!(
+            resolve_serve_env_file(loader.manifest(), "cloudflare", dir.path()).unwrap(),
+            None
+        );
+        let cfg = &loader.manifest().adapters["cloudflare"];
+        let error = path_safety::local_layout(
+            dir.path(),
+            get_adapter("cloudflare").unwrap(),
+            cfg.adapter.manifest.as_deref(),
+            cfg.adapter.crate_path.as_deref(),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("symlink"), "{error}");
     }
 
     #[test]

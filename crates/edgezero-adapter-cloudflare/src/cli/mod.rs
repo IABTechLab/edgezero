@@ -1,3 +1,12 @@
+#![expect(
+    clippy::mod_module_files,
+    reason = "keep each adapter CLI root and its subcommands together under cli/"
+)]
+#![expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "group adapter CLI lifecycle methods and their helpers by responsibility"
+)]
+
 use std::path::{Path, PathBuf};
 
 use ctor::ctor;
@@ -23,7 +32,7 @@ mod run;
 static CLOUDFLARE_ADAPTER: CloudflareCliAdapter = CloudflareCliAdapter;
 
 static CLOUDFLARE_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
-    local_ignore_patterns: &["wrangler.toml", ".dev.vars", ".wrangler/"],
+    local_ignore_patterns: &["wrangler.toml", ".dev.vars", ".dev.vars.*", ".wrangler/"],
     tool_pins: &["nodejs 24.20.0"],
     install_notes: &[],
     id: "cloudflare",
@@ -36,6 +45,7 @@ static CLOUDFLARE_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
     extra_dirs: &["src", ".cargo"],
     dependencies: CLOUDFLARE_DEPENDENCIES,
     manifest: ManifestSpec {
+        adapter_defaults: "",
         manifest_filename: "wrangler.toml",
         build_target: "wasm32-unknown-unknown",
         build_profile: "release",
@@ -291,7 +301,7 @@ impl Adapter for CloudflareCliAdapter {
         Ok(())
     }
 
-    /// Cloudflare appends each typed secret as a `<key>=""` line into the
+    /// Cloudflare appends each typed secret as a `# <key>=""` hint into the
     /// SAME `.dev.vars` that `provision_local` seeds with generated
     /// `EDGEZERO__*` runtime-config lines (store `__NAME` / `__KEY` overlays,
     /// plus `EDGEZERO__ADAPTER__*` / `EDGEZERO__LOGGING__*`), and both batches
@@ -389,7 +399,7 @@ impl Adapter for CloudflareCliAdapter {
     ) -> Result<ProvisionOutcome, String> {
         // Cloud is a no-op: `wrangler secret put` is the tool for
         // remote secret upload. `provision_typed` handles ONLY the
-        // local preview writeback — a `<key_value>=""` placeholder
+        // local preview writeback — an inactive `# <key_value>=""` hint
         // per typed field, appended to the SAME `.dev.vars` file
         // `provision_local` seeds with `EDGEZERO__STORES__…__NAME` /
         // `__KEY` overlays.
@@ -410,7 +420,7 @@ impl Adapter for CloudflareCliAdapter {
             .join(".dev.vars");
         let lines: Vec<String> = typed_secrets
             .iter()
-            .map(|entry| format!(r#"{}="""#, entry.key_value))
+            .map(|entry| format!(r#"# {}="""#, entry.key_value))
             .collect();
         append_lines_dedup_with_header(
             &dev_vars_path,
@@ -598,6 +608,7 @@ pub(crate) fn path_mutation_guard() -> &'static PathMutationMutex<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use edgezero_adapter::env_records;
     use std::fs;
     use tempfile::tempdir;
 
@@ -642,6 +653,14 @@ mod tests {
             dev_vars_path.display()
         );
         let dev_vars = fs::read_to_string(&dev_vars_path).expect("read .dev.vars");
+        assert!(
+            env_records::records(&dev_vars).iter().all(|record| {
+                record
+                    .assignment
+                    .is_none_or(|entry| entry.key != "demo_api_token" || entry.commented)
+            }),
+            "a placeholder must not manufacture an empty secret: {dev_vars}"
+        );
         assert!(
             dev_vars.contains(r#"demo_api_token="""#),
             "placeholder line present: {dev_vars}"
@@ -835,13 +854,7 @@ mod tests {
         );
     }
 
-    /// Renamed 2026-07 (deep self-review finding P1-f): the prior
-    /// name (`provision_local_push_after_provision_preserves_*`)
-    /// promised a push→provision integration test but the body only
-    /// re-runs `provision_typed` twice. The real invariant this
-    /// locks is: re-running `provision_typed` after an operator
-    /// hand-edits the placeholder MUST NOT clobber the edit. That
-    /// is the `append_lines_dedup` contract, not the push contract.
+    /// Re-provision preserves the operator's filled-in secret and its mapping.
     #[test]
     fn provision_typed_local_re_run_preserves_operator_edit_to_dev_vars_secret() {
         // First run seeds `SECRET_KEY=""` (empty placeholder) into
@@ -876,7 +889,7 @@ mod tests {
         // Simulate the operator's hand-edit. Rewrite just the
         // SECRET_KEY line; everything else stays as provision wrote it.
         let edited = first.replace(
-            r#"SECRET_KEY="""#,
+            r#"# SECRET_KEY="""#,
             r#"SECRET_KEY="real_value_operator_set""#,
         );
         assert_ne!(edited, first, "operator edit actually mutated the file");
