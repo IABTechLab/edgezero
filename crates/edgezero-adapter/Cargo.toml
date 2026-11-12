@@ -12,10 +12,10 @@ workspace = true
 
 [features]
 default = []
-cli = ["dep:base16ct", "dep:serde", "dep:serde_json", "dep:sha2", "dep:toml", "dep:walkdir"]
+cli = ["dep:base16ct", "dep:regex", "dep:serde", "dep:serde_json", "dep:sha2", "dep:toml", "dep:walkdir"]
 
 [dependencies]
-regex = { workspace = true }
+regex = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

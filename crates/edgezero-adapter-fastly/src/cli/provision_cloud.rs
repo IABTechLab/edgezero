@@ -636,6 +636,8 @@ mod tests {
 
     #[test]
     fn scaffold_empty_service_id_is_treated_as_unselected() {
+        let _lock = path_mutation_guard().lock().expect("guard");
+        let _service = EnvOverride::remove(FASTLY_SERVICE_ID_ENV);
         let dir = tempdir().expect("tempdir");
         let manifest = dir.path().join("fastly.toml");
         fs::write(&manifest, "name = \"demo\"\nservice_id = \"\"\n").expect("write manifest");
@@ -651,6 +653,7 @@ mod tests {
     #[test]
     fn provision_existing_service_links_physical_store_under_logical_alias() {
         let _lock = path_mutation_guard().lock().expect("guard");
+        let _service = EnvOverride::remove(FASTLY_SERVICE_ID_ENV);
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("fastly.toml");
         fs::write(&path, "name = \"demo\"\nservice_id = \"abc123svc\"\n").expect("write");
@@ -699,6 +702,7 @@ mod tests {
     #[test]
     fn provision_rejects_non_default_mapping_without_service_before_mutation() {
         let _lock = path_mutation_guard().lock().expect("guard");
+        let _service = EnvOverride::remove(FASTLY_SERVICE_ID_ENV);
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("fastly.toml");
         let original = "name = \"demo\"\n";

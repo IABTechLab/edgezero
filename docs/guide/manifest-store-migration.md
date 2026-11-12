@@ -225,6 +225,52 @@ adapter manifests follow the same gitignored-generated model, so the
 source of truth is `edgezero.toml` (which stays tracked).
 :::
 
+## Preserve provider settings before untracking or pulling
+
+Back up existing provider manifests and custom settings before creating their
+removal commit or asking teammates to pull it. Complete the following tracked
+settings first; regeneration cannot recover them from a deleted manifest.
+
+### Spin outbound HTTPS permissions
+
+Older scaffolded `spin.toml` files allowed outbound HTTPS, commonly with
+`allowed_outbound_hosts = ["https://*:*"]`. Regeneration now reads that setting
+from the tracked application manifest. Without it, outbound HTTP becomes
+deny-all, including an older scaffold's `/proxy` route.
+
+Copy the hosts your app requires from the old component into `edgezero.toml`
+and commit the change **before** removing manifests or asking teammates to pull:
+
+```toml
+[adapters.spin.adapter]
+# Preserve the existing manifest/crate/component settings in this table.
+allowed_outbound_hosts = ["https://*:*"]
+```
+
+Use the existing app's host list if it is narrower or otherwise customized.
+Fresh scaffolds already declare their HTTPS proxy permission here.
+
+### Existing Cloudflare namespace IDs
+
+Cloud provisioning skips automatic promotion of IDs held only in a local,
+gitignored `wrangler.toml`; it reports the skipped promotion and can still
+return success. Before the removal commit or any teammate pulls, back up that
+configuration and verify its primary and preview namespaces in the intended
+Cloudflare account. `wrangler whoami` helps identify the account;
+`wrangler kv namespace list` lists namespace IDs and titles, **not bindings**.
+Recover each binding-to-ID mapping from the existing Wrangler configuration or
+the deployed Worker's binding settings, then map it to the corresponding
+logical store ID in `edgezero.toml`.
+
+Record verified primary IDs in
+`[adapters.cloudflare.deployed.kv_namespaces]` and preview IDs separately in
+`[adapters.cloudflare.deployed.preview_kv_namespaces]`, keyed by logical store
+ID. Commit this tracked state **before** teammates pull the manifest removal,
+then run local provision to restore the IDs into generated Wrangler config.
+See [the Cloudflare migration procedure](/guide/adapters/cloudflare#migrating-existing-namespace-ids)
+for an example and the verification steps. If this step is skipped, a clean
+clone has neither ID and cloud provisioning can create duplicate namespaces.
+
 ## Un-tracking manifests already committed to your repo
 
 ::: warning Back up before the removal is pulled
@@ -273,15 +319,6 @@ Commit the `.gitignore` change plus the `git rm --cached` removals
 together after coordinating backups. The author retains local files; teammates
 regenerate theirs with `provision --local` after pulling and restore custom
 settings from their backups.
-
-## Existing Cloudflare namespace IDs
-
-Cloud provisioning does not adopt IDs merely because they appear in a local
-`wrangler.toml`. In the intended Cloudflare account, verify the namespace and
-binding with `wrangler kv namespace list`. Record the verified primary IDs in
-`[adapters.cloudflare.deployed.kv_namespaces]` and preview IDs in the separate
-`preview_kv_namespaces` table, each keyed by the logical store ID. Commit that
-tracked state, then run local provision to restore it into Wrangler configuration.
 
 ## Axum runtime data and unset secrets
 

@@ -251,9 +251,10 @@ Schema-coupling note: the SQLite writer uses the exact `spin_key_value`
 schema and `INSERT … ON CONFLICT DO UPDATE` statement vendored from
 spinframework/spin's `crates/key-value-spin/src/store.rs`. A contract
 test in `edgezero-adapter-spin/src/cli/push_local.rs` asserts
-byte-equality against the upstream string, and the workspace's
-`spin-sdk = "~7.0"` pin blocks any Spin minor bump that would change
-the schema until the operator opts in.
+byte-equality against the upstream string, verified through Spin 4.1. The
+workspace's `spin-sdk = "~7.0"` pin constrains the Rust SDK dependency; it does
+not constrain the separately installed Spin CLI or its database schema. Review
+the schema compatibility before upgrading that CLI.
 
 ```bash
 # Local dev: writes through to .spin/sqlite_key_value.db.

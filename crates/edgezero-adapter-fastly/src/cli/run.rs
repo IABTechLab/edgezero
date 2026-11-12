@@ -322,8 +322,8 @@ mod tests {
         fs::write(
             fake.path().join("fastly"),
             r#"#!/bin/sh
-printf '%s\n' "$PWD" > "$EDGEZERO_DEPLOY_RECORD/cwd"
-printf '%s\n' "$@" > "$EDGEZERO_DEPLOY_RECORD/invocation"
+printf '%s\n' "$PWD" >> "$EDGEZERO_DEPLOY_RECORD/cwd"
+printf '%s\n' "$@" >> "$EDGEZERO_DEPLOY_RECORD/invocation"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dir) shift; dir="$1" ;;
@@ -355,14 +355,22 @@ cp "$dir/fastly.$environment.toml" "$EDGEZERO_DEPLOY_RECORD/selected"
         deploy(&args, &AdapterExecContext::new().with_env(&environment)).unwrap();
         let raw = fs::read_to_string(record.path().join("invocation")).unwrap();
         let invocation: Vec<_> = raw.lines().collect();
+        assert_eq!(invocation.len(), 9, "one complete deploy invocation: {raw}");
+        let selected_dir = fs::canonicalize(app.path()).unwrap();
+        let selector = invocation[8];
+        assert!(selector.starts_with("edgezero-"), "{raw}");
         assert_eq!(
-            &invocation[..5],
+            invocation,
             [
                 "compute",
                 "deploy",
                 "--service-id",
                 "SVC1",
-                "--non-interactive"
+                "--non-interactive",
+                "--dir",
+                selected_dir.to_str().unwrap(),
+                "--env",
+                selector,
             ]
         );
         assert!(
@@ -370,19 +378,13 @@ cp "$dir/fastly.$environment.toml" "$EDGEZERO_DEPLOY_RECORD/selected"
                 .iter()
                 .any(|arg| arg.starts_with("--manifest-path"))
         );
-        let selected_dir = fs::canonicalize(app.path()).unwrap();
-        assert!(invocation.windows(2).any(|pair| {
-            pair.first() == Some(&"--dir")
-                && pair
-                    .get(1)
-                    .is_some_and(|dir| Path::new(dir) == selected_dir)
-        }));
         assert_eq!(
             fs::read_to_string(record.path().join("selected")).unwrap(),
             original
         );
         assert_eq!(fs::read_to_string(&manifest).unwrap(), original);
         let startup = fs::read_to_string(record.path().join("cwd")).unwrap();
+        assert_eq!(startup.lines().count(), 1, "one vendor call: {startup}");
         assert_ne!(Path::new(startup.trim()), selected_dir);
     }
 

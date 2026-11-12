@@ -92,6 +92,7 @@ jobs:
       # The three exact request-fidelity manifests are hand-written runtime
       # test inputs, not provision output. No other fixture state is exempt.
       - name: Enforce adapter manifests and secret env files are not tracked
+        if: matrix.suite == 'workspace'
         run: |
           if git ls-files |
             grep -E '(^|/)(axum|fastly|spin|wrangler|runtime-config)\.toml$|(^|/)\.(dev\.vars|env)(\..*)?$|(^|/)\.edgezero-write-' |
@@ -106,6 +107,7 @@ jobs:
       # `git check-ignore` evaluates the ignore rules against the pathname
       # whether or not the file exists.
       - name: Enforce adapter manifests and secret env files are gitignored
+        if: matrix.suite == 'workspace'
         run: |
           for probe in \
             crates/demo/axum.toml \
@@ -153,12 +155,15 @@ jobs:
       # `--severity=warning` gates on warnings and errors (SC1091/SC2086-style
       # info notes stay advisory). ubuntu-latest ships shellcheck.
       - name: ShellCheck smoke scripts
+        if: matrix.suite == 'workspace'
         run: shellcheck -x --severity=warning scripts/*.sh scripts/lib/*.sh
 
       # Run the backup/restore helper's own unit tests -- fail-closed backup,
       # atomic restore, symlink refusal, ownership-guarded server teardown.
       - name: Smoke backup helper unit tests
+        if: matrix.suite == 'workspace'
         run: bash scripts/lib/smoke_backup_test.sh
+
       - name: Verify native request ingress harness
         if: matrix.suite == 'workspace'
         run: |

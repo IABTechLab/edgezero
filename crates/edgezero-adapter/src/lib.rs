@@ -4,10 +4,14 @@
              `edgezero_adapter::TypeName` instead of `edgezero_adapter::registry::TypeName`"
 )]
 
+#[cfg(feature = "cli")]
 pub mod atomic_file;
+#[cfg(feature = "cli")]
 pub mod env_file;
+#[cfg(feature = "cli")]
 pub mod env_records;
 
+#[cfg(feature = "cli")]
 pub mod local;
 
 pub mod registry;

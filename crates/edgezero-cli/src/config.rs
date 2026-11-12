@@ -1,8 +1,3 @@
-#![expect(
-    clippy::arbitrary_source_item_ordering,
-    reason = "keep validation and config transaction helpers next to the flow that uses them"
-)]
-
 //! `config validate`.
 //!
 //! Two entry points share the same checks against the manifest, the
@@ -32,6 +27,7 @@ use crate::ensure_adapter_defined;
 use crate::manifest_variable_defaults;
 use crate::path_safety::{assert_provision_paths_contained, assert_provision_paths_safe};
 use crate::provision_lock::ProvisionLock;
+use crate::stream::{info_line as write_to_stderr_line, prompt as prompt_stderr};
 use edgezero_adapter::registry::{
     self as adapter_registry, ReadConfigEntry, ResolvedStoreId, TypedSecretEntry,
 };
@@ -47,6 +43,7 @@ use serde::de::DeserializeOwned;
 use similar::TextDiff;
 use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::io::{self, Error as IoError, IsTerminal as _, Write, stdin};
 use std::iter;
 use std::path::{Path, PathBuf};
@@ -234,12 +231,30 @@ struct PushPathRefs<'pp> {
     push_ctx: &'pp adapter_registry::AdapterPushContext<'pp>,
 }
 
+/// Borrowed identity and initial read for the pre-write recheck.
+struct RecheckContext<'ctx> {
+    adapter: &'ctx dyn adapter_registry::Adapter,
+    args: &'ctx ConfigPushArgs,
+    first_read: &'ctx ReadConfigEntry,
+    key: &'ctx str,
+    paths: &'ctx PushPathRefs<'ctx>,
+    store: &'ctx ResolvedStoreId,
+}
+
 /// Outcome of the pre-write re-check.
 enum RecheckOutcome {
     /// Concurrent push reached the same state — skip the write.
     Skip,
     /// Proceed to write (any warnings already emitted).
     Write,
+}
+
+/// Owned resolved push paths, borrowed into [`PushPathRefs`] for dispatch.
+struct ResolvedPushPaths<'ctx> {
+    adapter_manifest_path: Option<String>,
+    component_selector: Option<String>,
+    manifest_root: &'ctx Path,
+    push_ctx: adapter_registry::AdapterPushContext<'ctx>,
 }
 
 /// One resolved `#[secret]` leaf located in the raw app-config TOML.
@@ -534,6 +549,8 @@ pub fn run_config_push_typed<C>(args: &ConfigPushArgs) -> Result<(), String>
 where
     C: DeserializeOwned + Serialize + Validate + AppConfigMeta,
 {
+    fs::metadata(&args.manifest)
+        .map_err(|err| format!("inspect {}: {err}", args.manifest.display()))?;
     // Cross-process advisory lock (shared with `provision`) --
     // config push --local writes into `fastly.toml` / `.dev.vars` /
     // spin's local SQLite key-value store, all of which provision
@@ -1043,8 +1060,6 @@ fn handle_consent(args: &ConfigPushArgs, remote: &ReadConfigEntry) -> Result<(),
 
 /// Write an informational message to stderr. All push messages that are
 /// not errors go here.
-use crate::stream::{info_line as write_to_stderr_line, prompt as prompt_stderr};
-
 fn push_info(msg: &str) {
     write_to_stderr_line(msg);
 }
@@ -1082,17 +1097,6 @@ fn read_remote(
 
 /// Re-fetch right before the write to detect concurrent pushes
 /// and skip-on-equal.
-/// Bundles the four "identity + first-read" args `recheck_before_write`
-/// needs so the fn signature drops from 8 args to 4.
-struct RecheckContext<'ctx> {
-    adapter: &'ctx dyn adapter_registry::Adapter,
-    args: &'ctx ConfigPushArgs,
-    paths: &'ctx PushPathRefs<'ctx>,
-    store: &'ctx ResolvedStoreId,
-    key: &'ctx str,
-    first_read: &'ctx ReadConfigEntry,
-}
-
 fn recheck_before_write(
     ctx: &RecheckContext<'_>,
     local_sha: &str,
@@ -1333,15 +1337,6 @@ fn require_consent(args: &ConfigPushArgs, _read: &ReadConfigEntry) -> Result<(),
     }
 }
 
-/// Owned form of the resolved push paths -- the caller then borrows
-/// the `Option<String>`s into a [`PushPathRefs`] for adapter dispatch.
-struct ResolvedPushPaths<'ctx> {
-    manifest_root: &'ctx Path,
-    adapter_manifest_path: Option<String>,
-    component_selector: Option<String>,
-    push_ctx: adapter_registry::AdapterPushContext<'ctx>,
-}
-
 /// Resolve the adapter-manifest root, adapter manifest path, component
 /// selector, and `AdapterPushContext` from the push context.
 fn resolve_push_paths(ctx: &PushContext) -> Result<ResolvedPushPaths<'_>, String> {
@@ -1368,9 +1363,9 @@ fn resolve_push_paths(ctx: &PushContext) -> Result<ResolvedPushPaths<'_>, String
     let adapter_manifest_path = adapter_cfg.adapter.manifest.clone();
     let component_selector = adapter_cfg.adapter.component.clone();
     Ok(ResolvedPushPaths {
-        manifest_root,
         adapter_manifest_path,
         component_selector,
+        manifest_root,
         push_ctx,
     })
 }
@@ -1762,6 +1757,13 @@ fn run_shared_checks(
     ctx: &ValidationContext,
     adapter_scope: AdapterValidationScope,
 ) -> Result<(), String> {
+    validate_adapter_option_ownership(
+        ctx.manifest(),
+        match adapter_scope {
+            AdapterValidationScope::All => None,
+            AdapterValidationScope::Selected(adapter) => Some(adapter.name()),
+        },
+    )?;
     run_adapter_shared_checks(ctx, adapter_scope)?;
     validate_deployed_field_ownership(
         ctx.manifest(),
@@ -1824,6 +1826,41 @@ pub(crate) fn validate_deployed_field_ownership(
                 return Err(format!(
                     "[adapters.{name}.deployed].{field}: field is not owned by the `{name}` adapter (owned fields: [{}])",
                     owned.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Enforce adapter-owned extension options without provider identity dispatch.
+/// Whole-project validation skips adapters disabled in this CLI build; a
+/// selected adapter needs a registered implementation to claim any options.
+pub(crate) fn validate_adapter_option_ownership(
+    manifest: &Manifest,
+    selected: Option<&str>,
+) -> Result<(), String> {
+    for (name, configured) in &manifest.adapters {
+        if selected.is_some_and(|target| !name.eq_ignore_ascii_case(target)) {
+            continue;
+        }
+        let fields = configured.adapter.configured_option_fields();
+        if fields.is_empty() {
+            continue;
+        }
+        let Some(adapter) = adapter_registry::get_adapter(name) else {
+            if selected.is_some() {
+                return Err(format!(
+                    "adapter `{name}` is not registered; cannot validate its configured options"
+                ));
+            }
+            continue;
+        };
+        let owned = adapter.manifest_option_fields();
+        for field in fields {
+            if !owned.contains(&field) {
+                return Err(format!(
+                    "[adapters.{name}.adapter].{field}: field is not owned by the `{name}` adapter"
                 ));
             }
         }
@@ -2387,6 +2424,10 @@ fn format_app_config_error(err: &AppConfigError) -> String {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "keep test-only types and adapters beside their behavior cases"
+)]
 mod tests {
     use super::*;
     use crate::test_support::{EnvOverride, manifest_guard};
@@ -3017,10 +3058,58 @@ source = "target/wasm32-wasip2/release/demo.wasm"
     // ---------- raw flow ----------
 
     #[test]
+    fn missing_config_push_manifest_has_no_filesystem_side_effects() {
+        let _guard = manifest_guard().lock().unwrap();
+        for existing_parent in [false, true] {
+            for local in [false, true] {
+                for dry_run in [false, true] {
+                    let project = TempDir::new().unwrap();
+                    let parent = project.path().join("typo");
+                    if existing_parent {
+                        fs::create_dir_all(&parent).unwrap();
+                    }
+                    let mut args = push_args(&parent.join("edgezero.toml"), "axum");
+                    args.local = local;
+                    args.dry_run = dry_run;
+                    args.yes = true;
+                    args.no_diff = true;
+                    run_config_push_typed::<FixtureConfig>(&args)
+                        .expect_err("a missing input manifest must fail before mutation");
+                    assert!(
+                        !parent.join(".edgezero").exists(),
+                        "created a lock directory: local={local}, dry_run={dry_run}"
+                    );
+                    assert_eq!(parent.exists(), existing_parent);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn raw_validates_a_well_formed_project() {
         let _lock = manifest_guard().lock().expect("manifest guard");
         let (_dir, manifest, _) = setup_project(VALID_MANIFEST, VALID_APP_CONFIG);
         run_config_validate(&args_for(&manifest)).expect("valid project passes");
+    }
+
+    #[test]
+    fn config_validation_rejects_options_owned_by_another_adapter() {
+        let _guard = manifest_guard().lock().unwrap();
+        for setting in ["cloud = false", "allowed_outbound_hosts = []"] {
+            let raw = VALID_MANIFEST.replace(
+                "[adapters.axum.adapter]",
+                &format!("[adapters.axum.adapter]\n{setting}"),
+            );
+            let (_project, manifest, _) = setup_project(&raw, FIXTURE_APP_CONFIG);
+            let args = args_for(&manifest);
+            for error in [
+                run_config_validate(&args).expect_err("raw validation rejects wrong ownership"),
+                run_config_validate_typed::<FixtureConfig>(&args)
+                    .expect_err("typed validation rejects wrong ownership"),
+            ] {
+                assert!(error.contains("not owned"), "{error}");
+            }
+        }
     }
 
     #[test]
@@ -3243,9 +3332,7 @@ ids = ["app_config"]
 
     #[test]
     fn raw_rejects_absolute_adapter_manifest_path_before_adapter_validators_run() {
-        // Regression: pre-2026-07-09,
-        // `run_config_validate` -> `run_shared_checks` ->
-        // `run_adapter_shared_checks` called
+        // Validation must check path safety before calling
         // `adapter.validate_adapter_manifest(manifest_root, path, ...)`
         // without first running `assert_provision_paths_safe`.
         // Spin's validator then reads

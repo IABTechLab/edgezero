@@ -382,7 +382,7 @@ fn assert_adapter_declaration_consistent(
 /// registry-fallback dispatch.
 ///
 /// Both `.manifest` AND `.crate` are REQUIRED whenever a manifest is
-/// loaded and declares this adapter (the post-2026-07 hard cutoff).
+/// loaded and declares this adapter.
 /// Without `.manifest` the adapter falls back to a recursive,
 /// symlink-following workspace scan that can select an unrelated or
 /// out-of-tree project. Without `.crate` the adapter can only guess the

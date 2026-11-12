@@ -894,16 +894,25 @@ mod tests {
     fn custom_blueprint_owns_tool_pins_notes_and_logging_templates() {
         const CHILD: &str = "EDGEZERO_CUSTOM_BLUEPRINT_TEST";
         if env::var_os(CHILD).is_none() {
-            let status = Command::new(env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "generator::tests::custom_blueprint_owns_tool_pins_notes_and_logging_templates",
-                    "--nocapture",
-                ])
+            let test = format!(
+                "{}::custom_blueprint_owns_tool_pins_notes_and_logging_templates",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = Command::new(env::current_exe().unwrap())
+                .args(["--exact", &test, "--nocapture"])
                 .env(CHILD, "1")
-                .status()
+                .output()
                 .unwrap();
-            assert!(status.success());
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains("test result: ok. 1 passed; 0 failed;"),
+                "selected test did not execute: {stdout}"
+            );
             return;
         }
         let base = scaffold::registered_blueprints()

@@ -161,6 +161,10 @@ pub(super) const WRANGLER_INSTALL_HINT: &str =
 struct CloudflareCliAdapter;
 
 impl Adapter for CloudflareCliAdapter {
+    fn manifest_option_fields(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     fn preflight_deploy(
         &self,
         _context: &AdapterDeployContext,

@@ -320,7 +320,7 @@ fn verify_spin_runtime_compat() {
     } else {
         log::warn!(
             "Spin CLI major version {major} is outside EdgeZero's verified range {VERIFIED_SPIN_MAJOR_RANGE:?}. \
-             The local SQLite KV writer uses Spin's internal `spin_key_value` schema vendored from spinframework/spin 3.x; \
+             The local SQLite KV writer uses Spin's internal `spin_key_value` schema vendored from spinframework/spin (verified through 4.1); \
              if Spin {major}.x changed the schema, your push will write a file the runtime can't read. \
              Verify with `spin up` after the push, and consider opening an issue if you see incompatibility."
         );

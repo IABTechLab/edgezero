@@ -1,8 +1,3 @@
-#![expect(
-    clippy::arbitrary_source_item_ordering,
-    reason = "keep transaction contexts and fixtures adjacent to the provisioning flows they describe"
-)]
-
 //! `provision` command.
 //!
 //! Thin delegate to the adapter registry. The CLI loads the manifest,
@@ -27,7 +22,7 @@ use crate::config::{
     ValidationContext, build_typed_secret_entries, effective_manifest_environment,
     enforce_single_store_capability, load_validation_context_with_options,
     reject_merged_id_collisions, resolve_app_config_path_primitive, run_typed_preflight,
-    strict_handler_paths, validate_deployed_field_ownership,
+    strict_handler_paths, validate_adapter_option_ownership, validate_deployed_field_ownership,
 };
 use crate::ensure_adapter_defined;
 use crate::path_safety::{
@@ -60,24 +55,42 @@ use validator::Validate;
 /// - Spin: resolved `spin.toml` + sibling `runtime-config.toml` +
 ///   sibling `.env`.
 pub(crate) struct DryRunAllowList {
+    pub kinds: BTreeMap<PathBuf, LocalArtifactKind>,
     /// (`project_path`, `staged_path`) pairs the driver diffs.
     pub pairs: Vec<(PathBuf, PathBuf)>,
-    pub kinds: BTreeMap<PathBuf, LocalArtifactKind>,
 }
 
-/// Manifest-shape gates run before the dispatch matrix: capability
-/// gate, handler-path shape, and deployed-field ownership. The
-/// ownership check exists here for parity with `run_shared_checks` in
+/// Shared adapter identity and declared paths for transaction dispatch.
+struct DispatchContext<'dispatch> {
+    adapter: &'static dyn adapter_registry::Adapter,
+    adapter_cfg: &'dispatch ManifestAdapter,
+    adapter_name: &'dispatch str,
+    manifest_root: &'dispatch Path,
+}
+
+/// Adapter identity, declared paths and typed context for staged provision.
+struct DryRunTypedRequest<'req> {
+    adapter: &'static dyn adapter_registry::Adapter,
+    adapter_component: Option<&'req str>,
+    adapter_crate_rel: Option<&'req str>,
+    adapter_manifest_rel: Option<&'req str>,
+    canonical_adapter_name: &'req str,
+    ctx: &'req ValidationContext,
+    manifest_root: &'req Path,
+}
+
+/// Manifest-shape gates run before the dispatch matrix: option ownership,
+/// store capability, handler-path shape, and deployed-field ownership. The
+/// ownership checks exist here for parity with `run_shared_checks` in
 /// the config path, so `config validate` / `push` / `diff` and
-/// `provision` all reject the same manifests. Extracted from
-/// `run_provision` to keep that fn under the workspace `too_many_lines`
-/// lint; no behaviour change.
+/// `provision` all reject the same manifests.
 ///
 /// # Errors
 ///
-/// Returns the first check's error string when any of the three gates
+/// Returns the first check's error string when any of the four gates
 /// rejects the manifest.
 fn run_manifest_shape_gates(manifest: &Manifest, adapter_name: &str) -> Result<(), String> {
+    validate_adapter_option_ownership(manifest, Some(adapter_name))?;
     enforce_single_store_capability(manifest, adapter_name)?;
     strict_handler_paths(manifest)?;
     validate_deployed_field_ownership(manifest, Some(adapter_name))?;
@@ -235,6 +248,13 @@ fn run_provision_inner(
     // Translate the manifest's deployed block into the neutral
     // `AdapterDeployedState` for the synthesiser call site.
     let deployed = deployed_state_for(manifest, &args.adapter);
+    let definition = &adapter_cfg.adapter;
+    let dispatch = DispatchContext {
+        adapter,
+        adapter_cfg,
+        adapter_name: &args.adapter,
+        manifest_root,
+    };
 
     let outcome = match (args.local, args.dry_run) {
         (false, dry_run) => {
@@ -258,12 +278,6 @@ fn run_provision_inner(
             if !dry_run && !adapter.deployed_fields().is_empty() {
                 assert_manifest_writable(&args.manifest)?;
             }
-            let dispatch = DispatchContext {
-                adapter,
-                adapter_cfg,
-                adapter_name: &args.adapter,
-                manifest_root,
-            };
             validate_and_dispatch(
                 &dispatch,
                 manifest,
@@ -278,19 +292,16 @@ fn run_provision_inner(
             // worktree, then validate + build stores + dispatch.
             let baseline_pairs = adapter.synthesise_baseline_manifest(
                 manifest_root,
-                adapter_cfg.adapter.manifest.as_deref(),
-                adapter_cfg.adapter.crate_path.as_deref(),
-                adapter_cfg.adapter.component.as_deref(),
+                definition.manifest.as_deref(),
+                definition.crate_path.as_deref(),
+                definition.component.as_deref(),
                 &app_name,
                 deployed.as_ref(),
-                &adapter_cfg.adapter.allowed_outbound_hosts,
+                definition
+                    .allowed_outbound_hosts
+                    .as_deref()
+                    .unwrap_or_default(),
             )?;
-            let dispatch = DispatchContext {
-                adapter,
-                adapter_cfg,
-                adapter_name: &args.adapter,
-                manifest_root,
-            };
             let (synthesised, merged) = run_local_transaction(
                 &dispatch,
                 manifest,
@@ -475,26 +486,6 @@ where
     Ok(())
 }
 
-/// Dry-run arm of [`run_provision_typed`]. Extracted so the parent
-/// function stays under the workspace `too_many_lines` lint. Stages
-/// a tempdir that hosts BOTH `adapter.provision` (base) AND
-/// `adapter.provision_typed` (secret placeholders) so the typed
-/// merge sees the baseline manifest the base step wrote. The report
-/// is rendered inside the closure — `staged_root` is only valid
-/// until the tempdir drops.
-/// Bundle for [`run_local_dry_run_typed`]. Reduces the arg list from
-/// 9 to 3 by grouping the adapter identity + dispatch paths under
-/// one struct.
-struct DryRunTypedRequest<'req> {
-    adapter: &'static dyn adapter_registry::Adapter,
-    ctx: &'req ValidationContext,
-    canonical_adapter_name: &'req str,
-    adapter_manifest_rel: Option<&'req str>,
-    adapter_component: Option<&'req str>,
-    adapter_crate_rel: Option<&'req str>,
-    manifest_root: &'req Path,
-}
-
 /// Merge the base + typed provision outcomes produced inside the staging
 /// tempdir, prepend the baseline "wrote …" lines, and render the dry-run
 /// report. Returns the rendered report AND any partial-failure `error`
@@ -545,6 +536,8 @@ fn merge_and_render_typed_dry_run(
     (report, merged_error)
 }
 
+/// Stage base and typed provision together, then render before the temporary
+/// root drops so secret placeholders see the same synthesized baseline.
 fn run_local_dry_run_typed(
     req: &DryRunTypedRequest<'_>,
     entries: &[TypedSecretEntry<'_>],
@@ -793,7 +786,10 @@ fn outbound_hosts_for<'manifest>(
     manifest
         .adapter_entry(adapter_name)
         .map_or(&[], |(_, cfg)| {
-            cfg.adapter.allowed_outbound_hosts.as_slice()
+            cfg.adapter
+                .allowed_outbound_hosts
+                .as_deref()
+                .unwrap_or_default()
         })
 }
 
@@ -887,6 +883,8 @@ fn assert_manifest_writable(manifest_path: &Path) -> Result<(), String> {
         let parent = target
             .parent()
             .ok_or_else(|| io::Error::other("manifest has no parent"))?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
         tempfile::Builder::new()
             .prefix(".edgezero-write-probe-")
             .tempfile_in(parent)?
@@ -1046,18 +1044,6 @@ pub(crate) fn merge_deployed_into_manifest(
     Ok(())
 }
 
-/// Bundles the adapter identity + paths + root that both
-/// `validate_and_dispatch` and its dry-run typed sibling need. Cuts
-/// their argument lists from 8-9 down to a single ctx + the arm-
-/// specific bits (deployed / mode / dry-run for the base tail;
-/// entries / typed context for the dry-run typed tail).
-struct DispatchContext<'dispatch> {
-    adapter: &'static dyn adapter_registry::Adapter,
-    adapter_cfg: &'dispatch ManifestAdapter,
-    adapter_name: &'dispatch str,
-    manifest_root: &'dispatch Path,
-}
-
 /// Validate the selected manifest, resolve stores and dispatch the live transaction.
 fn validate_and_dispatch(
     ctx: &DispatchContext<'_>,
@@ -1212,7 +1198,7 @@ fn resolve_dry_run_allow_list(
         kinds.insert(project.clone(), artifact.kind);
         pairs.push((project, staged_root.join(&artifact.path)));
     }
-    Ok(DryRunAllowList { pairs, kinds })
+    Ok(DryRunAllowList { kinds, pairs })
 }
 
 /// Permission delta (`project_mode`, `staged_mode`) between a project file
@@ -1450,14 +1436,23 @@ fn run_local_dry_run(
     app_name: &str,
     deployed: Option<&AdapterDeployedState>,
 ) -> Result<adapter_registry::ProvisionOutcome, String> {
+    let definition = &adapter_cfg.adapter;
+    let local_context = AdapterLocalContext::new(
+        definition.manifest.as_deref(),
+        definition.crate_path.as_deref(),
+        definition.component.as_deref(),
+    );
     let baseline_pairs = adapter.synthesise_baseline_manifest(
         manifest_root,
-        adapter_cfg.adapter.manifest.as_deref(),
-        adapter_cfg.adapter.crate_path.as_deref(),
-        adapter_cfg.adapter.component.as_deref(),
+        definition.manifest.as_deref(),
+        definition.crate_path.as_deref(),
+        definition.component.as_deref(),
         app_name,
         deployed,
-        &adapter_cfg.adapter.allowed_outbound_hosts,
+        definition
+            .allowed_outbound_hosts
+            .as_deref()
+            .unwrap_or_default(),
     )?;
     let adapter_crate_rel = adapter_cfg
         .adapter
@@ -1494,11 +1489,7 @@ fn run_local_dry_run(
                 manifest_root,
                 staged_root,
                 &args.adapter,
-                &AdapterLocalContext::new(
-                    adapter_cfg.adapter.manifest.as_deref(),
-                    adapter_cfg.adapter.crate_path.as_deref(),
-                    adapter_cfg.adapter.component.as_deref(),
-                ),
+                &local_context,
             )?);
             let dispatch = DispatchContext {
                 adapter,
@@ -1528,16 +1519,8 @@ fn run_local_dry_run(
     let (outcome, pristine) = staged_result;
 
     let staged_root = tempdir.path();
-    let allow_list = resolve_dry_run_allow_list(
-        manifest_root,
-        staged_root,
-        &args.adapter,
-        &AdapterLocalContext::new(
-            adapter_cfg.adapter.manifest.as_deref(),
-            adapter_cfg.adapter.crate_path.as_deref(),
-            adapter_cfg.adapter.component.as_deref(),
-        ),
-    )?;
+    let allow_list =
+        resolve_dry_run_allow_list(manifest_root, staged_root, &args.adapter, &local_context)?;
     let report = render_dry_run_report(
         manifest_root,
         staged_root,
@@ -1688,10 +1671,11 @@ where
         .map_err(|err| format!("create staged crate directory: {err}"))?;
     // Crate-name discovery and workspace-inherited package metadata need only
     // Cargo manifests along this ancestry, never source/build/cache trees.
+    // These are read-only inputs: follow source links as real discovery does,
+    // while copying their bytes into regular files in the private staging tree.
     for relative in adapter_crate_rel.ancestors() {
         let cargo = relative.join("Cargo.toml");
         let source = project_root.join(&cargo);
-        reject_symlink_components(project_root, &source, "Cargo metadata")?;
         match fs::copy(&source, staged_root.join(&cargo)) {
             Ok(_) => {}
             Err(err) if err.kind() == ErrorKind::NotFound => {}
@@ -1715,6 +1699,10 @@ where
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "keep test-only adapters and fixture types alongside their scenarios"
+)]
 mod tests {
     use super::*;
     use crate::args::ProvisionArgs;
@@ -2911,6 +2899,40 @@ ids = ["default"]
         );
     }
 
+    #[test]
+    fn provision_dry_run_rejects_unowned_options_before_staging() {
+        let _guard = manifest_guard().lock().unwrap();
+        register_adapter(&FAKE_ADAPTER);
+        let project = TempDir::new().unwrap();
+        let mut raw: toml::Value = toml::from_str(TYPED_FAKE_MANIFEST_BODY).unwrap();
+        raw["adapters"][FAKE_ADAPTER.name()]["adapter"]
+            .as_table_mut()
+            .unwrap()
+            .insert("cloud".to_owned(), toml::Value::Boolean(false));
+        let manifest = project.path().join("edgezero.toml");
+        fs::write(&manifest, toml::to_string(&raw).unwrap()).unwrap();
+        fs::write(project.path().join("demo-app.toml"), TYPED_APP_CONFIG).unwrap();
+        let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", &manifest);
+        let args = ProvisionArgs {
+            manifest,
+            adapter: FAKE_ADAPTER.name().to_owned(),
+            local: true,
+            dry_run: true,
+        };
+        for typed in [false, true] {
+            reset_fake_state();
+            let result = if typed {
+                run_provision_typed::<TypedTestConfig>(&args)
+            } else {
+                run_provision(&args)
+            };
+            let error = result.expect_err("unowned options must fail before staging");
+            assert!(error.contains("not owned"), "{error}");
+            assert!(!SYNTH_CALLED.load(Ordering::SeqCst));
+            assert!(!PROVISION_CALLED.load(Ordering::SeqCst));
+        }
+    }
+
     // ---------- run_with_staging dry-run helper ----------
 
     #[cfg(unix)]
@@ -3043,6 +3065,33 @@ ids = ["default"]
 
     #[cfg(unix)]
     #[test]
+    fn staging_reads_symlinked_cargo_metadata_without_changing_the_source() {
+        use std::os::unix::fs::symlink;
+        for crate_rel in [".", "crates/worker"] {
+            let project = TempDir::new().unwrap();
+            let shared = project.path().join("shared");
+            fs::create_dir_all(&shared).unwrap();
+            let source = shared.join("worker-Cargo.toml");
+            let body = "[package]\nname = 'worker'\nversion = '0.1.0'\n";
+            fs::write(&source, body).unwrap();
+            let crate_dir = project.path().join(crate_rel);
+            fs::create_dir_all(&crate_dir).unwrap();
+            let cargo = crate_dir.join("Cargo.toml");
+            symlink(&source, &cargo).unwrap();
+            run_with_staging(project.path(), Path::new(crate_rel), |_, staged| {
+                let copied = staged.join("Cargo.toml");
+                assert!(fs::symlink_metadata(&copied).unwrap().is_file());
+                assert_eq!(fs::read_to_string(copied).unwrap(), body);
+                Ok(())
+            })
+            .expect("read-only Cargo metadata links must work in previews");
+            assert!(fs::symlink_metadata(&cargo).unwrap().is_symlink());
+            assert_eq!(fs::read_to_string(&source).unwrap(), body);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn staging_is_private_under_permissive_umask() {
         use std::os::unix::fs::PermissionsExt as _;
         use std::process::Command;
@@ -3142,7 +3191,7 @@ ids = ["default"]
     fn cloud_provision_checks_atomic_writeback_parent_before_dispatch() {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
         let _guard = manifest_guard().lock().unwrap();
-        for through_link in [false, true] {
+        for (through_link, mode) in [(false, 0o555), (true, 0o555), (false, 0o300), (true, 0o300)] {
             reset_fake_state();
             register_adapter(&FAKE_ADAPTER);
             let project = TempDir::new().unwrap();
@@ -3162,7 +3211,7 @@ ids = ["default"]
             fs::create_dir_all(root.join("crates/spin")).unwrap();
             fs::write(root.join("crates/spin/spin.toml"), "# stub\n").unwrap();
             let _manifest = EnvOverride::set("EDGEZERO_MANIFEST", &manifest);
-            fs::set_permissions(&restricted, fs::Permissions::from_mode(0o555)).unwrap();
+            fs::set_permissions(&restricted, fs::Permissions::from_mode(mode)).unwrap();
             let result = run_provision(&ProvisionArgs {
                 manifest: manifest.clone(),
                 adapter: FAKE_ADAPTER.name().to_owned(),

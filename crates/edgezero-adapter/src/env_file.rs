@@ -5,8 +5,8 @@
 //! → "Line-oriented".
 
 use crate::atomic_file;
-use crate::env_records::records;
-use std::collections::BTreeSet;
+use crate::env_records::{decode_value, records};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -163,6 +163,64 @@ pub fn append_lines_dedup_with_header(
     Ok(true)
 }
 
+/// Describe preserved active store-name records that differ from the resolved
+/// bindings. Only exact expected `EDGEZERO__STORES__*__NAME` keys are inspected;
+/// other env values and quoted continuations never enter diagnostics. Multiline
+/// selector values are redacted. A missing file produces no messages or writes.
+///
+/// # Errors
+/// Returns an error for unreadable, symlinked or malformed env input.
+#[inline]
+pub fn preserved_name_conflicts(
+    path: &Path,
+    expected_lines: &[String],
+) -> Result<Vec<String>, String> {
+    reject_symlinked_target(path)?;
+    let existing = match fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    validate_existing_records(&existing)?;
+    let mut expected = BTreeMap::new();
+    for line in expected_lines {
+        for record in records(line) {
+            if let Some(entry) = record.assignment
+                && !entry.commented
+                && entry.key.starts_with("EDGEZERO__STORES__")
+                && entry.key.ends_with("__NAME")
+            {
+                expected
+                    .entry(entry.key.to_owned())
+                    .or_insert(decode_value(entry)?);
+            }
+        }
+    }
+    let mut messages = Vec::new();
+    for record in records(&existing) {
+        let Some(entry) = record.assignment.filter(|entry| !entry.commented) else {
+            continue;
+        };
+        let Some(resolved) = expected.get(entry.key) else {
+            continue;
+        };
+        let current = decode_value(entry)?;
+        if current == *resolved {
+            continue;
+        }
+        let displayed = if current.contains(['\r', '\n']) {
+            "<multiline value>"
+        } else {
+            &current
+        };
+        messages.push(format!(
+            "{}:{}: preserving active {}={displayed:?}; resolved binding is {resolved:?}. Update this operator-owned record if the new binding is intended.",
+            path.display(), record.line, entry.key,
+        ));
+    }
+    Ok(messages)
+}
+
 /// Upsert each managed `<key>=<value>` line into `path`, CONVERGING an
 /// existing file to the managed values instead of skipping keys that
 /// already appear.
@@ -178,6 +236,7 @@ pub fn append_lines_dedup_with_header(
 ///
 /// This helper deliberately owns the supplied values. Provision hints use
 /// [`append_lines_dedup_with_header`] instead, preserving operator overrides.
+/// There are currently no in-tree production callers of this explicit upsert API.
 ///
 /// Returns `Ok(true)` when the file content actually changed and
 /// `Ok(false)` on a no-op (content already current, or `dry_run`). Like
@@ -384,8 +443,7 @@ pub fn reject_symlink_components(start: &Path, candidate: &Path) -> Result<(), S
             Ok(md) if md.file_type().is_symlink() => {
                 return Err(format!(
                     "refusing to use `{}`: `{}` is a symlink, so the write would escape the \
-                     project tree. Replace it with a regular directory (or a symlink to a path \
-                     INSIDE the project)",
+                     project tree. Replace it with a regular file or directory",
                     candidate.display(),
                     walk.display()
                 ));
@@ -443,6 +501,47 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[test]
+    fn name_conflicts_ignore_comments_secret_continuations_and_equivalent_quotes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        let key = "EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME";
+        let body = format!(
+            "{key}=\"app_config\"\r\n# {key}=disabled\r\nTOKEN=\"first\r\n{key}=PRIVATE_CONTINUATION\r\nlast\"\r\nOTHER=PRIVATE_SIBLING\r\n"
+        );
+        fs::write(&path, &body).unwrap();
+        assert!(
+            preserved_name_conflicts(&path, &[format!("{key}=app_config")])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), body);
+    }
+
+    #[test]
+    fn name_conflicts_redact_multiline_selectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        let key = "EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME";
+        let body = format!("{key}=\"PRIVATE_FIRST\nPRIVATE_LAST\"\n");
+        fs::write(&path, &body).unwrap();
+        let diagnostics = preserved_name_conflicts(&path, &[format!("{key}=prod_config")])
+            .unwrap()
+            .join("\n");
+        assert!(diagnostics.contains("<multiline value>"));
+        assert!(diagnostics.contains("prod_config"));
+        assert!(!diagnostics.contains("PRIVATE_"));
+        assert_eq!(fs::read_to_string(path).unwrap(), body);
+    }
+
+    #[test]
+    fn name_conflict_inspection_does_not_create_missing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("missing");
+        let path = parent.join(".env");
+        assert!(preserved_name_conflicts(&path, &[]).unwrap().is_empty());
+        assert!(!parent.exists());
+    }
     #[cfg(unix)]
     #[test]
     fn append_atomically_replaces_the_file_without_changing_existing_links() {

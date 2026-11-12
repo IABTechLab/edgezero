@@ -21,16 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and callers of `Adapter::validate_adapter_manifest`.
 - **Scaffold adapter defaults.** `ManifestSpec` literals require
   `adapter_defaults`; use `""` when no tracked defaults are needed. Spin scaffolds
-  declare HTTPS outbound access for their proxy route. Existing applications
-  without `allowed_outbound_hosts` retain deny-all on regeneration; declare the
-  required hosts in tracked `edgezero.toml`.
+  declare HTTPS outbound access for their proxy route. Older generated Spin
+  manifests also allowed HTTPS by default; regeneration drops that permission
+  unless the required `allowed_outbound_hosts` are first copied into tracked
+  `edgezero.toml`. Preserve those hosts before removing manifests or pulling
+  their removal commit.
 - **Axum KV location.** Runtime KV databases now live under the application
   project root's `.edgezero/`, rather than the launch directory. Stop the old
   runtime, back up its databases, and copy their existing filenames into the
   project's `.edgezero/` before restarting.
-- **Cloudflare namespace adoption.** Cloud provision refuses unverified IDs
+- **Cloudflare namespace adoption.** Cloud provision skips unverified IDs
   held only in local Wrangler state. Verify the account, binding and primary/
   preview IDs, then record them in the corresponding tracked deployed maps.
+  Commit verified IDs before removing manifests or asking teammates to pull.
   Local provisioning can then restore them without creating duplicates.
 - **Unset typed secrets.** Fresh Axum and Cloudflare secret hints are commented;
   Spin secret variables set `required = true`, have no default and require a
@@ -67,8 +70,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `false` when registry execution must honor the adapter manifest.
 - **Explicit config cloud target.** `AdapterPushContext::cloud_target` and
   `.with_cloud_target(bool)` replace deploy-command inference. Set
-  `[adapters.<name>.adapter].cloud = true` for a cloud target and use the context
+  `[adapters.spin.adapter].cloud = true` for a Spin cloud target and use the context
   builder instead of the removed deploy-command context field.
+- **Adapter option ownership.** CLI adapters declare supported option names
+  through `Adapter::manifest_option_fields`. Explicit unsupported `cloud` and
+  `allowed_outbound_hosts` settings fail validation, including `false` and `[]`.
+  Spin owns both; custom adapters can declare support without CLI type checks.
+  `ManifestAdapterDefinition::allowed_outbound_hosts` is now
+  `Option<Vec<String>>`; use `None` for absence and `Some(hosts)` when configured.
+- **Shared CLI utilities.** `edgezero-adapter` filesystem helpers and local
+  layout metadata require its `cli` feature, which also enables `regex`.
+  Runtime-only builds omit them. Unix atomic replacement syncs the parent
+  directory after rename and reports if installation succeeded but that sync
+  failed.
 
 - **`edgezero-adapter::Adapter::provision` trait method changed shape.** Was
   `fn provision(&self, root, adapter_manifest, component, stores, dry_run) -> Result<Vec<String>, String>`

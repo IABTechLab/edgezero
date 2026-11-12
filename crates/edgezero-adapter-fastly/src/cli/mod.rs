@@ -202,6 +202,10 @@ pub(super) enum ConfigStoreLookup {
 //   secret's Viceroy env var as `key.to_ascii_uppercase()`, which
 //   is lossy — see the impl for the collision this rejects.
 impl Adapter for FastlyCliAdapter {
+    fn manifest_option_fields(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     fn preflight_deploy(
         &self,
         context: &AdapterDeployContext,

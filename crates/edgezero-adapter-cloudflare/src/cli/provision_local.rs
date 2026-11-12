@@ -3,7 +3,9 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 
-use edgezero_adapter::env_file::{EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header};
+use edgezero_adapter::env_file::{
+    EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header, preserved_name_conflicts,
+};
 use edgezero_adapter::registry::{AdapterDeployedState, ProvisionOutcome, ProvisionStores};
 
 use super::provision_cloud::is_real_namespace_id;
@@ -349,10 +351,9 @@ pub(super) fn provision(
         Ok(lines) => lines,
         Err(error) => return Err(error.to_owned()),
     };
-    // Managed `__NAME` overlay lines go through the CONVERGING upsert so a
-    // reprovision after a platform-name change lands the new value. The
-    // commented `__KEY` placeholders are operator-owned and stay on the
-    // insert-only append path (an uncommented + edited one survives).
+    // Keep operator records insert-only and report active name mismatches;
+    // changing the resolved binding must not silently rewrite their values.
+    status_lines.extend(preserved_name_conflicts(&dev_vars_path, &name_lines)?);
     append_lines_dedup_with_header(
         &dev_vars_path,
         Some(EDGEZERO_PROVISION_HEADER),
@@ -368,7 +369,7 @@ pub(super) fn provision(
     )
     .map_err(|err| format!("write {}: {err}", dev_vars_path.display()))?;
     status_lines.push(format!(
-        "cloudflare: wrote {} .dev.vars entries to {}",
+        "cloudflare: checked {} candidate .dev.vars entries in {}",
         name_lines.len().saturating_add(comment_lines.len()),
         dev_vars_path.display()
     ));
@@ -391,8 +392,8 @@ pub(super) fn provision(
 /// re-run of provision — the commented placeholder is not re-added.
 ///
 /// Returns `(name_lines, comment_lines)`: the `__NAME` overlay lines
-/// (converging upsert path) and the commented `__KEY` placeholders
-/// (operator-owned, insert-only append path) split apart.
+/// (insert-only, with active mismatches reported) and the commented `__KEY`
+/// placeholders (operator-owned, insert-only) split apart.
 fn build_dev_vars_lines(
     stores: &ProvisionStores<'_>,
 ) -> Result<(Vec<String>, Vec<String>), &'static str> {
@@ -1291,7 +1292,7 @@ mod tests {
 
         // Reprovision with the platform renamed to `prod_config`.
         let second_ids = vec![ResolvedStoreId::new(TEST_CONFIG_ID, "prod_config")];
-        CloudflareCliAdapter
+        let outcome = CloudflareCliAdapter
             .provision(
                 dir.path(),
                 Some("wrangler.toml"),
@@ -1309,6 +1310,19 @@ mod tests {
 
         let after = fs::read_to_string(&dev_vars_path).expect("read .dev.vars");
         assert_eq!(after, operator, "operator bytes must survive unchanged");
+        let diagnostics = outcome.status_lines.join("\n");
+        for expected in [
+            "preserv",
+            "APP_CONFIG__NAME",
+            "operator",
+            "duplicate",
+            "prod_config",
+        ] {
+            assert!(diagnostics.contains(expected), "{diagnostics}");
+        }
+        assert!(diagnostics.contains(dev_vars_path.to_string_lossy().as_ref()));
+        assert!(!diagnostics.contains("inside secret"));
+        assert!(!diagnostics.contains("disabled"));
     }
 
     #[test]

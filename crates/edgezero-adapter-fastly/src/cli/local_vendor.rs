@@ -143,19 +143,26 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         const CHILD: &str = "EDGEZERO_PRIVATE_MANIFEST_MODE_CHILD";
         if env::var_os(CHILD).is_none() {
-            let status = Command::new("sh")
+            let test = format!(
+                "{}::startup_manifest_is_private_under_permissive_umask",
+                module_path!().split_once("::").unwrap().1
+            );
+            let output = Command::new("sh")
                 .args(["-c", "umask 022; exec \"$@\"", "sh"])
                 .arg(env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "cli::local_vendor::tests::startup_manifest_is_private_under_permissive_umask",
-                ])
+                .args(["--exact", &test])
                 .env(CHILD, "1")
-                .status()
+                .output()
                 .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
-                status.success(),
-                "private manifest permissions failed in child"
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains("test result: ok. 1 passed; 0 failed;"),
+                "selected test did not execute: {stdout}"
             );
             return;
         }

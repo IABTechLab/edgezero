@@ -286,11 +286,53 @@ id      = "abc123…"
 ```
 
 The binding name comes from `EDGEZERO__STORES__KV__SESSIONS__NAME`, defaulting
-to the logical id. `edgezero provision --adapter cloudflare` creates the
-namespace and appends the binding for you. Handlers reach the store through the
+to the logical id. For a new store, `edgezero provision --adapter cloudflare`
+creates the namespace and appends the binding for you. Existing namespaces need
+the tracked ID migration below. Handlers reach the store through the
 portable `Kv` extractor or `ctx.kv_store(id)`; a hand-picked binding that is not
 declared under `[stores.kv]` is never opened. See [KV Storage](/guide/kv) for
 the API.
+
+### Migrating existing namespace IDs
+
+Complete this procedure **before removing a tracked `wrangler.toml`, committing
+its removal, or asking teammates to pull that commit**. Back up the current
+config, including environment-specific namespace bindings. Provisioning skips
+promotion of an unverified ID found only in the local Wrangler file; it reports
+that skip rather than failing the whole command. A clean clone without tracked
+IDs can create duplicate namespaces on its next cloud provision.
+
+1. Run `wrangler whoami` and confirm the intended account. List its namespaces
+   with `wrangler kv namespace list`, using the existing project's account
+   configuration. The list contains IDs and titles; it does not identify Worker
+   bindings.
+2. Read the existing `[[kv_namespaces]]` and environment-specific entries, or
+   inspect the deployed Worker's binding settings. Match each `binding`, `id`,
+   and optional `preview_id` against the verified account resources. Translate
+   the binding to the logical ID declared in `[stores.kv]` or `[stores.config]`,
+   accounting for any `EDGEZERO__STORES__*__NAME` override.
+3. Copy the verified IDs into tracked `edgezero.toml`. Keep production and
+   preview IDs in separate maps, both keyed by the logical store ID:
+
+   ```toml
+   [adapters.cloudflare.deployed.kv_namespaces]
+   sessions = "REPLACE_WITH_VERIFIED_PRIMARY_NAMESPACE_ID"
+
+   [adapters.cloudflare.deployed.preview_kv_namespaces]
+   sessions = "REPLACE_WITH_VERIFIED_PREVIEW_NAMESPACE_ID"
+   ```
+
+   Replace the example values with verified IDs. Omit the preview entry if the
+   store has no preview namespace; do not substitute a primary ID by guessing.
+
+4. Commit the tracked IDs before the manifest-removal commit is pulled. Run
+   `cargo run -p <app>-cli -- provision --adapter cloudflare --local` and compare
+   the generated bindings/IDs against the backup. Teammates can then regenerate
+   their own local manifests from the same tracked state.
+
+If an earlier cloud provision was interrupted, verify any namespaces it created
+and record their IDs through the same procedure before retrying. Do not run
+cloud provision on a clean clone until existing resources have been identified.
 
 ## Durable Objects
 

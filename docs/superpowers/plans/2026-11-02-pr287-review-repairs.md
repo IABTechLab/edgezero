@@ -121,8 +121,8 @@ full typed-CLI/fake-Spin cloud replay now invokes the cloud writer and leaves
 operator files unchanged. Fifty shell assertions pass, including failed-stop
 restoration gates extracted from all four actual cleanup functions.
 
-Independent adapter, CLI, and smoke reviewers approved the resulting behavior.
-The CLI reviewer identified the audit helper's non-entrypoint exit lint; it now
+Internal adapter, CLI, and smoke audits informed these repairs; they were not
+independent PR approvals. The CLI audit identified the helper's non-entrypoint exit lint; it now
 returns a result to the existing entrypoint instead. The command builder accepts
 already-resolved child environments, avoiding another argument-count suppression.
 

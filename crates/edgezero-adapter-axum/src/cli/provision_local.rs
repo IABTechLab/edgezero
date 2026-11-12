@@ -2,7 +2,9 @@ use edgezero_adapter::env_records::encode_value;
 use std::fs;
 use std::path::Path;
 
-use edgezero_adapter::env_file::{EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header};
+use edgezero_adapter::env_file::{
+    EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header, preserved_name_conflicts,
+};
 use edgezero_adapter::registry::{ProvisionOutcome, ProvisionStores};
 
 /// Local-mode `provision` arm.
@@ -41,11 +43,9 @@ pub(super) fn provision(
         Ok(lines) => lines,
         Err(error) => return Err(error.to_owned()),
     };
-    // Managed `__NAME` overlay lines go through the CONVERGING upsert so a
-    // reprovision after a platform-name change lands the new value instead
-    // of retaining the stale one. The commented `__KEY` placeholders are
-    // operator-owned and stay on the insert-only append path so an
-    // operator who uncommented + edited one is never clobbered.
+    // Existing records are operator-owned. Keep their bytes and report active
+    // names that disagree with the newly resolved bindings before deduping.
+    let mut status_lines = preserved_name_conflicts(&env_path, &name_lines)?;
     append_lines_dedup_with_header(
         &env_path,
         Some(EDGEZERO_PROVISION_HEADER),
@@ -60,12 +60,12 @@ pub(super) fn provision(
         dry_run,
     )
     .map_err(|err| format!("write {}: {err}", env_path.display()))?;
-    let status_lines = vec![format!(
-        "axum: ensured {} + wrote {} lines to {}",
+    status_lines.push(format!(
+        "axum: ensured {} + checked {} candidate lines in {}",
         dot_edgezero.display(),
         name_lines.len().saturating_add(comment_lines.len()),
         env_path.display()
-    )];
+    ));
     Ok(ProvisionOutcome::from_status_lines(status_lines))
 }
 
@@ -84,8 +84,8 @@ pub(super) fn provision(
 /// Fastly, Spin, and here the Axum local file store) points at.
 ///
 /// Returns `(name_lines, comment_lines)`: the `__NAME` overlay lines
-/// (converging upsert path) and the commented `__KEY` placeholders
-/// (operator-owned, insert-only append path) split apart.
+/// (insert-only, with active mismatches reported) and the commented `__KEY`
+/// placeholders (operator-owned, insert-only) split apart.
 fn build_axum_env_lines(
     stores: &ProvisionStores<'_>,
 ) -> Result<(Vec<String>, Vec<String>), &'static str> {
@@ -651,7 +651,7 @@ mod tests {
 
         // Reprovision with the platform renamed to `prod_config`.
         let second_ids = vec![ResolvedStoreId::new("app_config", "prod_config")];
-        AxumCliAdapter
+        let outcome = AxumCliAdapter
             .provision(
                 dir.path(),
                 None,
@@ -669,6 +669,19 @@ mod tests {
 
         let after = fs::read_to_string(&env_path).unwrap();
         assert_eq!(after, operator, "operator bytes must survive unchanged");
+        let diagnostics = outcome.status_lines.join("\n");
+        for expected in [
+            "preserv",
+            "APP_CONFIG__NAME",
+            "operator",
+            "duplicate",
+            "prod_config",
+        ] {
+            assert!(diagnostics.contains(expected), "{diagnostics}");
+        }
+        assert!(diagnostics.contains(env_path.to_string_lossy().as_ref()));
+        assert!(!diagnostics.contains("inside secret"));
+        assert!(!diagnostics.contains("disabled"));
     }
 
     #[test]

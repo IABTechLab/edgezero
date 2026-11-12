@@ -9,7 +9,8 @@ use std::path::Path;
 use toml_edit::DocumentMut;
 
 use edgezero_adapter::env_file::{
-    EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header, reject_symlinked_target,
+    EDGEZERO_PROVISION_HEADER, append_lines_dedup_with_header, preserved_name_conflicts,
+    reject_symlinked_target,
 };
 use edgezero_adapter::registry::{ProvisionOutcome, ProvisionStores, TypedSecretEntry};
 
@@ -132,10 +133,9 @@ pub(super) fn provision(
     // reported as a write. In dry-run the writer returns `false` (nothing
     // written); the status still describes intent via the change flags,
     // but we treat a would-write as changed so the preview lists the file.
-    // Managed `__NAME` overlay lines go through the CONVERGING upsert so a
-    // reprovision after a platform-name change lands the new value. The
-    // commented `__KEY` placeholders are operator-owned and stay on the
-    // insert-only append path (an uncommented + edited one survives).
+    // Existing records are operator-owned; preserve their bytes and report
+    // active names that disagree with the newly resolved bindings.
+    let name_conflicts = preserved_name_conflicts(&env_path, &name_lines)?;
     let name_written = append_lines_dedup_with_header(
         &env_path,
         Some(EDGEZERO_PROVISION_HEADER),
@@ -159,7 +159,7 @@ pub(super) fn provision(
         name_written || comment_written
     };
 
-    let status_lines = build_provision_status_lines(
+    let mut status_lines = build_provision_status_lines(
         stores,
         &spin_path,
         &rc_path,
@@ -168,6 +168,7 @@ pub(super) fn provision(
         rc_changed,
         env_changed,
     );
+    status_lines.extend(name_conflicts);
     Ok(ProvisionOutcome::from_status_lines(status_lines))
 }
 
@@ -710,7 +711,7 @@ fn normalise_runtime_config_header(serialised: String) -> String {
 /// a re-run of provision (the commented placeholder is NOT re-added).
 ///
 /// Returns `(name_lines, comment_lines)`: the `__NAME` overlay lines
-/// (converging upsert path) and the commented `__KEY` placeholders
+/// (insert-only, with retained-value mismatch reporting) and the commented `__KEY` placeholders
 /// (operator-owned, insert-only append path) split apart.
 fn build_env_lines(
     stores: &ProvisionStores<'_>,
@@ -1631,7 +1632,7 @@ mod tests {
 
         // Reprovision with the platform renamed to `prod_config`.
         let second_ids = vec![ResolvedStoreId::new(TEST_CONFIG_ID, "prod_config")];
-        SpinCliAdapter
+        let outcome = SpinCliAdapter
             .provision(
                 dir.path(),
                 Some("spin.toml"),
@@ -1649,6 +1650,19 @@ mod tests {
 
         let after = fs::read_to_string(&env_path).expect("read .env");
         assert_eq!(after, operator, "operator bytes must survive unchanged");
+        let diagnostics = outcome.status_lines.join("\n");
+        for expected in [
+            "preserv",
+            "APP_CONFIG__NAME",
+            "operator",
+            "duplicate",
+            "prod_config",
+        ] {
+            assert!(diagnostics.contains(expected), "{diagnostics}");
+        }
+        assert!(diagnostics.contains(env_path.to_string_lossy().as_ref()));
+        assert!(!diagnostics.contains("inside secret"));
+        assert!(!diagnostics.contains("disabled"));
     }
 
     #[test]

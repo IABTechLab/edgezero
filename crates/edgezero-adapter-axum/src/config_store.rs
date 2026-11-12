@@ -238,8 +238,8 @@ mod tests {
     #[test]
     fn from_path_reads_symlinked_config_file() {
         use std::os::unix::fs::symlink;
-        // A planted symlink where the local config is expected must be
-        // refused on the READ path, matching the write side.
+        // Direct runtime reads support ConfigMap-style file symlinks;
+        // CLI write paths enforce their own containment checks.
         let temp = tempdir().expect("tempdir");
         let real = temp.path().join("real.json");
         fs::write(&real, "{\"k\":\"v\"}").expect("write real");

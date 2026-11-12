@@ -135,6 +135,10 @@ static AXUM_ADAPTER: AxumCliAdapter = AxumCliAdapter;
 struct AxumCliAdapter;
 
 impl Adapter for AxumCliAdapter {
+    fn manifest_option_fields(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     fn preflight_deploy(
         &self,
         _context: &AdapterDeployContext,

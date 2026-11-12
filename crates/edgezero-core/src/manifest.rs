@@ -446,18 +446,20 @@ pub struct ManifestAdapterDefinition {
     /// Spin defaults outbound HTTP to deny-all; leaving this empty
     /// (the default) keeps the synthesised `spin.toml` at that secure
     /// baseline. Set it to opt a generated project into outbound
-    /// calls, e.g. `allowed_outbound_hosts = ["https://*:*"]`. Only
-    /// the Spin adapter reads it; other adapters ignore it. Because
+    /// calls, e.g. `allowed_outbound_hosts = ["https://*:*"]`. The
+    /// selected adapter must declare ownership of this option; unsupported
+    /// adapters reject it, including an explicitly empty list. Because
     /// both `edgezero new` and clean-clone `provision --local`
     /// synthesise from the SAME manifest, the emitted file stays
     /// byte-identical across the two paths regardless of this value.
     #[serde(default)]
-    pub allowed_outbound_hosts: Vec<String>,
+    pub allowed_outbound_hosts: Option<Vec<String>>,
     /// Whether config `push` / `diff` targets the platform's CLOUD store
     /// rather than the local emulator store. Currently only the Spin adapter
     /// reads it: `true` routes `config push`/`diff --adapter spin` to Fermyon
     /// Cloud key-value (`spin cloud key-value ...`); unset/`false` uses the
-    /// local `SQLite` store. Replaces the old heuristic that inferred cloud
+    /// local `SQLite` store. Other adapters reject the option unless they
+    /// declare ownership, including an explicit `false`. Replaces the old heuristic that inferred cloud
     /// from the `[adapters.spin.commands].deploy` string, which the
     /// hard-cutoff manifest no longer emits.
     #[serde(default)]
@@ -493,6 +495,23 @@ pub struct ManifestAdapterDefinition {
     /// Port for the adapter server.
     #[serde(default)]
     pub port: Option<u16>,
+}
+
+impl ManifestAdapterDefinition {
+    /// Extension options explicitly present in this definition. The registered
+    /// adapter declares which of these structural fields it implements.
+    #[must_use]
+    #[inline]
+    pub fn configured_option_fields(&self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        if self.allowed_outbound_hosts.is_some() {
+            fields.push("allowed_outbound_hosts");
+        }
+        if self.cloud.is_some() {
+            fields.push("cloud");
+        }
+        fields
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Validate)]
@@ -697,6 +716,14 @@ impl HttpMethod {
     }
 }
 
+// Serde's `Deserialize` trait has an optional `deserialize_in_place` method
+// that defaults to `*place = Self::deserialize(deserializer)?`. For these
+// small Copy/clone enums there is nothing to gain from spelling out an
+// override — the default already does exactly the right thing.
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "default deserialize_in_place is identical to what we would write manually"
+)]
 impl<'de> Deserialize<'de> for HttpMethod {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -717,15 +744,6 @@ impl<'de> Deserialize<'de> for HttpMethod {
             ))),
         }
     }
-
-    #[inline]
-    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        *place = Self::deserialize(deserializer)?;
-        Ok(())
-    }
 }
 
 impl serde::Serialize for HttpMethod {
@@ -745,6 +763,14 @@ pub enum BodyMode {
     Stream,
 }
 
+// Serde's `Deserialize` trait has an optional `deserialize_in_place` method
+// that defaults to `*place = Self::deserialize(deserializer)?`. For these
+// small Copy/clone enums there is nothing to gain from spelling out an
+// override — the default already does exactly the right thing.
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "default deserialize_in_place is identical to what we would write manually"
+)]
 impl<'de> Deserialize<'de> for BodyMode {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -757,15 +783,6 @@ impl<'de> Deserialize<'de> for BodyMode {
             "stream" => Ok(Self::Stream),
             other => Err(DeError::custom(format!("unsupported body mode `{other}`"))),
         }
-    }
-
-    #[inline]
-    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        *place = Self::deserialize(deserializer)?;
-        Ok(())
     }
 }
 
@@ -823,6 +840,14 @@ impl From<LogLevel> for LevelFilter {
     }
 }
 
+// Serde's `Deserialize` trait has an optional `deserialize_in_place` method
+// that defaults to `*place = Self::deserialize(deserializer)?`. For these
+// small Copy/clone enums there is nothing to gain from spelling out an
+// override — the default already does exactly the right thing.
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "default deserialize_in_place is identical to what we would write manually"
+)]
 impl<'de> Deserialize<'de> for LogLevel {
     #[inline]
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -841,15 +866,6 @@ impl<'de> Deserialize<'de> for LogLevel {
                 "logging level must be trace, debug, info, warn, error, or off (got `{other}`)"
             ))),
         }
-    }
-
-    #[inline]
-    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        *place = Self::deserialize(deserializer)?;
-        Ok(())
     }
 }
 

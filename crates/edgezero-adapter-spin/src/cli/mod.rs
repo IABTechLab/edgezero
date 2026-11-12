@@ -151,6 +151,10 @@ const SPIN_INSTALL_HINT: &str = "install the Spin CLI (https://spinframework.dev
 struct SpinCliAdapter;
 
 impl Adapter for SpinCliAdapter {
+    fn manifest_option_fields(&self) -> &'static [&'static str] {
+        &["allowed_outbound_hosts", "cloud"]
+    }
+
     fn preflight_deploy(
         &self,
         _context: &AdapterDeployContext,

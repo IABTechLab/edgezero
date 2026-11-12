@@ -530,8 +530,8 @@ impl Default for ConfigDiffArgs {
 /// CLI at runtime.
 /// `no_diff` and `no_env` live
 /// on this struct as top-level public fields to preserve source
-/// compatibility with downstream CLIs that predate the 2026-07-13
-/// changes. Total bool count is 6 (`dry_run`, `local`, `no_diff`,
+/// compatibility with downstream CLIs that assign those fields directly.
+/// Total bool count is 6 (`dry_run`, `local`, `no_diff`,
 /// `no_env`, `staging`, `yes`), which trips
 /// `clippy::struct_excessive_bools` (threshold 3). The lint
 /// prefers grouping into a sub-struct, but that would break

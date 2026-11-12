@@ -661,6 +661,7 @@ fn ensure_adapter_defined(
 ) -> Result<(), String> {
     if let Some(loader) = manifest_loader {
         if loader.manifest().adapter_entry(adapter_name).is_some() {
+            config::validate_adapter_option_ownership(loader.manifest(), Some(adapter_name))?;
             return Ok(());
         }
         let available: Vec<String> = loader.manifest().adapters.keys().cloned().collect();
@@ -792,6 +793,10 @@ serve = "echo"
         reason = "the recording adapter exercises only deploy preflight, deploy dispatch, and finalization"
     )]
     impl Adapter for RecordingDeployAdapter {
+        fn manifest_option_fields(&self) -> &'static [&'static str] {
+            &["cloud"]
+        }
+
         fn provision(
             &self,
             _root: &Path,
@@ -1536,6 +1541,50 @@ deploy = "touch '{}'"
     fn ensure_adapter_defined_accepts_known_adapter() {
         let loader = ManifestLoader::load_from_str(BASIC_MANIFEST);
         ensure_adapter_defined("fastly", Some(&loader)).expect("known adapter");
+    }
+
+    #[test]
+    fn selected_adapter_rejects_options_it_does_not_own_including_empty_values() {
+        let _guard = manifest_guard().lock().unwrap();
+        adapter_registry::register_adapter(&LAYOUT_TEST_ADAPTER);
+        for name in ["axum", "cloudflare", "fastly", LAYOUT_TEST_ADAPTER.name()] {
+            for setting in [
+                "cloud = true",
+                "cloud = false",
+                "allowed_outbound_hosts = []",
+                "allowed_outbound_hosts = ['https://example.com']",
+            ] {
+                let raw = format!(
+                    "[app]\nname='demo'\n[adapters.{name}.adapter]\ncrate='.'\n{setting}\n"
+                );
+                let loader = ManifestLoader::load_from_str(&raw);
+                let error = ensure_adapter_defined(name, Some(&loader))
+                    .expect_err("unsupported adapter options must not silently succeed");
+                assert!(error.contains("not owned"), "{name}: {setting}: {error}");
+                assert!(error.contains(setting.split('=').next().unwrap().trim()));
+            }
+        }
+    }
+
+    #[test]
+    fn selected_adapter_accepts_options_it_owns() {
+        let _guard = manifest_guard().lock().unwrap();
+        adapter_registry::register_adapter(&RECORDING_DEPLOY_ADAPTER);
+        for setting in [
+            "cloud = true",
+            "cloud = false",
+            "allowed_outbound_hosts = []",
+            "allowed_outbound_hosts = ['https://example.com']",
+        ] {
+            let raw =
+                format!("[app]\nname='demo'\n[adapters.spin.adapter]\ncrate='.'\n{setting}\n");
+            let loader = ManifestLoader::load_from_str(&raw);
+            ensure_adapter_defined("spin", Some(&loader)).expect("adapter owns its options");
+        }
+        let name = RECORDING_DEPLOY_ADAPTER.name();
+        let raw = format!("[app]\nname='demo'\n[adapters.{name}.adapter]\ncloud=true\n");
+        let loader = ManifestLoader::load_from_str(&raw);
+        ensure_adapter_defined(name, Some(&loader)).expect("custom adapter owns its option");
     }
 
     #[test]

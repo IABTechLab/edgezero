@@ -688,8 +688,8 @@ mod tests {
     fn kv_handle_opens_a_symlinked_persistent_volume() {
         use std::os::unix::fs::symlink;
         use tempfile::tempdir;
-        // A planted symlink where `.edgezero/` is expected must be refused,
-        // so the redb is never written THROUGH a link outside the tree.
+        // Direct runtime storage supports a symlinked persistent volume;
+        // CLI provisioning enforces its own project containment checks.
         let temp = tempdir().expect("tempdir");
         let outside = temp.path().join("outside");
         fs::create_dir_all(&outside).expect("mkdir outside");

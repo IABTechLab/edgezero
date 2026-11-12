@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{LazyLock, PoisonError, RwLock};
 
+#[cfg(feature = "cli")]
 use crate::local::{AdapterLocalContext, AdapterLocalLayout};
 
 static REGISTRY: LazyLock<RwLock<HashMap<String, &'static dyn Adapter>>> =
@@ -812,6 +813,15 @@ pub trait Adapter: Sync + Send {
         &[]
     }
 
+    /// Optional application-manifest fields implemented by this adapter's CLI.
+    /// Generic orchestration rejects explicitly configured fields not listed
+    /// here, without choosing policy from the adapter's identity.
+    #[cfg(feature = "cli")]
+    #[inline]
+    fn manifest_option_fields(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Name used to reference the adapter (case-insensitive).
     fn name(&self) -> &'static str;
 
@@ -821,6 +831,7 @@ pub trait Adapter: Sync + Send {
     ///
     /// # Errors
     /// Returns an error when the declared layout cannot be supported.
+    #[cfg(feature = "cli")]
     #[inline]
     fn local_layout(
         &self,
@@ -1107,11 +1118,12 @@ pub trait Adapter: Sync + Send {
     /// translates from `&Manifest` at the call site.
     ///
     /// `allowed_outbound_hosts` carries
-    /// `[adapters.<name>.adapter].allowed_outbound_hosts` verbatim.
-    /// Only the Spin adapter consumes it (it emits
-    /// `[component.<id>].allowed_outbound_hosts`); the empty default
-    /// keeps the synthesised manifest at Spin's deny-all baseline.
-    /// Other adapters ignore it.
+    /// `[adapters.<name>.adapter].allowed_outbound_hosts`; absence becomes
+    /// an empty slice. Adapters advertise ownership through
+    /// [`Self::manifest_option_fields`], and the CLI rejects explicitly
+    /// configured options that the selected adapter does not own.
+    /// Spin emits `[component.<id>].allowed_outbound_hosts`; its empty
+    /// default keeps the synthesised manifest at the deny-all baseline.
     ///
     /// # Errors
     /// The default impl never errors. Adapter overrides may return
