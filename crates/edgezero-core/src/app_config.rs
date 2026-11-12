@@ -498,7 +498,24 @@ pub fn load_app_config_raw_with_options(
         path: path.to_path_buf(),
         source,
     })?;
-    let mut document: Value = toml::from_str(&raw).map_err(|source| AppConfigError::Parse {
+    parse_app_config_raw_with_options(&raw, path, app_name, opts)
+}
+
+/// Parse already-loaded app-config source and apply the requested environment overlay.
+///
+/// This performs no filesystem reads, allowing command hooks and serialization
+/// to share one exact source read and one effective value.
+///
+/// # Errors
+/// Returns the same parse, overlay and value errors as the file-based loader.
+#[inline]
+pub fn parse_app_config_raw_with_options(
+    raw: &str,
+    path: &Path,
+    app_name: &str,
+    opts: &AppConfigLoadOptions,
+) -> Result<Value, AppConfigError> {
+    let mut document: Value = toml::from_str(raw).map_err(|source| AppConfigError::Parse {
         path: path.to_path_buf(),
         source: Box::new(source),
     })?;
