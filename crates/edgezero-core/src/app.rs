@@ -8,7 +8,7 @@ use crate::error::{
     suppress_overflow_retry_after,
 };
 use crate::http::header::CONTENT_TYPE;
-use crate::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
+use crate::http::{Extensions, HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use crate::ingress::{
     AdmissionDecision, IngressAdmissionOutcome, IngressAdmissionPolicy, IngressBeginOutcome,
     IngressDispatchOutcome, IngressFraming, IngressHead, IngressHeadAccounting, IngressHeadLimits,
@@ -472,6 +472,16 @@ impl App {
     #[inline]
     pub const fn platform(&self) -> PlatformMetadata {
         self.platform
+    }
+
+    /// Captures application-authenticated facts before a managed host sanitizes the head.
+    ///
+    /// The host must structurally validate the received head first. The router's
+    /// [`crate::router::RouterBuilder::received_head_preparer`] can retain facts but cannot mutate
+    /// headers, poll a body, choose a route or return a response at this stage.
+    #[inline]
+    pub fn prepare_received_head(&self, headers: &HeaderMap, extensions: &mut Extensions) {
+        self.router.prepare_received_head(headers, extensions);
     }
 
     fn render_error_response(&self, error: EdgeError) -> Response {
