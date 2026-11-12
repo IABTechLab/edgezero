@@ -9,9 +9,11 @@ use ctor::ctor;
 use edgezero_adapter::cli_support::{
     find_manifest_upwards, find_workspace_root, path_distance, read_package_name, run_native_cli,
 };
+use edgezero_adapter::process;
 use edgezero_adapter::registry::{
-    Adapter, AdapterAction, AdapterPushContext, ProvisionStores, ReadConfigEntry, ResolvedStoreId,
-    register_adapter,
+    ActionOutcome, Adapter, AdapterAction, AdapterPushContext, AuthState, AuthStatusOutcome,
+    BuildOutcome, ProvisionAction, ProvisionEntry, ProvisionReport, ProvisionStores,
+    ReadConfigEntry, ResolvedStoreId, StoreKind, register_adapter,
 };
 use edgezero_adapter::scaffold::{
     AdapterBlueprint, AdapterFileSpec, CommandTemplates, DependencySpec, LoggingDefaults,
@@ -124,6 +126,9 @@ static CLOUDFLARE_TEMPLATE_REGISTRATIONS: &[TemplateRegistration] = &[
 
 const TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 
+/// How much of each wrangler stream a failed `auth status` probe quotes.
+const WHOAMI_EXCERPT_CHARS: usize = 400;
+
 const WRANGLER_INSTALL_HINT: &str =
     "install the Cloudflare CLI (`npm install -g wrangler`) and try again";
 
@@ -134,28 +139,31 @@ struct CloudflareCliAdapter;
     reason = "cloudflare has no validate_app_config_keys / validate_adapter_manifest / validate_typed_secrets requirements; those three trait defaults are intentionally inherited. `read_config_entry` and `read_config_entry_local` are both overridden below (wrangler kv key get --remote / --local). `single_store_kinds` IS overridden below (returns `&[\"secrets\"]`)."
 )]
 impl Adapter for CloudflareCliAdapter {
-    fn execute(&self, action: AdapterAction, args: &[String]) -> Result<(), String> {
+    fn execute(&self, action: AdapterAction, args: &[String]) -> Result<ActionOutcome, String> {
         match action {
             // `wrangler` is the native sign-in surface for Cloudflare
             // Workers. EdgeZero stores no credentials — this is a thin
             // shell-out.
             AdapterAction::AuthLogin => {
                 run_native_cli("wrangler", &["login"], WRANGLER_INSTALL_HINT)
+                    .map(|()| ActionOutcome::Empty)
             }
             AdapterAction::AuthLogout => {
                 run_native_cli("wrangler", &["logout"], WRANGLER_INSTALL_HINT)
+                    .map(|()| ActionOutcome::Empty)
             }
-            AdapterAction::AuthStatus => {
-                run_native_cli("wrangler", &["whoami"], WRANGLER_INSTALL_HINT)
-            }
+            AdapterAction::AuthStatus => auth_status().map(ActionOutcome::AuthStatus),
             AdapterAction::Build => build(args).map(|artifact| {
                 log::info!(
                     "[edgezero] Cloudflare build artifact -> {}",
                     artifact.display()
                 );
+                ActionOutcome::Build(BuildOutcome {
+                    artifact: Some(artifact),
+                })
             }),
-            AdapterAction::Deploy => deploy(args),
-            AdapterAction::Serve => serve(args),
+            AdapterAction::Deploy => deploy(args).map(|()| ActionOutcome::Empty),
+            AdapterAction::Serve => serve(args).map(|()| ActionOutcome::Empty),
             // The Fastly staging lifecycle is Fastly-only.
             AdapterAction::DeployStaging
             | AdapterAction::EmitVersion
@@ -196,7 +204,7 @@ impl Adapter for CloudflareCliAdapter {
         _component_selector: Option<&str>,
         stores: &ProvisionStores<'_>,
         dry_run: bool,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<ProvisionReport, String> {
         //: KV ids and config ids both back to Cloudflare KV
         // namespaces. Secrets are runtime-managed via
         // `wrangler secret put` — provision is a no-op for them.
@@ -208,8 +216,13 @@ impl Adapter for CloudflareCliAdapter {
         };
         let wrangler_path = manifest_root.join(rel);
 
-        let mut out = Vec::new();
-        for store in stores.kv.iter().chain(stores.config.iter()) {
+        let mut entries = Vec::new();
+        for (kind, store) in stores
+            .kv
+            .iter()
+            .map(|store| (StoreKind::Kv, store))
+            .chain(stores.config.iter().map(|store| (StoreKind::Config, store)))
+        {
             let logical = &store.logical;
             // The Cloudflare KV binding name is what the runtime
             // calls `env.kv(...)` with -- it's resolved at request
@@ -243,10 +256,10 @@ impl Adapter for CloudflareCliAdapter {
             // entry by hand before re-running provision.
             let existing = existing_real_namespace_id(&wrangler_path, binding)?;
             if let Some(existing_id) = existing {
-                out.push(format!(
+                entries.push(ProvisionEntry::for_store(ProvisionAction::AlreadyPresent, kind, store, format!(
                     "binding `{binding}` (logical id `{logical}`) already provisioned (id={existing_id} in {}); skipping. To force a fresh namespace: delete the [[kv_namespaces]] entry for binding `{binding}` AND run `wrangler kv namespace delete --namespace-id={existing_id}` (the old remote namespace lingers otherwise), then re-run provision.",
                     wrangler_path.display()
-                ));
+                )));
                 continue;
             }
             // Pre-flight the writeback shape BEFORE shelling
@@ -266,30 +279,32 @@ impl Adapter for CloudflareCliAdapter {
             // BEFORE any account-side mutation.
             check_kv_namespaces_writeback_shape(&wrangler_path)?;
             if dry_run {
-                out.push(format!(
+                entries.push(ProvisionEntry::for_store(ProvisionAction::WouldCreate, kind, store, format!(
                     "would run `wrangler kv namespace create {binding}` and append [[kv_namespaces]] binding = \"{binding}\" to {} (logical id `{logical}`)",
                     wrangler_path.display()
-                ));
+                )));
                 continue;
             }
             let namespace_id = create_kv_namespace(binding)?;
             upsert_kv_namespace(&wrangler_path, binding, &namespace_id)?;
-            out.push(format!(
+            entries.push(ProvisionEntry::for_store(ProvisionAction::Created, kind, store, format!(
                 "created KV namespace `{binding}` (logical id `{logical}`, namespace id={namespace_id}); written to {}",
                 wrangler_path.display()
-            ));
+            )));
         }
         for store in stores.secrets {
             let logical = &store.logical;
             let platform = &store.platform;
-            out.push(format!(
+            entries.push(ProvisionEntry::for_store(ProvisionAction::NotApplicable, StoreKind::Secrets, store, format!(
                 "cloudflare secret `{platform}` (logical id `{logical}`) is runtime-managed via `wrangler secret put`; nothing to provision"
+            )));
+        }
+        if entries.is_empty() {
+            entries.push(ProvisionEntry::note(
+                "cloudflare has no declared stores to provision".to_owned(),
             ));
         }
-        if out.is_empty() {
-            out.push("cloudflare has no declared stores to provision".to_owned());
-        }
-        Ok(out)
+        Ok(ProvisionReport { entries })
     }
 
     fn push_config_entries(
@@ -526,6 +541,78 @@ impl Adapter for CloudflareCliAdapter {
         // Secrets is a single flat bag).
         &["secrets"]
     }
+}
+
+/// `auth status`. Plain `wrangler whoami` exits 0 even when logged out, so
+/// this reads `loggedIn` from `wrangler whoami --json` instead of the exit
+/// status. Output that is not that JSON is a probe failure, not a state, as is
+/// `loggedIn: true` from a wrangler that exited non-zero.
+fn auth_status() -> Result<AuthStatusOutcome, String> {
+    let output = Command::new("wrangler")
+        .args(["whoami", "--json"])
+        // wrangler colours stderr even when piped; keep escapes out of errors.
+        .env("NO_COLOR", "1")
+        .env("FORCE_COLOR", "0")
+        .output()
+        .map_err(|err| {
+            if err.kind() == ErrorKind::NotFound {
+                format!("`wrangler` not found on PATH; {WRANGLER_INSTALL_HINT}")
+            } else {
+                format!("failed to spawn `wrangler`: {err}")
+            }
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    parse_whoami(&stdout, output.status.success()).ok_or_else(|| {
+        let status = output
+            .status
+            .code()
+            .map_or_else(|| "a signal".to_owned(), |code| format!("status {code}"));
+        let mut lines = vec![format!(
+            "`wrangler whoami --json` exited with {status} without a usable `loggedIn`"
+        )];
+        for (stream, text) in [("stdout", stdout.trim()), ("stderr", stderr.trim())] {
+            if !text.is_empty() {
+                let excerpt: String = text.chars().take(WHOAMI_EXCERPT_CHARS).collect();
+                let ellipsis = if excerpt.len() < text.len() {
+                    "..."
+                } else {
+                    ""
+                };
+                lines.push(format!("{stream}: {excerpt}{ellipsis}"));
+            }
+        }
+        lines.join("\n")
+    })
+}
+
+/// The session state in `wrangler whoami --json` output, if it reports one.
+/// The JSON runs from the last line starting with `{` to the end, so a notice
+/// wrangler prints first does not hide it.
+fn parse_whoami(stdout: &str, success: bool) -> Option<AuthStatusOutcome> {
+    let lines: Vec<&str> = stdout.lines().collect();
+    let whoami = (0..lines.len()).rev().find_map(|start| {
+        let rest = lines.get(start..)?;
+        if !rest.first()?.starts_with('{') {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(&rest.join("\n")).ok()
+    })?;
+    let state = if whoami.get("loggedIn")?.as_bool()? {
+        if !success {
+            return None;
+        }
+        if let Some(email) = whoami.get("email").and_then(serde_json::Value::as_str) {
+            log::info!("[edgezero] wrangler is logged in as {email}");
+        }
+        AuthState::Authenticated
+    } else {
+        AuthState::Unauthenticated {
+            reason: "`wrangler whoami --json` reports loggedIn: false; run `wrangler login`"
+                .to_owned(),
+        }
+    };
+    Some(AuthStatusOutcome { state })
 }
 
 /// Shell out to `wrangler kv namespace create <binding>`, capture
@@ -935,20 +1022,21 @@ pub fn build(extra_args: &[String]) -> Result<PathBuf, String> {
     let cargo_manifest = manifest_dir.join("Cargo.toml");
     let crate_name = read_package_name(&cargo_manifest)?;
 
-    let status = Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "--target",
-            TARGET_TRIPLE,
-            "--manifest-path",
-            cargo_manifest
-                .to_str()
-                .ok_or("invalid Cargo manifest path")?,
-        ])
-        .args(extra_args)
-        .status()
-        .map_err(|err| format!("failed to run cargo build: {err}"))?;
+    let status = process::status(
+        Command::new("cargo")
+            .args([
+                "build",
+                "--release",
+                "--target",
+                TARGET_TRIPLE,
+                "--manifest-path",
+                cargo_manifest
+                    .to_str()
+                    .ok_or("invalid Cargo manifest path")?,
+            ])
+            .args(extra_args),
+    )
+    .map_err(|err| format!("failed to run cargo build: {err}"))?;
     if !status.success() {
         return Err(format!("cargo build failed with status {status}"));
     }
@@ -978,12 +1066,13 @@ pub fn deploy(extra_args: &[String]) -> Result<(), String> {
         .to_str()
         .ok_or_else(|| "invalid wrangler config path".to_owned())?;
 
-    let status = Command::new("wrangler")
-        .args(["deploy", "--config", config])
-        .args(extra_args)
-        .current_dir(manifest_dir)
-        .status()
-        .map_err(|err| format!("failed to run wrangler CLI: {err}"))?;
+    let status = process::status(
+        Command::new("wrangler")
+            .args(["deploy", "--config", config])
+            .args(extra_args)
+            .current_dir(manifest_dir),
+    )
+    .map_err(|err| format!("failed to run wrangler CLI: {err}"))?;
     if !status.success() {
         return Err(format!("wrangler deploy failed with status {status}"));
     }
@@ -1119,12 +1208,13 @@ pub fn serve(extra_args: &[String]) -> Result<(), String> {
         .to_str()
         .ok_or_else(|| "invalid wrangler config path".to_owned())?;
 
-    let status = Command::new("wrangler")
-        .args(["dev", "--config", config])
-        .args(extra_args)
-        .current_dir(manifest_dir)
-        .status()
-        .map_err(|err| format!("failed to run wrangler CLI: {err}"))?;
+    let status = process::status(
+        Command::new("wrangler")
+            .args(["dev", "--config", config])
+            .args(extra_args)
+            .current_dir(manifest_dir),
+    )
+    .map_err(|err| format!("failed to run wrangler CLI: {err}"))?;
     if !status.success() {
         return Err(format!("wrangler dev failed with status {status}"));
     }
@@ -1544,7 +1634,8 @@ id = "00112233445566778899aabbccddeeff"
         };
         let out = CloudflareCliAdapter
             .provision(dir.path(), Some("wrangler.toml"), None, &stores, true)
-            .expect("dry-run succeeds");
+            .expect("dry-run succeeds")
+            .into_messages();
         // 2 KV + 1 config + 1 secret = 4 status lines.
         assert_eq!(out.len(), 4);
         assert!(out[0].contains("would run `wrangler kv namespace create sessions`"));
@@ -1575,7 +1666,8 @@ id = "00112233445566778899aabbccddeeff"
         };
         let out = CloudflareCliAdapter
             .provision(dir.path(), Some("wrangler.toml"), None, &stores, true)
-            .expect("dry-run succeeds");
+            .expect("dry-run succeeds")
+            .into_messages();
         assert_eq!(out.len(), 1);
         assert!(
             out[0].contains("wrangler kv namespace create prod_config"),
@@ -1625,7 +1717,8 @@ id = "00112233445566778899aabbccddeeff"
         };
         let out = CloudflareCliAdapter
             .provision(dir.path(), Some("wrangler.toml"), None, &stores, true)
-            .expect("dry-run succeeds");
+            .expect("dry-run succeeds")
+            .into_messages();
         assert_eq!(out.len(), 1);
         assert!(
             out[0].contains("already provisioned")
@@ -1658,7 +1751,8 @@ id = "00112233445566778899aabbccddeeff"
         };
         let out = CloudflareCliAdapter
             .provision(dir.path(), Some("wrangler.toml"), None, &stores, true)
-            .expect("dry-run succeeds");
+            .expect("dry-run succeeds")
+            .into_messages();
         assert_eq!(out.len(), 1);
         assert!(
             out[0].contains("would run `wrangler kv namespace create sessions`"),
@@ -1677,8 +1771,65 @@ id = "00112233445566778899aabbccddeeff"
         };
         let out = CloudflareCliAdapter
             .provision(dir.path(), Some("wrangler.toml"), None, &stores, false)
-            .expect("no-store provision is fine");
+            .expect("no-store provision is fine")
+            .into_messages();
         assert_eq!(out, vec!["cloudflare has no declared stores to provision"]);
+    }
+
+    #[test]
+    fn provision_report_classifies_each_store() {
+        let dir = tempdir().expect("tempdir");
+        write_wrangler(
+            dir.path(),
+            "name = \"demo\"\n[[kv_namespaces]]\nbinding = \"sessions\"\nid = \"00112233445566778899aabbccddeeff\"\n",
+        );
+        let kv_ids = ResolvedStoreId::from_logicals(&[TEST_KV_ID]);
+        let config_ids = vec![ResolvedStoreId::new(TEST_CONFIG_ID, "prod_config")];
+        let secret_ids = ResolvedStoreId::from_logicals(&[TEST_SECRET_ID]);
+        let stores = ProvisionStores {
+            config: &config_ids,
+            kv: &kv_ids,
+            secrets: &secret_ids,
+        };
+        let report = CloudflareCliAdapter
+            .provision(dir.path(), Some("wrangler.toml"), None, &stores, true)
+            .expect("dry-run succeeds");
+        let summary: Vec<_> = report
+            .entries
+            .iter()
+            .map(|entry| {
+                let store = entry.store.as_ref().expect("every entry names a store");
+                (
+                    entry.action,
+                    store.kind,
+                    store.logical.as_str(),
+                    store.platform.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (
+                    ProvisionAction::AlreadyPresent,
+                    StoreKind::Kv,
+                    TEST_KV_ID,
+                    TEST_KV_ID
+                ),
+                (
+                    ProvisionAction::WouldCreate,
+                    StoreKind::Config,
+                    TEST_CONFIG_ID,
+                    "prod_config"
+                ),
+                (
+                    ProvisionAction::NotApplicable,
+                    StoreKind::Secrets,
+                    TEST_SECRET_ID,
+                    TEST_SECRET_ID
+                ),
+            ]
+        );
     }
 
     // ---------- find_namespace_id ----------
@@ -1976,6 +2127,42 @@ id = "00112233445566778899aabbccddeeff"
         use std::sync::{Mutex, OnceLock};
         static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
         GUARD.get_or_init(|| Mutex::new(()))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_status_reads_logged_in_from_whoami_json() {
+        let _lock = path_mutation_guard().lock().expect("guard");
+        let state = |stdout: &str, code| {
+            let fake = fake_wrangler_returning(stdout, "probe stderr", code);
+            let _path = PathPrepend::new(fake.path());
+            auth_status().map(|outcome| outcome.state)
+        };
+
+        assert_eq!(
+            state(r#"{"loggedIn": true, "email": "a@example.com"}"#, 0_i32),
+            Ok(AuthState::Authenticated)
+        );
+        // Logged out: `whoami --json` exits non-zero with `loggedIn: false`.
+        assert!(matches!(
+            state(r#"{"loggedIn": false}"#, 1_i32),
+            Ok(AuthState::Unauthenticated { .. })
+        ));
+        // Plain-text output (e.g. a wrangler without `--json`) is a probe
+        // failure, never "authenticated", even on exit 0.
+        let error = state("You are not authenticated.", 0_i32).expect_err("no state");
+        assert_eq!(
+            error,
+            "`wrangler whoami --json` exited with status 0 without a usable `loggedIn`\n\
+             stdout: You are not authenticated.\nstderr: probe stderr"
+        );
+        // A notice before the JSON does not hide it.
+        assert_eq!(
+            state("Update available!\n{\n  \"loggedIn\": true\n}\n", 0_i32),
+            Ok(AuthState::Authenticated)
+        );
+        // `loggedIn: true` with a failed exit is not trusted.
+        state(r#"{"loggedIn": true}"#, 1_i32).expect_err("not trusted");
     }
 
     #[cfg(unix)]
