@@ -66,6 +66,7 @@ run cargo test -p edgezero-core --doc
 
 section "Workspace Feature Compilation"
 run cargo check --workspace --all-targets --features "fastly cloudflare spin"
+run cargo check --offline --locked -p edgezero-cli --lib --no-default-features --features cli
 
 section "Adapter Native Feature Matrices"
 for adapter in axum cloudflare fastly spin; do

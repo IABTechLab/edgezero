@@ -50,6 +50,12 @@ const adapters = tests.jobs["adapter-wasm-tests"];
 const yamlContractName =
   "workflow YAML preserves trigger keys and scalar types";
 
+test("CLI-only compilation is isolated from adapter feature unification", () => {
+  const check = "cargo check --offline --locked -p edgezero-cli --lib --no-default-features --features cli";
+  assert.ok(format.jobs.format.steps.some((step) => step.run?.includes(check)));
+  assert.ok(readFileSync(join(root, "scripts/run_tests.sh"), "utf8").includes(check));
+});
+
 test(yamlContractName, () => {
   assert.deepEqual(tests.on, {
     push: { branches: ["main"] },
