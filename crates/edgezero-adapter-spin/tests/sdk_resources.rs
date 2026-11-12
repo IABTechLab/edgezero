@@ -511,19 +511,31 @@ mod tests {
     #[test]
     fn buffered_length_is_derived_after_normalization_without_polling_streams() {
         use edgezero_core::Body;
-        for method in [Method::GET, Method::HEAD, Method::POST, Method::PUT] {
+        for (method, empty_length) in [
+            (Method::GET, false),
+            (Method::HEAD, false),
+            (Method::POST, true),
+            (Method::PUT, true),
+            (Method::PATCH, true),
+            (Method::DELETE, false),
+            (Method::OPTIONS, false),
+        ] {
             for payload in ["", "abc"] {
                 if matches!(method, Method::GET | Method::HEAD) && !payload.is_empty() {
                     continue;
                 }
                 let mut headers = HeaderMap::new();
                 let fields = request_fields(&method, &Body::from(payload), &mut headers).unwrap();
-                let expected = if matches!(method, Method::GET | Method::HEAD) {
+                let expected = if payload.is_empty() && !empty_length {
                     vec![]
                 } else {
                     vec![payload.len().to_string().into_bytes()]
                 };
-                assert_eq!(fields.get("content-length"), expected);
+                assert_eq!(
+                    fields.get("content-length"),
+                    expected,
+                    "{method} {payload:?}"
+                );
             }
         }
         let stream = poll_fn(|_| -> Poll<Option<Result<Bytes, EdgeError>>> {
@@ -555,6 +567,25 @@ mod tests {
         let fields = request_fields(&parts.method, &parts.body, &mut parts.headers).unwrap();
         assert_eq!(fields.get("content-length"), vec![b"3".to_vec()]);
         assert!(fields.get("transfer-encoding").is_empty());
+        for method in [Method::DELETE, Method::OPTIONS] {
+            let mut empty_request =
+                OutboundRequest::new(method, "http://example.com/".parse().unwrap())
+                    .unwrap()
+                    .header("content-length", "999")
+                    .unwrap()
+                    .header("transfer-encoding", "chunked")
+                    .unwrap();
+            normalize_for_dispatch(&mut empty_request).unwrap();
+            let mut empty_parts = empty_request.into_parts();
+            let empty_fields = request_fields(
+                &empty_parts.method,
+                &empty_parts.body,
+                &mut empty_parts.headers,
+            )
+            .unwrap();
+            assert!(empty_fields.get("content-length").is_empty());
+            assert!(empty_fields.get("transfer-encoding").is_empty());
+        }
     }
 
     #[test]
