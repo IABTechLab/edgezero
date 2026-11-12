@@ -265,6 +265,22 @@ fn stable_store_name_hash(store_name: &str) -> u64 {
     hash
 }
 
+/// Anchor a `.edgezero`-relative store path at the project root (the
+/// ancestor holding `edgezero.toml`), the SAME directory `config push` /
+/// provision write `.edgezero` into, so the runtime and the CLI agree
+/// regardless of launch cwd -- a registry `serve` launches this binary with
+/// cwd = the adapter crate, NOT the project root, so a bare relative
+/// `.edgezero` would land KV state in the crate dir. Falls back to the
+/// cwd-relative path in a deployed binary with no `edgezero.toml` alongside,
+/// matching [`AxumConfigStore::local_path`].
+fn anchor_at_project_root(relative: PathBuf) -> PathBuf {
+    use crate::config_store::find_project_root_dir;
+    match find_project_root_dir() {
+        Some(root) => root.join(relative),
+        None => relative,
+    }
+}
+
 fn kv_handle_from_path(kv_path: &Path) -> anyhow::Result<KvHandle> {
     if let Some(parent) = kv_path.parent() {
         fs::create_dir_all(parent).context("failed to create KV store directory")?;
@@ -407,7 +423,7 @@ fn build_kv_registry(
     let mut by_id: BTreeMap<String, KvHandle> = BTreeMap::new();
     for id in meta.ids {
         let store_name = env.store_name("kv", id);
-        let kv_path = kv_store_path(&store_name);
+        let kv_path = anchor_at_project_root(kv_store_path(&store_name));
         let handle = match kv_handle_from_path(&kv_path) {
             Ok(handle) => handle,
             Err(err) => match init {
@@ -664,6 +680,27 @@ mod tests {
         assert!(
             file_name.len() <= 64,
             "unexpected file name length: {file_name}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kv_handle_opens_a_symlinked_persistent_volume() {
+        use std::os::unix::fs::symlink;
+        use tempfile::tempdir;
+        // Direct runtime storage supports a symlinked persistent volume;
+        // CLI provisioning enforces its own project containment checks.
+        let temp = tempdir().expect("tempdir");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).expect("mkdir outside");
+        let dot = temp.path().join(".edgezero");
+        symlink(&outside, &dot).expect("symlink .edgezero");
+        let kv_path = dot.join("kv-sessions-0000000000000000.redb");
+        let _handle =
+            kv_handle_from_path(&kv_path).expect("runtime may use a symlinked persistent volume");
+        assert!(
+            outside.join("kv-sessions-0000000000000000.redb").is_file(),
+            "the database must be created on the persistent volume"
         );
     }
 

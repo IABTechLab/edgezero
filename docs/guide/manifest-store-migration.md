@@ -36,16 +36,22 @@ platform name.
 ## What changed and why
 
 `edgezero.toml` is now portable: it declares what the app _is_, not
-how any particular platform runs it. The old per-adapter store and
-runtime tables (`[stores.*.adapters.*]`, `[adapters.<name>.adapter]
-host`, etc.) coupled the manifest to a specific deployment shape;
-keeping them required the manifest to be recompiled every time you
-moved between environments.
+how any particular platform runs it. The old per-adapter STORE tables
+(`[stores.*.adapters.*]`) coupled the manifest to a specific deployment
+shape; keeping them required the manifest to be recompiled every time you
+moved between environments, so they were removed.
+
+`[adapters.<name>.adapter]` still exists, and axum still accepts a
+`host` / `port` bind hint there — but only as a **default**. The
+authoritative per-environment values come from the environment overlay
+(`EDGEZERO__ADAPTER__HOST` / `EDGEZERO__ADAPTER__PORT`, which win over the
+manifest hint), so the same file works across environments.
 
 The new shape lets one manifest cover dev, staging, and production for
 the same workload. Per-environment differences (which Cloudflare KV
 namespace ID maps to the `sessions` store, what host axum binds to,
-what log level the worker uses) live in the environment, not the file.
+what log level the worker uses) live in the environment overlay, with the
+manifest carrying only the portable defaults.
 
 ## Field-by-field
 
@@ -190,20 +196,142 @@ just need a quick fixture for local testing.
 The Cloudflare config store used to read one `[vars]` string binding
 containing a JSON object. It now reads from a **KV namespace** binding
 asynchronously. To migrate, replace each `[vars] app_config = '{ … }'`
-entry with a KV namespace binding:
+entry in your local copy of `wrangler.toml` with a KV namespace binding:
 
 ```toml
-# wrangler.toml — before
+# your local copy of wrangler.toml — before
 [vars]
 app_config = '{"greeting":"hello","feature.new_checkout":"false"}'
 
-# wrangler.toml — after
+# your local copy of wrangler.toml — after
 [[kv_namespaces]]
 binding = "app_config"
 id      = "abc123…"
 ```
 
-Populate the namespace via `wrangler kv key put`. The binding name
-becomes the platform name resolved by
+`<app>-cli provision --adapter cloudflare` writes the `[[kv_namespaces]]`
+binding for you. Populate the namespace via `wrangler kv key put`. The
+binding name becomes the platform name resolved by
 `EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME` (with the default being
 the literal id `app_config`).
+
+::: tip Adapter manifests are gitignored
+Your local copy of `axum.toml`, `wrangler.toml`, `fastly.toml`,
+`spin.toml`, and `runtime-config.toml` is not tracked — regenerate
+each with `cargo run -p <app>-cli -- provision --adapter <name> --local`
+(the project CLI isn't installed on a fresh clone, so build-and-run it
+from source) and re-apply any operator edits after cloning. All five
+adapter manifests follow the same gitignored-generated model, so the
+source of truth is `edgezero.toml` (which stays tracked).
+:::
+
+## Preserve provider settings before untracking or pulling
+
+Back up existing provider manifests and custom settings before creating their
+removal commit or asking teammates to pull it. Complete the following tracked
+settings first; regeneration cannot recover them from a deleted manifest.
+
+### Spin outbound HTTPS permissions
+
+Older scaffolded `spin.toml` files allowed outbound HTTPS, commonly with
+`allowed_outbound_hosts = ["https://*:*"]`. Regeneration now reads that setting
+from the tracked application manifest. Without it, outbound HTTP becomes
+deny-all, including an older scaffold's `/proxy` route.
+
+Copy the hosts your app requires from the old component into `edgezero.toml`
+and commit the change **before** removing manifests or asking teammates to pull:
+
+```toml
+[adapters.spin.adapter]
+# Preserve the existing manifest/crate/component settings in this table.
+allowed_outbound_hosts = ["https://*:*"]
+```
+
+Use the existing app's host list if it is narrower or otherwise customized.
+Fresh scaffolds already declare their HTTPS proxy permission here.
+
+### Existing Cloudflare namespace IDs
+
+Cloud provisioning skips automatic promotion of IDs held only in a local,
+gitignored `wrangler.toml`; it reports the skipped promotion and can still
+return success. Before the removal commit or any teammate pulls, back up that
+configuration and verify its primary and preview namespaces in the intended
+Cloudflare account. `wrangler whoami` helps identify the account;
+`wrangler kv namespace list` lists namespace IDs and titles, **not bindings**.
+Recover each binding-to-ID mapping from the existing Wrangler configuration or
+the deployed Worker's binding settings, then map it to the corresponding
+logical store ID in `edgezero.toml`.
+
+Record verified primary IDs in
+`[adapters.cloudflare.deployed.kv_namespaces]` and preview IDs separately in
+`[adapters.cloudflare.deployed.preview_kv_namespaces]`, keyed by logical store
+ID. Commit this tracked state **before** teammates pull the manifest removal,
+then run local provision to restore the IDs into generated Wrangler config.
+See [the Cloudflare migration procedure](/guide/adapters/cloudflare#migrating-existing-namespace-ids)
+for an example and the verification steps. If this step is skipped, a clean
+clone has neither ID and cloud provisioning can create duplicate namespaces.
+
+## Un-tracking manifests already committed to your repo
+
+::: warning Back up before the removal is pulled
+`git rm --cached` keeps the working copy only for the person running it.
+When teammates pull the committed deletion, Git removes their clean tracked
+copies. Before anyone pulls, back up all custom adapter settings and filled
+secret files outside the repository. Do not rely on a local modification to
+protect a file from deletion or a checkout conflict.
+
+Provisioning recreates supported defaults and declared bindings; it cannot
+recover custom provider sections, backends, routes, or outbound permissions from
+a deleted manifest. Move supported settings into tracked `edgezero.toml`;
+maintain reviewed shared templates for other non-secret settings. Transfer
+credentials separately. After regeneration, restore the required local
+customizations from the backup.
+:::
+
+If your project committed these manifests before the cutover, add them
+to `.gitignore` and then untrack them **without deleting your working
+copy** (`--cached`), so provision can own them going forward. Match the
+five adapter manifests plus the Cloudflare `.dev.vars` secrets file and `.env` / `.dev.vars` environment variants at the
+repo root **and** any subdirectory (a `**/name.toml` pathspec silently
+skips files at the repo root), and guard the removal so it's a no-op when
+nothing is tracked:
+
+```bash
+# `(^|/)` anchors each name to a path segment, so both `wrangler.toml`
+# and `adapters/wrangler.toml` match. `.dev.vars` (Cloudflare) and `.env`
+# (Spin's `<crate>/.env`, Axum's `.edgezero/.env`) are secret-bearing and
+# must be untracked too.
+matcher='(^|/)(axum|wrangler|fastly|spin|runtime-config)\.toml$|(^|/)\.(dev\.vars|env)(\..*)?$'
+example='(^|/)\.env\.example$'
+
+# Untrack matching files without touching your working copy. NUL-delimited
+# end-to-end (`-z` / `-0`) so paths with spaces or newlines survive; the
+# `grep -q` pre-check keeps `git rm` from running on an empty list.
+if git ls-files -z | grep -zE "$matcher" | grep -qzEv "$example"; then
+  git ls-files -z | grep -zE "$matcher" | grep -zEv "$example" | xargs -0 git rm --cached --
+fi
+
+# Verify none remain tracked (expect no output):
+git ls-files -z | grep -zE "$matcher" | grep -zEv "$example" | tr '\0' '\n'
+```
+
+Commit the `.gitignore` change plus the `git rm --cached` removals
+together after coordinating backups. The author retains local files; teammates
+regenerate theirs with `provision --local` after pulling and restore custom
+settings from their backups.
+
+## Axum runtime data and unset secrets
+
+Stop Axum before migrating its KV data. Back up the old launch directory's
+`.edgezero/`, then copy the existing database filenames into the application
+project root's `.edgezero/`. Keep the backup until the restarted runtime has
+verified the data.
+
+Fresh typed secret hints are inactive until filled. Uncomment and populate
+Axum's `# EDGEZERO__SECRETS__<KEY>=` or Cloudflare's `# <key>=""` hint, or export
+the corresponding variable. Spin writes `# SPIN_VARIABLE_<NAME>=` and a secret
+variable with `required = true` and `secret = true`, without a default, so supply
+a value before starting Spin. Existing values are preserved: comment out old
+empty assignments if they represent an unset credential. For old generated Spin
+variables, replace `default = ""` with `required = true`; if no default is present,
+add `required = true`. Spin requires one of those two declarations.

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, absolute};
 
 use async_trait::async_trait;
 use edgezero_core::config_store::{ConfigStore, ConfigStoreError};
@@ -162,18 +162,48 @@ impl ConfigStore for AxumConfigStore {
     }
 }
 
-/// Walk up from the process cwd looking for an ancestor that
-/// contains an `edgezero.toml` file (the manifest marker, same
-/// convention cargo uses for `Cargo.toml`). Returns the first
-/// matching ancestor, or `None` if the walk hits the filesystem
-/// root without finding one.
+/// Resolve the project root that anchors the runtime `.edgezero`
+/// directory.
+///
+/// When `EDGEZERO_MANIFEST` is set (the manifest path can be renamed
+/// away from the default `edgezero.toml`), the root is that manifest's
+/// parent directory — the SAME root `provision --local` resolves the
+/// manifest from — so runtime reads land exactly where provisioning
+/// wrote. Only when the variable is unset does discovery fall back to
+/// the upward `edgezero.toml` search below.
 ///
 /// Used by [`AxumConfigStore::local_path`] to keep push and runtime
-/// on the same path regardless of launch cwd. Pulled out as a free
-/// function so the same discovery rule can be reused by other
-/// runtime helpers in the future.
-fn find_project_root_dir() -> Option<PathBuf> {
+/// on the same path regardless of launch cwd. Also reused by the dev
+/// server's KV path anchoring so config and KV state land in the SAME
+/// `.edgezero` directory.
+pub(crate) fn find_project_root_dir() -> Option<PathBuf> {
+    if let Some(root) = manifest_root_from_env() {
+        return Some(root);
+    }
     find_project_root_dir_from(&env::current_dir().ok()?)
+}
+
+/// Derive the project root from an explicitly set `EDGEZERO_MANIFEST`.
+///
+/// Mirrors the CLI's `manifest_root_from` — the manifest's parent is
+/// the project root — but resolves a bare or relative manifest to an
+/// ABSOLUTE path against the current working directory FIRST, so the
+/// derived root stays stable regardless of a later cwd change. The Axum
+/// runtime relaunches the child with cwd set to the adapter crate dir
+/// (see `cli/run.rs`) before resolving `.edgezero`; a relative `.` root
+/// would then resolve against the adapter crate dir instead of the
+/// project root where `provision --local` wrote. Anchoring on the
+/// launch cwd up front keeps runtime reads and provision writes on the
+/// same directory. Returns `None` when the variable is unset (so the
+/// caller falls back to the `edgezero.toml` upward search) or when the
+/// current directory can't be determined.
+fn manifest_root_from_env() -> Option<PathBuf> {
+    let manifest = absolute(env::var("EDGEZERO_MANIFEST").ok()?).ok()?;
+    let root = manifest
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    Some(root)
 }
 
 /// Test-visible inner walk: same behaviour as
@@ -199,8 +229,26 @@ mod tests {
     });
 
     use super::*;
+    use crate::test_utils::env_guard;
+    use edgezero_core::test_env::EnvOverride;
     use futures::executor::block_on;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn from_path_reads_symlinked_config_file() {
+        use std::os::unix::fs::symlink;
+        // Direct runtime reads support ConfigMap-style file symlinks;
+        // CLI write paths enforce their own containment checks.
+        let temp = tempdir().expect("tempdir");
+        let real = temp.path().join("real.json");
+        fs::write(&real, "{\"k\":\"v\"}").expect("write real");
+        let link = temp.path().join("local-config-app.json");
+        symlink(&real, &link).expect("symlink");
+        let store = AxumConfigStore::from_path(&link)
+            .expect("ConfigMap-style symlinks are valid runtime inputs");
+        assert_eq!(block_on(store.get("k")).unwrap(), Some("v".to_owned()));
+    }
 
     #[test]
     fn axum_config_store_from_map_returns_values() {
@@ -268,6 +316,56 @@ mod tests {
         assert_eq!(
             fs::canonicalize(&resolved).expect("canonicalize resolved"),
             fs::canonicalize(&inner).expect("canonicalize inner")
+        );
+    }
+
+    #[tokio::test]
+    async fn find_project_root_dir_honors_renamed_manifest_env() {
+        // A renamed top-level manifest (`EDGEZERO_MANIFEST=<dir>/project.local.toml`)
+        // must anchor the runtime `.edgezero` directory on that
+        // manifest's parent — the same root `provision --local` writes
+        // under — NOT the `edgezero.toml` upward-search fallback. Note
+        // the tempdir deliberately has NO `edgezero.toml`, so a fallback
+        // would resolve somewhere else entirely.
+        let _lock = env_guard().lock().await;
+        let temp = tempdir().expect("tempdir");
+        let manifest = temp.path().join("project.local.toml");
+        let _env = EnvOverride::set("EDGEZERO_MANIFEST", &manifest);
+
+        let resolved = find_project_root_dir().expect("manifest env must resolve a root");
+        assert_eq!(
+            fs::canonicalize(&resolved).expect("canonicalize resolved"),
+            fs::canonicalize(temp.path()).expect("canonicalize tempdir"),
+            "runtime root must be the renamed manifest's parent directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_project_root_dir_anchors_bare_manifest_env_to_cwd() {
+        // A BARE relative `EDGEZERO_MANIFEST=project.local.toml` must
+        // anchor the runtime `.edgezero` on the ABSOLUTE launch cwd, not
+        // a relative `.`. The Axum runtime relaunches the child with cwd
+        // set to the adapter crate dir before resolving `.edgezero`, so a
+        // relative `.` root would drift to that crate dir instead of the
+        // project root where `provision --local` wrote. Resolving the
+        // manifest to absolute up front keeps the two in agreement
+        // regardless of the later cwd change. Setting cwd in a test is
+        // racy, so assert on absoluteness + equality with the current
+        // cwd under the env lock rather than mutating cwd.
+        let _lock = env_guard().lock().await;
+        let _env = EnvOverride::set("EDGEZERO_MANIFEST", "project.local.toml");
+
+        let resolved = find_project_root_dir().expect("bare manifest env must resolve a root");
+        assert!(
+            resolved.is_absolute(),
+            "bare manifest env must resolve an ABSOLUTE root, got `{}`",
+            resolved.display()
+        );
+        let cwd = env::current_dir().expect("cwd");
+        assert_eq!(
+            fs::canonicalize(&resolved).expect("canonicalize resolved"),
+            fs::canonicalize(&cwd).expect("canonicalize cwd"),
+            "bare manifest env must anchor on the absolute launch cwd, not `.`"
         );
     }
 

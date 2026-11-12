@@ -1,5 +1,36 @@
 # `provision --local`: write per-adapter local emulator state
 
+## Implementation amendment: adapter ownership and review repairs
+
+The [adapter-owned CLI design](2026-10-19-adapter-owned-cli-design.md) amends
+the original orchestration described below. Each adapter owns its CLI commands,
+local layout, artifact sensitivity, serve environment input and scaffold defaults.
+The production CLI consumes those neutral contracts without switching on provider
+identity. Its serve overlay applies only to children; parent exports take
+precedence and the parent environment remains unchanged.
+
+The [review repair plan](../plans/2026-11-10-pr287-prfection-feedback.md) specifies
+the current safety contract: preserve existing env records by logical key,
+including commented and duplicate records; redact untrusted preview comments and
+malformed prefixes; stage only declared artifacts and Cargo/application metadata
+in a private directory; propagate preview write errors; atomically replace env
+files and changed deployed state. Before a cloud mutation, verify the canonical
+manifest target's sibling-file write capability. Serve validates the inputs it
+reads, while write/diff operations validate the complete declared layout.
+
+Fresh secret hints are inactive: Axum writes
+`# EDGEZERO__SECRETS__<KEY_UPPER>=`, Cloudflare writes `# <key>=""`, and Spin
+writes `# SPIN_VARIABLE_<NAME>=` plus a variable with `required = true` and
+`secret = true`, without a default.
+Existing explicit values and defaults are preserved. Spin variable names obey
+`^[a-z][a-z0-9]*(_[a-z][a-z0-9]*)*$`; Axum secret values never enter Spin guest
+arguments. Fastly augments inline arrays or arrays of tables and leaves
+file-backed secret stores externally managed.
+
+These corrections supersede conflicting historical descriptions below. This
+records implementation scope and contracts; independent acceptance of the amended
+planning scope remains part of the requested re-review.
+
 ## Motivation
 
 `edgezero provision --adapter <name>` today creates **platform**
@@ -35,16 +66,26 @@ the config blob, leaving everything provision wrote intact.
   gitignored per a later section. If a manifest is missing,
   `provision --local`'s CLI-owned bootstrap synthesises a
   minimal valid file from `edgezero.toml` primitives via
-  `toml_edit::DocumentMut` (NOT from the scaffold `.hbs`
-  templates -- those carry generator-only placeholders that
-  aren't reconstructible from `edgezero.toml` alone; the
-  `.hbs` files remain in use only by `edgezero new`'s
-  scaffold path). The synthesiser's exact per-adapter output
-  is specified in the "Primitive synthesiser output" section.
+  `toml_edit::DocumentMut`. There is NO `.hbs` template for any
+  adapter manifest: `edgezero new` runs this same synthesiser at
+  scaffold time, so the synthesiser is the single source of truth
+  for these files. The remaining `.hbs` templates cover only
+  non-manifest scaffold files (`Cargo.toml`, `src/…`,
+  `.cargo/config.toml`, etc.). The synthesiser's exact per-adapter
+  output is specified in the "Primitive synthesiser output" section.
 - Never creates files outside the adapter crate's directory or
   the gitignored local-state directories (`.wrangler/`, `.spin/`,
   `.edgezero/`, `.dev.vars`, `.env`). This is enforced by the
-  path-containment rule below, not just by convention.
+  path-containment rule below, not just by convention. `--local`
+  provision and config paths REQUIRE both
+  `[adapters.<name>.adapter].crate` and
+  `[adapters.<name>.adapter].manifest` to be declared — the
+  strict-local containment rule proves the manifest resolves
+  inside the adapter crate dir, which is impossible when either
+  field is absent. All four bundled adapters (axum, cloudflare,
+  fastly, spin) declare both fields in generated projects; there
+  is no legacy adapter that legitimately omits either in local
+  mode.
 
 ### Path containment (MUST)
 
@@ -135,33 +176,58 @@ pub(crate) fn assert_provision_paths_contained(
             }
         }
     }
-    // Step 2: when both `.crate` and `.manifest` are set, the
-    // manifest path MUST resolve inside the adapter crate dir.
-    // Without this, `crate = "crates/cf"` plus
-    // `manifest = "tmp/wrangler.toml"` would pass step 1 but
-    // write to a path OUTSIDE the adapter crate -- breaking
-    // the "never creates files outside the adapter crate"
-    // promise this section opens with.
+    // Step 2 (strict-local only): BOTH `.crate` AND `.manifest`
+    // are REQUIRED and the manifest MUST resolve inside the
+    // adapter crate dir. Any one of the three failure modes
+    // below breaks the "never creates files outside the
+    // adapter crate" promise this section opens with:
     //
-    // `crate = None` means the operator omitted the crate
-    // declaration (legal for adapters whose layout doesn't
-    // need it, e.g. Axum); we skip this stronger check
-    // entirely and fall back to step 1's project-root
-    // containment.
-    if let (Some(crate_raw), Some(manifest_raw)) =
-        (adapter_crate_path, adapter_manifest_path)
-    {
-        let crate_resolved = lexical_normalize(&root.join(Path::new(crate_raw)));
-        let manifest_resolved = lexical_normalize(&root.join(Path::new(manifest_raw)));
-        if !manifest_resolved.starts_with(&crate_resolved) {
-            return Err(format!(
-                "[adapters.<name>.adapter].manifest `{manifest_raw}` must \
-                 resolve inside [adapters.<name>.adapter].crate `{crate_raw}`; \
-                 resolved manifest path `{}` is not under crate path `{}`",
-                manifest_resolved.display(),
-                crate_resolved.display(),
-            ));
-        }
+    //   - Missing `.manifest`: the adapter synth's
+    //     `PathBuf::from("<default>.toml")` fallback lands
+    //     generated files at the project root, and
+    //     `read_adapter_crate_name` has no path to walk up
+    //     from.
+    //   - Missing `.crate`: the CLI can't PROVE the manifest
+    //     lives inside any adapter crate. A permissive
+    //     `manifest = "wrangler.toml"` at project root would
+    //     silently land wrangler.toml outside any crate.
+    //   - Both set but manifest outside crate: e.g.
+    //     `crate = "crates/cf"` +
+    //     `manifest = "tmp/wrangler.toml"` passes step 1 but
+    //     writes outside the adapter crate.
+    //
+    // Cloud dispatch does not run this step -- legitimate
+    // cloud fixtures use `manifest = "wrangler.toml"` at the
+    // project root alongside a crate under `crates/`, which
+    // is safe for vendor-CLI dispatch. All four bundled
+    // adapters declare BOTH fields in generated projects
+    // (the scaffolder writes them; there is no legacy
+    // adapter that legitimately omits either).
+    if !strict_local {
+        return Ok(());
+    }
+    let Some(manifest_raw) = adapter_manifest_path else {
+        return Err(format!(
+            "[adapters.<name>.adapter].manifest is required for `--local` \
+             provision and config paths"
+        ));
+    };
+    let Some(crate_raw) = adapter_crate_path else {
+        return Err(format!(
+            "[adapters.<name>.adapter].crate is required for `--local` \
+             provision and config paths"
+        ));
+    };
+    let crate_resolved = lexical_normalize(&root.join(Path::new(crate_raw)));
+    let manifest_resolved = lexical_normalize(&root.join(Path::new(manifest_raw)));
+    if !manifest_resolved.starts_with(&crate_resolved) {
+        return Err(format!(
+            "[adapters.<name>.adapter].manifest `{manifest_raw}` must \
+             resolve inside [adapters.<name>.adapter].crate `{crate_raw}`; \
+             resolved manifest path `{}` is not under crate path `{}`",
+            manifest_resolved.display(),
+            crate_resolved.display(),
+        ));
     }
     Ok(())
 }
@@ -201,10 +267,18 @@ local files through it is wired up in the same PR:
    ultimately resolve manifest-relative paths). Push
    only writes local files when `--local` is set, so
    the helper call sits inside the `args.local` arm.
-3. (Existing remote-only entry points -- cloud
-   provision shell-outs, `run_config_diff` read-only --
-   stay unchecked. They don't write through
-   manifest-declared paths.)
+3. `run_config_diff_typed` runs the same containment
+   loop (`--local` uses `assert_provision_paths_contained`;
+   default cloud uses `assert_provision_paths_safe`) BEFORE
+   `run_shared_checks` and before any adapter
+   `read_config_entry` / `read_config_entry_local` dispatch.
+   Read-only is not enough: those adapter reads still join
+   `manifest_root` with `[adapters.<name>.adapter].manifest`
+   and read (and print) the resulting file body. Without
+   this gate a poisoned `manifest = "../../etc/shadow"`
+   would surface as diff output rather than an early error.
+4. (Cloud provision shell-outs stay unchecked past Step 1.
+   They don't write through manifest-declared paths.)
 
 Push and provision import the shared helper from
 `path_safety.rs` so a future check addition lands in both
@@ -371,6 +445,7 @@ already rejected `..`, normalisation is purely
       baseline manifest into the copied tempdir at the
       adapter's expected relative path BEFORE adapter
       dispatch.
+
    3. Re-point the `manifest_root` argument that flows
       into `adapter.provision` (and `provision_typed`) at
       the tempdir. Dispatch the adapter call with
@@ -429,12 +504,12 @@ already rejected `..`, normalisation is purely
    Cloudflare / Fastly cloud CLIs will shell out for
    real.
 
-   | `--local`? | `--dry-run`? | Tempdir staging? | `dry_run` passed to adapter | Why                                                                                                                                                                |
-   | ---------- | ------------ | ---------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-   | No         | No           | No               | `false`                     | Today's default cloud-mode path.                                                                                                                                   |
+   | `--local`? | `--dry-run`? | Tempdir staging? | `dry_run` passed to adapter | Why                                                                                                                                                                      |
+   | ---------- | ------------ | ---------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+   | No         | No           | No               | `false`                     | Today's default cloud-mode path.                                                                                                                                         |
    | No         | Yes          | No               | **`true`**                  | Cloud dry-run goes straight through to each adapter's existing dry-run branch (Cloudflare `cli.rs:263`, Fastly's `setup` block, Spin's lookup-only flow). NO shell-outs. |
-   | Yes        | No           | No               | `false`                     | Local real-write path; adapters mutate the real worktree directly.                                                                                                 |
-   | Yes        | Yes          | **Yes**          | **`false`**                 | The tempdir IS the safety net. Adapters take their real-write branch against the copied tree; the driver rewrites status + diffs the result.                       |
+   | Yes        | No           | No               | `false`                     | Local real-write path; adapters mutate the real worktree directly.                                                                                                       |
+   | Yes        | Yes          | **Yes**          | **`false`**                 | The tempdir IS the safety net. Adapters take their real-write branch against the copied tree; the driver rewrites status + diffs the result.                             |
 
    The first three rows match current behaviour exactly;
    only the bottom row is new. The tempdir-and-lie
@@ -463,12 +538,12 @@ already rejected `..`, normalisation is purely
    regressions where an adapter write follows a symlink
    back into the project tree.
 
-   The bootstrap synthesiser does NOT re-render the
-   per-adapter manifest from `.hbs` templates -- those
-   carry generator-only placeholders (`{{proj_spin}}`,
-   `{{target_dir_spin}}`, `{{proj_spin_underscored}}`)
-   that aren't reconstructible from `edgezero.toml` alone.
-   Instead the bootstrap builds the manifest from
+   There is NO `.hbs` template for any adapter manifest --
+   they were all removed, and `edgezero new` runs this SAME
+   synthesiser at scaffold time (the `.hbs` templates that
+   remain cover only non-manifest scaffold files like
+   `Cargo.toml` / `src/…` / `.cargo/config.toml`). The
+   bootstrap builds the manifest from
    primitives via `toml_edit::DocumentMut`, writing only
    the structural keys the adapter's `provision` step is
    about to populate (e.g. for Spin: `spin_manifest_version = 2`,
@@ -488,19 +563,23 @@ already rejected `..`, normalisation is purely
    customizations (v1)" below for the cross-team sharing
    contract.
 
-   The scaffold `.hbs` templates remain the source-of-truth
-   for `edgezero new`'s richer first-time generation; only
-   `provision --local`'s bootstrap path uses the primitive
-   synthesiser.
+   There is NO `.hbs` template for any adapter manifest
+   (`axum.toml`, `wrangler.toml`, `fastly.toml`, `spin.toml`,
+   `runtime-config.toml`). `edgezero new` runs the same
+   `provision --local` synthesiser at scaffold time, so the
+   synthesiser is the single source of truth for these files;
+   `.hbs` templates cover only non-manifest scaffold files
+   (`Cargo.toml`, `src/…`, `.cargo/config.toml`, `.gitignore`,
+   etc.).
 
 ### Bundled binary vs. generated CLI
 
 `provision --local` runs in two flavours:
 
-| Entry point                                    | What it can write                                                                                                                                          |
-| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Bundled `edgezero provision --adapter <name> --local` | Manifest-and-store-binding work only: synthesise the per-adapter manifest from `edgezero.toml` primitives via `toml_edit::DocumentMut` if absent (see "Primitive synthesiser output"), merge `[stores.*]` from `edgezero.toml` into per-store binding blocks, write Fastly local stores under their manifest logical IDs. No `#[secret]` field walking -- the bundled binary has no typed `C`. Output names the missing secret-placeholder step as a follow-up for the operator to run from their `<app-cli>`. |
-| Generated `<app-cli> provision --adapter <name> --local` | Everything the bundled binary does, plus adapter-specific per-secret placeholders sourced from `C::SECRET_FIELDS` (filtered to skip `SecretKind::StoreRef`). The destination varies per adapter and is NOT uniformly an env file -- see "Per-adapter `provision_typed` output" below for the per-adapter contract. |
+| Entry point                                              | What it can write                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Bundled `edgezero provision --adapter <name> --local`    | Manifest-and-store-binding work only: synthesise the per-adapter manifest from `edgezero.toml` primitives via `toml_edit::DocumentMut` if absent (see "Primitive synthesiser output"), merge `[stores.*]` from `edgezero.toml` into per-store binding blocks, write Fastly local stores under their manifest logical IDs. No `#[secret]` field walking -- the bundled binary has no typed `C`. Output names the missing secret-placeholder step as a follow-up for the operator to run from their `<app-cli>`. |
+| Generated `<app-cli> provision --adapter <name> --local` | Everything the bundled binary does, plus adapter-specific per-secret placeholders sourced from `C::SECRET_FIELDS` (filtered to skip `SecretKind::StoreRef`). The destination varies per adapter and is NOT uniformly an env file -- see "Per-adapter `provision_typed` output" below for the per-adapter contract.                                                                                                                                                                                             |
 
 The split mirrors the spec 3.2.1 stub-pointer model for
 `config push` / `config diff`: anything that requires typed
@@ -669,7 +748,7 @@ Implementation contract:
 
   Provision constructs its own `ValidationContext` via a
   new `pub(crate) fn load_validation_context_with_options(
-  manifest_path, app_config_override, strict, env_overlay)`
+manifest_path, app_config_override, strict, env_overlay)`
   helper (a refactor of the existing
   `load_validation_context(args: &ConfigValidateArgs)`
   at `config.rs:1128` -- the args-shaped wrapper stays,
@@ -775,6 +854,7 @@ Implementation contract:
   `.edgezero/.env` placeholders) never carry a key NAME
   the runtime would later reject -- the operator gets the
   error at provision time, not at first request.
+
 - Walks `C::SECRET_FIELDS` (the COMPILE-TIME metadata is
   available; it's just the runtime field VALUES that aren't)
   and SKIPS entries whose `kind == SecretKind::StoreRef`:
@@ -906,15 +986,15 @@ exit, regardless of whether either inner call errored.
 
 #### Per-adapter `provision_typed` output
 
-For each `TypedSecretEntry { store_id, field_name, key_value }`
+For each reflected `TypedSecretEntry`
 that comes out of the typed walk:
 
-| Adapter    | Where the per-secret placeholder lands                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Axum       | `.edgezero/.env` line: `<key_value>=` (empty placeholder; operator fills). One line per entry.                                                                                                                                                                                                                                                                                                                                                  |
-| Cloudflare | `.dev.vars` line: `<key_value>=""` (quoted empty placeholder, wrangler convention).                                                                                                                                                                                                                                                                                                                                                             |
-| Fastly     | `fastly.toml` `[[local_server.secret_stores.<store_id>]]` array entry: `key = "<key_value>"`, `env = "<KEY_VALUE_UPPER>"`. The array NAME is the entry's `store_id` (NOT hardcoded `default`) so `#[secret(store_ref = "field")]` routes to the correct `[stores.secrets]` id. Append IFF the array entry with the same `key` is absent.                                                                                                       |
-| Spin       | Two writes per entry, both using `spin_var = key_value.to_ascii_lowercase()` (canonicalised exactly as `crates/edgezero-adapter-spin/src/cli.rs:535` does, matching the runtime lookup at `crates/edgezero-adapter-spin/src/secret_store.rs:51`). (1) `spin.toml` -- `[variables].<spin_var> = { default = "", secret = true }` plus `[component.<component_id>.variables].<spin_var> = "{{ <spin_var> }}"`. (2) `.env` next to `spin.toml` -- a `SPIN_VARIABLE_<spin_var.to_ascii_uppercase()>=` line for the operator to populate. Both writes are merge-only (append IFF absent). Spin's flat variable namespace means `store_id` is informational only -- there's no per-store routing. Mixed-case operator-typed key values (`api_token` vs `API_TOKEN` vs `Api_Token`) all canonicalise to the same `api_token` spin var; the lowercased-collision check that catches this lives in Spin's `validate_typed_secrets` at `crates/edgezero-adapter-spin/src/cli.rs:514`, which provision reaches via the `run_adapter_typed_checks` call documented in the "Validation" section above (NOT via `typed_secret_checks`, which only covers cross-adapter-agnostic rules). Both helpers must run; provision's two-helper preflight pattern (also documented in "Validation") catches the collision before the merge step. |
+| Adapter    | Where the per-secret placeholder lands                                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Axum       | `.edgezero/.env` hint: `# EDGEZERO__SECRETS__<KEY_VALUE_UPPER>=`. Uncomment and fill, or export the variable; an untouched hint stays missing.                                                                                                                                                                                                                                                                                      |
+| Cloudflare | `.dev.vars` hint: `# <key_value>=""`. Uncomment and fill before serving; existing operator values remain unchanged.                                                                                                                                                                                                                                                                                                                 |
+| Fastly     | `fastly.toml` `[[local_server.secret_stores.<store_id>]]` array entry: `key = "<key_value>"`, `env = "<KEY_VALUE_UPPER>"`. The array NAME is the entry's `store_id` (NOT hardcoded `default`) so `#[secret(store_ref = "field")]` routes to the correct `[stores.secrets]` id. Append IFF the array entry with the same `key` is absent.                                                                                            |
+| Spin       | Canonicalize `key_value` to lowercase, validate its Spin variable name and reject collisions before writing. Add `[variables].<name> = { required = true, secret = true }` and its selected component binding only when absent; append `# SPIN_VARIABLE_<NAME_UPPER>=` to the sibling `.env` only when its logical key is absent. Supply a provider value before starting Spin. Existing operator defaults and env records survive. |
 
 Existing values are preserved (the merge mechanics above
 apply): an operator who pre-filled a placeholder with a real
@@ -931,11 +1011,11 @@ command runs (re-provision, operator edits since last run). The
 spec contract is **preserve operator-set values; only add what's
 missing**:
 
-| File shape                                          | Merge mechanism                                                                                                                                                                                                                                  |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| TOML (`fastly.toml`, `spin.toml`, `wrangler.toml`, `runtime-config.toml`) | `toml_edit::DocumentMut` round-trip. New tables / array-of-tables append only when absent (`setup_block_present`-style check). Existing tables keep their child keys verbatim, including operator comments and formatting. |
-| Line-oriented (`.env`, `.dev.vars`)               | Line-wise dedup, key-normalised. Parse each line by stripping at most one leading `#` and optional adjacent whitespace, then parsing `<key>=<value>`; the resulting `<key>` is the dedup key. Provision skips appending its line when either an uncommented OR a commented form of the same `<key>` is already present. Concretely: if the file already contains `EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY=app_config_staging` (operator uncommented and edited), a second provision run MUST NOT re-add the `# EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY=app_config` commented placeholder it originally emitted. Existing lines (including comments operator-edited and operator-set values) are preserved byte-for-byte. (`.gitignore` is NOT in this set -- it is generator-owned; see "Scaffold generator".) Contract test: "Re-provision after operator uncomments override does not re-add commented placeholder" -- write provision output, uncomment + edit the override line, re-run provision, assert exactly one line per normalised key. |
-| JSON map (`.edgezero/local-config-<id>.json`)       | Not provision's responsibility -- that file is written only by `config push --local`. Provision ensures the parent directory exists.                                                                                                            |
+| File shape                                                                | Merge mechanism                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| TOML (`fastly.toml`, `spin.toml`, `wrangler.toml`, `runtime-config.toml`) | `toml_edit::DocumentMut` round-trip. New tables / array-of-tables append only when absent (`setup_block_present`-style check). Existing tables keep their child keys verbatim, including operator comments and formatting.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Line-oriented (`.env`, `.dev.vars`)                                       | Line-wise dedup, key-normalised. Parse each line by stripping at most one leading `#` and optional adjacent whitespace, then parsing `<key>=<value>`; the resulting `<key>` is the dedup key. Provision skips appending its line when either an uncommented OR a commented form of the same `<key>` is already present. Concretely: if the file already contains `EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY=app_config_staging` (operator uncommented and edited), a second provision run MUST NOT re-add the `# EDGEZERO__STORES__CONFIG__APP_CONFIG__KEY=app_config` commented placeholder it originally emitted. Existing lines (including comments operator-edited and operator-set values) are preserved byte-for-byte. (`.gitignore` is NOT in this set -- it is generator-owned; see "Scaffold generator".) Contract test: "Re-provision after operator uncomments override does not re-add commented placeholder" -- write provision output, uncomment + edit the override line, re-run provision, assert exactly one line per normalised key. |
+| JSON map (`.edgezero/local-config-<id>.json`)                             | Not provision's responsibility -- that file is written only by `config push --local`. Provision ensures the parent directory exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 A schema-version header lands at the top of each provision-written
 file as a single-line comment, e.g. `# edgezero-provision: v1`.
@@ -949,12 +1029,11 @@ during dedup -- if absent, it gets prepended.
 
 A clean `git clone` has no **generated adapter manifest**
 (`wrangler.toml`, `fastly.toml`, `spin.toml`,
-`runtime-config.toml` -- the four under the synthesiser /
-gitignore model; Axum's `axum.toml` stays tracked, see the
-Axum subsection under "Primitive synthesiser output").
-Provision's CLI-owned bootstrap synthesises a minimal baseline
-for each of those four via `toml_edit::DocumentMut` (NOT from
-the scaffold `.hbs` templates -- see CLI section). The
+`runtime-config.toml`, `axum.toml` -- the five under the
+synthesiser / gitignore model). Provision's CLI-owned
+bootstrap synthesises a minimal baseline for each via
+`toml_edit::DocumentMut` (NOT from the scaffold `.hbs`
+templates -- see CLI section). The
 synthesised baseline carries enough adapter shape to validate
 and boot, but NOT the operator-declared list of `[stores.kv]`
 / `[stores.config]` ids. Those ids only exist in
@@ -1009,12 +1088,12 @@ runs on the `--local` path unchanged.
 `[stores.secrets]` declarations and MERGES one binding per id
 into each adapter's local manifest:
 
-| Adapter    | Binding the merge appends per `stores.<kind>.ids` entry                                                                                                                                                                                                                 |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Adapter    | Binding the merge appends per `stores.<kind>.ids` entry                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Cloudflare | `[[kv_namespaces]] binding = "<id>", id = "<resolved_id>"` per `stores.kv` AND per `stores.config` id -- Cloudflare's config store IS KV-backed, so config ids also need a `[[kv_namespaces]]` binding. **`<resolved_id>` precedence (this list is the SOLE authority; the general "preserve operator values" rule in Merge mechanics yields to it for the managed keys `id` and `preview_id`):** (1) tracked `[adapters.cloudflare.deployed].kv_namespaces.<logical_id>` in `edgezero.toml` if present -- cloud authority wins, so a teammate's pushed cloud id overrides any stale local hand-edit; (2) otherwise, the `id` value currently on the matched existing local `[[kv_namespaces]]` entry, if any -- preserves the operator's hand-edit when no cloud authority exists; (3) otherwise, the literal placeholder `"<placeholder-namespace-id-{logical_id}>"` so `wrangler dev --local` still boots and operators can spot the unfilled slot. `preview_id` follows the v1 rule under "Cloudflare preview_id (v1)" below. Matches the existing `stores.kv.iter().chain(stores.config.iter())` pattern in `crates/edgezero-adapter-cloudflare/src/cli.rs:207`. **Per-binding merge mechanics (matches existing `id`-only update at `crates/edgezero-adapter-cloudflare/src/cli.rs:821`):** locate the `[[kv_namespaces]]` array entry whose `binding == "<id>"`; if found, UPSERT only the managed keys (`id`, and -- when v1 has a value for it -- `preview_id`) per the precedence above. Sibling operator-authored keys on the same entry (custom `usage_model`, adjacent comments) AND entries with a different `binding` value are untouched. If not found, append a new entry with `binding`, `id`, and (when present) `preview_id` only. Never delete an entry. |
-| Fastly     | Per `stores.kv` id, a `[[local_server.kv_stores.<id>]]` ARRAY-of-tables entry with a placeholder `key = "__init__"`, `data = ""` row -- Viceroy rejects empty `[local_server.kv_stores.<id>]` normal-tables (the existing app-demo fixture uses the array-of-tables shape). Per `stores.config` id, a `[local_server.config_stores.<id>]` normal table with `format = "inline-toml"` PLUS an empty `[local_server.config_stores.<id>.contents]` sub-table (NOT `contents = ""` -- the existing Fastly push writer at `crates/edgezero-adapter-fastly/src/cli.rs:986` calls `contents_entry.as_table_mut()` and refuses to edit in place when the value isn't a table).                  |
-| Spin       | Add `<id>` to the component's `key_value_stores` array in `spin.toml`, AND a `[key_value_store.<id>]` block in `runtime-config.toml` (`type = "spin"`, default `path = ".spin/sqlite_key_value.db"`). `spin.toml` is regenerated when absent (via the primitive-synthesiser, not the scaffold `.hbs`), otherwise the array merge appends only the missing ids. **Typed `[variables]` declarations for `#[secret]` fields are NOT written here** -- they belong in `provision_typed` (the generated `<app-cli>` path), per the table below. The bundled binary has no typed `C` and so cannot derive the secret-variable names. |
-| Axum       | No manifest equivalent (Axum's stores are file-backed; ids surface as `local-config-<id>.json` filenames).                                                                                                                                                              |
+| Fastly     | Per `stores.kv` id, a `[[local_server.kv_stores.<id>]]` ARRAY-of-tables entry with a placeholder `key = "__init__"`, `data = ""` row -- Viceroy rejects empty `[local_server.kv_stores.<id>]` normal-tables (the existing app-demo fixture uses the array-of-tables shape). Per `stores.config` id, a `[local_server.config_stores.<id>]` normal table with `format = "inline-toml"` PLUS an empty `[local_server.config_stores.<id>.contents]` sub-table (NOT `contents = ""` -- the existing Fastly push writer at `crates/edgezero-adapter-fastly/src/cli.rs:986` calls `contents_entry.as_table_mut()` and refuses to edit in place when the value isn't a table).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Spin       | Add `<id>` to the component's `key_value_stores` array in `spin.toml`, AND a `[key_value_store.<id>]` block in `runtime-config.toml` (`type = "spin"`, default `path = ".spin/sqlite_key_value.db"`). `spin.toml` is regenerated when absent (via the primitive-synthesiser, not the scaffold `.hbs`), otherwise the array merge appends only the missing ids. **Typed `[variables]` declarations for `#[secret]` fields are NOT written here** -- they belong in `provision_typed` (the generated `<app-cli>` path), per the table below. The bundled binary has no typed `C` and so cannot derive the secret-variable names.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Axum       | No manifest equivalent (Axum's stores are file-backed; ids surface as `local-config-<id>.json` filenames).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 The merge is additive: bindings whose `binding` value
 matches a declared `[stores.<kind>].ids` entry get their
@@ -1279,6 +1358,7 @@ a CLI-owned step, not the adapter's:
    map. The CLI maps each adapter's `AdapterDeployedState`
    into the appropriate strongly-typed
    `ManifestAdapterDeployed` variant in `edgezero-core`.
+
 2. `run_provision` (the CLI orchestrator at
    `crates/edgezero-cli/src/provision.rs`) takes the returned
    `AdapterDeployedState`, maps it to the typed
@@ -1304,11 +1384,11 @@ path here:
 - The `Adapter::deploy` trait is NOT changed in v1.
   `run_deploy` at `crates/edgezero-cli/src/lib.rs:160`
   continues to call `adapter::execute(adapter, Action::Deploy,
-  ...)` at `crates/edgezero-cli/src/adapter.rs:97`, which
+...)` at `crates/edgezero-cli/src/adapter.rs:97`, which
   prefers the manifest-defined `[adapters.<name>.commands].deploy`
   shell command when present (which app-demo and the scaffold
   template both do). The shell command's `fastly compute
-  deploy` writes `service_id` into the local `fastly.toml`
+deploy` writes `service_id` into the local `fastly.toml`
   in place -- the CLI never sees it.
 - After a successful first deploy, operators run a documented
   one-time manual step: read `service_id` from the local
@@ -1352,12 +1432,12 @@ The placeholder fall-back covers the rest
 v1 splits adapter-manifest content into three tiers by how
 it's shared across teammates:
 
-| Tier                                                                                                                                                                                                                                                                                              | Source-of-truth (tracked)                                  | Reaches teammates how                                                                                                                                                |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Structural primitives (`<app_name>`, store ids, build script paths)                                                                                                                                                                                                                                | `edgezero.toml`'s `[app]` + `[stores.*]`                  | Re-derived by `provision --local` on every clone.                                                                                                                    |
-| Build / deploy / serve commands                                                                                                                                                                                                                                                                   | `edgezero.toml`'s `[adapters.<name>.commands]` (existing) | **v1: NOT re-derived.** The `synthesise_baseline_manifest` trait receives only `manifest_root`, adapter manifest path, component selector, `app_name`, and `deployed` -- the existing `[adapters.<name>.commands]` block doesn't flow through. Each adapter's synthesiser hard-codes its default build script (e.g. Fastly's `cargo build --profile release --target wasm32-wasip1`). Operators with custom commands edit the generated manifest by hand after `provision --local`; re-runs preserve those edits via merge mechanics. Extending the synthesiser to consume `[adapters.<name>.commands]` is an out-of-scope follow-up. |
-| Durable deploy-time ids (Cloudflare namespace ids, Fastly `service_id`)                                                                                                                                                                                                                            | `edgezero.toml`'s `[adapters.<name>.deployed]` (this spec) | Re-derived by `provision --local` (per propagation rules above).                                                                                                     |
-| **Everything else** -- custom `[scripts]` not expressible in `[adapters.<name>.commands]`, alternate `[component.*]` shapes, additional `[setup.*]` declarations, log endpoints, `[local_server]` overrides, etc.                                                                                  | **Not shareable in v1.**                                  | Local-only: operator hand-edits the gitignored adapter manifest; re-runs of `provision --local` preserve those edits via merge mechanics. Teammates re-apply by hand. |
+| Tier                                                                                                                                                                                                              | Source-of-truth (tracked)                                  | Reaches teammates how                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Structural primitives (`<app_name>`, store ids, build script paths)                                                                                                                                               | `edgezero.toml`'s `[app]` + `[stores.*]`                   | Re-derived by `provision --local` on every clone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Build / deploy / serve commands                                                                                                                                                                                   | `edgezero.toml`'s `[adapters.<name>.commands]` (existing)  | **v1: NOT re-derived.** The `synthesise_baseline_manifest` trait receives only `manifest_root`, adapter manifest path, component selector, `app_name`, and `deployed` -- the existing `[adapters.<name>.commands]` block doesn't flow through. Each adapter's synthesiser hard-codes its default build script (e.g. Fastly's `cargo build --profile release --target wasm32-wasip1`). Operators with custom commands edit the generated manifest by hand after `provision --local`; re-runs preserve those edits via merge mechanics. Extending the synthesiser to consume `[adapters.<name>.commands]` is an out-of-scope follow-up. |
+| Durable deploy-time ids (Cloudflare namespace ids, Fastly `service_id`)                                                                                                                                           | `edgezero.toml`'s `[adapters.<name>.deployed]` (this spec) | Re-derived by `provision --local` (per propagation rules above).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **Everything else** -- custom `[scripts]` not expressible in `[adapters.<name>.commands]`, alternate `[component.*]` shapes, additional `[setup.*]` declarations, log endpoints, `[local_server]` overrides, etc. | **Not shareable in v1.**                                   | Local-only: operator hand-edits the gitignored adapter manifest; re-runs of `provision --local` preserve those edits via merge mechanics. Teammates re-apply by hand.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 The v1 contract is intentionally minimal: anything not
 expressible in the three tracked tiers above stays a
@@ -1383,11 +1463,27 @@ binary, so forking them is not a realistic sharing mechanism.
 When a manifest is absent at the start of `provision --local`,
 the CLI bootstrap writes the following minimal-valid baseline
 via `toml_edit::DocumentMut` before the adapter's
-`provision` step layers store bindings on top. `<app_name>`
-comes from `edgezero.toml`'s `[app].name`. Per-adapter
-overrides past this baseline are operator scope (hand-edit
-the synthesised file; the merge mechanics preserve those
-edits on re-run). See "Shareable vs. local-only
+`provision` step layers store bindings on top.
+
+**`<crate_name>` is the ADAPTER CRATE package name**, resolved
+by walking upward from the manifest's parent directory to the
+first `Cargo.toml` inside `manifest_root` and reading its
+`[package].name`. This honours the operator's
+`[adapters.<name>.adapter].crate` path when it points at a
+rename or a nested manifest (e.g.
+`crates/server/config/wrangler.toml` still resolves to
+`crates/server/Cargo.toml`). When no reachable Cargo.toml
+carries `[package].name`, the synthesiser falls back to the
+scaffold-convention `<app_name>-adapter-<id>`. A pre-2026-07
+version of this spec derived `<crate_name>` from `[app].name`,
+which broke on any project that renamed its adapter crate —
+Cargo builds `<package_name_underscored>.wasm`, and any wrangler
+/ fastly / spin manifest that names something else fails at
+build or run time.
+
+Per-adapter overrides past this baseline are operator scope
+(hand-edit the synthesised file; the merge mechanics preserve
+those edits on re-run). See "Shareable vs. local-only
 customizations (v1)" above for the cross-team sharing
 contract.
 
@@ -1395,22 +1491,31 @@ contract.
 
 ```toml
 # edgezero-provision: v1
-name = "<app_name>"
+name = "<crate_name>"
 main = "build/worker/shim.mjs"
 compatibility_date = "2024-01-01"
+
+[build]
+command = "worker-build --release"
 ```
 
-`build/worker/shim.mjs` matches Wrangler's standard Rust
-worker entrypoint convention. Operators using a different
-build output edit the synthesised file once; re-runs preserve
-the change.
+`main` points at `build/worker/shim.mjs` — the wasm-bindgen glue that
+ONLY `worker-build` produces (a plain `cargo build` emits just the raw
+wasm). The `[build] command` is therefore REQUIRED, not optional: without
+it a fresh scaffold cannot `serve` or `deploy` (`wrangler dev` / `wrangler
+deploy` load `main` but nothing would ever create the shim). `wrangler`
+runs `[build].command` in the CRATE ROOT before dev/deploy; for a NESTED
+manifest `main` is emitted relative to the manifest dir (e.g.
+`../build/worker/shim.mjs`) so it still resolves to that crate-root output.
+Operators using a different build output edit the synthesised file once;
+re-runs preserve the change.
 
 ### Fastly (`fastly.toml`)
 
 ```toml
 # edgezero-provision: v1
 manifest_version = 3
-name = "<app_name>"
+name = "<crate_name>"
 language = "rust"
 
 [scripts]
@@ -1432,7 +1537,7 @@ populates it on first run.
 spin_manifest_version = 2
 
 [application]
-name = "<app_name>"
+name = "<crate_name>"
 version = "0.1.0"
 
 [[trigger.http]]
@@ -1444,29 +1549,45 @@ source = "<target_wasm_path>"
 key_value_stores = []
 ```
 
-**`<component_id>` resolution.** The bootstrap reads
-`[adapters.spin.adapter].component` from `edgezero.toml`
-(the same selector Spin's runtime validates against actual
-component ids at
-`crates/edgezero-adapter-spin/src/cli.rs:942`). Precedence:
-(1) `[adapters.spin.adapter].component` when set, verbatim;
-(2) otherwise `<app_name>` (the project's `[app].name`) as
-the default, matching the app-demo fixture and the scaffold
-template's first-time output. Whatever the bootstrap writes
-into the trigger's `component = "..."` value MUST equal the
-`[component.<id>]` block name it emits in the same pass --
-Spin's loader otherwise rejects the manifest. Operators who
-later add a `component = "..."` value to `edgezero.toml`
-out of phase with their already-synthesised `spin.toml`
-re-run `provision --local` to refresh.
+**Two distinct identities feed the Spin baseline** and are kept
+separate — a pre-2026-07-v3 version of the synth conflated them,
+which broke any project where the operator's Spin component
+selector differed from the Cargo package name.
+
+- **`<crate_name>`** — the adapter crate's Cargo
+  `[package].name`. Read by walking upward from the manifest's
+  parent directory to the first `Cargo.toml` inside `manifest_root`
+  (so a nested manifest like `crates/server/config/spin.toml`
+  still resolves to `crates/server/Cargo.toml`), then reading
+  `[package].name`. Drives `[application].name` AND the wasm
+  source basename — Cargo always produces
+  `<package_name_underscored>.wasm` regardless of what the
+  operator calls the Spin component. Fallback when no Cargo.toml
+  is reachable (fresh scaffold before the crate files land):
+  scaffold-convention `<app_name>-adapter-spin`.
+
+- **`<component_id>`** — the Spin component id from
+  `[adapters.spin.adapter].component`. The operator's runtime
+  discriminator for a multi-component `spin.toml`, and the same
+  selector Spin's runtime validates against actual component ids
+  at `crates/edgezero-adapter-spin/src/cli.rs:942`. Drives
+  `[[trigger.http]].component` AND the `[component.<id>]` table
+  key. Defaults to `<crate_name>` when unset (single-component
+  projects). Whatever the bootstrap writes into the trigger's
+  `component = "..."` value MUST equal the `[component.<id>]`
+  block name it emits in the same pass — Spin's loader otherwise
+  rejects the manifest. Operators who later add a
+  `component = "..."` value to `edgezero.toml` out of phase with
+  their already-synthesised `spin.toml` re-run `provision --local`
+  to refresh.
 
 `<target_wasm_path>` is computed as the conventional
 workspace-relative wasm artefact path
-`"../../target/wasm32-wasip2/release/<component_id_underscored>.wasm"`
-(matches the existing app-demo fixture; the wasm filename
-matches the component id, not the app name). Operators
-whose workspace layout differs edit the synthesised file
-once.
+`"../../target/wasm32-wasip2/release/<crate_name_underscored>.wasm"`.
+The wasm filename ALWAYS underscores the CARGO CRATE name —
+never the component id, because Cargo names artifacts after the
+package, not the Spin runtime selector. Operators whose workspace
+layout differs edit the synthesised file once.
 
 ### Spin (`runtime-config.toml`)
 
@@ -1481,42 +1602,51 @@ above), keyed by the platform name.
 
 ### Axum
 
-Axum's per-adapter manifest (`axum.toml`) IS tracked in
-the project tree -- the scaffold emits it via the existing
-`axum_axum_toml` template at
-`crates/edgezero-adapter-axum/src/cli.rs:36-52`, the
-app-demo fixture commits a copy at
-`examples/app-demo/crates/app-demo-adapter-axum/axum.toml`,
-and `edgezero.toml`'s `[adapters.axum.adapter].manifest`
-points at it (e.g. `examples/app-demo/edgezero.toml:146`).
-**This stays the case in v1.** `provision --local` does NOT
-synthesise, gitignore, mutate, or otherwise own `axum.toml`:
+Axum's per-adapter manifest (`axum.toml`) is synthesised by
+`provision --local` on missing, gitignored, and re-generated on
+fresh clone -- matching the model for the other three adapters.
+Amendment 2026-07: earlier drafts of this spec kept
+`axum.toml` tracked because it has no deploy-time identifiers
+to weave in, but the asymmetry led to two concrete problems --
+dry-run showed no diff for a manifest the operator's tree
+did have to produce, and fresh clones missing `axum.toml`
+failed at `serve` before any provision step ran. Aligning
+`axum.toml` with the other three closes both.
 
-- The primitive synthesiser ("Primitive synthesiser output"
-  above) has NO Axum entry -- the scaffold's `.hbs` template
-  remains the sole source-of-truth for `axum.toml` content.
+- The primitive synthesiser has an Axum entry emitted by
+  `Adapter::synthesise_baseline_manifest` on
+  `AxumCliAdapter`. Default content:
+  `crate = "<app>-adapter-axum"`, `crate_dir = "."`,
+  `host = "127.0.0.1"`, `port = 8787`, prefixed with the
+  `# edgezero-provision: v1` header.
+- The Axum blueprint has NO scaffold template for
+  `axum.toml`. If both a scaffold template AND the
+  synthesiser wrote the file, `write_baseline_to_disk`'s
+  "skip if exists" guard would silently pick the scaffold
+  content at `edgezero new` while a clean clone would pick
+  the synthesiser output -- two baselines diverging is
+  exactly the drift this section closed. The scaffold-time
+  provision loop (`generator::provision_all_selected_adapters`)
+  is the single writer.
 - The "Adapter manifests are gitignored" section below
-  applies ONLY to `fastly.toml`, `wrangler.toml`,
-  `spin.toml`, and `runtime-config.toml`. `axum.toml`
-  stays tracked.
-- The CLI bootstrap step ensures `.edgezero/` exists (so the
-  per-store binding propagation table's Axum row -- which
-  uses `.edgezero/local-config-<id>.json` filenames -- can
-  land its writes) but creates / merges nothing under
-  `axum.toml` itself.
-- `provision --local --dry-run` does NOT list `axum.toml` in
-  its diff allow-list (per the dry-run scope above).
+  covers all five: `axum.toml`, `wrangler.toml`,
+  `fastly.toml`, `spin.toml`, and `runtime-config.toml`.
+  Per clone, they're regenerated by `provision --local`.
+- The CLI bootstrap step ensures `.edgezero/` exists AND
+  writes the axum baseline if `axum.toml` is missing.
+  `write_baseline_to_disk` skips existing files so operator
+  edits (custom host / port / crate_dir) survive re-runs
+  byte-identical.
+- `provision --local --dry-run` lists `axum.toml` in its
+  diff allow-list, so operators can preview the exact
+  content that would land on first synthesis.
 
-Rationale for the asymmetry: `axum.toml` is small static
-metadata (`host`, `port`, `address`) that doesn't encode
-deploy-time identifiers or platform-resolved store labels --
-none of the propagation-table content the other three
-adapters' manifests carry. There's no operator merge-conflict
-churn to mitigate and no clean-clone reproducibility gap to
-close, so the cost of pulling Axum into the generated /
-gitignored model would buy nothing in v1. A v2 that adds
-deploy-time fields to `axum.toml` (none exist today) can
-revisit. Spelled out in "Out of scope".
+The adapter merge path is a no-op on the file: Axum has no
+per-machine identifiers to weave in on re-provision, so
+`AxumCliAdapter::provision` does not touch the manifest.
+Operator edits therefore survive byte-identical -- the same
+guarantee the other three adapters' merge paths provide for
+their own edits.
 
 ## Per-adapter local state
 
@@ -1525,76 +1655,22 @@ AFTER this spec lands (the scaffold `.gitignore` discussed below).
 
 ### Axum
 
-| File                              | What `provision --local` writes                                                                                                                                                                                                                                   | Already gitignored? |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| `.edgezero/.env`                  | **Base `provision --local`** writes one `EDGEZERO__STORES__<KIND>__<ID>__NAME` line per `StoresMetadata` id (KV / CONFIG / SECRETS), set to the **platform-resolved name** (same value the adapter manifest's binding uses; see "Env-file `__NAME` values match adapter bindings" below), plus one `EDGEZERO__STORES__CONFIG__<ID>__KEY` line per CONFIG id only -- `__KEY` is config-only at runtime (Cloudflare's `env_config_from_worker` at `crates/edgezero-adapter-cloudflare/src/lib.rs:55` derives `__KEY` only for CONFIG; KV/SECRETS have no per-id key override). **Generated `<app-cli> provision --local` (`provision_typed`)** appends one `<key_value>=` line per `#[secret]` field in the typed `C` (key NAME → empty string placeholder for the operator to fill in). Base writes store env labels; typed appends secret placeholders -- bundled `edgezero` has no typed `C`, so it cannot walk `#[secret]` fields. See the "Per-adapter `provision_typed` output" table above for the typed path. | yes (`.edgezero/`)  |
-| `.edgezero/local-config-<id>.json` | Not created by provision (`config push --local` owns this file). Provision only ensures `.edgezero/` exists.                                                                                                                                                  | yes                 |
+| File                               | What `provision --local` writes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Already gitignored? |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `.edgezero/.env`                   | **Base `provision --local`** writes one `EDGEZERO__STORES__<KIND>__<ID>__NAME` line per `StoresMetadata` id (KV / CONFIG / SECRETS), set to the **platform-resolved name** (same value the adapter manifest's binding uses; see "Env-file `__NAME` values match adapter bindings" below), plus one `EDGEZERO__STORES__CONFIG__<ID>__KEY` line per CONFIG id only -- `__KEY` is config-only at runtime (Cloudflare's `env_config_from_worker` at `crates/edgezero-adapter-cloudflare/src/lib.rs:55` derives `__KEY` only for CONFIG; KV/SECRETS have no per-id key override). **Generated `<app-cli> provision --local` (`provision_typed`)** appends one `# EDGEZERO__SECRETS__<KEY_VALUE_UPPER>=` hint per `#[secret]` field in the typed `C` (key name → inactive hint for the operator to uncomment and fill). Base writes store env labels; typed appends secret placeholders -- bundled `edgezero` has no typed `C`, so it cannot walk `#[secret]` fields. See the "Per-adapter `provision_typed` output" table above for the typed path. | yes (`.edgezero/`)  |
+| `.edgezero/local-config-<id>.json` | Not created by provision (`config push --local` owns this file). Provision only ensures `.edgezero/` exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | yes                 |
 
-Axum reads secrets via `EnvSecretStore` from process env. The
-implementing PR extends `crates/edgezero-cli/src/lib.rs`'s
-`run_serve` (the CLI orchestrator at `lib.rs:179`) with an
-**adapter-scoped** env-file load: at most ONE env file is
-loaded per invocation, selected by the resolved adapter
-name. Each `<key>=<value>` line is set in the current
-process env BEFORE dispatching to either the
-manifest-defined serve command OR the adapter registry's
-`serve`. `run_serve` is shared across adapters, so loading
-both files unconditionally would let Axum's
-`.edgezero/.env` preempt Spin's `EDGEZERO__STORES__*__NAME`
-lines via the "existing env wins" rule below, silently
-opening the wrong store labels on every Spin serve.
+Axum reads secrets via `EnvSecretStore` from its process environment. The
+selected adapter supplies an optional `serve_env` path through its local layout;
+the CLI parses that file into a child overlay used by both manifest-command and
+registry dispatch. The parent environment remains unchanged and already-exported
+keys win. There is no provider-name dispatch table in the CLI.
 
-Dispatch table (MUST):
-
-| `args.adapter` | File loaded                                              |
-| -------------- | -------------------------------------------------------- |
-| `axum`         | `<manifest_root>/.edgezero/.env`                         |
-| `spin`         | `<spin_crate_dir>/.env`                                  |
-| `cloudflare`   | none (operator's `wrangler dev` reads `.dev.vars` itself) |
-| `fastly`       | none (Viceroy reads `[local_server.config_stores.*]` itself) |
-| any other name | none                                                     |
-
-`<spin_crate_dir>` resolves via the same path the adapter
-dispatch uses (the parent of `[adapters.spin.adapter].manifest`,
-defaulting to the in-tree per-adapter crate when unset).
-The Spin file load is required because the default serve
-command at `crates/edgezero-adapter-spin/src/cli.rs:54`
-is `spin up --from {crate_dir} --runtime-config-file
-{crate_dir}/runtime-config.toml`, which `run_serve`
-executes from the workspace root via the manifest command
-path at `crates/edgezero-cli/src/lib.rs:182`. Spin's env
-provider reads `.env` from the spawning process's
-current working directory; that's the workspace root,
-NOT `{crate_dir}`. So the operator's
-`<spin_crate_dir>/.env` would never reach Spin without
-the CLI loading it explicitly first.
-
-Contract test (MUST): create a fixture with conflicting
-values -- `<manifest_root>/.edgezero/.env` containing
-`EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=axum_only`,
-`<spin_crate_dir>/.env` containing
-`EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=spin_only` --
-run `edgezero serve --adapter spin`, intercept the env
-vars passed to the spawned `spin up` child via a fake
-`spin` shim on `PATH`, and assert the child saw
-`spin_only` (NOT `axum_only`). Mirror test for
-`--adapter axum` asserting it saw `axum_only`.
-
-The CLI layer is chosen (not
-`crates/edgezero-adapter-axum/src/cli.rs`'s `serve`)
-because `edgezero serve` honours manifest-defined serve
-commands at `crates/edgezero-cli/src/adapter.rs:97`
-BEFORE the adapter dispatch -- generated and app-demo
-manifests define serve commands, so an adapter-layer
-`.env` load would be bypassed. Loading in the CLI
-ensures both paths see the env vars.
-
-Operator-set env vars on the shell take precedence (the
-`.env` load is best-effort: existing
-`std::env::var(<key>).is_ok()` skips the line). Without this,
-the runtime never sees the placeholders provision wrote. The
-smoke harness drops its inline `demo_api_token=...` env shim
-once this lands.
+Bundled layouts select project-root `.edgezero/.env` for Axum and the manifest's
+sibling `.env` for Spin. Cloudflare and Fastly select no CLI-loaded env file;
+their native runtimes own local configuration. A custom adapter may select its
+own path. Tests must prove selected/custom paths, parent precedence, and absence
+of cross-adapter file loading.
 
 Lines in `.edgezero/.env` look like:
 
@@ -1606,24 +1682,24 @@ Lines in `.edgezero/.env` look like:
 # Secret values -- key NAMES come from the AppConfig's #[secret]
 # fields' VALUES at rest in the blob (Model A). Fill in real
 # values before running `cargo run`:
-demo_api_token=
+# EDGEZERO__SECRETS__DEMO_API_TOKEN=
 ```
 
 ### Cloudflare
 
-| File              | What `provision --local` writes                                                                                                                                                                                                                                                                      | Already gitignored?                                              |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `.dev.vars`       | Same base/typed split as Axum's `.env`. **Base `provision --local`** writes `EDGEZERO__STORES__<KIND>__<ID>__NAME` lines for KV / CONFIG / SECRETS (values are the **platform-resolved name**, matching the `binding` of the corresponding `[[kv_namespaces]]` entry; see "Env-file `__NAME` values match adapter bindings" below) plus `EDGEZERO__STORES__CONFIG__<ID>__KEY` lines for CONFIG ids only. **Generated `<app-cli> provision --local` (`provision_typed`)** appends one `<key_value>=""` line per `#[secret]` field (quoted-empty wrangler convention). `wrangler dev` surfaces these to `env.var(...)`. See the "Per-adapter `provision_typed` output" table above for the typed path. | yes -- included in the scaffold-generated `.gitignore` (below)  |
-| `.wrangler/state/`| Not created or pre-seeded. `wrangler kv` populates this on first push.                                                                                                                                                                                                                              | yes                                                              |
-| `wrangler.toml`   | Synthesised from primitives when absent (first-run bootstrap; see "Primitive synthesiser output" below). When present, additively merged: missing `[[kv_namespaces]]` entries for any `stores.kv` or `stores.config` id are appended (per the propagation table above). Operator-set bindings, durable namespace ids from `[adapters.cloudflare.deployed]`, and unrelated keys are preserved verbatim.                                  | yes -- per the gitignore section below                           |
+| File               | What `provision --local` writes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Already gitignored?                                            |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `.dev.vars`        | Same base/typed split as Axum's `.env`. **Base `provision --local`** writes `EDGEZERO__STORES__<KIND>__<ID>__NAME` lines for KV / CONFIG / SECRETS (values are the **platform-resolved name**, matching the `binding` of the corresponding `[[kv_namespaces]]` entry; see "Env-file `__NAME` values match adapter bindings" below) plus `EDGEZERO__STORES__CONFIG__<ID>__KEY` lines for CONFIG ids only. **Generated `<app-cli> provision --local` (`provision_typed`)** appends one commented `# <key_value>=""` hint per `#[secret]` field (inactive until the operator supplies a value). `wrangler dev` surfaces these to `env.var(...)`. See the "Per-adapter `provision_typed` output" table above for the typed path. | yes -- included in the scaffold-generated `.gitignore` (below) |
+| `.wrangler/state/` | Not created or pre-seeded. `wrangler kv` populates this on first push.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | yes                                                            |
+| `wrangler.toml`    | Synthesised from primitives when absent (first-run bootstrap; see "Primitive synthesiser output" below). When present, additively merged: missing `[[kv_namespaces]]` entries for any `stores.kv` or `stores.config` id are appended (per the propagation table above). Operator-set bindings, durable namespace ids from `[adapters.cloudflare.deployed]`, and unrelated keys are preserved verbatim.                                                                                                                                                                                                                                                                                                                       | yes -- per the gitignore section below                         |
 
 Line-wise dedup applies to `.dev.vars` (see Merge mechanics).
 
 ### Fastly
 
-| File           | What `provision --local` writes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fastly.toml`  | Append IFF the named block is absent: `[local_server.config_stores.<logical-id>]` (`format = "inline-toml"` plus an empty `[local_server.config_stores.<logical-id>.contents]` table) per Config Store and `[[local_server.kv_stores.<logical-id>]]` placeholder entries per KV Store. Fastly local bindings use logical IDs because production deployment selects physical stores through version resource links. The generated typed CLI also writes per-secret `[[local_server.secret_stores.<logical-id>]]` entries. No runtime selector store or deployment-specific Config key is written. |
+| File          | What `provision --local` writes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `fastly.toml` | Append IFF the named block is absent: `[local_server.config_stores.<logical-id>]` (`format = "inline-toml"` plus an empty `[local_server.config_stores.<logical-id>.contents]` table) per Config Store and `[[local_server.kv_stores.<logical-id>]]` placeholder entries per KV Store. Fastly local bindings use logical IDs because production deployment selects physical stores through version resource links. The generated typed CLI also writes per-secret `[[local_server.secret_stores.<logical-id>]]` entries. No runtime selector store or deployment-specific Config key is written. |
 
 The `[setup.config_stores.<id>]` / `[setup.secret_stores.<id>]`
 blocks that cloud-mode provision writes are NOT touched in
@@ -1631,58 +1707,38 @@ blocks that cloud-mode provision writes are NOT touched in
 
 ### Spin
 
-| File                                                  | What `provision --local` writes                                                                                                                                                                                                                                                                              |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `runtime-config.toml` (next to `spin.toml`)           | A `[key_value_store.<platform>]` block per declared config/kv id with `type = "spin"` and a default `path = ".spin/sqlite_key_value.db"`. Created when absent; existing blocks preserved. **No** `[variables_provider]` block -- Spin's runtime-config does not have a variables-provider concept (verified against the official `spinframework.dev/v3/dynamic-configuration` page); variables resolve from `[variables]` defaults in `spin.toml` plus `SPIN_VARIABLE_*` process env. |
-| `.env` (next to `spin.toml`)                          | Two groups of lines (line-wise dedup applies to all): (1) `EDGEZERO__STORES__<KIND>__<LOGICAL_ID>__NAME=<platform_name>` for every KV / CONFIG / SECRETS store id (same shape as Axum / Cloudflare emit; required because Spin's runtime resolves labels through the env overlay at `crates/edgezero-adapter-spin/src/request.rs:258`, `:301`); (2) `# EDGEZERO__STORES__CONFIG__<LOGICAL_ID>__KEY=<logical_id>` for CONFIG ids only, commented out by default (operator uncomments and edits per-environment override per spec 12.7). **The `SPIN_VARIABLE_*` lines are NOT written by base `provision --local`** -- they require typed-`C` reflection over `#[secret]` fields, which only the generated `<app-cli>`'s `run_provision_typed` path has. See the "Spin" row of the "Per-adapter `provision_typed` output" table above for the typed-CLI's `SPIN_VARIABLE_<SPIN_VAR_UPPER>=` emission. The base/typed split mirrors the Cloudflare and Fastly split: base writes adapter-level bindings + env labels; typed writes per-secret placeholders. Consumption: `edgezero serve` loads this file into the spawning process env BEFORE exec'ing the Spin serve command (`crates/edgezero-cli/src/lib.rs:182`); see the adapter-scoped `run_serve` env-file table described after the Axum row above. Operators invoking `spin up` directly from a third-party shell still need to source the file by hand. The correct pattern is path-explicit so it works from any cwd: either `set -a; source <spin_crate_dir>/.env; set +a; spin up --from <spin_crate_dir> ...` (sources by full path; cwd irrelevant), or `cd <spin_crate_dir> && set -a; source .env; set +a; spin up ...` (cd first, then sources from current dir). The bare-`source .env` form is only correct when cwd already IS the Spin crate dir, which is rarely true from operator shells. |
-| `spin.toml`                                           | Synthesised from primitives when absent (first-run bootstrap; see "Primitive synthesiser output" below). When present, the component's `key_value_stores` array gets the missing store ids appended. Everything else operator-owned is preserved by `toml_edit::DocumentMut`. **`[variables]` declarations and `[component.<name>.variables]` mappings are NOT written by base `provision --local`** -- they require typed-`C` reflection over `#[secret]` fields and live in `provision_typed` (the generated `<app-cli>` path). See the "Spin" row of the "Per-adapter `provision_typed` output" table above. |
-| `.spin/sqlite_key_value.db`                           | Not created; `spin up` initialises it on first read.                                                                                                                                                                                                                                                       |
+| File                                        | What `provision --local` writes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runtime-config.toml` (next to `spin.toml`) | A `[key_value_store.<platform>]` block per declared config/kv id with `type = "spin"` and a default `path = ".spin/sqlite_key_value.db"`. Created when absent; existing blocks preserved. **No** `[variables_provider]` block -- Spin's runtime-config does not have a variables-provider concept (verified against the official `spinframework.dev/v3/dynamic-configuration` page); variables resolve from `[variables]` defaults in `spin.toml` plus `SPIN_VARIABLE_*` process env.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `.env` (next to `spin.toml`)                | Two groups of lines (line-wise dedup applies to all): (1) `EDGEZERO__STORES__<KIND>__<LOGICAL_ID>__NAME=<platform_name>` for every KV / CONFIG / SECRETS store id (same shape as Axum / Cloudflare emit; required because Spin's runtime resolves labels through the env overlay at `crates/edgezero-adapter-spin/src/request.rs:258`, `:301`); (2) `# EDGEZERO__STORES__CONFIG__<LOGICAL_ID>__KEY=<logical_id>` for CONFIG ids only, commented out by default (operator uncomments and edits per-environment override per spec 12.7). **The `SPIN_VARIABLE_*` lines are NOT written by base `provision --local`** -- they require typed-`C` reflection over `#[secret]` fields, which only the generated `<app-cli>`'s `run_provision_typed` path has. See the "Spin" row of the "Per-adapter `provision_typed` output" table above for the typed-CLI's `SPIN_VARIABLE_<SPIN_VAR_UPPER>=` emission. The base/typed split mirrors the Cloudflare and Fastly split: base writes adapter-level bindings + env labels; typed writes per-secret placeholders. Consumption: `edgezero serve` loads this file into a child-process overlay before executing the Spin serve command (`crates/edgezero-cli/src/lib.rs:182`); see the adapter-scoped `run_serve` env-file selection prose after the Axum row above. **CRUCIAL Spin env model:** a wasip2 Spin component does NOT inherit the `spin` host process environment -- the guest reads its own sandboxed WASI env (`std::env`), which Spin populates only from `spin up --env <k>=<v>` or `[component.<id>.environment]`. So loading the `.env` into the host process is NOT sufficient for Spin: `run::serve` additionally forwards `EDGEZERO__*` overrides except the Axum-only `EDGEZERO__SECRETS__*` namespace to the guest via `spin up --env` (verified against Spin 4.0.2 -- a `__KEY` override set only on the host process is invisible to the component and every store silently falls back to its logical id). Operators invoking `spin up` directly from a third-party shell must therefore pass the overrides via `--env` too (sourcing the `.env` into their shell only sets the HOST env, which the guest can't see): e.g. `spin up --from <spin_crate_dir>/spin.toml --runtime-config-file <spin_crate_dir>/runtime-config.toml --env EDGEZERO__STORES__CONFIG__<ID>__KEY=<value>`. The `SPIN_VARIABLE_*` secret lines are the exception -- those DO travel as Spin application variables from the host env, not via `--env`. |
+| `spin.toml`                                 | Synthesised from primitives when absent (first-run bootstrap; see "Primitive synthesiser output" below). When present, the component's `key_value_stores` array gets the missing store ids appended. Everything else operator-owned is preserved by `toml_edit::DocumentMut`. **`[variables]` declarations and `[component.<name>.variables]` mappings are NOT written by base `provision --local`** -- they require typed-`C` reflection over `#[secret]` fields and live in `provision_typed` (the generated `<app-cli>` path). See the "Spin" row of the "Per-adapter `provision_typed` output" table above.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `.spin/sqlite_key_value.db`                 | Not created; `spin up` initialises it on first read.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
-### Env-file `__NAME` values match adapter bindings
+### Env-file `__NAME` values and adapter bindings
 
-The `EDGEZERO__STORES__<KIND>__<LOGICAL_ID>__NAME` lines
-that provision writes into `.edgezero/.env` (Axum) and
-`.dev.vars` (Cloudflare) MUST be the **platform-resolved name** -- the
-same value the per-store propagation table emits as the
-`binding` (Cloudflare) or `[local_server.kv_stores.<name>]`
-/ `[local_server.config_stores.<name>]` / `[component.<name>.key_value_stores]`
-table name (Fastly / Spin). When no env overlay is set in
-the operator's shell when `provision --local` runs, the
-platform-resolved name equals the logical id (env-overlay
-fallback) and the two are indistinguishable.
+New `EDGEZERO__STORES__<KIND>__<LOGICAL_ID>__NAME` records written to
+Axum's `.edgezero/.env`, Cloudflare's `.dev.vars`, and Spin's sibling `.env`
+MUST use the resolved platform name, matching the generated binding or store
+label. Without an override, that name defaults to the logical store ID.
 
-The desync risk this rule closes: if the operator set
-`EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=prod_config` in
-their shell at provision time, the adapter manifest's
-binding resolves to `prod_config` (today's behaviour at
-`crates/edgezero-cli/src/provision.rs:89`) but a v1 spec
-that wrote the **logical** id `app_config` into the local
-env file would leave the runtime looking for binding
-`app_config`, which the manifest doesn't expose -- the
-runtime then falls back to its baked-in default and the
-operator sees a silent mismatch. Writing the resolved name
-into both sides keeps the runtime resolution and the
-manifest binding pointing at the same logical-thing.
+Existing records are operator-owned and remain byte-for-byte unchanged,
+including comments, custom values, duplicate records, and quoted continuations.
+When an existing active `__NAME` record differs from the resolved binding,
+provision MUST report the file, key, retained value and resolved binding. It
+does not silently converge an operator value to the exported override. Quoted
+values are compared after decoding; commented records produce no mismatch
+warning. Other env values and secret continuations never enter these diagnostics;
+multiline selector values are redacted.
 
-Spin writes the same per-id `__NAME` lines as the other
-adapters. The Spin runtime calls `EnvConfig::from_env()`
-at `crates/edgezero-adapter-spin/src/lib.rs:116` and
-resolves both KV and CONFIG store labels via
-`env.store_name(kind, id)` at
-`crates/edgezero-adapter-spin/src/request.rs:258` (KV)
-and `crates/edgezero-adapter-spin/src/request.rs:301`
-(CONFIG). The `[key_value_store.<name>]` table in
-`runtime-config.toml` pins the runtime label for a given
-PLATFORM name, but Spin's app code reaches that table by
-asking the env overlay first ("logical id `app_config` →
-which platform store label?"). If provision wrote
-`[key_value_store.prod_config]` into `runtime-config.toml`
-but skipped `EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=prod_config`
-in Spin's `.env`, the runtime would fall back to the
-logical id `app_config` and open a store named `app_config`
-that no `runtime-config.toml` block declares. The
-Spin row of the local-state table below adds these lines
-to the Spin `.env` write list.
+For example, exporting
+`EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME=prod_config` adds the resolved
+binding to provider manifests. If the env file still names `app_config`,
+provision keeps that record and reports the difference. The operator must
+explicitly update it if the new binding should be used after the export is
+removed. This applies to Spin's `key_value_stores` and
+`[key_value_store.<platform>]` entries as well as Cloudflare bindings and Axum
+local stores. A no-op content merge still applies the existing 0600 permission
+policy; statuses must not describe candidate records as actual writes.
 
 ## Interaction with `config push --local`
 
@@ -1694,12 +1750,12 @@ ownership -- Fastly's local push writes back to the same
 upserts within that table preserve sibling keys; everything
 outside it is untouched.
 
-| Adapter    | What `push --local` writes (the ONLY tables / keys it owns)                          | What it MUST NOT touch                                                                                                                                |
-| ---------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Axum       | `.edgezero/local-config-<id>.json` JSON-map keys                                     | `.edgezero/.env` (any line)                                                                                                                           |
-| Cloudflare | `.wrangler/state/` KV rows (via `wrangler kv`)                                       | `.dev.vars`, any `wrangler.toml` table                                                                                                                |
-| Fastly     | `fastly.toml` `[local_server.config_stores.<id>.contents]` keys (per-key upsert)     | `[local_server.kv_stores.*]`, `[local_server.secret_stores.*]`, `[setup.*]`, top-level fields    |
-| Spin       | `.spin/sqlite_key_value.db` `spin_key_value` table rows                              | `runtime-config.toml`, `.env`, any `spin.toml` table including `[variables]`                                                                          |
+| Adapter    | What `push --local` writes (the ONLY tables / keys it owns)                      | What it MUST NOT touch                                                                        |
+| ---------- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Axum       | `.edgezero/local-config-<id>.json` JSON-map keys                                 | `.edgezero/.env` (any line)                                                                   |
+| Cloudflare | `.wrangler/state/` KV rows (via `wrangler kv`)                                   | `.dev.vars`, any `wrangler.toml` table                                                        |
+| Fastly     | `fastly.toml` `[local_server.config_stores.<id>.contents]` keys (per-key upsert) | `[local_server.kv_stores.*]`, `[local_server.secret_stores.*]`, `[setup.*]`, top-level fields |
+| Spin       | `.spin/sqlite_key_value.db` `spin_key_value` table rows                          | `runtime-config.toml`, `.env`, any `spin.toml` table including `[variables]`                  |
 
 Adapter writers MUST preserve unrelated tables and keys. The
 Fastly local writer already does this via per-key upsert (see
@@ -1721,17 +1777,19 @@ operator hand-edits a value provision wrote (e.g. fills in a real
 secret in `.dev.vars`), the second provision MUST NOT clobber it.
 The merge mechanics above pin the contract.
 
-## Cloudflare / Fastly / Spin manifests are gitignored
+## Adapter manifests are gitignored
 
-The **Cloudflare, Fastly, and Spin** per-adapter manifests
-are treated as **generated local state**, not source-of-truth
-artefacts. **Axum's `axum.toml` is NOT in this set** -- it
-stays tracked and scaffold-owned (see "Primitive synthesiser
-output" → "Axum"), so do NOT add `axum.toml` to `.gitignore`
-or to the migration runbook below:
+All five per-adapter manifests -- **Cloudflare** (`wrangler.toml`),
+**Fastly** (`fastly.toml`), **Spin** (`spin.toml` +
+`runtime-config.toml`), and **Axum** (`axum.toml`) -- are
+treated as **generated local state**, not source-of-truth
+artefacts. `provision --local` regenerates each on fresh clone
+or after a delete. Operator edits are preserved via the merge
+paths described above:
 
 ```
-# add to .gitignore (root) -- four entries, NO axum.toml
+# add to .gitignore (root) -- five entries covering all adapters
+axum.toml
 fastly.toml
 spin.toml
 wrangler.toml
@@ -1750,13 +1808,18 @@ Rationale:
   "Where durable identifiers live"). `provision --local`
   synthesises the per-adapter manifest from those primitives
   via `toml_edit::DocumentMut` so a clean `git clone` plus
-  `provision --local` is always reproducible. The richer
-  scaffold `.hbs` templates under
+  `provision --local` is always reproducible. NO adapter
+  manifest (`axum.toml`, `wrangler.toml`, `fastly.toml`,
+  `spin.toml`, `runtime-config.toml`) has a scaffold `.hbs`
+  template: `edgezero new` runs the SAME synthesiser at
+  scaffold time, so the synthesiser is the single writer for
+  those files. The `.hbs` templates that remain under
   `crates/edgezero-cli/src/templates/` and
-  `crates/edgezero-adapter-*/src/templates/` are used only
-  by `edgezero new`'s first-time generation -- they carry
-  generator-only placeholders (`{{proj_spin}}` etc.) that
-  the steady-state dev loop can't reconstruct.
+  `crates/edgezero-adapter-*/src/templates/` cover only
+  NON-manifest scaffold files (`Cargo.toml`, `src/…`,
+  `.cargo/config.toml`) with generator-only placeholders
+  (`{{proj_spin}}` etc.) that the steady-state dev loop
+  doesn't reconstruct.
 - Operator-authored values (custom `[scripts]`, deploy commands,
   service ids) live alongside generated content; the merge
   mechanics above preserve unknown / pre-existing keys when
@@ -1775,20 +1838,27 @@ git ls-files | rg '(^|/)runtime-config\.toml$' && exit 1 || true
 ### Migration for the in-tree `examples/app-demo/`
 
 - The currently-tracked manifests are removed from version control:
+  - `examples/app-demo/crates/app-demo-adapter-axum/axum.toml`
   - `examples/app-demo/crates/app-demo-adapter-fastly/fastly.toml`
   - `examples/app-demo/crates/app-demo-adapter-cloudflare/wrangler.toml`
   - `examples/app-demo/crates/app-demo-adapter-spin/spin.toml`
   - any in-tree `runtime-config.toml` next to the Spin manifest
 - The implementing commit runs `git rm` on each of these files
-  and adds the four patterns to the root `.gitignore` in the same
-  commit so the worktree is clean immediately after.
-- The richer per-adapter scaffold remains in the adapter
-  crates' `templates/` directories for `edgezero new`'s use.
-  For the steady-state dev loop, `provision --local`
-  synthesises the concrete files at the same paths from
+  and adds the five patterns to the root `.gitignore` in the same
+  commit so the worktree is clean immediately after. (The 2026-07
+  amendment folded `axum.toml` into the gitignored set alongside
+  the other four adapter manifests; the CI gate at Task 37
+  enforces all five.)
+- No adapter manifest (`axum.toml`, `wrangler.toml`,
+  `fastly.toml`, `spin.toml`, `runtime-config.toml`) has a
+  scaffold `.hbs` template: all of them were removed so
+  scaffold-time provision is the single writer. Both
+  `edgezero new` and the steady-state `provision --local`
+  synthesise the concrete files at the same paths from
   `edgezero.toml` primitives via `toml_edit::DocumentMut`
-  (see "Primitive synthesiser output") -- not from those
-  `.hbs` templates.
+  (see "Primitive synthesiser output"). The adapter crates'
+  `templates/` directories retain only non-manifest scaffold
+  files (`Cargo.toml`, `src/…`, `.cargo/config.toml`).
 - Smoke scripts that previously `backup_in_tree`'d these files
   drop that machinery -- the files are no longer tracked, so
   worktree cleanliness checks ignore them anyway. Smoke calls
@@ -1803,16 +1873,17 @@ not generated.
 
 ### Migration for downstream projects
 
-Operators with existing projects that already track
-`fastly.toml` / `wrangler.toml` / `spin.toml` / `runtime-config.toml`
-follow a one-time runbook:
+Operators with existing projects that already track any of
+`axum.toml` / `fastly.toml` / `wrangler.toml` / `spin.toml` /
+`runtime-config.toml` follow a one-time runbook:
 
 ```sh
-# Add the four manifest patterns + .dev.vars to .gitignore.
+# Add the five manifest patterns + .dev.vars to .gitignore.
 # `.dev.vars` is Cloudflare's per-secret placeholder file
 # (written by `<app-cli> provision --adapter cloudflare --local`);
 # operator values must never be committed.
 cat >> .gitignore <<'EOF'
+axum.toml
 fastly.toml
 spin.toml
 wrangler.toml
@@ -1826,9 +1897,10 @@ EOF
 # operator runs `provision --local` next. The portable guarded
 # loop below works on macOS / BSD `xargs` (which lacks the
 # GNU `-r` "no-run-if-empty" flag) as well as GNU systems.
-# `.dev.vars` is left untouched -- operators rarely have it
-# tracked, but the same loop will pick it up if they do.
-tracked=$(git ls-files | rg '(^|/)(fastly|spin|wrangler|runtime-config)\.toml$|(^|/)\.dev\.vars$' || true)
+# `.dev.vars` (Cloudflare) and `.env` (Spin's `<crate>/.env`, Axum's
+# `.edgezero/.env`) are secret-bearing and untracked too -- operators
+# rarely have them tracked, but the loop picks them up if they do.
+tracked=$(git ls-files | rg '(^|/)(axum|fastly|spin|wrangler|runtime-config)\.toml$|(^|/)\.dev\.vars$|(^|/)\.env$' || true)
 if [ -n "$tracked" ]; then
   printf '%s\n' "$tracked" | xargs git rm --cached
 fi
@@ -1865,6 +1937,7 @@ bin/
 !**/src/bin/**
 
 # Per-adapter manifests -- regenerated by `edgezero provision --local`
+axum.toml
 fastly.toml
 spin.toml
 wrangler.toml
@@ -1936,6 +2009,7 @@ The generator's responsibilities:
    (`cargo run -p <project>-cli -- provision --adapter <name> --local`),
    which dispatches to `run_provision_typed` and emits
    the per-secret placeholders.
+
 3. Print the same per-adapter "next steps" hints
    `provision --local` would print on a re-run.
 
@@ -1974,18 +2048,19 @@ silently re-add a line an operator deliberately removed.
 returns these files; every one needs a touch to reflect the
 gitignored-manifests model:
 
-| File                                       | Update                                                                                                                                                              |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `docs/guide/getting-started.md`            | First-run flow ends with `provision --adapter <name> --local` (scaffold runs it automatically). Note that Cloudflare / Fastly / Spin manifests are gitignored (Axum's `axum.toml` stays tracked).                     |
-| `docs/guide/cli-walkthrough.md`            | Per-adapter walkthroughs: "Generate the manifest" via `provision --local`, not hand-edit.                                                                           |
-| `docs/guide/cli-reference.md`              | New `provision --local` row in the CLI table.                                                                                                                       |
-| `docs/guide/configuration.md`              | "Where does each setting live?": Cloudflare / Fastly / Spin manifests are operator-modifiable but gitignored; Axum's `axum.toml` stays tracked; durable settings go in `edgezero.toml` (tracked).                    |
-| `docs/guide/manifest-store-migration.md`   | Reword tracked-path references to "the local copy of".                                                                                                              |
-| `docs/guide/blob-app-config-migration.md`  | Per-adapter mechanics sections: reword to "your local `<manifest>`" plus a note that it's not committed.                                                            |
-| `docs/guide/adapters/cloudflare.md`        | Setup section: `wrangler.toml` generated by scaffold + `provision --local`; do not commit.                                                                          |
-| `docs/guide/adapters/fastly.md`            | Same for `fastly.toml`.                                                                                                                                             |
-| `docs/guide/adapters/spin.md`              | Same for `spin.toml` + `runtime-config.toml`. Note that `[variables]` lives in the generated file -- operator edits are local until they hand-share to teammates. |
-| `docs/guide/kv.md`                         | KV setup snippets: replace hand-edits with `provision --local` re-run plus a re-run-safe extension snippet.                                                         |
+| File                                      | Update                                                                                                                                                                                                                             |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docs/guide/getting-started.md`           | First-run flow ends with `provision --adapter <name> --local` (scaffold runs it automatically). Note that all adapter manifests are gitignored: `axum.toml`, `wrangler.toml`, `fastly.toml`, `spin.toml`, `runtime-config.toml`.   |
+| `docs/guide/cli-walkthrough.md`           | Per-adapter walkthroughs: "Generate the manifest" via `provision --local`, not hand-edit.                                                                                                                                          |
+| `docs/guide/cli-reference.md`             | New `provision --local` row in the CLI table.                                                                                                                                                                                      |
+| `docs/guide/configuration.md`             | "Where does each setting live?": all adapter manifests (`axum.toml`, `wrangler.toml`, `fastly.toml`, `spin.toml`, `runtime-config.toml`) are operator-modifiable but gitignored; durable settings go in `edgezero.toml` (tracked). |
+| `docs/guide/manifest-store-migration.md`  | Reword tracked-path references to "the local copy of".                                                                                                                                                                             |
+| `docs/guide/blob-app-config-migration.md` | Per-adapter mechanics sections: reword to "your local `<manifest>`" plus a note that it's not committed.                                                                                                                           |
+| `docs/guide/adapters/axum.md`             | Setup section: `axum.toml` generated by scaffold-time `provision --local`; do not commit. Note that host / port live in the generated file.                                                                                        |
+| `docs/guide/adapters/cloudflare.md`       | Setup section: `wrangler.toml` generated by scaffold + `provision --local`; do not commit.                                                                                                                                         |
+| `docs/guide/adapters/fastly.md`           | Same for `fastly.toml`.                                                                                                                                                                                                            |
+| `docs/guide/adapters/spin.md`             | Same for `spin.toml` + `runtime-config.toml`. Note that `[variables]` lives in the generated file -- operator edits are local until they hand-share to teammates.                                                                  |
+| `docs/guide/kv.md`                        | KV setup snippets: replace hand-edits with `provision --local` re-run plus a re-run-safe extension snippet.                                                                                                                        |
 
 `docs/.vitepress/dist/` is the built site -- regenerated by
 `npm run build` in `docs/`, so no manual edits. The implementing
@@ -2195,7 +2270,7 @@ suite:
    `fake_fastly_returning`) needs a panicking variant:
    `fake_<cli>_panicking()` writes a shim script that exits
    non-zero with stderr `"FAKE-CLI INVOKED: provision --local
-   must not shell out"`. The test prepends this fake to `PATH`
+must not shell out"`. The test prepends this fake to `PATH`
    via `PathPrepend`, runs `provision --local`, asserts
    success. If the implementation shells out, the fake panics
    and the test fails with a clear message.
@@ -2257,15 +2332,11 @@ Cross-adapter smoke (`scripts/smoke_test_config_key_override.sh`):
 - Generating real cryptographic secret values. Operators fill
   in the placeholders. A `provision --local --gen-secrets`
   flag could ship in a follow-up.
-- Pulling Axum's `axum.toml` into the generated /
-  gitignored model. v1 keeps `axum.toml` tracked and
-  scaffold-owned (see the Axum subsection under "Primitive
-  synthesiser output") because the file carries no
-  deploy-time identifiers or platform-resolved store
-  labels -- nothing the other three adapters' manifests
-  carry that justifies the gitignore + synthesiser
-  symmetry. A v2 that adds deploy-time fields to
-  `axum.toml` (none exist today) revisits the call.
+- (2026-07 amendment closed the earlier "keep `axum.toml`
+  tracked" carve-out. v1 now pulls `axum.toml` into the
+  generated / gitignored model alongside the other four
+  adapter manifests -- see the Axum subsection under
+  "Primitive synthesiser output" for the rationale.)
 - OS-level filesystem sandboxing for adapter dispatch.
   v1's path containment (rejection of absolute and `..`
   paths plus the dry-run tempdir staging) protects
@@ -2294,11 +2365,11 @@ Cross-adapter smoke (`scripts/smoke_test_config_key_override.sh`):
   `[adapters.<name>.deployed]` doesn't fire). v1 documents
   the manual fix-up runbook in the migration guide; a
   dedicated command would be its own clap args + dispatch
-  + tests + docs.
+  - tests + docs.
 - Automatic Cloudflare preview-namespace capture during
   cloud `provision --adapter cloudflare`. v1 only extracts
   the primary namespace id from `wrangler kv namespace
-  create`; operators wanting a separate preview namespace
+create`; operators wanting a separate preview namespace
   run `wrangler kv namespace create <binding> --preview`
   manually and write the result into
   `[adapters.cloudflare.deployed].preview_kv_namespaces.<logical_id>`.

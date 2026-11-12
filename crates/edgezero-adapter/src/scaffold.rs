@@ -15,11 +15,14 @@ pub struct AdapterBlueprint {
     pub extra_dirs: &'static [&'static str],
     pub files: &'static [AdapterFileSpec],
     pub id: &'static str,
+    pub install_notes: &'static [&'static str],
+    pub local_ignore_patterns: &'static [&'static str],
     pub logging: LoggingDefaults,
     pub manifest: ManifestSpec,
     pub readme: ReadmeInfo,
     pub run_module: &'static str,
     pub template_registrations: &'static [TemplateRegistration],
+    pub tool_pins: &'static [&'static str],
 }
 
 /// Specifies which template renders to a given adapter-relative output file.
@@ -34,6 +37,13 @@ pub struct AdapterFileSpec {
 pub struct CommandTemplates {
     pub build: &'static str,
     pub deploy: &'static str,
+    /// Whether the generator emits an `[adapters.<id>.commands]` shell block.
+    /// When `false`, `build`/`serve`/`deploy` dispatch through the registry
+    /// adapter instead -- which reads the adapter's own manifest (e.g. Axum's
+    /// `axum.toml` `crate_dir`). A shell `commands` block would take
+    /// precedence over that dispatch and bypass the manifest, so adapters
+    /// whose build/serve must honour their manifest opt OUT here.
+    pub emit_commands: bool,
     pub serve: &'static str,
 }
 
@@ -57,6 +67,8 @@ pub struct LoggingDefaults {
 /// Provides manifest and build configuration defaults for an adapter.
 #[derive(Clone, Copy)]
 pub struct ManifestSpec {
+    /// Static TOML entries emitted inside this adapter's tracked configuration.
+    pub adapter_defaults: &'static str,
     pub build_features: &'static [&'static str],
     pub build_profile: &'static str,
     pub build_target: &'static str,
@@ -104,10 +116,14 @@ mod tests {
     use std::sync::{LazyLock, Mutex};
 
     static BLUEPRINT_ALPHA: AdapterBlueprint = AdapterBlueprint {
+        local_ignore_patterns: &[],
+        tool_pins: &[],
+        install_notes: &[],
         commands: CommandTemplates {
             build: "build",
             deploy: "deploy",
             serve: "serve",
+            emit_commands: true,
         },
         crate_suffix: "adapter-alpha",
         dependencies: &[DependencySpec {
@@ -131,6 +147,7 @@ mod tests {
             level: "info",
         },
         manifest: ManifestSpec {
+            adapter_defaults: "",
             build_features: &[],
             build_profile: "release",
             build_target: "wasm32",
@@ -146,10 +163,14 @@ mod tests {
     };
 
     static BLUEPRINT_BETA: AdapterBlueprint = AdapterBlueprint {
+        local_ignore_patterns: &[],
+        tool_pins: &[],
+        install_notes: &[],
         commands: CommandTemplates {
             build: "build",
             deploy: "deploy",
             serve: "serve",
+            emit_commands: true,
         },
         crate_suffix: "adapter-beta",
         dependencies: &[],
@@ -168,6 +189,7 @@ mod tests {
             level: "info",
         },
         manifest: ManifestSpec {
+            adapter_defaults: "",
             build_features: &[],
             build_profile: "release",
             build_target: "wasm32",
