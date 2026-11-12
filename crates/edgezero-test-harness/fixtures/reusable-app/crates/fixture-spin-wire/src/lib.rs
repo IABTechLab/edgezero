@@ -124,10 +124,19 @@ mod sdk {
             }
             if path == "/scope" {
                 drop(request);
+                if !fixture_spin_support::outbound::bodyless_request_resources_hold() {
+                    return Err(ErrorCode::InternalError(Some(
+                        "empty buffered method resources changed".to_owned(),
+                    )));
+                }
                 canonical_entrypoints_release_retained_handles()
                     .await
                     .map_err(|error| ErrorCode::InternalError(Some(error.to_string())))?;
-                return empty_response();
+                let headers = Fields::new();
+                headers
+                    .append("x-fixture-empty-method-resources", b"pass")
+                    .map_err(|_| ErrorCode::HttpProtocolError)?;
+                return empty_response(headers);
             }
             let method = match path.as_str() {
                 "/get" | "/get-settled" | "/p5" | "/policy" | "/normalization"
@@ -227,7 +236,7 @@ mod sdk {
                 .map_err(|_error| {
                     ErrorCode::InternalError(Some("outbound wire check failed".to_owned()))
                 })?;
-            empty_response()
+            empty_response(Fields::new())
         }
     }
 
@@ -273,8 +282,7 @@ mod sdk {
         eprintln!("FAIL: Spin attached Begin/Batch handoff terminal ownership");
     }
 
-    fn empty_response() -> Result<Response, ErrorCode> {
-        let headers = Fields::new();
+    fn empty_response(headers: Fields) -> Result<Response, ErrorCode> {
         if let (Ok(nonce), Some(build)) = (
             env::var("EDGEZERO_FIXTURE_LAUNCH_NONCE"),
             option_env!("EDGEZERO_FIXTURE_BUILD_ID"),

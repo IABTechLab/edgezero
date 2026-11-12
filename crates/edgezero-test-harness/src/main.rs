@@ -740,6 +740,7 @@ fn run(arguments: Vec<String>) -> Result<i32> {
     }
     fs::create_dir_all(&path)?;
     let path = path.canonicalize()?;
+    let _output_directory = startup::OutputDirectory::enter(&path)?;
     if args.suite == "ingress-fidelity" {
         fidelity::run(&args, &path)?;
         return Ok(0);
@@ -1823,6 +1824,112 @@ mod process_tests {
         }
     }
 
+    fn assert_progress_cargo_cancellation(adapter: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new();
+        let cargo = fixture.0.join("cargo");
+        fs::write(&cargo, r#"#!/bin/sh
+case "$1" in
+  --version) printf 'cargo process-fixture\n'; exit 0 ;;
+  build|metadata)
+    printf '%s' "$$" > "$EDGEZERO_PROCESS_TEST_DIR/cargo-started"
+    export EDGEZERO_PROCESS_TEST_MODE=descendant
+    exec "$EDGEZERO_TEST_HELPER" --ignored --exact process_tests::outbound_wire_process_helper --nocapture --test-threads=1
+    ;;
+  *) exit 64 ;;
+esac
+"#).unwrap();
+        fs::set_permissions(&cargo, fs::Permissions::from_mode(0o700)).unwrap();
+        let output = fixture.0.join("evidence");
+        let mut command = static_check_command(&fixture, "--help");
+        command
+            .env(
+                "EDGEZERO_STATIC_CHECK_ARGS",
+                json!([
+                    "--adapter",
+                    adapter,
+                    "--suite",
+                    "outbound-progress",
+                    "--output",
+                    output,
+                ])
+                .to_string(),
+            )
+            .env("EDGEZERO_TEST_HELPER", std::env::current_exe().unwrap())
+            .env("CARGO", &cargo)
+            .env("RUSTC", executable("RUSTC", "rustc").unwrap())
+            .env("WRANGLER_BIN", &cargo)
+            .env("WORKER_BUILD_BIN", &cargo);
+        let mut controller =
+            Process::spawn(&mut command, &fixture.0.join("controller.log")).unwrap();
+        fixture.ready();
+        let cargo_id = fs::read_to_string(fixture.0.join("cargo-started"))
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+        let mut cleanup = GroupCleanup(Some(cargo_id));
+        let port = fixture.descendant_port();
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+        signal_target(
+            SignalTarget::Pid(controller.0.id()),
+            Some(Signal::SIGTERM),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while controller.child_status().unwrap().is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let completed = controller.child_status().unwrap().is_some();
+        let child = signal_target(
+            SignalTarget::Pid(cargo_id),
+            None,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let descendant_closed = loop {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        let outcome = if completed {
+            controller.wait_exit_code(1).map(|_| ())
+        } else {
+            controller.finish()
+        };
+        cleanup.finish().unwrap();
+        assert!(
+            completed,
+            "{adapter}: direct cancellation did not stop Cargo"
+        );
+        outcome.unwrap();
+        assert_eq!(
+            child,
+            SignalOutcome::Absent,
+            "{adapter}: Cargo was not reaped"
+        );
+        assert!(
+            descendant_closed,
+            "{adapter}: Cargo descendant retained its socket"
+        );
+    }
+
+    #[test]
+    fn progress_build_cancellation_reaps_cargo_and_descendants() {
+        assert_progress_cargo_cancellation("axum");
+    }
+
+    #[test]
+    fn progress_metadata_cancellation_reaps_cargo_and_descendants() {
+        assert_progress_cargo_cancellation("cloudflare");
+    }
+
     #[test]
     fn failed_process_fixture_preserves_diagnostics_until_explicit_cleanup() {
         let fixture = Fixture::new();
@@ -2175,9 +2282,11 @@ mod process_tests {
     #[test]
     fn startup_responder_rejects_invalid_endpoint_publication() {
         let fixture = Fixture::new();
-        let mut process = fixture.spawn("graceful");
+        let mut command = fixture.command("graceful");
+        let nonce = startup::command(&mut command, "fixture-test", TEST_BUILD_ID);
+        let mut process = Process::spawn(&mut command, &fixture.0.join("runtime.log")).unwrap();
         fixture.ready();
-        let endpoint = json!({"pid":process.0.id(), "nonce":"expected", "port":1234});
+        let endpoint = json!({"pid":process.0.id(), "nonce":nonce, "port":1234});
         let mut invalid = vec![json!(null), json!([]), json!("not an endpoint")];
         for (field, value) in [
             ("pid", json!(u64::from(process.0.id()) + 1)),
@@ -2209,7 +2318,7 @@ mod process_tests {
             let error = fixture
                 .responder_port(
                     &mut process,
-                    "expected",
+                    &nonce,
                     Instant::now() + Duration::from_secs(5),
                 )
                 .unwrap_err()
@@ -2218,18 +2327,33 @@ mod process_tests {
             assert!(!error.contains("private-foreign-nonce"), "{error}");
             assert!(!fixture.0.join("ordinal").exists());
         }
+        let mut exact = serde_json::to_vec(&endpoint).unwrap();
+        exact.resize(1024, b' ');
+        fs::write(fixture.0.join("endpoint.json"), exact).unwrap();
+        assert_eq!(
+            fixture
+                .responder_port(
+                    &mut process,
+                    &nonce,
+                    Instant::now() + Duration::from_secs(5)
+                )
+                .unwrap(),
+            1234
+        );
         process.finish().unwrap();
     }
 
     #[test]
     fn startup_responder_publication_preserves_deadline_and_child_liveness() {
         let fixture = Fixture::new();
-        let mut process = fixture.spawn("graceful");
+        let mut command = fixture.command("graceful");
+        let nonce = startup::command(&mut command, "fixture-test", TEST_BUILD_ID);
+        let mut process = Process::spawn(&mut command, &fixture.0.join("runtime.log")).unwrap();
         fixture.ready();
         let error = fixture
             .responder_port(
                 &mut process,
-                "expected",
+                &nonce,
                 Instant::now() + Duration::from_millis(20),
             )
             .unwrap_err();
@@ -2237,14 +2361,14 @@ mod process_tests {
             error.to_string().contains("endpoint deadline expired"),
             "{error}"
         );
-        let endpoint = json!({"pid":process.0.id(), "nonce":"expected", "port":1234});
+        let endpoint = json!({"pid":process.0.id(), "nonce":nonce, "port":1234});
         fs::write(
             fixture.0.join("endpoint.json"),
             serde_json::to_vec(&endpoint).unwrap(),
         )
         .unwrap();
         let error = fixture
-            .responder_port(&mut process, "expected", Instant::now())
+            .responder_port(&mut process, &nonce, Instant::now())
             .unwrap_err();
         assert!(
             error.to_string().contains("endpoint deadline expired"),
@@ -2253,9 +2377,12 @@ mod process_tests {
         process.finish().unwrap();
 
         let exited_fixture = Fixture::new();
-        let mut process = exited_fixture.spawn("exit-zero");
+        let mut command = exited_fixture.command("exit-zero");
+        let nonce = startup::command(&mut command, "fixture-test", TEST_BUILD_ID);
+        let mut process =
+            Process::spawn(&mut command, &exited_fixture.0.join("runtime.log")).unwrap();
         until(|| process.child_status().unwrap().is_some());
-        let endpoint = json!({"pid":process.0.id(), "nonce":"expected", "port":1234});
+        let endpoint = json!({"pid":process.0.id(), "nonce":nonce, "port":1234});
         fs::write(
             exited_fixture.0.join("endpoint.json"),
             serde_json::to_vec(&endpoint).unwrap(),
@@ -2264,7 +2391,7 @@ mod process_tests {
         let error = exited_fixture
             .responder_port(
                 &mut process,
-                "expected",
+                &nonce,
                 Instant::now() + Duration::from_secs(5),
             )
             .unwrap_err();

@@ -3,15 +3,14 @@ use super::*;
 pub(super) fn run(name: &str, parent: &Path, records: &mut Records) -> Result<()> {
     let run = parent.join(format!("progress-{name}"));
     fs::create_dir_all(&run)?;
-    let revision = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(fixture_root())
-        .output()?;
-    require(
-        revision.status.success(),
-        "cannot determine progress source revision",
+    let revision = capture_command(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(fixture_root()),
+        &run,
+        "source-revision",
     )?;
-    let revision = String::from_utf8(revision.stdout)?.trim().to_owned();
+    let revision = String::from_utf8(revision)?.trim().to_owned();
     let Some((mut command, port)) = build(name, &run, records, &revision, "outbound-progress")?
     else {
         return Ok(());
@@ -366,6 +365,13 @@ fn progress_feature(name: &str, suite: &str) -> &'static str {
     }
 }
 
+fn capture_command(command: &mut Command, run: &Path, name: &str) -> Result<Vec<u8>> {
+    let stdout = run.join(format!("{name}.stdout"));
+    let diagnostics = run.join(format!("{name}.stderr"));
+    Process::spawn_with_stdout(command, &diagnostics, &stdout)?.wait_success()?;
+    Ok(fs::read(stdout)?)
+}
+
 pub(super) fn build(
     name: &str,
     run: &Path,
@@ -388,8 +394,9 @@ pub(super) fn build(
         records.push(json!({"status":"unsupported","adapter":name,"phase":"outbound-progress","reason":format!("{fallback} unavailable"),"qualification":false}))?;
         return Ok(None);
     };
+    let version = capture_command(Command::new(&exe).arg("--version"), run, "runtime-version")?;
     records.push(json!({"event":"progress-runtime","adapter":name,"executable":exe,
-        "version":String::from_utf8_lossy(&Command::new(&exe).arg("--version").output()?.stdout).trim(),"revision":revision,"source_state":"working-tree-characterization"}))?;
+        "version":String::from_utf8_lossy(&version).trim(),"revision":revision,"source_state":"working-tree-characterization"}))?;
     let artifact_path = if name == "cloudflare" {
         let Some(builder) = executable("WORKER_BUILD_BIN", "worker-build") else {
             records.push(json!({"status":"unsupported","adapter":name,"phase":"outbound-progress","reason":"worker-build unavailable"}))?;
@@ -452,17 +459,13 @@ pub(super) fn build(
             command.args(["--bin", "fixture-axum-outbound-progress"]);
         }
         command.arg("--message-format=json-render-diagnostics");
-        let output = command.stderr(Stdio::inherit()).output()?;
-        require(
-            output.status.success(),
-            format!("{name} progress fixture build failed"),
-        )?;
+        let output = capture_command(&mut command, run, "cargo-build")?;
         let source = match name {
             "spin" => fixture_root().join("target/wasm32-wasip2/release/fixture_spin.wasm"),
             "fastly" => fixture_root()
                 .join("target/wasm32-wasip1/release")
                 .join(wasm_name(fastly_variant)),
-            _ => built_executable(&output.stdout, "fixture-axum-outbound-progress")?,
+            _ => built_executable(&output, "fixture-axum-outbound-progress")?,
         };
         stage(&source, run)?
     };
@@ -486,8 +489,13 @@ pub(super) fn build(
 
 // Prevent worker-build from implicitly downloading/replacing tools during characterization.
 pub(super) fn check_bindgen(records: &mut Records) -> Result<bool> {
-    let output = cargo_build()?
-        .args([
+    let run = records
+        .path
+        .parent()
+        .ok_or("missing evidence directory")?
+        .to_owned();
+    let output = capture_command(
+        cargo_build()?.args([
             "metadata",
             "--offline",
             "--locked",
@@ -495,13 +503,11 @@ pub(super) fn check_bindgen(records: &mut Records) -> Result<bool> {
             "1",
             "--filter-platform",
             "wasm32-unknown-unknown",
-        ])
-        .output()?;
-    require(
-        output.status.success(),
-        "cannot inspect locked wasm-bindgen version",
+        ]),
+        &run,
+        "cargo-metadata",
     )?;
-    let metadata: Value = serde_json::from_slice(&output.stdout)?;
+    let metadata: Value = serde_json::from_slice(&output)?;
     let version = metadata["packages"]
         .as_array()
         .ok_or("missing Cargo packages")?
@@ -512,11 +518,17 @@ pub(super) fn check_bindgen(records: &mut Records) -> Result<bool> {
     let installed = executable("WASM_BINDGEN_BIN", "wasm-bindgen");
     let observed = installed
         .as_ref()
-        .map(|exe| Command::new(exe).arg("--version").output())
+        .map(|exe| {
+            capture_command(
+                Command::new(exe).arg("--version"),
+                &run,
+                "wasm-bindgen-version",
+            )
+        })
         .transpose()?;
     let observed = observed
         .as_ref()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned());
+        .map(|output| String::from_utf8_lossy(output).trim().to_owned());
     let ready = observed.as_deref() == Some(format!("wasm-bindgen {version}").as_str());
     if !ready {
         records.push(json!({"status":"unsupported","adapter":"cloudflare","phase":"build-tooling","required_wasm_bindgen":version,"observed":observed,"reason":"matching wasm-bindgen CLI unavailable; no download or dependency repin attempted","qualification":false}))?;
@@ -532,12 +544,12 @@ pub(super) fn check_bindgen(records: &mut Records) -> Result<bool> {
                 records.push(json!({"status":"unsupported","adapter":"cloudflare","phase":"build-tooling","reason":format!("set {variable} to an existing absolute executable; automatic installation is disabled"),"qualification":false}))?;
                 return Ok(false);
             };
-            let output = Command::new(&path).arg("--version").output()?;
-            require(
-                output.status.success(),
-                format!("{variable} version command failed"),
+            let output = capture_command(
+                Command::new(&path).arg("--version"),
+                &run,
+                &format!("{variable}-version"),
             )?;
-            records.push(json!({"event":"worker-build-tool","variable":variable,"executable":path,"version":String::from_utf8_lossy(&output.stdout).trim()}))?;
+            records.push(json!({"event":"worker-build-tool","variable":variable,"executable":path,"version":String::from_utf8_lossy(&output).trim()}))?;
         }
     }
     Ok(ready)
