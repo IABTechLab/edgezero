@@ -338,6 +338,23 @@ mod tests {
     const TEST_ARN: &str = "arn:aws:secretsmanager:us-east-1:111122223333:secret:fixture-AbCdEf";
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
+    struct LoopbackFixture {
+        listener: TcpListener,
+        worker: thread::JoinHandle<Vec<String>>,
+    }
+
+    impl LoopbackFixture {
+        fn is_finished(&self) -> bool {
+            self.worker.is_finished()
+        }
+
+        fn join(self) -> thread::Result<Vec<String>> {
+            let result = self.worker.join();
+            drop(self.listener);
+            result
+        }
+    }
+
     #[derive(Clone)]
     enum FixtureResponse {
         Decryption,
@@ -432,15 +449,15 @@ mod tests {
         (headers, body)
     }
 
-    fn loopback_fixture(
-        responses: Vec<FixtureResponse>,
-    ) -> (String, thread::JoinHandle<Vec<String>>) {
+    fn loopback_fixture(responses: Vec<FixtureResponse>) -> (String, LoopbackFixture) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind literal loopback only");
         listener
             .set_nonblocking(true)
             .expect("nonblocking listener");
         let address = listener.local_addr().expect("loopback address");
         let endpoint = format!("http://{address}");
+        // The fixture owner keeps the endpoint alive while the SDK owns retries.
+        let worker_listener = listener.try_clone().expect("fixture listener clone");
         let worker = thread::spawn(move || {
             let deadline = Instant::now()
                 .checked_add(Duration::from_secs(12))
@@ -448,7 +465,7 @@ mod tests {
             let mut bodies = Vec::new();
             for response in responses {
                 let stream = loop {
-                    match listener.accept() {
+                    match worker_listener.accept() {
                         Ok((stream, peer)) => {
                             assert!(peer.ip().is_loopback(), "fixture peer must be loopback");
                             break stream;
@@ -468,7 +485,7 @@ mod tests {
             }
             bodies
         });
-        (endpoint, worker)
+        (endpoint, LoopbackFixture { listener, worker })
     }
 
     fn isolated_sdk_child(endpoint: &str, scenario: &str) -> std::process::Output {
@@ -736,6 +753,21 @@ mod tests {
                 PreparationError::Unavailable,
             );
         }
+    }
+
+    #[test]
+    fn fixture_endpoint_remains_available_until_its_owner_finishes() {
+        let (endpoint, fixture) = loopback_fixture(Vec::new());
+        while !fixture.is_finished() {
+            thread::yield_now();
+        }
+        let address = endpoint
+            .strip_prefix("http://")
+            .expect("fixture HTTP origin");
+        let connection = TcpStream::connect(address)
+            .expect("fixture endpoint stays available after its response script ends");
+        drop(connection);
+        fixture.join().expect("fixture thread");
     }
 
     #[test]
