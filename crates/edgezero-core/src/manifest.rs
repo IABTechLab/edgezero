@@ -935,9 +935,9 @@ fn validate_manifest_adapter_definition(
         let mut error = ValidationError::new("legacy_adapter_definition_schema");
         error.message = Some(
             format!(
-                "unknown field(s) under `[adapters.<name>.adapter]`: {}. The portable \
-                 manifest has no per-adapter runtime tuning surface beyond \
-                 `component`, `crate`, `host`, `manifest`, `port` -- see \
+                "unknown field(s) under `[adapters.<name>.adapter]`: {}. Supported fields are \
+                 `allowed_outbound_hosts`, `cloud`, `component`, `crate`, `host`, \
+                 `manifest`, `port`; CLI adapters validate option ownership -- see \
                  docs/guide/manifest-store-migration.md",
                 keys.join(", ")
             )
