@@ -66,6 +66,9 @@ pub(super) fn serve(
                     | "parity-gzip"
                     | "parity-original"
                     | "parity-opaque"
+                    | "parity-empty-post"
+                    | "parity-empty-delete"
+                    | "parity-empty-options"
             ),
         "unknown transport route",
     )?;
@@ -102,8 +105,12 @@ pub(super) fn serve(
     no_trailing_bytes(reader)?;
     let expected_method = if let Some(spec) = paired_case {
         spec.request_method()
-    } else if case == "parity-post" {
+    } else if matches!(case, "parity-post" | "parity-empty-post") {
         "POST"
+    } else if case == "parity-empty-delete" {
+        "DELETE"
+    } else if case == "parity-empty-options" {
+        "OPTIONS"
     } else if case == "parity-head" {
         "HEAD"
     } else {

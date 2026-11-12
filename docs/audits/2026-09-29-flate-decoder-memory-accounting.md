@@ -17,12 +17,12 @@ decoder contracts share one metadata snapshot per workspace; audited values are 
 
 ## Charge
 
-The pinned `miniz_oxide` state reserves a 32 KiB sliding window and a 64 KiB
-inflate state. The codec wrapper reserve is 4 KiB and the shared EdgeZero
-stream output buffer is 8 KiB. The measured source subtotal is therefore
-73,728 bytes before allocator metadata, fragmentation, task stacks, and host
-buffers. `FLATE_DECODER_FIXED_CHARGE_BYTES` is pinned to 1 MiB, giving more
-than 14x headroom over that subtotal while keeping the public policy uniform
+The 64 KiB reserve for the pinned `miniz_oxide` inflate state includes its
+embedded 32 KiB sliding window. The codec wrapper reserve is 4 KiB and the shared
+EdgeZero stream output buffer is 8 KiB. The reserved source subtotal is therefore
+77,824 bytes before allocator metadata, fragmentation, task stacks, and host
+buffers. `FLATE_DECODER_FIXED_CHARGE_BYTES` is pinned to 1 MiB, giving approximately
+13.47x headroom over that subtotal while keeping the public policy uniform
 for Brotli, gzip, and deflate.
 
 The charge is a conservative guest-visible policy reservation, not a claim
