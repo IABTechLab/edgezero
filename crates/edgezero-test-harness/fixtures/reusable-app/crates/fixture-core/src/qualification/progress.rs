@@ -145,7 +145,9 @@ impl ResponseEgressObserver for FramingObserver {
                 "bytes_written":report.bytes_written,"disposition":report.fallback_disposition.map(|value|format!("{value:?}")),"qualification":false});
             // One complete line prevents host logs from splitting JSON formatter writes.
             let line = format!("{record}\n");
-            std::io::stderr().write_all(line.as_bytes()).expect("should write framing receipt");
+            std::io::stderr()
+                .write_all(line.as_bytes())
+                .expect("should write framing receipt");
         }
     }
 }
