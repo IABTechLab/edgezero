@@ -703,6 +703,16 @@ impl App {
         self.response_egress_policy = Arc::new(policy);
     }
 
+    /// Installs routes and router state assembled during exclusive application startup.
+    ///
+    /// Application metadata, clocks and admission/egress policies remain unchanged.
+    /// Previous router dispatch tokens no longer belong to this App. This is not live reload;
+    /// finish initialization before sharing the App with a listener.
+    #[inline]
+    pub fn set_router(&mut self, router: RouterService) {
+        self.router = router;
+    }
+
     /// Validates and installs fields for framework-generated errors and adapter fallbacks.
     ///
     /// Routed responses, admission refusals and assembly failures are not decorated.
