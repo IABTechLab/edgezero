@@ -1723,11 +1723,14 @@ fn load_validation_context(args: &ConfigValidateArgs) -> Result<ValidationContex
             source,
         })
     })?;
-    let mut opts = AppConfigLoadOptions::default();
-    opts.env_overlay = false;
-    let raw_config =
-        app_config::parse_app_config_raw_with_options(&source, &app_config_path, &app_name, &opts)
-            .map_err(|err| format_app_config_error(&err))?;
+    // Check syntax only here. Value validation must follow the overlay so
+    // finite environment overrides can replace non-finite source values.
+    let raw_config = toml::from_str(&source).map_err(|error| {
+        format_app_config_error(&AppConfigError::Parse {
+            path: app_config_path.clone(),
+            source: Box::new(error),
+        })
+    })?;
 
     Ok(ValidationContext {
         source,
@@ -3127,6 +3130,87 @@ serve = "echo"
             err.contains("`[app].name`"),
             "error names the missing field: {err}"
         );
+    }
+
+    #[test]
+    fn config_commands_validate_non_finite_floats_after_environment_overrides() {
+        #[derive(Deserialize, Serialize, Validate, edgezero_core::AppConfig)]
+        struct FloatConfig {
+            ratio: f64,
+        }
+
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        for literal in ["nan", "inf", "-inf"] {
+            for (source, overlay, no_env, succeeds) in [
+                (literal, Some("2.5"), false, true),
+                (literal, None, false, false),
+                (literal, Some("2.5"), true, false),
+                ("1.5", Some(literal), false, false),
+            ] {
+                let _overlay = overlay.map_or_else(
+                    || EnvOverride::remove("DEMO_APP__RATIO"),
+                    |value| EnvOverride::set("DEMO_APP__RATIO", value),
+                );
+                let (dir, manifest, _) =
+                    setup_project(PUSH_MANIFEST, &format!("ratio = {source}\n"));
+                let mut validate = args_for(&manifest);
+                validate.no_env = no_env;
+                let mut push = push_args(&manifest, "axum");
+                push.local = true;
+                push.yes = true;
+                push.no_env = no_env;
+                let diff = ConfigDiffArgs {
+                    adapter: "axum".to_owned(),
+                    exit_code: true,
+                    local: true,
+                    manifest,
+                    no_env,
+                    ..ConfigDiffArgs::default()
+                };
+
+                for (command, result) in [
+                    ("raw validate", run_config_validate(&validate)),
+                    (
+                        "typed validate",
+                        run_config_validate_typed::<FloatConfig>(&validate),
+                    ),
+                    ("push", run_config_push_typed::<FloatConfig>(&push)),
+                    (
+                        "diff",
+                        run_config_diff_typed::<FloatConfig>(&diff)
+                            .map(|exit| assert_eq!(exit.code, 0)),
+                    ),
+                ] {
+                    if succeeds {
+                        result.unwrap_or_else(|error| {
+                            panic!("{command} must accept the finite override of {source}: {error}")
+                        });
+                    } else {
+                        let error = result.expect_err("effective non-finite values must fail");
+                        assert!(
+                            error.contains("non-finite f64"),
+                            "{command} must reject the effective value: {error}"
+                        );
+                    }
+                }
+
+                let store_path = dir.path().join(".edgezero/local-config-app_config.json");
+                if succeeds {
+                    let outer: serde_json::Value = serde_json::from_str(
+                        &fs::read_to_string(&store_path).expect("read local store"),
+                    )
+                    .expect("parse local store");
+                    let envelope: BlobEnvelope = serde_json::from_str(
+                        outer["app_config"].as_str().expect("stored envelope"),
+                    )
+                    .expect("parse envelope");
+                    envelope.verify().expect("envelope integrity");
+                    assert_eq!(envelope.data["ratio"], 2.5_f64);
+                } else {
+                    assert!(!store_path.exists(), "invalid config must not be published");
+                }
+            }
+        }
     }
 
     // ---------- typed flow ----------
