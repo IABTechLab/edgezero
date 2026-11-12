@@ -2175,9 +2175,10 @@ mod process_tests {
     #[test]
     fn startup_responder_rejects_invalid_endpoint_publication() {
         let fixture = Fixture::new();
+        let nonce = token();
         let mut process = fixture.spawn("graceful");
         fixture.ready();
-        let endpoint = json!({"pid":process.0.id(), "nonce":"expected", "port":1234});
+        let endpoint = json!({"pid":process.0.id(), "nonce":nonce, "port":1234});
         let mut invalid = vec![json!(null), json!([]), json!("not an endpoint")];
         for (field, value) in [
             ("pid", json!(u64::from(process.0.id()) + 1)),
@@ -2209,7 +2210,7 @@ mod process_tests {
             let error = fixture
                 .responder_port(
                     &mut process,
-                    "expected",
+                    &nonce,
                     Instant::now() + Duration::from_secs(5),
                 )
                 .unwrap_err()
@@ -2224,12 +2225,13 @@ mod process_tests {
     #[test]
     fn startup_responder_publication_preserves_deadline_and_child_liveness() {
         let fixture = Fixture::new();
+        let nonce = token();
         let mut process = fixture.spawn("graceful");
         fixture.ready();
         let error = fixture
             .responder_port(
                 &mut process,
-                "expected",
+                &nonce,
                 Instant::now() + Duration::from_millis(20),
             )
             .unwrap_err();
@@ -2237,14 +2239,14 @@ mod process_tests {
             error.to_string().contains("endpoint deadline expired"),
             "{error}"
         );
-        let endpoint = json!({"pid":process.0.id(), "nonce":"expected", "port":1234});
+        let endpoint = json!({"pid":process.0.id(), "nonce":nonce, "port":1234});
         fs::write(
             fixture.0.join("endpoint.json"),
             serde_json::to_vec(&endpoint).unwrap(),
         )
         .unwrap();
         let error = fixture
-            .responder_port(&mut process, "expected", Instant::now())
+            .responder_port(&mut process, &nonce, Instant::now())
             .unwrap_err();
         assert!(
             error.to_string().contains("endpoint deadline expired"),
@@ -2255,7 +2257,7 @@ mod process_tests {
         let exited_fixture = Fixture::new();
         let mut process = exited_fixture.spawn("exit-zero");
         until(|| process.child_status().unwrap().is_some());
-        let endpoint = json!({"pid":process.0.id(), "nonce":"expected", "port":1234});
+        let endpoint = json!({"pid":process.0.id(), "nonce":nonce, "port":1234});
         fs::write(
             exited_fixture.0.join("endpoint.json"),
             serde_json::to_vec(&endpoint).unwrap(),
@@ -2264,7 +2266,7 @@ mod process_tests {
         let error = exited_fixture
             .responder_port(
                 &mut process,
-                "expected",
+                &nonce,
                 Instant::now() + Duration::from_secs(5),
             )
             .unwrap_err();

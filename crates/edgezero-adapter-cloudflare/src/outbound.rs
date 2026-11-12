@@ -341,7 +341,8 @@ mod worker_impl {
             let worker_body =
                 request_body(body, max_request_body_bytes, budget, time.clone()).await?;
             let url = uri.to_string();
-            let request = build_worker_request(&method, &url, &headers, worker_body, cache_policy)?;
+            let request =
+                build_worker_request(&method, &url, &headers, worker_body, &cache_policy)?;
             let (response, abort_guard) = raw_fetch(
                 request,
                 budget,
@@ -581,13 +582,13 @@ mod worker_impl {
         url: &str,
         headers: &HeaderMap,
         request_body: Option<JsValue>,
-        cache_policy: OutboundCachePolicy,
+        cache_policy: &OutboundCachePolicy,
     ) -> Result<WorkerRequest, EdgeError> {
         let mut init = RequestInit::new();
         init.with_headers(build_headers(headers)?)
             .with_method(worker_method(method))
             .with_redirect(RequestRedirect::Manual);
-        if cache_policy == OutboundCachePolicy::Bypass {
+        if matches!(cache_policy, OutboundCachePolicy::Bypass) {
             init.with_cache(CacheMode::NoStore);
         }
         if let Some(worker_body) = request_body {
@@ -2248,7 +2249,7 @@ mod worker_impl {
                     "https://origin.example.com/resource",
                     &HeaderMap::new(),
                     None,
-                    policy,
+                    &policy,
                 )
                 .expect("Workers request");
                 let mode = Reflect::get(request.inner().as_ref(), &JsValue::from_str("cache"))
@@ -2295,7 +2296,7 @@ mod worker_impl {
                 "https://example.com/?token=provider-secret-token",
                 &HeaderMap::new(),
                 Some(JsValue::from_str("body")),
-                OutboundCachePolicy::PlatformDefault,
+                &OutboundCachePolicy::PlatformDefault,
             )
             .expect_err("GET body rejection");
             assert_eq!(
@@ -2391,7 +2392,7 @@ mod worker_impl {
                     "https://example.com/?token=provider-secret-token",
                     &HeaderMap::new(),
                     None,
-                    OutboundCachePolicy::PlatformDefault,
+                    &OutboundCachePolicy::PlatformDefault,
                 )
                 .expect("valid request");
                 let start = MonotonicInstant::now();

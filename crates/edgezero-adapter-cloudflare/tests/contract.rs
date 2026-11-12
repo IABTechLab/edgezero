@@ -1756,7 +1756,8 @@ mod native_tests {
     }
 }
 
-#[cfg(all(test, feature = "cloudflare", target_arch = "wasm32"))]
+#[cfg(test)]
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 mod timing_tests {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn request_timing_clock_handle_and_attachment_work_on_runtime() {
@@ -1774,6 +1775,7 @@ mod timing_tests {
     }
 }
 
-#[cfg(all(test, feature = "cloudflare", target_arch = "wasm32"))]
+#[cfg(test)]
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 #[path = "../../edgezero-core/tests/support/request_timing.rs"]
 mod request_timing_tests;

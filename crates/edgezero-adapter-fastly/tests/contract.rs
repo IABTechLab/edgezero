@@ -1978,7 +1978,8 @@ mod outbound_contract_tests {
     }
 }
 
-#[cfg(all(test, feature = "fastly", target_arch = "wasm32"))]
+#[cfg(test)]
+#[cfg(all(feature = "fastly", target_arch = "wasm32"))]
 mod timing_tests {
     #[test]
     fn request_timing_clock_handle_and_attachment_work_on_runtime() {
@@ -1996,6 +1997,7 @@ mod timing_tests {
     }
 }
 
-#[cfg(all(test, feature = "fastly", target_arch = "wasm32"))]
+#[cfg(test)]
+#[cfg(all(feature = "fastly", target_arch = "wasm32"))]
 #[path = "../../edgezero-core/tests/support/request_timing.rs"]
 mod request_timing_tests;
