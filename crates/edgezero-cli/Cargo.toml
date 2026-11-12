@@ -59,6 +59,6 @@ default = [
     "edgezero-adapter-cloudflare",
     "edgezero-adapter-spin",
 ]
-cli = ["dep:clap", "dep:handlebars"]
+cli = ["dep:clap", "dep:handlebars", "edgezero-adapter/cli"]
 demo-example = ["dep:app-demo-core", "edgezero-adapter-axum"]
 nested-app-config-check = ["dep:proc-macro2", "dep:syn", "dep:walkdir"]

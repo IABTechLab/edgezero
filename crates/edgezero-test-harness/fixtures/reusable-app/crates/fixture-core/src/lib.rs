@@ -27,9 +27,17 @@ struct FixtureLogger;
 impl log::Log for FixtureLogger {
     fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
         metadata.level() <= log::Level::Warn
+            || (metadata.target() == "edgezero_qualification"
+                && metadata.level() <= log::Level::Info)
     }
     fn log(&self, record: &log::Record<'_>) {
         if self.enabled(record.metadata()) {
+            if record.target() == "edgezero_qualification" {
+                if let Some(sink) = TELEMETRY.get() {
+                    sink(&record.args().to_string());
+                }
+                return;
+            }
             emit(
                 serde_json::json!({"event":"fixture_log","instance":instance_id(),
                 "level":record.level().to_string(),"target":record.target(),"message":record.args().to_string()}),
@@ -49,7 +57,7 @@ pub fn init_fixture_logging(sink: fn(&str)) -> Result<(), EdgeError> {
         .map_err(|_error| {
             EdgeError::internal(std::io::Error::other("fixture logger installation failed"))
         })?;
-    log::set_max_level(log::LevelFilter::Warn);
+    log::set_max_level(log::LevelFilter::Info);
     Ok(())
 }
 
