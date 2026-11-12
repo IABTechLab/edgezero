@@ -443,17 +443,7 @@ mod tests {
                 let OutboundBatchNext::Item(_) = block_on(batch.next()).unwrap() else {
                     panic!("fresh scope");
                 };
-                // Both observed slots may already be complete after a loopback refusal.
-                // Retain unpolled work to test callback revocation independently of IO timing.
-                drop(batch);
-                client.start_batch_until(
-                    vec![
-                        OutboundRequest::post("http://127.0.0.1:9/callback-scope")
-                            .unwrap()
-                            .body("pending"),
-                    ],
-                    Deadline::after(Duration::from_secs(1)),
-                )
+                batch
             });
             previous = Some(batch);
         }

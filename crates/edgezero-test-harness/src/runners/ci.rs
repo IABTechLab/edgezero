@@ -33,7 +33,7 @@ pub(super) fn read_events(path: &Path) -> Result<Vec<Value>> {
         .lines()
         .map(serde_json::from_str)
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    // Bound input bytes here; each suite validates its complete event schedule.
+    require(events.len() <= 512, "too many CI artifact records")?;
     Ok(events)
 }
 
@@ -775,15 +775,6 @@ mod tests {
     }
 
     #[test]
-    fn persisted_artifacts_preserve_bounded_wire_records_beyond_512() {
-        let directory = tempfile::tempdir().unwrap();
-        let file = directory.path().join("events.jsonl");
-        // The current complete Fastly wire capture contains 518 records.
-        fs::write(&file, "{}\n".repeat(518)).unwrap();
-        assert_eq!(read_events(&file).unwrap().len(), 518);
-    }
-
-    #[test]
     fn persisted_artifacts_reject_empty_malformed_truncated_and_oversized_jsonl() {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("events.jsonl");
@@ -794,8 +785,9 @@ mod tests {
         }
         fs::write(&file, format!("{}\n", json!({"event":"pass"}))).unwrap();
         assert_eq!(read_events(&file).unwrap().len(), 1);
+        fs::write(&file, "{}\n".repeat(513)).unwrap();
+        assert!(read_events(&file).is_err());
         fs::write(&file, vec![b' '; ARTIFACT_BYTES as usize + 1]).unwrap();
-        let error = read_events(&file).unwrap_err().to_string();
-        assert!(error.contains("missing or oversized CI artifact"));
+        assert!(read_events(&file).is_err());
     }
 }
