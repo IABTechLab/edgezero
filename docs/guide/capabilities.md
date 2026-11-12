@@ -413,11 +413,13 @@ capabilities above.
 ⁴ Fastly dispatches slots sequentially, then cooperatively services pending heads and demanded
 bodies within that operation. Each raw body read requires fresh matching timed readiness and
 reads at most 16 KiB; rotating slot service prevents a continuously-ready body from monopolizing
-the driver. An occupied result slot backpressures only its own exchange. Cached SDK Send heads
-retain their opaque cache state and use nonblocking polling with one shared positive 1 ms pulse.
-That pulse has a CPU cost during a long pending cached head. It is shared across slots, not one
-timer per request. Backoff would change ready-observation latency; replacing the SDK head would
-change cache ownership. Neither change is made without a separate measured policy decision.
+the driver. An occupied result slot backpressures only its own exchange. Buffered SDK Send and
+batch response heads are opaque under both `PlatformDefault` and `Bypass`; their nonblocking
+polling uses one shared positive 1 ms pulse. This is not limited to cached requests. Each turn
+polls pending head slots, so guest CPU cost grows with their number and wait duration. The pulse
+is shared across slots, not one timer per request. Backoff would change ready-observation
+latency; replacing the SDK head could change cache ownership. Neither change is made without
+a separate measured policy decision. Native Image Optimizer dispatch remains synchronous.
 Cold backend registration can still delay dispatch; synchronous provider work and SDK cleanup
 remain non-preemptible. Progress is cooperative, not autonomous during application CPU work,
 and does not establish hosted isolation.
@@ -444,6 +446,13 @@ keep the response-egress cells BestEffort.
 ⁷ Spin writes one portable chunk at a time through the WASI body writer. Unit tests and target
 compilation prove the coordinator, but a live Spin component test has not yet established the
 generated production composition. Host teardown and network completion also lack deployed proof.
+
+For known-empty buffered DELETE/OPTIONS, EdgeZero omits synthetic `Content-Length: 0`
+and supplies absent WASI content with clean trailers. The Spin 4.1 host may still choose
+empty chunked framing (`0\r\n\r\n`). This is a provider exception to the empty-buffered-method
+SHOULD in EZ-1.10, not a relaxation of its mandatory unchunked GET/HEAD behavior. Empty
+buffered POST/PUT/PATCH retain their derived zero length; nonempty and streamed bodies
+retain their existing preparation and limits.
 
 ⁸ Spin cancellation is cooperative until host teardown is observable within a documented
 bound. Cloudflare wires one owned `AbortController` through fetch and streamed body consumption,

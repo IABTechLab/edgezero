@@ -678,7 +678,7 @@ mod spin_impl {
     const EMPTY_REQUEST_TRAILERS: fn() -> Result<Option<Fields>, ErrorCode> = || Ok(None);
 
     fn prepare_request_body(method: &Method, body: &Body) -> PreparedRequestBody {
-        if matches!(*method, Method::GET | Method::HEAD)
+        if !matches!(*method, Method::POST | Method::PUT | Method::PATCH)
             && body.as_bytes().is_some_and(<[u8]>::is_empty)
         {
             // Publish clean trailers, not BodyWriter's error-on-drop default.
@@ -904,6 +904,7 @@ mod spin_impl {
     ) -> Result<Fields, EdgeError> {
         if !matches!(*method, Method::GET | Method::HEAD)
             && let Some(bytes) = body.as_bytes()
+            && (!bytes.is_empty() || matches!(*method, Method::POST | Method::PUT | Method::PATCH))
         {
             let length = HeaderValue::from_str(&bytes.len().to_string()).map_err(|_error| {
                 EdgeError::internal(anyhow::anyhow!(
