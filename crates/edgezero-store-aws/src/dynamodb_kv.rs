@@ -6,13 +6,15 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use aws_config::BehaviorVersion;
 use aws_sdk_dynamodb::Client;
 use aws_sdk_dynamodb::config::timeout::TimeoutConfig;
-use aws_sdk_dynamodb::config::{Builder, Region, retry::RetryConfig};
+use aws_sdk_dynamodb::config::{Builder, retry::RetryConfig};
 use aws_sdk_dynamodb::error::SdkError;
+use aws_sdk_dynamodb::operation::describe_table::DescribeTableError;
 use aws_sdk_dynamodb::primitives::Blob;
 use aws_sdk_dynamodb::types::{AttributeValue, TableDescription};
+use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
+use aws_types::region::Region;
 use bytes::Bytes;
 use edgezero_core::key_value_store::{KvError, KvHandle, KvPage, KvStore};
 use edgezero_core::time::{Deadline, MonotonicClock};
@@ -130,19 +132,7 @@ impl AwsPreparation {
         self.check_deadline()?;
         let output = result
             .map_err(|_elapsed| PreparationError::Deadline)?
-            .map_err(|error| {
-                if matches!(&error, SdkError::TimeoutError(_)) {
-                    return PreparationError::Deadline;
-                }
-                classify_preparation_error(
-                    error
-                        .as_service_error()
-                        .and_then(|service| service.meta().code()),
-                    error
-                        .raw_response()
-                        .map(|response| response.status().as_u16()),
-                )
-            })?;
+            .map_err(|error| classify_operation_error(&error))?;
         let validation = output
             .table
             .as_ref()
@@ -488,6 +478,42 @@ impl KvStore for DynamoDbStore {
     }
 }
 
+#[cfg(test)]
+#[expect(
+    clippy::print_stderr,
+    reason = "test-only closed SDK error kind excludes source details and payloads"
+)]
+fn report_sdk_error_kind<E, R>(error: &SdkError<E, R>) {
+    let kind = match error {
+        SdkError::TimeoutError(_) => "Timeout",
+        SdkError::DispatchFailure(failure) if failure.is_timeout() => "DispatchTimeout",
+        SdkError::DispatchFailure(_) => "DispatchOther",
+        SdkError::ServiceError(_) => "Service",
+        SdkError::ResponseError(_) => "Response",
+        SdkError::ConstructionFailure(_) => "Construction",
+        _ => "Other",
+    };
+    eprintln!("sdk-error-kind={kind}");
+}
+
+fn classify_operation_error(error: &SdkError<DescribeTableError>) -> PreparationError {
+    #[cfg(test)]
+    report_sdk_error_kind(error);
+    if matches!(error, SdkError::TimeoutError(_))
+        || matches!(error, SdkError::DispatchFailure(failure) if failure.is_timeout())
+    {
+        return PreparationError::Deadline;
+    }
+    classify_preparation_error(
+        error
+            .as_service_error()
+            .and_then(|service| service.meta().code()),
+        error
+            .raw_response()
+            .map(|response| response.status().as_u16()),
+    )
+}
+
 fn classify_preparation_error(code: Option<&str>, status: Option<u16>) -> PreparationError {
     match code {
         Some("AccessDeniedException" | "AccessDenied") => PreparationError::AccessDenied,
@@ -698,7 +724,10 @@ mod sdk_tests;
 
 #[cfg(test)]
 mod tests {
+    use super::classify_operation_error;
+    use aws_sdk_dynamodb::error::{ConnectorError, SdkError};
     use std::collections::HashMap;
+    use std::io::{Error as IoError, ErrorKind};
     use std::time::Duration;
 
     use aws_sdk_dynamodb::types::{
@@ -713,6 +742,43 @@ mod tests {
         Cursor, MAX_CURSOR_BYTES, decode_cursor, expiry_from_duration, is_expired, read_expiry,
         read_unsigned, row_key, valid_key, validate_item_size, validate_table,
     };
+
+    #[test]
+    fn typed_sdk_timeouts_are_deadlines() {
+        for error in [
+            SdkError::timeout_error(IoError::new(
+                ErrorKind::TimedOut,
+                "PRIVATE_SDK_SOURCE_SENTINEL",
+            )),
+            SdkError::dispatch_failure(ConnectorError::timeout(
+                IoError::new(ErrorKind::TimedOut, "PRIVATE_SDK_SOURCE_SENTINEL").into(),
+            )),
+        ] {
+            assert_eq!(classify_operation_error(&error), PreparationError::Deadline);
+        }
+    }
+
+    #[test]
+    fn non_timeout_dispatch_failures_remain_unavailable() {
+        for connector in [
+            ConnectorError::io(
+                IoError::new(
+                    ErrorKind::ConnectionReset,
+                    "timeout PRIVATE_SDK_SOURCE_SENTINEL",
+                )
+                .into(),
+            ),
+            ConnectorError::other(
+                IoError::other("timeout PRIVATE_SDK_SOURCE_SENTINEL").into(),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                classify_operation_error(&SdkError::dispatch_failure(connector)),
+                PreparationError::Unavailable,
+            );
+        }
+    }
 
     fn active_table_description() -> TableDescription {
         TableDescription::builder()

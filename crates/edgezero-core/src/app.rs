@@ -9,7 +9,7 @@ use crate::error::{
 };
 use crate::geo::GeoOutcome;
 use crate::http::header::CONTENT_TYPE;
-use crate::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
+use crate::http::{Extensions, HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use crate::ingress::{
     AdmissionDecision, IngressAdmissionOutcome, IngressAdmissionPolicy, IngressBeginOutcome,
     IngressDispatchOutcome, IngressFraming, IngressHead, IngressHeadAccounting, IngressHeadLimits,
@@ -511,6 +511,16 @@ impl App {
         self.platform
     }
 
+    /// Captures application-authenticated facts before a managed host sanitizes the head.
+    ///
+    /// The host must structurally validate the received head first. The router's
+    /// [`crate::router::RouterBuilder::received_head_preparer`] can retain facts but cannot mutate
+    /// headers, poll a body, choose a route or return a response at this stage.
+    #[inline]
+    pub fn prepare_received_head(&self, headers: &HeaderMap, extensions: &mut Extensions) {
+        self.router.prepare_received_head(headers, extensions);
+    }
+
     fn render_error_response(&self, error: EdgeError) -> Response {
         self.render_error_response_with_message(error, None)
     }
@@ -691,6 +701,16 @@ impl App {
             + 'static,
     {
         self.response_egress_policy = Arc::new(policy);
+    }
+
+    /// Installs routes and router state assembled during exclusive application startup.
+    ///
+    /// Application metadata, clocks and admission/egress policies remain unchanged.
+    /// Previous router dispatch tokens no longer belong to this App. This is not live reload;
+    /// finish initialization before sharing the App with a listener.
+    #[inline]
+    pub fn set_router(&mut self, router: RouterService) {
+        self.router = router;
     }
 
     /// Validates and installs fields for framework-generated errors and adapter fallbacks.

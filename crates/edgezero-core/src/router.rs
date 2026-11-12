@@ -10,7 +10,7 @@ use tower_service::Service;
 use crate::context::FallbackDrainOutcome;
 use crate::error::EdgeError;
 use crate::handler::{BoxHandler, IntoHandler, IntrospectionNeeds};
-use crate::http::{Extensions, HandlerFuture, Method, Request, Response};
+use crate::http::{Extensions, HandlerFuture, HeaderMap, Method, Request, Response};
 use crate::ingress::{AdmittedIngress, IngressHeadLimits, validate_normalized_ingress_parts};
 use crate::introspection::{ManifestJson, RouteTable};
 use crate::middleware::{BoxMiddleware, Middleware, Next};
@@ -44,6 +44,8 @@ impl DispatchOutcome {
 
 /// Shared optional interception performed before router lookup and state injection.
 pub type BoxPreDispatchHook = Arc<dyn PreDispatchHook>;
+
+type ReceivedHeadPreparer = Arc<dyn Fn(&HeaderMap, &mut Extensions) + Send + Sync + 'static>;
 
 /// Inspect or terminate an admitted request before handler dispatch and route middleware.
 ///
@@ -236,6 +238,7 @@ pub struct RouterBuilder {
     manifest_json: Option<Arc<str>>,
     middlewares: Vec<BoxMiddleware>,
     pre_dispatch_hook: Option<BoxPreDispatchHook>,
+    received_head_preparer: Option<ReceivedHeadPreparer>,
     route_info: Vec<RouteInfo>,
     routes: HashMap<Method, PathRouter<RouteEntry>>,
     /// App state registered via [`RouterBuilder::with_state`], keyed by type.
@@ -289,6 +292,7 @@ impl RouterBuilder {
             self.manifest_json,
             self.state_extensions,
             self.pre_dispatch_hook,
+            self.received_head_preparer,
         )
     }
 
@@ -382,6 +386,22 @@ impl RouterBuilder {
         self.route(path, Method::PUT, handler)
     }
 
+    /// Sets a body-blind preparation callback for structurally validated received heads.
+    ///
+    /// Managed hosts call it before stripping forwarding fields or provider credentials.
+    /// Retain only application-authenticated facts in extensions, never credentials or an
+    /// unchecked header copy. It cannot change headers, route, read a body or return a response.
+    /// Router clones share the callback. Setting it again replaces the previous callback.
+    #[must_use]
+    #[inline]
+    pub fn received_head_preparer<F>(mut self, prepare: F) -> Self
+    where
+        F: Fn(&HeaderMap, &mut Extensions) + Send + Sync + 'static,
+    {
+        self.received_head_preparer = Some(Arc::new(prepare));
+        self
+    }
+
     #[must_use]
     #[inline]
     pub fn route<H>(mut self, path: &str, method: Method, handler: H) -> Self
@@ -445,6 +465,7 @@ struct RouterInner {
     manifest_json: Option<Arc<str>>,
     middlewares: Vec<BoxMiddleware>,
     pre_dispatch_hook: Option<BoxPreDispatchHook>,
+    received_head_preparer: Option<ReceivedHeadPreparer>,
     route_index: Arc<[RouteInfo]>,
     routes: HashMap<Method, PathRouter<RouteEntry>>,
     state_extensions: Extensions,
@@ -708,12 +729,14 @@ impl RouterService {
         manifest_json: Option<Arc<str>>,
         state_extensions: Extensions,
         pre_dispatch_hook: Option<BoxPreDispatchHook>,
+        received_head_preparer: Option<ReceivedHeadPreparer>,
     ) -> Self {
         Self {
             inner: Arc::new(RouterInner {
                 manifest_json,
                 middlewares,
                 pre_dispatch_hook,
+                received_head_preparer,
                 route_index,
                 routes,
                 state_extensions,
@@ -730,6 +753,17 @@ impl RouterService {
         match service.call(request).await {
             Ok(response) => Ok(response),
             Err(err) => err.into_response(),
+        }
+    }
+
+    /// Captures application-authenticated facts from a structurally validated head.
+    ///
+    /// Managed hosts call this before stripping forwarding fields or provider credentials.
+    /// Preparation cannot change headers, poll a body, bypass admission or produce a response.
+    #[inline]
+    pub fn prepare_received_head(&self, headers: &HeaderMap, extensions: &mut Extensions) {
+        if let Some(prepare) = &self.inner.received_head_preparer {
+            prepare(headers, extensions);
         }
     }
 
