@@ -137,8 +137,10 @@ let app = retained.state().expect("successful initialization");
 
 `Hooks::configure` returns `Result<(), EdgeError>`; `App::build` installs and
 validates platform metadata. No partial app or initialization error is retained.
-Custom callbacks decide whether a failure is recoverable; standard serving
-propagates it and stops without another send.
+Standard serving delivers application assembly failures through detached egress;
+successful delivery completes the callback and the next request retries assembly.
+Logging/setup failures and terminal-delivery errors still propagate. Custom
+callbacks decide their own recoverable-error policy.
 
 - [x] **2.3 Preserve the degraded first logging snapshot.** Exercise production `setup_once` with an empty initial environment and later successful selector reads. Logging is not reconfigured after successful setup, while runtime/store resolution remains per request. The earlier private-helper test sketch is superseded.
 

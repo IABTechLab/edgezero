@@ -17,6 +17,7 @@ use futures::{
     task::AtomicWaker,
 };
 use serde_json::{Value, json};
+use std::io::Write as _;
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -138,13 +139,15 @@ impl ResponseEgressObserver for FramingObserver {
         if report.framing_failures.application().is_some()
             || report.framing_failures.fallback().is_some()
         {
-            eprintln!(
-                "{}",
-                json!({"event":"framing-terminal", "application":report.framing_failures.application().map(|reason|format!("{reason:?}")),
+            let record = json!({"event":"framing-terminal", "application":report.framing_failures.application().map(|reason|format!("{reason:?}")),
                 "fallback":report.framing_failures.fallback().map(|reason|format!("{reason:?}")),
                 "outcome":format!("{:?}",report.outcome),"body_kind":format!("{:?}",report.body_kind),
-                "bytes_written":report.bytes_written,"disposition":report.fallback_disposition.map(|value|format!("{value:?}")),"qualification":false})
-            );
+                "bytes_written":report.bytes_written,"disposition":report.fallback_disposition.map(|value|format!("{value:?}")),"qualification":false});
+            // One complete line prevents host logs from splitting JSON formatter writes.
+            let line = format!("{record}\n");
+            std::io::stderr()
+                .write_all(line.as_bytes())
+                .expect("should write framing receipt");
         }
     }
 }

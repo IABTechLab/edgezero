@@ -2,7 +2,7 @@
   "src/main.rs:outbound_lifetimes_selects_exactly_one_explicit_provider": "db8098c65fe1d4c32b4c7572883e02b1267d6ddaa99b751d35a087052409942c",
   "src/main.rs:outbound_wire_suite_is_explicit_and_selects_one_supported_provider": "5e6bd8b1f347422d0030acab5e43a8c0d9fffbad7f304d7171847fc7e4e04ae7",
   "src/main.rs:parse_from": "2aef1c2d5aca6902f8c6f67ed820ea578a4062d1f2b9eb16abd25d7bc9a558ac",
-  "src/main.rs:run": "f8d3b78414c5d69c74c5b6e69a24fe0d1e8ae61067e0247cbff17bf375b237f7",
+  "src/main.rs:run": "744c16f7b155adb4d27933eed21ab7b6d0adcc40ac81b787e2b8e164b2b78fb5",
   "src/runners.rs:fastly": "cbea839284606bc7bd552675bdacc8b33c4ff7fe6e8c5ca80a28cd93f8d2117c",
   "src/runners.rs:provider": "611830f75cbb95179b853a39f49ba9839a9cb06c2967b769a7d9300a40536f5b",
   "src/runners/ci.rs:phase_with_exit": "071915332c0cd8d29aeade1fc89ed79d35b38037c76d41e55160c11f7f31e76e",
