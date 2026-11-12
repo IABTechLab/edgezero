@@ -832,6 +832,21 @@ fn component_text(directory: &Path) -> Result<String> {
     Ok(text)
 }
 
+fn validate_empty_method_resources(scope: &Value) -> Result<()> {
+    let headers = scope["headers"].as_array().ok_or("missing scope headers")?;
+    let mut markers = headers.iter().filter(|field| {
+        field[0]
+            .as_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case("x-fixture-empty-method-resources"))
+    });
+    require(
+        scope["status"] == 200
+            && markers.next().is_some_and(|field| field[1] == "pass")
+            && markers.next().is_none(),
+        "canonical scope or empty-method SDK resource control failed",
+    )
+}
+
 fn controls(port: u16, origins: &WireOrigins, log_dir: &Path, process: &mut Process) -> Result<()> {
     for name in ["get", "head", "get-settled", "head-settled", "post"] {
         let uri = format!("http://127.0.0.1:{}/{name}", origins.port(0));
@@ -870,10 +885,8 @@ fn controls(port: u16, origins: &WireOrigins, log_dir: &Path, process: &mut Proc
             )?;
         }
     }
-    require(
-        net::header_request(port, "/scope", &token(), &[], None)?["status"] == 200,
-        "canonical scope control failed",
-    )?;
+    let scope = net::header_request(port, "/scope", &token(), &[], None)?;
+    validate_empty_method_resources(&scope)?;
     let uri = format!("http://127.0.0.1:{}", origins.port(0));
     let reply = net::header_request(port, "/handoff", &token(), &[("x-origin", &uri)], None)?;
     require(reply["status"] == 200, "handoff guest failed")?;
@@ -1149,6 +1162,24 @@ fn finish_wire<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_method_resource_receipt_requires_one_unambiguous_pass() {
+        let marker = "x-fixture-empty-method-resources";
+        validate_empty_method_resources(&json!({"status":200,
+            "headers":[["X-Fixture-Empty-Method-Resources", "pass"]]}))
+        .unwrap();
+        for headers in [
+            json!([]),
+            json!([[marker, "fail"]]),
+            json!([[marker, "pass"], [marker, "fail"]]),
+            json!([[marker, "pass"], [marker, "pass"]]),
+        ] {
+            assert!(
+                validate_empty_method_resources(&json!({"status":200,"headers":headers})).is_err()
+            );
+        }
+    }
 
     fn wire_error(kind: &str, reason: &str) -> Value {
         json!({"error":{"kind":kind,"reason":reason,
