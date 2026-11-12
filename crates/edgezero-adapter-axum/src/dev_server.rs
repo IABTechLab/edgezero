@@ -64,6 +64,7 @@ use tokio::time::{Instant as NativeInstant, sleep_until};
 use crate::config_store::AxumConfigStore;
 use crate::config_store_limits::ConfigStoreLimits;
 use crate::connection::{ConnectionExit, serve_http1_with_shutdown};
+use crate::geo::NativeGeo;
 use crate::ingress_config::AxumIngressConfig;
 use crate::key_value_store::PersistentKvStore;
 use crate::native_stores::{self, NativeSourcePlan, NativeStoreOverrides, NativeStoreSource};
@@ -510,9 +511,10 @@ fn serve_local(
     )
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct NativeHosting {
     diagnostics: NativeDiagnosticsHandle,
+    geo: NativeGeo,
     policy: TrustedProxyPolicy,
     request_records: bool,
 }
@@ -523,6 +525,7 @@ impl Default for NativeHosting {
             diagnostics: NativeDiagnosticsHandle::new(),
             policy: TrustedProxyPolicy::no_trust(),
             request_records: true,
+            geo: NativeGeo::default(),
         }
     }
 }
@@ -746,9 +749,15 @@ where
         log::warn!(target: BOOT_LOG_TARGET, "application head limits exceed Axum raw ingress limits; the parser rejects first");
     }
     let session = NativeSession::new(native.diagnostics, native.request_records)?;
-    let mut service =
-        AxumServiceState::with_transport(app, transport, json_body_limit, session, native.policy)
-            .with_phase(reader.clone());
+    let mut service = AxumServiceState::with_native_transport(
+        app,
+        transport,
+        json_body_limit,
+        session,
+        native.policy,
+        native.geo,
+    )
+    .with_phase(reader.clone());
     if let Some(registry) = stores.config {
         service = service.with_config_registry(registry);
     }
@@ -1109,6 +1118,7 @@ where
             policy,
             request_records,
             diagnostics: NativeDiagnosticsHandle::new(),
+            geo: NativeGeo::default(),
         },
     ))
 }
@@ -1285,6 +1295,13 @@ where
         &'startup PreparedStores,
     ) -> LocalStartupFuture<'startup>,
 {
+    let geo = options.native_geo()?;
+    let native = NativeHosting {
+        diagnostics: options.diagnostics(),
+        policy: options.trusted_proxy_policy(),
+        request_records: options.request_records(),
+        geo,
+    };
     run_local(
         ListenerSource::Bind(options.addr()),
         signals,
@@ -1307,17 +1324,7 @@ where
                 );
                 failure("initializer", "application", &category)
             })?;
-            Ok((
-                app,
-                stores,
-                transport,
-                options.json_body_limit(),
-                NativeHosting {
-                    diagnostics: options.diagnostics(),
-                    policy: options.trusted_proxy_policy(),
-                    request_records: options.request_records(),
-                },
-            ))
+            Ok((app, stores, transport, options.json_body_limit(), native))
         },
     )
 }
@@ -2372,7 +2379,8 @@ mod tests {
             OsString::from("EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES"),
             binary,
         )])
-        .expect_err("recognized binary setting");
+        .err()
+        .expect("recognized binary setting");
         assert!(error.to_string().contains("JSON_BODY_LIMIT_BYTES"));
         assert_eq!(error.chain().count(), 1);
         for (path, category) in [
@@ -2383,7 +2391,8 @@ mod tests {
                 OsString::from(format!("EDGEZERO__ADAPTER__{path}")),
                 OsString::from_vec(b"PRIVATE_SENTINEL\xff".to_vec()),
             )])
-            .expect_err("owned binary limit must fail");
+            .err()
+            .expect("owned binary limit must fail");
             assert!(owned_error.to_string().contains(category));
             assert!(!format!("{owned_error:?}").contains("PRIVATE_SENTINEL"));
             assert_eq!(owned_error.chain().count(), 1);
@@ -2398,6 +2407,60 @@ mod tests {
         let server = AxumDevServer::new(App::new(router));
         assert_eq!(server.config.addr.port(), 8787);
         assert!(server.config.enable_ctrl_c);
+    }
+
+    async fn router_json_upload(addr: SocketAddr, body: String, status: u16) -> String {
+        use std::io::ErrorKind;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpStream;
+        use tokio::time::timeout;
+
+        let socket = TcpStream::connect(addr).await.expect("upload connection");
+        let (mut reader, mut writer) = socket.into_split();
+        let request_head = format!(
+            "POST /json HTTP/1.1\r\nHost: fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let mut bytes = Vec::new();
+        // Keep reading an early 413 even if the peer stops accepting the upload.
+        let (sent, reading) = timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                async {
+                    writer.write_all(request_head.as_bytes()).await?;
+                    writer.write_all(body.as_bytes()).await
+                },
+                reader.read_to_end(&mut bytes)
+            )
+        })
+        .await
+        .expect("bounded upload and response");
+        let response = String::from_utf8(bytes).expect("UTF-8 response");
+        let (head, payload) = response
+            .split_once("\r\n\r\n")
+            .expect("usable response head");
+        assert!(
+            head.starts_with(&format!("HTTP/1.1 {status} ")),
+            "{response}"
+        );
+        let length = head
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().expect("response length"))
+            })
+            .expect("finite response framing");
+        assert_eq!(payload.len(), length, "complete response: {response}");
+        if let Err(error) = reading {
+            assert!(
+                status == 413 && error.kind() == ErrorKind::ConnectionReset,
+                "response read: {error}"
+            );
+        }
+        if let Err(error) = sent {
+            assert_eq!(status, 413, "upload failure without 413: {error}");
+        }
+        payload.to_owned()
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2430,10 +2493,6 @@ mod tests {
             };
             let serving =
                 tokio::spawn(async move { server.serve(listener, future::pending()).await });
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .expect("client");
             for (bytes, status) in [
                 (limit, StatusCode::OK),
                 (limit.saturating_add(1), StatusCode::PAYLOAD_TOO_LARGE),
@@ -2442,15 +2501,7 @@ mod tests {
                     "\"{}\"",
                     "x".repeat(bytes.checked_sub(2).expect("delimiters"))
                 );
-                let response = client
-                    .post(format!("http://{addr}/json"))
-                    .header("content-type", "application/json")
-                    .body(body)
-                    .send()
-                    .await
-                    .expect("prebound listener request");
-                assert_eq!(response.status(), status);
-                let text = response.text().await.expect("usable response");
+                let text = router_json_upload(addr, body, status.as_u16()).await;
                 if status == StatusCode::OK {
                     assert_eq!(text, limit.checked_sub(2).expect("length").to_string());
                 } else {
@@ -4218,6 +4269,53 @@ mod native_store_tests {
             .await?
             .unwrap_or_default();
         Ok(format!("{}:{state}", value.as_str()))
+    }
+
+    #[cfg(not(feature = "geo-cloudfront"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn geo_unavailable_selection_fails_before_runner_resources() {
+        use crate::geo::{NativeGeoSelection, ProtectedCloudFrontAlb};
+        let root = tempfile::tempdir().unwrap();
+        let options = options()
+            .with_config_dir(root.path())
+            .unwrap()
+            .with_data_dir(root.path())
+            .unwrap()
+            .with_geo(NativeGeoSelection::CloudFront {
+                policy: ProtectedCloudFrontAlb::new(["127.0.0.1/32"], "x-origin-verify-fixture")
+                    .unwrap(),
+            });
+        let address = options.addr();
+        let prepared = Rc::new(Cell::new(false));
+        let initialized = Rc::new(Cell::new(false));
+        let prepare_observed = Rc::clone(&prepared);
+        let initialize_observed = Rc::clone(&initialized);
+        let mut overrides = NativeStoreOverrides::default();
+        overrides
+            .prepare_config("first", async move {
+                prepare_observed.set(true);
+                Err(NativeStorePreparationError::Unavailable)
+            })
+            .unwrap();
+        // Existing Tokio runtime would reject nested runner construction if validation were late.
+        let error = run_app_with_native_stores::<CustomApp, _, _>(
+            options,
+            overrides,
+            future::pending::<()>(),
+            move |_app, _stores| {
+                Box::pin(async move {
+                    initialize_observed.set(true);
+                    Ok(())
+                })
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unavailable"));
+        assert!(!prepared.get());
+        assert!(!initialized.get());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        let listener = StdTcpListener::bind(address).expect("runner never bound listener");
+        drop(listener);
     }
 
     #[test]

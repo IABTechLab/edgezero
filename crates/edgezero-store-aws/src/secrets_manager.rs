@@ -8,13 +8,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aws_config::BehaviorVersion;
 use aws_sdk_secretsmanager::Client;
+use aws_sdk_secretsmanager::config::retry::RetryConfig;
 use aws_sdk_secretsmanager::config::timeout::TimeoutConfig;
-use aws_sdk_secretsmanager::config::{Region, retry::RetryConfig};
 use aws_sdk_secretsmanager::error::SdkError;
+use aws_sdk_secretsmanager::operation::get_secret_value::GetSecretValueError;
 #[cfg(test)]
 use aws_sdk_secretsmanager::primitives::Blob;
+use aws_smithy_runtime_api::client::behavior_version::BehaviorVersion;
+use aws_types::region::Region;
 use bytes::Bytes;
 use edgezero_core::secret_store::SecretHandle;
 use tokio::time::timeout;
@@ -158,24 +160,7 @@ impl AwsPreparation {
                 .await
                 .map_err(|_elapsed| PreparationError::Deadline)?;
                 self.check_deadline()?;
-                let output = result.map_err(|error| {
-                    if matches!(&error, SdkError::TimeoutError(_)) {
-                        return PreparationError::Deadline;
-                    }
-                    let service = error.as_service_error().map(|service| {
-                        (
-                            service.is_decryption_failure(),
-                            service.is_resource_not_found_exception(),
-                            service.is_invalid_request_exception(),
-                            service.is_invalid_parameter_exception(),
-                            service.meta().code().unwrap_or_default().to_owned(),
-                        )
-                    });
-                    let status = error
-                        .raw_response()
-                        .map(|response| response.status().as_u16());
-                    classify_sdk_error(service, status)
-                })?;
+                let output = result.map_err(|error| classify_operation_error(&error))?;
                 let cap = usize::try_from(self.limits.max_secret_value_bytes)
                     .map_err(|_error| PreparationError::InvalidLimits)?;
                 let size = match (output.secret_string(), output.secret_binary()) {
@@ -209,6 +194,47 @@ impl AwsPreparation {
             entries,
         })))
     }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::print_stderr,
+    reason = "test-only closed SDK error kind excludes source details and payloads"
+)]
+fn report_sdk_error_kind<E, R>(error: &SdkError<E, R>) {
+    let kind = match error {
+        SdkError::TimeoutError(_) => "Timeout",
+        SdkError::DispatchFailure(failure) if failure.is_timeout() => "DispatchTimeout",
+        SdkError::DispatchFailure(_) => "DispatchOther",
+        SdkError::ServiceError(_) => "Service",
+        SdkError::ResponseError(_) => "Response",
+        SdkError::ConstructionFailure(_) => "Construction",
+        _ => "Other",
+    };
+    eprintln!("sdk-error-kind={kind}");
+}
+
+fn classify_operation_error(error: &SdkError<GetSecretValueError>) -> PreparationError {
+    #[cfg(test)]
+    report_sdk_error_kind(error);
+    if matches!(error, SdkError::TimeoutError(_))
+        || matches!(error, SdkError::DispatchFailure(failure) if failure.is_timeout())
+    {
+        return PreparationError::Deadline;
+    }
+    let service = error.as_service_error().map(|service| {
+        (
+            service.is_decryption_failure(),
+            service.is_resource_not_found_exception(),
+            service.is_invalid_request_exception(),
+            service.is_invalid_parameter_exception(),
+            service.meta().code().unwrap_or_default().to_owned(),
+        )
+    });
+    let status = error
+        .raw_response()
+        .map(|response| response.status().as_u16());
+    classify_sdk_error(service, status)
 }
 
 fn valid_secret_name(value: &str) -> bool {
@@ -295,11 +321,13 @@ fn classify_sdk_error(
     reason = "explicit std and crate paths keep the isolated child-process fixture auditable"
 )]
 mod tests {
-    use super::materialize_payload;
+    use super::{classify_operation_error, materialize_payload};
     use crate::PreparationError;
+    use aws_sdk_secretsmanager::error::{ConnectorError, SdkError};
     use aws_sdk_secretsmanager::operation::get_secret_value::GetSecretValueOutput;
     use aws_sdk_secretsmanager::primitives::Blob;
     use bytes::Bytes;
+    use std::io::{Error as IoError, ErrorKind};
     use std::io::{Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
     use std::process::{Command, Stdio};
@@ -671,6 +699,43 @@ mod tests {
             !output.contains(&"x".repeat(128)),
             "payload is not included in public output"
         );
+    }
+
+    #[test]
+    fn typed_sdk_timeouts_are_deadlines() {
+        for error in [
+            SdkError::timeout_error(IoError::new(
+                ErrorKind::TimedOut,
+                "PRIVATE_SDK_SOURCE_SENTINEL",
+            )),
+            SdkError::dispatch_failure(ConnectorError::timeout(
+                IoError::new(ErrorKind::TimedOut, "PRIVATE_SDK_SOURCE_SENTINEL").into(),
+            )),
+        ] {
+            assert_eq!(classify_operation_error(&error), PreparationError::Deadline);
+        }
+    }
+
+    #[test]
+    fn non_timeout_dispatch_failures_remain_unavailable() {
+        for connector in [
+            ConnectorError::io(
+                IoError::new(
+                    ErrorKind::ConnectionReset,
+                    "timeout PRIVATE_SDK_SOURCE_SENTINEL",
+                )
+                .into(),
+            ),
+            ConnectorError::other(
+                IoError::other("timeout PRIVATE_SDK_SOURCE_SENTINEL").into(),
+                None,
+            ),
+        ] {
+            assert_eq!(
+                classify_operation_error(&SdkError::dispatch_failure(connector)),
+                PreparationError::Unavailable,
+            );
+        }
     }
 
     #[test]
