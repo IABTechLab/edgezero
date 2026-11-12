@@ -25,6 +25,19 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Restore isolated CLI-only compilation by enabling the adapter's CLI helpers explicitly;
+  check that feature selection independently of provider feature unification.
+- Keep qualification lifecycle JSON unwrapped at the fixture telemetry sink, permitting Info
+  only for that target while ordinary fixture logs retain Warn/Error filtering.
+- Supervise progress fixture builds, Cargo metadata and version probes through the existing
+  process owner, preserving separate stdout/diagnostics and direct-signal descendant cleanup.
+  Exclude only the selected canonical evidence subtree from fresh source/build identities;
+  keep dirty/untracked source detection and scoped restoration intact.
+- Omit synthesized zero lengths and unnecessary body writers for known-empty Spin
+  DELETE/OPTIONS. Retain empty POST/PUT/PATCH lengths and document the host's possible empty
+  chunked framing without relaxing GET/HEAD suppression or any upload/deadline limit.
+- Include the codec-wrapper reserve in the flate audit subtotal (77,824 bytes). The conservative
+  decoder charge stays 1 MiB; no dependency pin, allocation policy or capability is promoted.
 - Keep startup-attestation test listeners owned from bind through shutdown. The child publishes
   its ephemeral endpoint, PID and launch nonce atomically; the fixture validates bounded metadata
   before its first prescribed HTTP request. Preserve response attestation, sticky failures and
@@ -544,8 +557,10 @@ their scope when introduced; the current summary supersedes their then-pending A
   engine shared by the existing Send and Batch receive paths. Select borrowed handle identities,
   validate every result, rotate slot service, and perform at most one 16 KiB raw read per fresh
   matching readiness observation. Remove the superseded ownership-reassociation implementation.
-- Preserve cached SDK Send behavior with nonblocking opaque-head polling and one shared positive
-  1 ms pulse. Keep B31, original deadlines/cutoffs, typed source errors and response policies;
+- Preserve SDK cache selection for buffered Send and Batch under both PlatformDefault and
+  Bypass, with nonblocking opaque-head polling and one shared positive 1 ms pulse. This includes
+  uncached heads; CPU cost grows with pending slot count and wait duration.
+  Keep B31, original deadlines/cutoffs, typed source errors and response policies;
   leave direct native Image Optimizer dispatch unchanged. Ready results backpressure only their
   own slot, with exactly-once local lease cleanup on cancellation/terminal paths.
 - Release batch drivers on terminal or poisoned observations even when callers retain the batch.

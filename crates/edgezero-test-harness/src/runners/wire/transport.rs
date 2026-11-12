@@ -24,6 +24,9 @@ const PARITY: &[&str] = &[
     "parity-upload-cap",
     "parity-zero-timeout",
     "parity-expired",
+    "parity-empty-post",
+    "parity-empty-delete",
+    "parity-empty-options",
 ];
 const GZIP: &[u8] = &[
     31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 75, 76, 132, 1, 0, 240, 205, 17, 76, 10, 0, 0, 0,
@@ -625,14 +628,18 @@ pub(super) fn validate_artifact(events: &[Value], adapter: &str) -> Result<()> {
             "native transport origin count differs",
         )?;
         for (receipt, (origin, route, step)) in origins.iter().zip(wanted) {
-            let method = if case == "parity-post" {
+            let method = if matches!(case, "parity-post" | "parity-empty-post") {
                 "POST"
+            } else if case == "parity-empty-delete" {
+                "DELETE"
+            } else if case == "parity-empty-options" {
+                "OPTIONS"
             } else if case == "parity-head" {
                 "HEAD"
             } else {
                 "GET"
             };
-            let payload = if method == "POST" { "abc" } else { "" };
+            let payload = if case == "parity-post" { "abc" } else { "" };
             require(
                 receipt["port"] == ports[origin]
                     && receipt["target"] == path(route, token)
@@ -667,11 +674,30 @@ pub(super) fn validate_artifact(events: &[Value], adapter: &str) -> Result<()> {
                     "buffered Spin upload lost its trusted content length",
                 )?;
             }
+            if adapter == "spin" && case == "parity-empty-post" {
+                require(
+                    lengths == &vec![json!("0")] && encodings.is_empty(),
+                    "empty Spin POST lost its trusted zero length",
+                )?;
+            }
+            let spin_empty_method =
+                adapter == "spin" && matches!(case, "parity-empty-delete" | "parity-empty-options");
+            if spin_empty_method {
+                require(
+                    lengths.is_empty()
+                        && receipt["payload"] == ""
+                        && ((encodings.is_empty() && receipt["encoded_body_hex"] == "")
+                            || (encodings == &vec![json!("chunked")]
+                                && receipt["encoded_body_hex"] == "300d0a0d0a")),
+                    "empty Spin method gained a length or nonempty host framing",
+                )?;
+            }
             require(
                 lengths.len() <= 1
                     && encodings.len() <= 1
                     && (lengths.is_empty() || encodings.is_empty())
-                    && (method == "POST"
+                    && (spin_empty_method
+                        || method == "POST"
                         || (encodings.is_empty()
                             && lengths.iter().all(|v| v == "0")
                             && receipt["encoded_body_hex"] == "")),
@@ -949,8 +975,8 @@ pub(super) mod tests {
             let origin=receipts(case).into_iter().map(|(index,route,step)|{
                 let payload=if *case=="parity-post" {"abc"} else {""};
                 json!({"port":4001+index,"target":path(route,&token),"token":token,"step":step,
-                    "method":if *case=="parity-post" {"POST"} else if *case=="parity-head" {"HEAD"} else {"GET"},
-                    "payload":payload,"encoded_body_hex":if payload.is_empty() {""} else {"616263"},"content_length":[payload.len().to_string()],"transfer_encoding":[],
+                    "method":match *case {"parity-post"|"parity-empty-post"=>"POST","parity-empty-delete"=>"DELETE","parity-empty-options"=>"OPTIONS","parity-head"=>"HEAD",_=>"GET"},
+                    "payload":payload,"encoded_body_hex":if payload.is_empty() {""} else {"616263"},"content_length":if adapter=="spin" && matches!(*case,"parity-empty-delete"|"parity-empty-options") {vec![]} else {vec![payload.len().to_string()]},"transfer_encoding":[],
                     "proof":if *case=="target" {vec!["application-value"]} else {vec![]},"signature":if *case=="target" {vec!["user-built-signature"]} else {vec![]},
                     "head_delay_us":if *case=="head-900" {Some(900_000)} else {None}})
             }).collect::<Vec<_>>();
@@ -968,6 +994,74 @@ pub(super) mod tests {
     fn native_transport_evidence_rejects_missing_inventory() {
         for adapter in ["axum", "fastly", "cloudflare", "spin"] {
             assert!(validate_artifact(&[], adapter).is_err(), "{adapter}");
+        }
+    }
+
+    #[test]
+    fn native_transport_evidence_checks_empty_method_framing() {
+        let valid = artifact("spin");
+        validate_artifact(&valid, "spin").unwrap();
+        for case in [
+            "parity-empty-post",
+            "parity-empty-delete",
+            "parity-empty-options",
+        ] {
+            for step in [0, 1] {
+                let mut events = valid.clone();
+                let event = events
+                    .iter_mut()
+                    .find(|event| event["case"] == case)
+                    .unwrap();
+                event["origin"][step]["content_length"] = if case == "parity-empty-post" {
+                    json!([])
+                } else {
+                    json!(["0"])
+                };
+                assert!(validate_artifact(&events, "spin").is_err(), "{case} {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn spin_host_empty_chunking_is_limited_to_empty_delete_and_options() {
+        let valid = artifact("spin");
+        for case in ["parity-empty-delete", "parity-empty-options"] {
+            for step in [0, 1] {
+                let mut host = valid.clone();
+                let origin = &mut host.iter_mut().find(|event| event["case"] == case).unwrap()["origin"]
+                    [step];
+                origin["transfer_encoding"] = json!(["chunked"]);
+                origin["encoded_body_hex"] = json!("300d0a0d0a");
+                validate_artifact(&host, "spin").expect("host's empty chunk terminator");
+                for (field, value) in [
+                    ("content_length", json!(["0"])),
+                    ("transfer_encoding", json!(["invalid"])),
+                    ("transfer_encoding", json!(["chunked", "chunked"])),
+                    ("payload", json!("x")),
+                    ("encoded_body_hex", json!("")),
+                    ("encoded_body_hex", json!("300d0a")),
+                    ("encoded_body_hex", json!("300d0a0d0a00")),
+                ] {
+                    let mut bad = host.clone();
+                    bad.iter_mut().find(|event| event["case"] == case).unwrap()["origin"][step]
+                        [field] = value;
+                    assert!(
+                        validate_artifact(&bad, "spin").is_err(),
+                        "{case} {step} {field}"
+                    );
+                }
+            }
+        }
+        for case in ["parity-default", "parity-head", "parity-empty-post"] {
+            for step in [0, 1] {
+                let mut bad = valid.clone();
+                let origin = &mut bad.iter_mut().find(|event| event["case"] == case).unwrap()["origin"]
+                    [step];
+                origin["content_length"] = json!([]);
+                origin["transfer_encoding"] = json!(["chunked"]);
+                origin["encoded_body_hex"] = json!("300d0a0d0a");
+                assert!(validate_artifact(&bad, "spin").is_err(), "{case} {step}");
+            }
         }
     }
 

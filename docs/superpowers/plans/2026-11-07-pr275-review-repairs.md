@@ -159,3 +159,139 @@ ceiling. Each production backend's Off-through-Trace filter matrix and all
 threshold, redaction and release assertions remain unchanged. This is test-only
 state isolation, not a production logging or timing-policy change. Retain the
 failed run separately and rerun the complete suite on the final clean commit.
+
+## Focused Review Closeout (2026-11-10)
+
+AG requested items 1 (CodeQL cleanup) and 2 (review closeout), including resolution
+of issues already addressed. This checkpoint starts at `a7d7fd0f` and preserves
+the architecture and outbound requirements above. Issue #458 stays separate.
+
+- [x] Replace the four hard-coded expected nonce arguments in startup-publication
+      fixtures with the nonce generated for each owned child launch. Retain wrong
+      nonce, PID, schema, byte-boundary, deadline and liveness controls; do not
+      suppress CodeQL or change production startup validation.
+- [x] Correct current Fastly guidance and the changelog: buffered SDK Send and
+      batch heads use the shared positive 1 ms pulse under both PlatformDefault
+      and Bypass. Preserve scheduler timing, cache selection and native optimizer.
+- [x] Verify Spin's empty buffered request framing at the SDK and existing wire
+      boundary before correcting unnecessary synthesized zero lengths. Preserve
+      empty POST/PUT/PATCH framing, actual nonempty lengths, GET/HEAD behavior,
+      limits, original deadlines and streamed bodies without prebuffering.
+- [ ] Run focused regressions, all five root gates, the full prescribed adapter,
+      demo/generated-project suite, strict harness/provider lint and docs checks.
+      Verify the pushed-head CodeQL result separately from local test results.
+- [ ] Push this checkpoint to PR #275 and reply in each affected original thread
+      with the exact fix and executed evidence. Under AG's explicit request,
+      resolve external threads only when the requested correction is verified
+      or the reviewer has explicitly accepted the retained policy. Record that
+      this maintainer-directed resolution is not independent approval. Own
+      amendment threads and unresolved policy/hosted questions stay open.
+
+No pin relaxation, alternate transport, backoff policy, generic body-error
+reclassification, manifest-discovery policy change, hosted deployment, evidence
+promotion, review dismissal or merge is authorized by this checkpoint. Further
+source changes require fresh current-head validation and independent re-review.
+
+## Scoped Repairs (2026-11-11)
+
+AG approved cleanup followed by items 1-3 of the current closeout list. Reuse the
+existing Rust harness, process supervisor, fixture logger and body preparation;
+do not introduce another transport or compatibility API. Hosted qualification,
+candidate freeze and review acceptance remain separate.
+
+- [x] Remove inactive generated output while preserving source changes, runtime
+      evidence and active worktrees/builds.
+- [x] Fix CLI-only dependency-feature activation and retain an isolated check in
+      the existing CI job and prescribed suite.
+- [x] Emit qualification lifecycle JSON through both logger filters without
+      enabling ordinary Info logging or wrapping the structured event.
+- [x] Supervise progress fixture builds and Cargo metadata capture through the
+      existing process owner; prove direct-controller cancellation reaps children.
+- [x] Exclude only the canonical selected evidence subtree from every fresh
+      build-identity capture; retain dirty/untracked source detection and scoped
+      restoration across nesting, unwinding and threads.
+- [x] Reconcile decoder charge arithmetic, standard Fastly assembly-error retry,
+      the Axum full-suite selector and the current response-type path.
+- [x] Complete the earlier nonce and Fastly disclosure changes, and verify Spin's
+      empty-method SDK projection and actual host framing without changing its
+      deadline, upload, ownership or body-suppression contracts.
+- [x] Run focused regressions and the applicable Rust, harness, fixture and docs
+      gates. Record failures without treating supporting captures as qualification.
+
+### Focused Evidence
+
+The CLI-only check, real qualification logger, selected-output identity tests,
+build/metadata cancellation tests and flate subtotal assertion each reproduced
+their original failure before the fix. Direct-controller cancellation checks
+Cargo absence and descendant socket closure before either safety cleanup.
+
+The 78 fixture-core tests pass. Spin's 23 SDK resource tests pass with Wasmtime
+48.0.2, and the existing Spin outbound-wire suite passes with 166 passing records
+and no failed records. The capture is
+`crates/edgezero-test-harness/fixtures/reusable-app/.runs/18e70ebb3cd1b6d0-e2a5-0/`;
+its records remain `qualification: false`. Send and Begin preserve zero-length
+POST while DELETE/OPTIONS have no Content-Length and exactly the host's empty
+chunk terminator. GET/HEAD requirements remain strict. The resource receipt is
+added before the WASI response freezes its fields and rejects duplicate markers.
+
+Retain the failed baseline harness run and initial failed wire capture. The
+baseline source-verifier assertion passed on its exact rerun; no cause is claimed.
+The first current full harness run passed 659 tests but detected the entrypoint's
+changed control-flow fingerprint. Review confirmed that its sole change installs
+the selected-output scope. Only that recorded fingerprint changed; the full
+rerun passes all 660 tests. No selector, controller, result or qualification
+predicate is relaxed.
+
+Two read-only verification agents rechecked the process/logging/identity and Spin
+resource/framing changes. Their follow-up reviews found no remaining issues after
+the version-probe ownership, pre-cleanup observation and immutable-header fixes.
+### Final Local Validation
+
+- All five primary Rust gates pass on Rust 1.98.1. The workspace run reports 2,700
+  passing tests across 33 binaries, no failures and one ignored generated-project
+  build. Root, harness and fixture formatting checks pass.
+- Harness: 660 passed, three ignored helper entrypoints. Fixture core with
+  qualification enabled: 78 passed. Spin SDK resources: 23 passed. The final
+  Spin outbound-wire capture has 166 passing records and no failures.
+- Strict Clippy passes for the root workspace, harness, qualification fixture and
+  Spin WASM all-targets build. Rename the new test's shadowed bindings rather than
+  suppressing restriction lints; retain the initial failing lint/format logs.
+- CI-tooling tests: 38 passed. Outbound legacy-API and docs contracts pass, as do
+  docs formatting, lint and VitePress build. The documented Axum command resolves
+  all 43 expected sentinels; this lookup is not a TCP execution claim.
+
+The complete four-adapter/demo/generated-project prescribed suite was not rerun
+in this scoped checkpoint. Publication, remote CodeQL/check verification,
+per-thread replies/resolution, independent acceptance and hosted qualification
+remain outstanding. No commit or push is included in the items 1-3 completion.
+
+## Publication Followup (2026-11-11)
+
+AG subsequently requested publishing this checkpoint and cleaning disposable
+build output afterward. The remote branch had independently advanced to
+`410a16238b7cb740275ad69b9af628cd52c57bdc` (received-head preparation). Retain
+that commit by fast-forwarding before adding the scoped repairs; do not rewrite
+or discard it. The earlier green counts above describe the repair tree before
+this independent addition, not a full-suite pass for the combined published head.
+
+The combined-tree publication attempt passed root formatting and the Spin WASM
+compilation check. Workspace tests, strict workspace Clippy, feature compilation
+and the harness rerun exited 101 with actual compiler/linker failures reporting
+`No space left on device` (errno 28). The first Node run exited 1 without usable
+output; docs/CLI checks could not create their redirected logs. Do not present
+those attempts as passing, infer a source regression, suppress checks or waive
+the complete-suite/hosted gates. Retain the failed logs and use CI to verify the
+published head before any readiness claim.
+
+After disk space recovered, repeat the interrupted checks without modifying
+source, assertions or CI policy. The combined tree passes all five primary Rust
+gates: 2,702 workspace tests across 34 binaries, strict workspace Clippy, native
+feature compilation, Spin WASM compilation and root formatting. The harness
+rerun reports `660 passed; 0 failed; 3 ignored`. The isolated CLI-only check,
+all 38 tooling tests and outbound docs contract also pass on retry. These are
+successful reruns, not a dismissal or relabeling of the failed attempts. The
+complete four-adapter/demo/generated-project and hosted gates remain separate.
+
+Inactive fixture build output was removed to recover working space. Only this
+task's disposable validation/build outputs may be removed after remote-head
+verification; preserve source, the active worktrees and runtime/test evidence.
