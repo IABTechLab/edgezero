@@ -207,7 +207,7 @@ do not promote it solely from a checkpoint test count or green CI.
 The EZ-23 ready legs share one full Axum suite command, including ignored tests:
 
 ```sh
-scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
+scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
 ```
 
 The guard selects the exact declared command as well as the environment. This keeps Rust test
