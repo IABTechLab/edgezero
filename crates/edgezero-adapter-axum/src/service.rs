@@ -405,6 +405,7 @@ impl AxumServiceState {
                     .await;
                 }
             };
+        app.prepare_received_head(&parts.headers, &mut parts.extensions);
         let checked = normalize(&self.trusted_proxy_policy, remote_addr, &parts);
         guard.set_forwarding_result(checked.forwarding_result());
         strip_forwarding_headers(&mut parts.headers);
@@ -610,6 +611,91 @@ mod tests {
     use tokio::task::{JoinHandle, JoinSet, LocalSet, yield_now};
     use tokio::time::{Instant as TokioInstant, sleep, sleep_until, timeout};
     use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn received_head_preparation_precedes_stripping_but_not_head_validation() {
+        #[derive(Clone)]
+        struct PreparedAuthority(String);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let router = RouterService::builder()
+            .received_head_preparer(move |headers, extensions| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                if headers.get("x-fixture-auth")
+                    == Some(&HeaderValue::from_static("fictional-secret"))
+                    && let Some(authority) = headers
+                        .get("x-forwarded-host")
+                        .and_then(|value| value.to_str().ok())
+                {
+                    extensions.insert(PreparedAuthority(authority.to_owned()));
+                }
+            })
+            .route("/", Method::GET, |ctx: RequestContext| async move {
+                assert!(
+                    !ctx.headers().contains_key("x-forwarded-host"),
+                    "raw forwarding fields should not reach handlers"
+                );
+                let authority = ctx
+                    .extensions()
+                    .get::<PreparedAuthority>()
+                    .map_or("untrusted", |prepared| prepared.0.as_str());
+                Ok::<_, EdgeError>(
+                    response_builder()
+                        .body(Body::from(authority.to_owned()))
+                        .expect("should build fixture response"),
+                )
+            })
+            .build();
+        let mut app = App::new(router);
+        app.set_ingress_head_limits(
+            IngressHeadLimits::default()
+                .with_max_request_header_bytes(256)
+                .expect("should set fixture head limit"),
+        );
+        let service = AxumServiceState::from_app(app);
+        for (credential, expected) in [
+            ("fictional-secret", "publisher.example.com:8443"),
+            ("invalid-secret", "untrusted"),
+        ] {
+            let request = Request::builder()
+                .uri("/")
+                .header("host", "transport.example.com")
+                .header("x-fixture-auth", credential)
+                .header("x-forwarded-host", "publisher.example.com:8443")
+                .body(AxumBody::empty())
+                .expect("should build fixture request");
+            let response = service
+                .dispatch_request(request, &EgressConnection::default(), None)
+                .await
+                .expect("should dispatch fixture request");
+            assert_eq!(
+                to_bytes(response.into_body(), 128)
+                    .await
+                    .expect("should read fixture response"),
+                expected
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let invalid = Request::builder()
+            .uri("/")
+            .header("x-forwarded-host", "x".repeat(512))
+            .body(AxumBody::empty())
+            .expect("should build oversized fixture request");
+        let response = service
+            .dispatch_request(invalid, &EgressConnection::default(), None)
+            .await
+            .expect("should render head rejection");
+        assert_eq!(
+            response.status(),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "invalid received heads should not invoke application preparation"
+        );
+    }
 
     thread_local! {
         static RETAINED_SEND: RefCell<Option<OutboundFuture<OutboundResponse>>> = const { RefCell::new(None) };
