@@ -13,6 +13,7 @@ use crate::error::{
     StoreExtractionReason,
 };
 use crate::error_detail::ProviderFailureDetail;
+use crate::geo::GeoOutcome;
 use crate::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use crate::http::{
     Extensions, HeaderMap, HeaderValue, Method, Request, RequestParts, Uri, Version,
@@ -299,7 +300,9 @@ impl StoredError {
 pub struct RequestContext {
     body: RefCell<BodyState>,
     body_policy: Option<BufferedJsonPolicy>,
+    category_only_json_errors: bool,
     config_extraction_limits: ConfigExtractionLimits,
+    geo: GeoOutcome,
     ingress_grant: RefCell<Option<IngressGrant>>,
     input_guard: Option<Rc<InputGuard>>,
     monotonic_clock: MonotonicClock,
@@ -569,7 +572,8 @@ impl RequestContext {
     ) -> Self {
         self.path_params = params;
         self.route_metadata = route_metadata;
-        if let Some(admitted) = ingress {
+        if let Some(mut admitted) = ingress {
+            (self.geo, self.category_only_json_errors) = admitted.take_request_context();
             let (request_start, read_deadline, grant, limits, clock) = admitted.into_parts();
             self.config_extraction_limits = limits;
             *self.ingress_grant.get_mut() = Some(grant);
@@ -597,6 +601,13 @@ impl RequestContext {
         let bytes = self.body_bytes(max).await?;
         serde_urlencoded::from_bytes(bytes.as_ref())
             .map_err(|err| EdgeError::bad_request(format!("invalid form payload: {err}")))
+    }
+
+    /// Returns this request's immutable geographic outcome. Public extensions do not replace it.
+    #[must_use]
+    #[inline]
+    pub fn geo(&self) -> &GeoOutcome {
+        &self.geo
     }
 
     #[must_use]
@@ -663,7 +674,7 @@ impl RequestContext {
     {
         let bytes = self.buffered_bytes(max, true).await?;
         serde_json::from_slice(bytes.as_ref()).map_err(|err| {
-            if self.body_policy.is_some() {
+            if self.category_only_json_errors || self.body_policy.is_some() {
                 EdgeError::bad_request("invalid JSON payload")
             } else {
                 EdgeError::bad_request(format!("invalid JSON payload: {err}"))
@@ -755,6 +766,8 @@ impl RequestContext {
         Self {
             body: RefCell::new(BodyState::from_transfer(transfer)),
             body_policy,
+            geo: GeoOutcome::NoSelection,
+            category_only_json_errors: false,
             config_extraction_limits: ConfigExtractionLimits::default(),
             ingress_grant: RefCell::new(None),
             input_guard: None,
@@ -767,6 +780,10 @@ impl RequestContext {
         }
     }
     pub(crate) fn new_pre_dispatch(request: Request, ingress: Option<&AdmittedIngress>) -> Self {
+        let (geo, category_only_json_errors) = ingress.map_or(
+            (GeoOutcome::NoSelection, false),
+            AdmittedIngress::request_context,
+        );
         let clock = ingress.map_or_else(MonotonicClock::default, AdmittedIngress::monotonic_clock);
         let deadline = ingress.map(AdmittedIngress::read_deadline);
         let guard = Rc::new(InputGuard {
@@ -794,6 +811,8 @@ impl RequestContext {
             ingress_grant: RefCell::new(None),
             input_guard: Some(guard),
             monotonic_clock: clock,
+            geo,
+            category_only_json_errors,
             parts,
             path_params: PathParams::default(),
             read_deadline: deadline,
