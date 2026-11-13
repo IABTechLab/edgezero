@@ -18,7 +18,8 @@ use crate::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use crate::http::{
     Extensions, HeaderMap, HeaderValue, Method, Request, RequestParts, Uri, Version,
 };
-use crate::ingress::{AdmittedIngress, IngressGrant};
+use crate::ingress::{AdmittedIngress, IngressGrant, RequestIngress};
+use crate::ja4::CapturedJa4;
 use crate::outbound::{ForwardedReadDeadline, HttpClient};
 use crate::params::PathParams;
 use crate::router::RouteMetadata;
@@ -587,6 +588,16 @@ impl RequestContext {
     pub(crate) fn fixed_input_outcome(&self) -> Option<FallbackDrainOutcome> {
         let guard = self.input_guard.as_ref()?;
         guard.outcome()
+    }
+
+    /// The adapter's JA4 capture for this request, read from [`RequestIngress`].
+    /// `None` if the request has no ingress metadata or the adapter made no claim.
+    #[inline]
+    pub fn ja4(&self) -> Option<&CapturedJa4> {
+        self.parts
+            .extensions
+            .get::<RequestIngress>()
+            .and_then(RequestIngress::ja4)
     }
 
     /// Buffers at most `max` bytes and deserializes form-urlencoded data.
@@ -2649,5 +2660,23 @@ mod tests {
             ctx.config_store_binding("undeclared").is_none(),
             "unknown id must yield None"
         );
+    }
+
+    #[test]
+    fn ja4_reads_adapter_ingress_claim() {
+        use crate::ingress::{CapturedTarget, HeaderFidelity, TargetUnavailable};
+        use crate::ja4::{CapturedJa4, Ja4Unavailable};
+        let mut context = ctx("/", Body::empty(), PathParams::default());
+        assert!(context.ja4().is_none());
+        let unavailable = CapturedJa4::Unavailable(Ja4Unavailable::NotExposed);
+        context.parts.extensions.insert(
+            RequestIngress::new(
+                CapturedTarget::Unavailable(TargetUnavailable::NotExposed),
+                None,
+                HeaderFidelity::default(),
+            )
+            .with_ja4(unavailable.clone()),
+        );
+        assert_eq!(context.ja4(), Some(&unavailable));
     }
 }

@@ -61,6 +61,7 @@ use edgezero_core::context::RequestContext;
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::{Response, response_builder};
 use edgezero_core::ingress::{CapturedTarget, Preservation, RequestIngress};
+use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
 use edgezero_core::middleware::{Middleware, Next};
 use edgezero_core::router::{PreDispatchHook, RouterService};
 use edgezero_core::{PreDispatchRequest, action};
@@ -163,6 +164,15 @@ impl PreDispatchHook for Probe {
         let same_name_order = cookies == [b"a=1".as_slice(), b"b=2".as_slice()];
         let cookie_name = "cookie".parse().map_err(EdgeError::internal)?;
         let fidelity = ingress.header_fidelity(&cookie_name);
+        // A fixed state label only; the fingerprint itself is never echoed.
+        let ja4_state = match ingress.ja4() {
+            None => "none",
+            Some(CapturedJa4::Captured { .. }) => "captured",
+            Some(CapturedJa4::Unavailable(Ja4Unavailable::Missing)) => "missing",
+            Some(CapturedJa4::Unavailable(Ja4Unavailable::Malformed)) => "malformed",
+            Some(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed)) => "not_exposed",
+            Some(CapturedJa4::Unavailable(_)) => "other",
+        };
         #[cfg(feature = "fastly")]
         let native_client_preserved =
             request
@@ -206,6 +216,7 @@ impl PreDispatchHook for Probe {
             "origin_matches_expected": ingress.origin().is_some_and(|origin| origin.scheme() == "http" && origin.authority() == "example.com"),
             "spoofed_origin_ignored": ingress.origin().is_none_or(|origin| !origin.authority().contains("spoof")),
             "global_order_unavailable": fidelity.global_field_order() == Preservation::Unavailable,
+            "ja4_state": ja4_state,
         });
         Ok(Some(
             response_builder()

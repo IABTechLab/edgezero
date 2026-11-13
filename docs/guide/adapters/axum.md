@@ -702,6 +702,52 @@ Origin validation checks HTTP(S) URI authority syntax, including registered
 names and trailing-dot hosts. It does not establish DNS resolution or ownership.
 Consumers that require DNS-label syntax must apply that additional policy.
 
+## JA4 from a trusted proxy
+
+The Axum adapter serves plain HTTP and never sees a TLS handshake, so by
+default `ctx.ja4()` reports `Unavailable(NotExposed)` and JA4 headers such as
+`cloudfront-viewer-ja4-fingerprint` are ignored. See
+[Client TLS fingerprint](./overview#client-tls-fingerprint-ja4).
+
+When a TLS-terminating proxy in front of Axum computes JA4 (FoxIO's
+[ja4-nginx-module](https://github.com/FoxIO-LLC/ja4-nginx-module), HAProxy's
+ja4 module, the Apache Traffic Server JA4 plugin, CloudFront, …), Axum can read
+it from a header, but only when the direct TCP peer is one of the proxies you
+name:
+
+```sh
+EDGEZERO__ADAPTER__JA4_HEADER=x-ja4
+EDGEZERO__ADAPTER__JA4_TRUSTED_PROXY_CIDRS=10.0.0.0/8,192.0.2.7
+```
+
+Both variables must be set together. Entries are CIDRs or bare IPs; startup
+fails on an invalid entry, an empty list or a `/0` network. IPv4-mapped IPv6
+peers match their IPv4 networks.
+
+| Request                                          | `ctx.ja4()`                                      |
+| ------------------------------------------------ | ------------------------------------------------ |
+| From a trusted proxy, one valid header           | `Captured { source: TrustedProxyHeader, .. }`    |
+| From a trusted proxy, no header                  | `Unavailable(Missing)`                           |
+| From a trusted proxy, invalid or repeated header | `Unavailable(Malformed)`                         |
+| From any other peer                              | `Unavailable(NotExposed)`; the header is ignored |
+
+::: warning The proxy must overwrite the header
+The peer check proves which hop sent the request, not who wrote the header.
+Configure the proxy to set the header on every request and drop any copy the
+client sent, including when it has no JA4. With FoxIO's nginx module,
+`proxy_set_header` does both, because it replaces the client's header and
+omits it when the value is empty:
+
+```nginx
+proxy_set_header X-JA4 $http_ssl_ja4;
+```
+
+:::
+
+In code, build the setting with `TrustedJa4Header::parse(header, cidrs)` and
+pass it to `AxumDevServer::with_trusted_ja4_header` or
+`EdgeZeroAxumService::with_trusted_ja4_header`.
+
 ## Next Steps
 
 - Configure [native diagnostics and trusted proxies](/guide/axum-diagnostics)

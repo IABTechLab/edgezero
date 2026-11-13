@@ -31,6 +31,7 @@ pub mod handler;
 pub mod http;
 pub mod ingress;
 pub mod introspection;
+pub mod ja4;
 pub mod key_value_store;
 pub mod logging;
 pub mod manifest;

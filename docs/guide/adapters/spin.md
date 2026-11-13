@@ -442,6 +442,10 @@ also imports Spin-specific host interfaces, so plain Wasmtime cannot execute
 that artifact. The real Spin HTTP fixture supplies runtime conversion evidence.
 See [the capability matrix](./overview#inbound-request-fidelity).
 
+Spin components never see the TLS handshake, so `ctx.ja4()` reports
+`Unavailable(NotExposed)`. See
+[Client TLS fingerprint](./overview#client-tls-fingerprint-ja4).
+
 ## Next Steps
 
 - [Migration guide](/guide/manifest-store-migration) — moving from the

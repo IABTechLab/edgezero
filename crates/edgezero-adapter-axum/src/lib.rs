@@ -19,6 +19,8 @@ pub mod geo;
 mod header_deadline;
 pub mod ingress_config;
 #[cfg(feature = "axum")]
+pub mod ja4;
+#[cfg(feature = "axum")]
 pub mod key_value_store;
 #[cfg(all(feature = "native-bindings", not(target_arch = "wasm32")))]
 pub mod native_bindings;

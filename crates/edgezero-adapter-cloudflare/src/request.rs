@@ -23,6 +23,7 @@ use edgezero_core::ingress::{
     IngressFraming, IngressHeadAccounting, IngressHeadParts, OriginSource, PreparedIngress,
     Preservation, RequestIngress, TargetSource,
 };
+use edgezero_core::ja4::CapturedJa4;
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::response_egress::ResponseEgressEnvelope;
@@ -359,7 +360,12 @@ fn into_core_request_head(
             InboundOrigin::parse(scheme, authority.as_str(), OriginSource::RuntimeUri).ok()
         });
     let fidelity = HeaderFidelity::RUNTIME_HEADER_MAP;
-    let ingress = RequestIngress::new(target, origin, fidelity);
+    let ja4 = req
+        .cf()
+        .and_then(worker::Cf::bot_management)
+        .and_then(|bot| bot.ja4());
+    let ingress = RequestIngress::new(target, origin, fidelity)
+        .with_ja4(CapturedJa4::from_runtime_tls(ja4.as_deref()));
 
     let mut builder = request_builder().method(method).uri(uri);
     let headers = req.headers();

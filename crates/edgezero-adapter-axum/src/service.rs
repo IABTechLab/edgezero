@@ -48,6 +48,7 @@ use crate::diagnostics::{
 use crate::geo::NativeGeo;
 #[cfg(test)]
 use crate::ingress_config::AxumIngressConfig;
+use crate::ja4::TrustedJa4Header;
 use crate::outbound::{AxumOutboundClient, native_time};
 use crate::request::{HttpTransport, into_core_request_parts};
 use crate::response::{AxumEgressBody, EgressConnection, prepare_egress_response};
@@ -75,6 +76,7 @@ pub(crate) struct AxumServiceState {
     phase: Option<watch::Receiver<LifecyclePhase>>,
     secret_handle: Option<SecretHandle>,
     secret_registry: Option<SecretRegistry>,
+    trusted_ja4_header: Option<Arc<TrustedJa4Header>>,
     trusted_proxy_policy: TrustedProxyPolicy,
 }
 
@@ -132,6 +134,7 @@ impl AxumServiceState {
             phase: None,
             secret_handle: None,
             secret_registry: None,
+            trusted_ja4_header: None,
             trusted_proxy_policy,
         }
     }
@@ -254,6 +257,16 @@ impl AxumServiceState {
 
     pub(crate) fn with_phase(mut self, phase: watch::Receiver<LifecyclePhase>) -> Self {
         self.phase = Some(phase);
+        self
+    }
+
+    /// Read the client's JA4 from a trusted TLS-terminating proxy's header.
+    ///
+    /// Without this, `ctx.ja4()` reports `NotExposed` on Axum.
+    #[must_use]
+    #[inline]
+    pub fn with_trusted_ja4_header(mut self, config: TrustedJa4Header) -> Self {
+        self.trusted_ja4_header = Some(Arc::new(config));
         self
     }
 
@@ -407,6 +420,11 @@ impl AxumServiceState {
             request.extensions_mut().insert(ConnectInfo(peer_addr));
         } else {
             request.extensions_mut().remove::<ConnectInfo<SocketAddr>>();
+        }
+        // JA4 trust is adapter configuration; it is checked against the socket peer above.
+        request.extensions_mut().remove::<Arc<TrustedJa4Header>>();
+        if let Some(config) = &self.trusted_ja4_header {
+            request.extensions_mut().insert(Arc::clone(config));
         }
         let app = Arc::clone(&self.app);
         let (mut parts, native_body) = request.into_parts();

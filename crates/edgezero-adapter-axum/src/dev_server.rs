@@ -66,6 +66,7 @@ use crate::config_store_limits::ConfigStoreLimits;
 use crate::connection::{ConnectionExit, serve_http1_with_shutdown};
 use crate::geo::NativeGeo;
 use crate::ingress_config::AxumIngressConfig;
+use crate::ja4::TrustedJa4Header;
 use crate::key_value_store::PersistentKvStore;
 use crate::native_stores::{self, NativeSourcePlan, NativeStoreOverrides, NativeStoreSource};
 use crate::outbound::AxumOutboundClient;
@@ -196,6 +197,14 @@ impl AxumDevServer {
             future::pending::<()>(),
             async move { prepare_transport(app, stores.into(), json_body_limit, native) },
         )
+    }
+
+    /// Reads the client's JA4 from a trusted TLS-terminating proxy's header.
+    #[must_use]
+    #[inline]
+    pub fn with_trusted_ja4_header(mut self, config: TrustedJa4Header) -> Self {
+        self.native.ja4 = Some(config);
+        self
     }
 
     /// Uses an explicit incoming-proxy policy, ignoring ambient proxy settings.
@@ -515,6 +524,7 @@ fn serve_local(
 struct NativeHosting {
     diagnostics: NativeDiagnosticsHandle,
     geo: NativeGeo,
+    ja4: Option<TrustedJa4Header>,
     policy: TrustedProxyPolicy,
     request_records: bool,
 }
@@ -526,6 +536,7 @@ impl Default for NativeHosting {
             policy: TrustedProxyPolicy::no_trust(),
             request_records: true,
             geo: NativeGeo::default(),
+            ja4: None,
         }
     }
 }
@@ -758,6 +769,9 @@ where
         native.geo,
     )
     .with_phase(reader.clone());
+    if let Some(config) = native.ja4 {
+        service = service.with_trusted_ja4_header(config);
+    }
     if let Some(registry) = stores.config {
         service = service.with_config_registry(registry);
     }
@@ -1111,6 +1125,7 @@ where
     let env = EnvConfig::from_vars(pairs);
     let limit = JsonBodyLimit::from_config(&env)?;
     let (policy, request_records) = native_settings(&env)?;
+    let ja4 = TrustedJa4Header::from_env(&env)?;
     Ok((
         env,
         limit,
@@ -1119,6 +1134,7 @@ where
             request_records,
             diagnostics: NativeDiagnosticsHandle::new(),
             geo: NativeGeo::default(),
+            ja4,
         },
     ))
 }
@@ -1301,6 +1317,7 @@ where
         policy: options.trusted_proxy_policy(),
         request_records: options.request_records(),
         geo,
+        ja4: TrustedJa4Header::from_env(options.env_config())?,
     };
     run_local(
         ListenerSource::Bind(options.addr()),
@@ -3744,6 +3761,58 @@ mod integration_tests {
         assert_eq!(response.text().await.unwrap(), "hello from dev server");
 
         server.handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_reads_ja4_only_from_trusted_proxy_peers() {
+        use edgezero_core::ja4::{CapturedJa4, Ja4Source, Ja4Unavailable};
+
+        async fn ja4_state(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+            Ok(match ctx.ja4() {
+                Some(CapturedJa4::Captured {
+                    fingerprint,
+                    source: Ja4Source::TrustedProxyHeader,
+                }) if fingerprint.as_str() == "t13d1516h2_8daaf6152771_e5627efa2ab1" => "captured",
+                Some(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed)) => "not_exposed",
+                _ => "unexpected",
+            })
+        }
+
+        // The test client connects from loopback, so only the first policy trusts it.
+        for (trusted_proxies, expected) in
+            [("127.0.0.0/8", "captured"), ("192.0.2.0/24", "not_exposed")]
+        {
+            let listener = TokioTcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            let config = AxumDevServerConfig {
+                addr,
+                enable_ctrl_c: false,
+                ingress: AxumIngressConfig::default(),
+            };
+            let trusted = TrustedJa4Header::parse("x-ja4", trusted_proxies)
+                .expect("should parse trusted proxy config");
+            let server = AxumDevServer::with_config(
+                App::new(RouterService::builder().get("/ja4", ja4_state).build()),
+                config,
+            )
+            .with_trusted_ja4_header(trusted);
+            let handle = tokio::spawn(async move {
+                let _result = server.serve(listener, future::pending()).await;
+            });
+
+            let client = reqwest::Client::new();
+            let url = format!("http://{addr}/ja4");
+            let response = send_with_retry(&client, |http_client| {
+                http_client
+                    .get(url.as_str())
+                    .header("x-ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1")
+            })
+            .await;
+            assert_eq!(response.text().await.expect("body"), expected);
+            handle.abort();
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
