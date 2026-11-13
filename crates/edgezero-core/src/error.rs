@@ -5,6 +5,7 @@ use serde_path_to_error::Error as SerdePathError;
 use thiserror::Error;
 
 use crate::body::Body;
+use crate::config_diagnostics::{ValidationDiagnostic, ValidationReport};
 use crate::config_store::ConfigStoreError;
 use crate::http::{
     HeaderValue, Method, Response, StatusCode,
@@ -24,6 +25,11 @@ pub enum EdgeError {
     /// `"config_out_of_date"`, carries `Retry-After: 60`.
     #[error("config out of date: {message}")]
     ConfigOutOfDate { message: String, field_path: String },
+    /// Typed app-config refusal with explicitly approved operator diagnostics.
+    /// Public rendering is identical to `ConfigOutOfDate`; details are available
+    /// through `validation_diagnostics`, `operator_message`, and safe `Debug`.
+    #[error("config out of date: {}", report.public_message())]
+    ConfigValidation { report: ValidationReport },
     #[error("internal error: {source}")]
     Internal {
         #[from]
@@ -100,6 +106,17 @@ impl EdgeError {
         }
     }
 
+    /// Build a fail-closed app-config error from a sanitized report.
+    #[must_use]
+    #[inline]
+    pub fn config_validation(report: ValidationReport) -> Self {
+        if report.diagnostics().is_empty() {
+            Self::config_out_of_date(report.public_message(), report.field_path())
+        } else {
+            Self::ConfigValidation { report }
+        }
+    }
+
     /// Typed access to the wrapped [`AnyError`] for `EdgeError::Internal`.
     ///
     /// Renamed away from `source` to avoid shadowing
@@ -113,6 +130,7 @@ impl EdgeError {
             EdgeError::Internal { source } => Some(source),
             EdgeError::BadRequest { .. }
             | EdgeError::ConfigOutOfDate { .. }
+            | EdgeError::ConfigValidation { .. }
             | EdgeError::NotFound { .. }
             | EdgeError::NotImplemented { .. }
             | EdgeError::MethodNotAllowed { .. }
@@ -134,7 +152,9 @@ impl EdgeError {
     fn kind_str(&self) -> &'static str {
         match self {
             EdgeError::BadRequest { .. } => "bad_request",
-            EdgeError::ConfigOutOfDate { .. } => "config_out_of_date",
+            EdgeError::ConfigOutOfDate { .. } | EdgeError::ConfigValidation { .. } => {
+                "config_out_of_date"
+            }
             EdgeError::Internal { .. } => "internal",
             EdgeError::MethodNotAllowed { .. } => "method_not_allowed",
             EdgeError::NotFound { .. } => "not_found",
@@ -153,6 +173,7 @@ impl EdgeError {
             | EdgeError::Validation { message }
             | EdgeError::NotImplemented { message }
             | EdgeError::ServiceUnavailable { message } => message.clone(),
+            EdgeError::ConfigValidation { report } => report.public_message(),
             EdgeError::NotFound { path } => format!("no route matched path: {path}"),
             EdgeError::MethodNotAllowed { method, allowed } => {
                 format!("method {method} not allowed; allowed: {allowed}")
@@ -198,6 +219,23 @@ impl EdgeError {
         }
     }
 
+    /// Safe operator view, including approved config diagnostics when present.
+    #[must_use]
+    #[inline]
+    pub fn operator_message(&self) -> String {
+        match self {
+            Self::ConfigValidation { report } => report.operator_message(),
+            Self::BadRequest { .. }
+            | Self::ConfigOutOfDate { .. }
+            | Self::Internal { .. }
+            | Self::MethodNotAllowed { .. }
+            | Self::NotFound { .. }
+            | Self::NotImplemented { .. }
+            | Self::ServiceUnavailable { .. }
+            | Self::Validation { .. } => self.message(),
+        }
+    }
+
     #[inline]
     pub fn service_unavailable<S>(message: S) -> Self
     where
@@ -213,9 +251,9 @@ impl EdgeError {
     pub fn status(&self) -> StatusCode {
         match self {
             EdgeError::BadRequest { .. } => StatusCode::BAD_REQUEST,
-            EdgeError::ConfigOutOfDate { .. } | EdgeError::ServiceUnavailable { .. } => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            EdgeError::ConfigOutOfDate { .. }
+            | EdgeError::ConfigValidation { .. }
+            | EdgeError::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             EdgeError::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             EdgeError::NotFound { .. } => StatusCode::NOT_FOUND,
             EdgeError::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
@@ -231,6 +269,22 @@ impl EdgeError {
     {
         EdgeError::Validation {
             message: message.into(),
+        }
+    }
+    /// Approved diagnostics for operator use. Empty for generic errors.
+    #[must_use]
+    #[inline]
+    pub fn validation_diagnostics(&self) -> &[ValidationDiagnostic] {
+        match self {
+            Self::ConfigValidation { report } => report.diagnostics(),
+            Self::BadRequest { .. }
+            | Self::ConfigOutOfDate { .. }
+            | Self::Internal { .. }
+            | Self::MethodNotAllowed { .. }
+            | Self::NotFound { .. }
+            | Self::NotImplemented { .. }
+            | Self::ServiceUnavailable { .. }
+            | Self::Validation { .. } => &[],
         }
     }
 }
@@ -250,7 +304,10 @@ impl IntoResponse for EdgeError {
     #[inline]
     fn into_response(self) -> Result<Response, EdgeError> {
         let kind = self.kind_str();
-        let is_config_out_of_date = matches!(self, EdgeError::ConfigOutOfDate { .. });
+        let is_config_out_of_date = matches!(
+            self,
+            EdgeError::ConfigOutOfDate { .. } | EdgeError::ConfigValidation { .. }
+        );
         // `ConfigOutOfDate { field_path: String::new(), .. }` (the missing-blob
         // path) must OMIT the `field_path` JSON key entirely, not emit
         // `"field_path": ""`. Per spec 6.3.1.
@@ -258,8 +315,12 @@ impl IntoResponse for EdgeError {
             EdgeError::ConfigOutOfDate { field_path, .. } if !field_path.is_empty() => {
                 Some(field_path.as_str())
             }
+            EdgeError::ConfigValidation { report } if !report.field_path().is_empty() => {
+                Some(report.field_path())
+            }
             EdgeError::BadRequest { .. }
             | EdgeError::ConfigOutOfDate { .. }
+            | EdgeError::ConfigValidation { .. }
             | EdgeError::Internal { .. }
             | EdgeError::MethodNotAllowed { .. }
             | EdgeError::NotFound { .. }
@@ -374,6 +435,7 @@ mod tests {
             | EdgeError::NotFound { .. }
             | EdgeError::NotImplemented { .. }
             | EdgeError::ServiceUnavailable { .. }
+            | EdgeError::ConfigValidation { .. }
             | EdgeError::Validation { .. } => panic!("expected ConfigOutOfDate"),
         }
     }
@@ -424,6 +486,7 @@ mod tests {
             | EdgeError::NotFound { .. }
             | EdgeError::NotImplemented { .. }
             | EdgeError::ServiceUnavailable { .. }
+            | EdgeError::ConfigValidation { .. }
             | EdgeError::Validation { .. } => panic!("expected ConfigOutOfDate"),
         }
     }
@@ -478,6 +541,7 @@ mod tests {
             | EdgeError::NotFound { .. }
             | EdgeError::NotImplemented { .. }
             | EdgeError::ServiceUnavailable { .. }
+            | EdgeError::ConfigValidation { .. }
             | EdgeError::Validation { .. } => panic!("expected ConfigOutOfDate"),
         }
     }
@@ -517,6 +581,7 @@ mod tests {
             | EdgeError::NotFound { .. }
             | EdgeError::NotImplemented { .. }
             | EdgeError::ServiceUnavailable { .. }
+            | EdgeError::ConfigValidation { .. }
             | EdgeError::Validation { .. } => panic!("expected ConfigOutOfDate"),
         }
     }

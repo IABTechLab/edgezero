@@ -108,6 +108,12 @@ jobs:
           --manifest-path tests/fixtures/reusable-app/Cargo.toml
           -p fixture-axum
 
+      # Workspace tests enable test-utils through adapter dev-dependencies.
+      # Keep the compiled-implementation refusal control in a separate invocation.
+      - name: Test app-config refusal without compiled implementation
+        if: matrix.suite == 'workspace'
+        run: cargo test -p edgezero-core --no-default-features --lib runtime_approved_diagnostic_tracks_compiled_availability
+
       - name: Run workspace tests
         if: matrix.suite == 'workspace'
         run: cargo test --workspace --all-targets

@@ -281,6 +281,85 @@ let cfg: MyAppConfig =
 The function deserialises, runs the `validator` rules (e.g.
 `#[validate(range(...))]`), and returns the typed struct.
 
+### Safe operator validation diagnostics
+
+Runtime extraction and typed CLI `config validate`, `config push`, and `config diff`
+never print validator messages or parameter maps. By default they report a generic
+failure and redact validator field names, since a custom validator may use a
+stored map key as a field name. Numeric list positions can remain visible.
+
+To approve an operator explanation, register a fixed structural path, code, and
+explanation on the **root** config type:
+
+```rust
+use edgezero_core::config_diagnostics::{ApprovedDiagnostic, ValidationPathSegment};
+use serde::{Deserialize, Serialize};
+use validator::{Validate, ValidationError};
+
+const DIAGNOSTICS: &[ApprovedDiagnostic] = &[ApprovedDiagnostic {
+    path: &[ValidationPathSegment::Field("implementation")],
+    code: "implementation_unavailable",
+    explanation: "Enable Cargo feature bidder-x and rebuild both CLI and serving guest.",
+}];
+
+#[derive(Deserialize, Serialize, Validate, edgezero_core::AppConfig)]
+#[app_config(diagnostics = DIAGNOSTICS)]
+struct Policy {
+    #[validate(custom(function = "implementation_available"))]
+    implementation: String,
+}
+
+fn implementation_available(value: &str) -> Result<(), ValidationError> {
+    if value == "bidder-x" && !cfg!(feature = "bidder-x") {
+        return Err(ValidationError::new("implementation_unavailable"));
+    }
+    Ok(())
+}
+```
+
+The feature in this example belongs to the consuming application. Registry strings
+must be reviewed, compiled declarations: never construct them from configuration,
+secrets, rejected URLs, or validator parameters. Matching requires the exact code
+and complete path; a matching code elsewhere does not approve a diagnostic.
+Use `ValidationPathSegment::Each` for a numeric list position, for example
+`[Field("bidders"), Each, Field("implementation")]`. Wildcards never match string
+map keys. Nested diagnostics must be registered with their full path at the root.
+Handwritten `AppConfigMeta` implementations can override `validation_diagnostics()`;
+its default is an empty registry.
+
+The shared sanitizer inspects the existing validation result without another store
+read, policy parse, or validation call. Runtime validates **resolved secrets**; CLI
+commands still skip secret-field rules while those fields contain key names. CLI
+success cannot certify a guest built with different Cargo features. A missing
+implementation requires rebuilding both binaries with matching features; pushing
+configuration again cannot add code to the guest.
+
+Approved failures use `EdgeError::ConfigValidation`; unapproved failures retain
+`ConfigOutOfDate`. Applications opting in should account for the new variant and
+use `err.validation_diagnostics()` or `err.operator_message()` for operator output.
+`RequestLogger` uses the operator view. `message()`, `Display`, and the HTTP response
+stay coarse: status 503, kind `config_out_of_date`, and `Retry-After: 60`, without
+approved codes or explanations. `Debug` includes the safe report, never the raw
+validation error. This policy concerns typed validation failures; it does not make
+arbitrary application errors or local loader errors safe to log.
+
+| Diagnostic limit                                         | Maximum |
+| -------------------------------------------------------- | ------: |
+| Registry entries                                         |      64 |
+| Approved diagnostics per failure                         |       8 |
+| Code bytes (ASCII letters, digits, underscore)           |      64 |
+| Single-line explanation bytes                            |     512 |
+| Rendered path bytes                                      |     256 |
+| Path depth                                               |      32 |
+| Visited validation containers, entries, and field errors |   1,024 |
+
+Field declarations accept ASCII letters, digits, underscores, and hyphens. Invalid
+or oversized entries are ignored; a registry exceeding 64 entries is ignored in
+full. Oversized raw keys are omitted. Diagnostic collection stops at its traversal
+or count limit. Every such case remains a validation **failure**, with generic
+reporting where no approved diagnostic is retained. Explanations are never
+truncated. Existing extraction byte/depth/node limits and deadlines are unchanged.
+
 ### Secret annotations
 
 | Attribute              | Meaning                                                                                        |
