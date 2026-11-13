@@ -67,14 +67,17 @@ Add `PreDispatchHook` and `BoxPreDispatchHook` in `crates/edgezero-core/src/rout
 pub trait PreDispatchHook: Send + Sync + 'static {
     async fn handle(
         &self,
-        request: &mut Request,
+        request: &mut PreDispatchRequest,
     ) -> Result<Option<Response>, EdgeError>;
 }
 
 pub type BoxPreDispatchHook = Arc<dyn PreDispatchHook>;
 ```
 
-`Request`/`Response` are existing `edgezero_core::http` aliases; the hook future has no Send requirement. Use the existing async-trait dependency. New public items receive the repository's normal documentation.
+`PreDispatchRequest` is the protected core request view; `Response` is the existing
+`edgezero_core::http` alias. This is a hard cut from mutable raw `Request` hooks:
+no compatibility implementation exposes unrestricted body replacement. The hook
+future has no Send requirement. Use the existing async-trait dependency.
 
 Builder methods `pre_dispatch_hook<H: PreDispatchHook>(hook: H)` and `pre_dispatch_hook_arc(hook: BoxPreDispatchHook)` install one optional hook. Default is None. Repeated registration panics during router construction, so another registration cannot silently remove an authentication gate. `RouterService` clones share the same Arc-backed instance.
 
@@ -95,12 +98,18 @@ if let Some(hook) = &self.pre_dispatch_hook {
 }
 ```
 
-The router snapshots the method/path before the hook and validates them after continuation. Only then may it call `find_route`, insert introspection/state, build `RequestContext` or run middleware.
+The router snapshots method/path before the hook and validates them after continuation,
+then rechecks the normalized head against the captured application ingress limits.
+Only then may it call `find_route` or insert introspection/state and run middleware.
+The hook and routed handler share one body cell. Bounded cached reads, buffered
+transformations with explicit input/output limits, and synchronous per-chunk mapping
+preserve original input accounting, source ownership and the absolute read deadline.
+No raw body extraction or arbitrary replacement stream is available to hooks.
 
 ### Result contract
 
-- `Ok(Some(response))`: terminal core response returned unchanged. No route matching, state/introspection injection, `RequestContext`, route middleware or handler follows.
-- `Ok(None)`: continue with modified headers, extensions, remaining body and URI query, preserving the method and URI path. Changing either routing input returns an internal error before lookup or lifecycle work. The consumer requires reserved requests to terminate locally and other paths to continue normally; it does not require method/path rewriting.
+- `Ok(Some(response))`: terminal core response returned unchanged unless a fixed admission body-policy violation has already occurred. No route matching, state/introspection injection, route middleware or handler follows. Unread terminal responses remain zero-read.
+- `Ok(None)`: continue with modified headers, extensions, bounded transformed body and URI query, preserving method/path. Head validation uses immutable admission limits. A fixed fallback input overflow or timeout wins even if the hook swallows its read error; shrinking the body cannot hide original input overflow.
 - `Err(error)`: direct `Service::call` propagates the existing `EdgeError`; existing `RouterService::oneshot` renders it through `IntoResponse`. Neither dispatches fallback routes or silently continues. Return `Some(Response)` when exact consumer-specific error headers/body are required.
 - No hook: retain all current routing/status/middleware behavior.
 - Request cancellation: follow the existing future/drop behavior; introduce no tasks, timers or background work.

@@ -1,0 +1,709 @@
+{
+  "evidence_scope": "local-working-tree-characterization",
+  "qualification": false,
+  "source_revision": "22c6386ca6bcd65fd80b26b6eee69a969680048e",
+  "source_build_id": "6c0c4d25399f0cc7bb5d60c44dda592916f3194648665f56acb0755b735db3a8",
+  "platform": "Linux/aarch64",
+  "rust": "1.98.1",
+  "spin": "4.1.0 (c0b3726)",
+  "spin_sdk": {
+    "version": "7.0.0",
+    "revision": "6c59ed5b4fcb377072763aee0b27a3abdd8edb72",
+    "wasip3": "0.10.0",
+    "wit_bindgen": "0.63.0"
+  },
+  "spin_archive_sha256": "b251a29d50fa5e23ac92497d0dd995ce694f79c420c501b4bee1372379c3fd29",
+  "spin_binary_sha256": "22d274955e2d001cf6cfffc5344603cb4f2b18c377e34e488711722c80320386",
+  "whole_suite": {
+    "status": "fail",
+    "exit_code": 1,
+    "passed": 9,
+    "failed": 11,
+    "failures": [
+      {
+        "event": "lifetime-case",
+        "case": "slow-origin",
+        "error": "origin head missed scenario time: measured 706542 us, expected 700000 +/- 5000 us"
+      },
+      {
+        "event": "lifetime-case",
+        "case": "timeout-before-cutoff",
+        "error": "timeout-case arrival elapsed changed: measured 151839 us, expected 146000 +/- 5000 us"
+      },
+      {
+        "event": "lifetime-case",
+        "case": "fast-origin",
+        "error": "mediator deadline was extended: measured 540591 us, expected 534000 +/- 5000 us"
+      },
+      {
+        "event": "lifetime-case",
+        "case": "caps-while-waiting",
+        "error": "caps batch missed 34 ms: measured 40407 us, expected 34000 +/- 5000 us"
+      },
+      {
+        "event": "lifetime-case",
+        "case": "batch-write-deadline",
+        "error": "slot did not use original batch start"
+      },
+      {
+        "event": "lifetime-case",
+        "case": "batch-cancel",
+        "error": "completed slot did not use original batch start"
+      },
+      {
+        "event": "lifetime-case",
+        "case": "body-check",
+        "error": "completed slot did not use original batch start"
+      },
+      {
+        "event": "response-cleanup-case",
+        "case": "response-owned-cleanup-disconnect",
+        "error": "wire: original response-owned setup budgets or batch entry were substituted; native: missing, duplicate or reordered native source operations"
+      },
+      {
+        "event": "response-cleanup-case",
+        "case": "response-owned-cleanup-write-deadline",
+        "error": "wire: missing, foreign, duplicate or reordered response cleanup stage; native: missing, duplicate or reordered native source operations"
+      },
+      {
+        "event": "response-cleanup-case",
+        "case": "response-owned-cleanup-source-error",
+        "error": "wire: missing, foreign, duplicate or reordered response cleanup stage; native: missing, duplicate or reordered native source operations"
+      },
+      {
+        "event": "response-cleanup-case",
+        "case": "response-owned-cleanup-cancel",
+        "error": "wire: wire: missing validated prefix or intentional abort; native: missing, foreign, duplicate or reordered response cleanup stage; native: missing, duplicate or reordered native source operations"
+      }
+    ]
+  },
+  "raw_artifacts": "/private/tmp/pr275-linux-connect.7Kc8wY/runs/spin-linux",
+  "connect": {
+    "adapter": "spin",
+    "certain_fault_interval_us": [3639, 205284],
+    "client_error": null,
+    "clock_sync_proven": false,
+    "error": null,
+    "event": "connect-timeout-case",
+    "fault": {
+      "accept_calls": 0,
+      "fillers": 8,
+      "kernel": "7.0.14-linuxkit",
+      "kind": "linux-loopback-listen-backlog-saturation",
+      "listen_backlog": 1,
+      "max_owned_sockets": 9,
+      "target": "127.0.0.1:33605"
+    },
+    "leader_start_ticks": 5846429,
+    "listener_inode": 4455341,
+    "pid": 3321,
+    "process_group": 3307,
+    "qualification": false,
+    "report": {
+      "activity": {
+        "batches": 0,
+        "begins": 0,
+        "dispatches": 3,
+        "support": [
+          {
+            "accepted": true,
+            "mode": "Send",
+            "optimizer": false
+          },
+          {
+            "accepted": true,
+            "mode": "Send",
+            "optimizer": false
+          },
+          {
+            "accepted": true,
+            "mode": "Send",
+            "optimizer": false
+          }
+        ]
+      },
+      "adapter": "spin",
+      "after": null,
+      "before": null,
+      "case": "connect-timeout",
+      "qualification": false,
+      "steps": [
+        {
+          "after": null,
+          "before": null,
+          "native": {
+            "attachments": 1,
+            "heads": 1,
+            "invalid": false,
+            "operation_acquisitions": 1,
+            "operation_polls": 2,
+            "operation_releases": 1,
+            "preparations": 1,
+            "prepared": {
+              "mode": "Send",
+              "target": "http://127.0.0.1:34807/lifetimes/18e49af7cda035fa-7-19/connect-timeout/start"
+            },
+            "reads": 0,
+            "source_acquisitions": 1,
+            "source_releases": 1,
+            "waits": 0
+          },
+          "outcome": {
+            "bytes": [],
+            "headers": [["x-edgezero-proxy", [115, 112, 105, 110]]],
+            "status": 204
+          },
+          "settings": {
+            "connect_ms": null,
+            "timeout_ms": 1000
+          },
+          "step": "connect-start",
+          "uri": "http://127.0.0.1:34807/lifetimes/18e49af7cda035fa-7-19/connect-timeout/start"
+        },
+        {
+          "after": null,
+          "before": null,
+          "elapsed_us": 202813,
+          "native": {
+            "attachments": 1,
+            "heads": 0,
+            "invalid": false,
+            "operation_acquisitions": 1,
+            "operation_polls": 3,
+            "operation_releases": 1,
+            "preparations": 1,
+            "prepared": {
+              "mode": "Send",
+              "target": "http://127.0.0.1:33605/transport/plain/18e49af7cda035fa-7-19"
+            },
+            "reads": 0,
+            "source_acquisitions": 0,
+            "source_releases": 0,
+            "waits": 0
+          },
+          "outcome": {
+            "error": {
+              "cause": "ConnectTimeout",
+              "kind": "gateway_timeout",
+              "provider": "Spin { phase: Send, cause: ConnectionTimeout }",
+              "reason": null,
+              "rejection": null,
+              "status": 504,
+              "upload_origin": null
+            }
+          },
+          "settings": {
+            "connect_ms": 200,
+            "timeout_ms": 2000
+          },
+          "step": "connect-timeout",
+          "uri": "http://127.0.0.1:33605/transport/plain/18e49af7cda035fa-7-19"
+        },
+        {
+          "after": null,
+          "before": null,
+          "native": {
+            "attachments": 1,
+            "heads": 1,
+            "invalid": false,
+            "operation_acquisitions": 1,
+            "operation_polls": 3,
+            "operation_releases": 1,
+            "preparations": 1,
+            "prepared": {
+              "mode": "Send",
+              "target": "http://127.0.0.1:34807/lifetimes/18e49af7cda035fa-7-19/connect-timeout/done"
+            },
+            "reads": 2,
+            "source_acquisitions": 1,
+            "source_releases": 1,
+            "waits": 0
+          },
+          "outcome": {
+            "bytes": [111, 107],
+            "headers": [
+              ["content-length", [50]],
+              ["x-edgezero-proxy", [115, 112, 105, 110]]
+            ],
+            "status": 200
+          },
+          "settings": {
+            "connect_ms": null,
+            "timeout_ms": 1000
+          },
+          "step": "recovery",
+          "uri": "http://127.0.0.1:34807/lifetimes/18e49af7cda035fa-7-19/connect-timeout/done"
+        }
+      ],
+      "token": "18e49af7cda035fa-7-19"
+    },
+    "same_rate_assumed": true,
+    "sample_error": null,
+    "samples": [
+      {
+        "at_us": 8470,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 7245,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 14851,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 13679,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 21950,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 20767,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 28563,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 27544,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 35445,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 34254,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 41787,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 40547,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 48484,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 47353,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 55717,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 54549,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 62805,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 61590,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 70523,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 68184,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 77728,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 76595,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 85745,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 83298,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 94060,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 91331,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 102188,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 99737,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 112171,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 107568,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 120651,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 117962,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 128868,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 126184,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 136962,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 134577,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 145191,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 142596,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 153245,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 150881,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 162475,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 159584,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 170348,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 167964,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 178660,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 176147,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 186407,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 184255,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 195401,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 192160,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      },
+      {
+        "at_us": 204125,
+        "leader_start_ticks": 5846429,
+        "listener_inode": 4455341,
+        "pid": 3321,
+        "process_group": 3307,
+        "read_started_us": 201788,
+        "socket": {
+          "inode": 4448928,
+          "local": "127.0.0.1:42628",
+          "remote": "127.0.0.1:33605",
+          "state": 2
+        },
+        "start_ticks": 5846441
+      }
+    ],
+    "sentinel": "ez_4_acceptance_06_spin",
+    "source": [
+      {
+        "at_us": 2429,
+        "case": "connect-timeout",
+        "guest_at_us": 21,
+        "op": "request",
+        "role": "start",
+        "token": "18e49af7cda035fa-7-19"
+      },
+      {
+        "at_us": 2471,
+        "case": "connect-timeout",
+        "op": "write-started",
+        "role": "start",
+        "token": "18e49af7cda035fa-7-19"
+      },
+      {
+        "at_us": 2510,
+        "case": "connect-timeout",
+        "op": "head",
+        "role": "start",
+        "token": "18e49af7cda035fa-7-19"
+      },
+      {
+        "at_us": 2516,
+        "case": "connect-timeout",
+        "op": "closed",
+        "reason": "complete",
+        "role": "start",
+        "token": "18e49af7cda035fa-7-19"
+      },
+      {
+        "at_us": 206450,
+        "case": "connect-timeout",
+        "guest_at_us": 203971,
+        "op": "request",
+        "role": "done",
+        "token": "18e49af7cda035fa-7-19"
+      },
+      {
+        "at_us": 206633,
+        "case": "connect-timeout",
+        "op": "write-started",
+        "role": "done",
+        "token": "18e49af7cda035fa-7-19"
+      },
+      {
+        "at_us": 206692,
+        "case": "connect-timeout",
+        "op": "head",
+        "role": "done",
+        "token": "18e49af7cda035fa-7-19"
+      },
+      {
+        "at_us": 206706,
+        "bytes": [111, 107],
+        "case": "connect-timeout",
+        "op": "chunk",
+        "role": "done",
+        "token": "18e49af7cda035fa-7-19"
+      },
+      {
+        "at_us": 206720,
+        "case": "connect-timeout",
+        "op": "closed",
+        "reason": "complete",
+        "role": "done",
+        "token": "18e49af7cda035fa-7-19"
+      }
+    ],
+    "source_error": null,
+    "start_ticks": 5846441,
+    "status": "pass"
+  }
+}
