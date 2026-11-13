@@ -22,6 +22,8 @@ pub mod outbound;
 pub mod request;
 #[cfg(feature = "axum")]
 mod response;
+#[cfg(feature = "axum")]
+mod run_options;
 #[cfg(any(feature = "axum", feature = "cli"))]
 pub mod secret_env;
 #[cfg(feature = "axum")]
