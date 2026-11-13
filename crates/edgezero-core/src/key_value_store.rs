@@ -324,6 +324,15 @@ pub enum KvError {
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    /// The requested TTL exceeds the handle's portable policy cap.
+    #[error("TTL {requested:?} exceeds maximum of {maximum:?}")]
+    TtlLimitExceeded {
+        /// The TTL requested by the caller.
+        requested: Duration,
+        /// The maximum TTL allowed by the handle, not a provider capability.
+        maximum: Duration,
+    },
+
     /// The KV store backend is temporarily unavailable.
     #[error("kv store unavailable")]
     Unavailable,
@@ -375,7 +384,10 @@ impl KvHandle {
     /// Maximum number of keys returned from a single page.
     pub const MAX_LIST_PAGE_SIZE: usize = 1_000;
 
-    /// Maximum TTL (1 year). Prevents overflow when adding to `SystemTime::now()`.
+    /// Portable policy cap of 365 days, not each provider's maximum capability.
+    ///
+    /// Larger TTLs return [`KvError::TtlLimitExceeded`] before reaching the
+    /// backend, protecting time arithmetic and provider TTL conversions.
     #[expect(
         clippy::duration_suboptimal_units,
         reason = "`Duration::from_days` is not stable in const context (1.98)"
@@ -660,7 +672,9 @@ impl KvHandle {
     /// Put raw bytes with a TTL.
     ///
     /// # Errors
-    /// Returns [`KvError::Validation`] for invalid input; [`KvError::Internal`] on backend failure.
+    /// Returns [`KvError::TtlLimitExceeded`] above [`Self::MAX_TTL`],
+    /// [`KvError::Validation`] for other invalid input, or a backend error
+    /// (including [`KvError::Unsupported`] when TTL writes are unavailable).
     #[inline]
     pub async fn put_bytes_with_ttl(
         &self,
@@ -683,7 +697,10 @@ impl KvHandle {
     /// Put a value with a TTL, serializing it to JSON.
     ///
     /// # Errors
-    /// Returns [`KvError`] if the value cannot be serialized or the backend rejects the write.
+    /// Returns [`KvError::TtlLimitExceeded`] above [`Self::MAX_TTL`],
+    /// [`KvError::Validation`] for other invalid input, [`KvError::Serialization`]
+    /// if serialization fails, or a backend error (including
+    /// [`KvError::Unsupported`] when TTL writes are unavailable).
     #[inline]
     pub async fn put_with_ttl<T>(&self, key: &str, value: &T, ttl: Duration) -> Result<(), KvError>
     where
@@ -801,9 +818,10 @@ impl KvHandle {
             )));
         }
         if ttl > Self::MAX_TTL {
-            return Err(KvError::Validation(format!(
-                "TTL {ttl:?} exceeds maximum of 1 year"
-            )));
+            return Err(KvError::TtlLimitExceeded {
+                requested: ttl,
+                maximum: Self::MAX_TTL,
+            });
         }
         Ok(())
     }
@@ -829,6 +847,9 @@ impl From<KvError> for EdgeError {
             KvError::Validation(msg) => {
                 EdgeError::bad_request(format!("kv validation error: {msg}"))
             }
+            KvError::TtlLimitExceeded { requested, maximum } => EdgeError::bad_request(format!(
+                "kv validation error: TTL {requested:?} exceeds maximum of {maximum:?}"
+            )),
             KvError::Serialization(msg) => {
                 EdgeError::internal(anyhow::anyhow!("kv serialization error: {msg}"))
             }
@@ -1000,9 +1021,11 @@ mod tests {
 
     use super::*;
     use crate::http::StatusCode;
+    use crate::store_registry::KvRegistry;
     use futures::executor::block_on;
     use std::collections::HashMap;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::SystemTime;
 
     #[derive(serde::Serialize, serde::Deserialize, PartialEq, Debug)]
@@ -1014,6 +1037,7 @@ mod tests {
     // Uses `SystemTime` instead of `Instant` for WASM compatibility.
     struct MockStore {
         data: Mutex<HashMap<String, (Bytes, Option<SystemTime>)>>,
+        ttl_write_calls: AtomicUsize,
     }
 
     #[async_trait(?Send)]
@@ -1079,6 +1103,7 @@ mod tests {
             value: Bytes,
             ttl: Duration,
         ) -> Result<(), KvError> {
+            self.ttl_write_calls.fetch_add(1, Ordering::Relaxed);
             let mut data = self.data.lock().unwrap();
             let expires_at = SystemTime::now()
                 .checked_add(ttl)
@@ -1092,6 +1117,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 data: Mutex::new(HashMap::new()),
+                ttl_write_calls: AtomicUsize::new(0),
             }
         }
     }
@@ -1245,6 +1271,31 @@ mod tests {
         let edge_err: EdgeError = kv_err.into();
         assert_eq!(edge_err.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(edge_err.message().contains("max_list_keys"));
+    }
+
+    #[test]
+    fn kv_error_ttl_limit_exceeded_converts_to_bad_request() {
+        let requested = KvHandle::MAX_TTL * 2;
+        let maximum = KvHandle::MAX_TTL;
+        let error = KvError::TtlLimitExceeded { requested, maximum };
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            format!("TTL {requested:?} exceeds maximum of {maximum:?}"),
+            "should identify requested TTL and cap in diagnostics"
+        );
+
+        let edge_error = EdgeError::from(error);
+        assert_eq!(
+            edge_error.status(),
+            StatusCode::BAD_REQUEST,
+            "should preserve HTTP 400 for excessive TTLs"
+        );
+        assert_eq!(
+            edge_error.message(),
+            format!("kv validation error: {message}"),
+            "should retain TTL limit details in the HTTP error"
+        );
     }
 
     #[test]
@@ -1616,9 +1667,136 @@ mod tests {
                 .put_with_ttl("long", &"val", KvHandle::MAX_TTL + Duration::from_secs(1))
                 .await
                 .unwrap_err();
-            assert!(matches!(err, KvError::Validation(_)));
+            assert!(matches!(err, KvError::TtlLimitExceeded { .. }));
             assert!(format!("{err}").contains("exceeds maximum"));
         });
+    }
+
+    #[test]
+    fn named_handle_reports_distinguishable_ttl_limit() {
+        let store = Arc::new(MockStore::new());
+        let registry = KvRegistry::single_id(
+            "events".to_owned(),
+            KvHandle::new(Arc::<MockStore>::clone(&store)),
+        );
+        let kv = registry
+            .named("events")
+            .expect("should resolve named store");
+
+        block_on(async {
+            for ttl in [
+                KvHandle::MAX_TTL + Duration::from_nanos(1),
+                KvHandle::MAX_TTL * 2,
+                Duration::MAX,
+            ] {
+                let typed_error = kv
+                    .put_with_ttl("typed", &42_i32, ttl)
+                    .await
+                    .expect_err("should reject excessive TTL");
+                let bytes_error = kv
+                    .put_bytes_with_ttl("bytes", Bytes::from_static(b"value"), ttl)
+                    .await
+                    .expect_err("should reject excessive TTL");
+                for error in [typed_error, bytes_error] {
+                    let KvError::TtlLimitExceeded { requested, maximum } = error else {
+                        panic!("should return a structured TTL limit error: {error}");
+                    };
+                    assert_eq!(requested, ttl, "should report the exact requested TTL");
+                    assert_eq!(
+                        maximum,
+                        KvHandle::MAX_TTL,
+                        "should report the applicable cap"
+                    );
+                }
+            }
+        });
+
+        assert_eq!(
+            store.ttl_write_calls.load(Ordering::Relaxed),
+            0,
+            "should reject excessive TTLs before invoking the backend"
+        );
+        assert!(
+            store.data.lock().expect("should lock test data").is_empty(),
+            "should not store rejected writes"
+        );
+    }
+
+    #[test]
+    fn named_handle_accepts_ttl_boundaries() {
+        let store = Arc::new(MockStore::new());
+        let registry = KvRegistry::single_id(
+            "events".to_owned(),
+            KvHandle::new(Arc::<MockStore>::clone(&store)),
+        );
+        let kv = registry
+            .named("events")
+            .expect("should resolve named store");
+
+        block_on(async {
+            for ttl in [KvHandle::MIN_TTL, KvHandle::MAX_TTL] {
+                kv.put_with_ttl("typed", &42_i32, ttl)
+                    .await
+                    .expect("should accept TTL boundary");
+                assert_eq!(
+                    kv.get::<i32>("typed").await.expect("should read value"),
+                    Some(42_i32),
+                    "should store typed value at TTL boundary"
+                );
+                kv.put_bytes_with_ttl("bytes", Bytes::from_static(b"value"), ttl)
+                    .await
+                    .expect("should accept TTL boundary");
+                assert_eq!(
+                    kv.get_bytes("bytes").await.expect("should read bytes"),
+                    Some(Bytes::from_static(b"value")),
+                    "should store bytes at TTL boundary"
+                );
+            }
+        });
+
+        assert_eq!(
+            store.ttl_write_calls.load(Ordering::Relaxed),
+            4,
+            "should delegate all writes at inclusive TTL boundaries"
+        );
+    }
+
+    #[test]
+    fn named_handle_rejects_ttl_below_minimum() {
+        let store = Arc::new(MockStore::new());
+        let registry = KvRegistry::single_id(
+            "events".to_owned(),
+            KvHandle::new(Arc::<MockStore>::clone(&store)),
+        );
+        let kv = registry
+            .named("events")
+            .expect("should resolve named store");
+        let ttl = KvHandle::MIN_TTL
+            .checked_sub(Duration::from_nanos(1))
+            .expect("should subtract one nanosecond from minimum TTL");
+
+        block_on(async {
+            let typed_error = kv
+                .put_with_ttl("typed", &42_i32, ttl)
+                .await
+                .expect_err("should reject TTL below minimum");
+            let bytes_error = kv
+                .put_bytes_with_ttl("bytes", Bytes::from_static(b"value"), ttl)
+                .await
+                .expect_err("should reject TTL below minimum");
+            for error in [typed_error, bytes_error] {
+                assert!(
+                    matches!(error, KvError::Validation(_)),
+                    "should preserve minimum TTL validation"
+                );
+            }
+        });
+
+        assert_eq!(
+            store.ttl_write_calls.load(Ordering::Relaxed),
+            0,
+            "should reject short TTLs before invoking the backend"
+        );
     }
 
     #[test]
