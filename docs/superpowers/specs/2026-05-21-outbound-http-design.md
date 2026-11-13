@@ -752,9 +752,9 @@ impl OutboundRequest {
  /// `host` from `req.headers`. `normalize_for_dispatch` re-strips
  /// `host` defensively as a safety net for callers that reached past
  /// `header(..)` via `headers_mut`;
- /// - `content-length` is dropped — the adapter sets it from the new body
- /// for `Body::Once`, or omits it (relying on chunked transfer) for
- /// `Body::Stream`.
+ /// - raw `content-length` is dropped. Buffered lengths are recomputed. A single valid,
+ /// non-nominated declaration without Transfer-Encoding is retained separately on a streamed
+ /// Body; Spin uses it for bounded native upload validation rather than forwarding raw framing.
  ///
  /// All other headers are preserved verbatim. Validates `uri` per `new`.
     pub fn from_request(request: Request, uri: Uri) -> Result<Self, EdgeError>;
@@ -1887,9 +1887,23 @@ rules end-to-end:
    override through Fetch headers but remains BestEffort until the deployed host-observation gate
    passes under the pinned SDK and compatibility date. `from_request` (§3.1.3) also drops raw
    `host`, so only the typed override can create a URI/wire-authority difference.
-5. Remove `content-length` — the adapter sets it from the body (length for
-   `Body::Once`; omitted for `Body::Stream`).
+5. Remove raw `content-length` — adapters derive buffered lengths from the body. Before
+   filtering, `from_request` alone may capture one decimal u64 declaration (optional SP/HTAB
+   around digits) for a streamed Body, provided no Transfer-Encoding or Content-Length
+   Connection nomination exists. Duplicates, comma lists, invalid/non-text/overflow values
+   supply no declaration; this does not replace ingress framing validation. Ordinary builder
+   headers cannot create the fact. Later normalization may clear it, never recapture it.
 6. Remove `transfer-encoding` — the adapter sets it per body type and HTTP version.
+
+The declaration is scalar, immutable public metadata owned by the Body. Unchanged Parts
+round-trips and ownership-only wrappers preserve it. Body replacement, JSON, raw payload/stream
+extraction into a new Body and redirect body rewrites cannot retain stale lengths. Spin emits
+the declared CL without TE and uses the shared `OutboundUploadCounter` before writes and at
+clean EOF. Upload overflow remains typed 413 with OutboundUpload origin; observed length
+overrun/short EOF is local BadRequest without fabricated provider details. Unknown streams
+remain unknown. No prebuffer or validation drain is introduced: an early response/ReaderGone
+abandons unread bytes, so equality applies only to observed chunks and clean EOF. Begin/Batch,
+GET/HEAD, paired deadlines, typed source errors and cancellation contracts do not change.
 
 Apps can therefore use `headers_mut()` and `from_request` freely; portability and
 framing safety are guaranteed by this final sweep, not by individual callers

@@ -23,6 +23,7 @@ pub enum BodyPayload {
 /// A buffered or locally streamed HTTP body with optional response-egress ownership.
 pub struct Body {
     egress_owner: Option<Box<OutboundScopeOwner>>,
+    forwarded_content_length: Option<u64>,
     payload: BodyPayload,
 }
 
@@ -91,6 +92,16 @@ impl Body {
         Self::from_bytes(Bytes::new())
     }
 
+    /// Syntax-validated length carried with an unchanged forwarded upload stream.
+    ///
+    /// This is a declaration, not evidence that the stream has been consumed or has
+    /// this length. Providers must validate consumed bytes before reporting completion.
+    #[must_use]
+    #[inline]
+    pub fn forwarded_content_length(&self) -> Option<u64> {
+        self.forwarded_content_length
+    }
+
     #[inline]
     pub fn from_bytes<B>(bytes: B) -> Self
     where
@@ -118,6 +129,7 @@ impl Body {
     ) -> Self {
         Self {
             egress_owner: egress_owner.map(Box::new),
+            forwarded_content_length: None,
             payload,
         }
     }
@@ -228,6 +240,11 @@ impl Body {
         T: Serialize,
     {
         serde_json::to_vec(value).map(Self::from_bytes)
+    }
+
+    #[inline]
+    pub(crate) fn set_forwarded_content_length(&mut self, length: Option<u64>) {
+        self.forwarded_content_length = length.filter(|_length| self.is_stream());
     }
 
     #[inline]
@@ -375,6 +392,7 @@ impl fmt::Debug for Body {
         f.debug_struct("Body")
             .field("payload", &self.payload)
             .field("egress_owner", &self.egress_owner.is_some())
+            .field("forwarded_content_length", &self.forwarded_content_length)
             .finish()
     }
 }
@@ -526,6 +544,26 @@ mod tests {
     }
 
     #[test]
+    fn ownership_only_wrapping_preserves_forwarded_length_without_polling() {
+        let mut body = Body::from_stream(stream::pending());
+        body.set_forwarded_content_length(Some(4096));
+        let owner = OutboundScopeOwner::response_body();
+        let scope = owner.scope();
+        let wrapped = body
+            .bind_outbound_scope(&scope)
+            .unwrap()
+            .attach_egress_owner(owner)
+            .unwrap();
+        assert_eq!(wrapped.forwarded_content_length(), Some(4096));
+        let (payload, transferred_owner) = wrapped.into_parts();
+        assert_eq!(
+            Body::from_parts(payload, transferred_owner).forwarded_content_length(),
+            None
+        );
+        assert_eq!(Body::empty().forwarded_content_length(), None);
+    }
+
+    #[test]
     fn attached_buffered_parts_preserve_bytes_and_exact_owner() {
         let bytes = Bytes::from(vec![b'x'; 32]);
         let original = bytes.as_ptr();
@@ -667,14 +705,14 @@ mod tests {
         let buffered_debug = format!("{buffered:?}");
         assert_eq!(
             buffered_debug,
-            "Body { payload: Once { len: 7 }, egress_owner: false }"
+            "Body { payload: Once { len: 7 }, egress_owner: false, forwarded_content_length: None }"
         );
 
         let stream = Body::stream(stream::iter(vec![Bytes::from_static(b"chunk")]));
         let stream_debug = format!("{stream:?}");
         assert_eq!(
             stream_debug,
-            "Body { payload: Stream, egress_owner: false }"
+            "Body { payload: Stream, egress_owner: false, forwarded_content_length: None }"
         );
     }
 

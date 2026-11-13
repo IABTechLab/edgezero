@@ -37,6 +37,7 @@ bytes = { workspace = true }
 flate2 = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
+fern = { workspace = true }
 log = { workspace = true }
 ctor = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

@@ -277,6 +277,8 @@ deploy = "wrangler deploy --cwd crates/app-demo-adapter-cloudflare"
 serve = "wrangler dev --cwd crates/app-demo-adapter-cloudflare"
 
 [adapters.cloudflare.logging]
+# Runtime filtering comes from EDGEZERO__LOGGING__LEVEL Worker bindings, not this table.
+# The standard runner installs console logging before assembly; boot Warn stays enabled.
 level = "info"
 
 [adapters.fastly.adapter]
@@ -314,4 +316,6 @@ deploy = "spin deploy --from crates/app-demo-adapter-spin"
 serve = "spin up --from crates/app-demo-adapter-spin --runtime-config-file crates/app-demo-adapter-spin/runtime-config.toml"
 
 [adapters.spin.logging]
+# Runtime filtering comes from EDGEZERO__LOGGING__LEVEL in the component environment.
+# The standard runner installs stderr logging; no logger setup belongs in this entrypoint.
 level = "info"

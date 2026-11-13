@@ -422,3 +422,136 @@ qualification claim. Keep all `qualification:false` dispositions and manual
 hosted gates open. The original PR branch and dirty worktree remain unchanged;
 remote replacement, new-head hosted checks and independent review acceptance
 are still outstanding.
+
+## Approved Managed Logging And Upload Framing Repairs (2026-11-13)
+
+AG approved both findings in PR comment `6863865880`, including the scoped
+stream-framing amendment, then explicitly requested a hard migration without
+compatibility wrappers. The starting head is `1467e28a`. Work stays in PR #275.
+
+Two read-only investigation/proposal agents independently mapped the logging
+and upload paths. Choose immutable per-instance managed logging, not concurrent
+filter reload. Associate a validated forwarding declaration with its Body, not
+request-only metadata that can become stale when public `Parts.body` is replaced.
+This adds scalar Body storage, whose native/WASM layout must be measured; it adds
+no buffer, allocation, identity token, transport, executor or public length setter.
+
+### Task 1: Managed Platform Logging
+
+Files: Cloudflare/Spin `src/logger.rs`, `src/lib.rs`, adapter manifests/locks;
+existing reusable assembly fixtures and Rust `src/runners/assembly.rs`.
+
+- [x] Add a failing isolated backend-installation/sink regression before implementation.
+- [x] Hard-cut to `init_logger(level)` with explicit errors. Reuse the existing
+      resolver, fern filtering and separate boot Warn target. Workers use the
+      console; Spin uses stderr. Identical repeated setup succeeds, changed
+      configuration or a foreign logger fails explicitly without reconfiguration.
+- [x] Resolve environment policy before assembly, reuse the snapshot for dispatch,
+      and propagate initialization failure. `owns_logging=true` changes neither
+      installation nor filters. No no-op compatibility initializer remains.
+- [x] Prove every level, boot warnings/errors under ordinary Off, repeated calls,
+      conflicts and owned logging. Extend existing Rust fixture supervision for
+      actual local Wrangler and Spin sink evidence, not an owned-fixture substitute.
+- [x] Update adapter/configuration guides, the guide-only four-backend table,
+      demo/templates and changelog. Add no manifest capability.
+
+### Task 2: Validated Forwarded Stream Length
+
+Files: core `src/body.rs`, `src/outbound.rs`, a co-located upload counter;
+Spin `src/outbound.rs`, `tests/sdk_resources.rs`; existing forwarding fixtures
+and Rust wire runner/origin.
+
+- [x] Reproduce loss of a 4096-byte declaration through actual SDK field preparation.
+- [x] Capture one valid streamed Content-Length only without Transfer-Encoding or
+      Connection nomination. Keep stripping raw CL/TE. Ambiguous/malformed input
+      supplies no declaration; retain existing ingress rejection and buffered
+      stale-framing behavior. Later normalization can invalidate, never recapture.
+- [x] Keep the declaration with its payload through ownership-only wrappers and
+      unchanged Parts round-trips. Replacement, JSON, transformations, raw payload
+      extraction and redirect rewrites must not retain stale declarations.
+- [x] Set Spin's wire CL from this metadata and replace its byte counter with one
+      shared scalar validator. Preserve upload-cap 413 precedence and typed source
+      errors; observed overrun fails before writing its chunk, short clean EOF fails
+      as local BadRequest without invented provider detail. Abort without a new drain.
+- [x] Preserve early response/ReaderGone semantics: unconsumed abandoned bytes have
+      no equality guarantee. No new prebuffering, stream eligibility for Begin/Batch,
+      or change to GET/HEAD rules, deadlines, cancellation or resource ownership.
+- [x] Add separately bounded 4096-byte known/unknown-length wire controls, short/long
+      synthetic sources and incremental/abort evidence. Do not enlarge the old
+      8-byte tests' limits or weaken their validators.
+- [x] Update the normative framing paragraphs/API approval record and current guides,
+      examples/templates and changelog; no provider qualification promotion.
+
+### Task 3: Verification And Publication
+
+- [x] Run focused red/green tests after each coherent code change, all five primary
+      Rust gates, strict harness/fixture/provider lint and `scripts/run_tests.sh`.
+      Run the local logging and forwarding controls through the existing Rust harness.
+- [x] Complete independent read-only verification and retain failed attempts and exact
+      runtime identities.
+- [ ] Commit and push normally to the existing PR branch; record the published SHA
+      in the separate replies below. Publication follows this validation checkpoint.
+- [ ] Reply separately to both findings with executed evidence. Leave review
+      acceptance, manual hosted qualification and deployment authorization separate.
+
+Baseline: the prior rebuilt source passed the complete prescribed suite and all
+three WASM Clippy targets. Its retained captures are supporting evidence, not a
+new execution or hosted qualification for this follow-up.
+
+### Focused Verification And Review
+
+Both original defects were reproduced before implementation: an isolated Spin logger emitted
+neither requested message, and actual Spin SDK field preparation omitted CL=4096. The repaired
+tests pass. Native/WASM Body measurements are 56/40 bytes respectively, with 16 inline bytes
+for the declaration and no metadata allocation. This is not a stable ABI promise.
+
+Two read-only reviewers checked separate logging/framing scopes. They found fixture ownership,
+saved-artifact coverage and live-peer test gaps; those were corrected and re-reviewed without
+remaining concrete defects. Overlapping-initialization and declared-redirect regressions pass.
+The full prescribed validation below was executed independently of these read-only reviews.
+
+Local supporting runs passed Spin assembly (including ten stderr logging cases), Cloudflare
+assembly (ten actual Wrangler logging cases) and the full Spin wire suite, including known /
+unknown 4096-byte uploads and five gated live-pump probes. Retain captures under
+`/private/tmp/pr275-logging-length-z2L3MA/`; all remain `qualification:false`.
+
+Retain earlier failures: missing first-response attestation on headerless Spin assembly errors;
+an unmatched wasm-bindgen CLI; a stale local Wrangler shim; an invalid test module-root path;
+and the runtime prohibition on intra-component resource-bearing future transfers. The assembly
+test now attests a healthy response first, without bypassing identity checks. Logging launches
+Wrangler's current generated index, not the compatibility shim. Local pump tests never read the
+unsupported completion future: length errors return while its peer remains live/unpolled, and
+real origin exchanges separately prove HTTP completion. No runtime/dependency pin, production
+framing guarantee, deadline, suppression rule or hosted gate was weakened.
+
+Full-suite validation also exposed incompatible test-workspace binding locks (ingress and
+production 0.2.128 versus reusable fixture 0.2.129). Align only the reusable fixture's nine-package
+binding family with the production lock, using Cargo's resolver and removing temporary resolver
+constraints afterward. Keep provider SDK/runtime and decoder pins unchanged; add no tool router,
+duplicate transport, permanent dependency or skipped gate. Re-run the complete prescribed suite
+and the actual logging controls with matching 0.2.128 tools. The earlier mismatched attempt is
+retained, not counted as passing.
+
+### Completed Validation Checkpoint
+
+The complete `scripts/run_tests.sh` run with production-aligned bindings exits zero:
+2,722 root workspace tests, 662 standalone harness tests, all four adapter CI integration
+suites, the generated project, the demo's 66 tests and three WASM checks, and outbound
+documentation contracts. The existing ignored tests retain their prescribed separate gates;
+no test was skipped to obtain this result. The fresh Cloudflare assembly run also exits zero
+with all ten actual Wrangler logging controls on the aligned binding graph.
+
+All five primary Rust gates pass. Strict standalone harness/fixture Clippy and all three
+provider WASM Clippy targets pass; final root Clippy, root formatting, new Spin wire-fixture
+WASM Clippy and `git diff --check` pass after alignment. Documentation format, lint and build
+pass. Retain the existing dependency audit warnings and `proc-macro-error2` future-compatibility
+notice; neither was suppressed or changed by this repair.
+
+Evidence remains under `/private/tmp/pr275-logging-length-z2L3MA/`, especially
+`full-suite-production-bindings.log`, `cloudflare-assembly-production-controller.log` and
+the `*-publication.log` final checks. The full-suite supporting runtime captures are
+`18e7be32ca9bea90-7390-0` (Axum), `18e7be4190994b08-81f0-0` (Fastly),
+`18e7be6772b8bad0-a470-0` (Cloudflare) and `18e7be70ac817d70-aeed-0` (Spin).
+These remain local supporting evidence with `qualification:false`, not deployment,
+hosted delivery certification or independent review acceptance. Publication and replies
+are the remaining steps at this checkpoint; their actual SHA belongs in the PR handoff.

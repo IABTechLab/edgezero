@@ -13,7 +13,7 @@ logger, read process environment, or change global filters. Manifest logging
 resolution remains separate and is not implicitly applied by this helper.
 
 `BOOT_LOG_TARGET` names `edgezero::boot`; `BOOT_LOG_LEVEL` is `Warn`. Adapter-owned
-Fastly and Axum logging preserves errors and warnings on that target even when
+logging on all four adapters preserves errors and warnings on that target even when
 ordinary logging is `Error` or `Off`. Each backend and the facade must admit the
 maximum of the ordinary and boot levels, while the outer target-aware filter
 continues to suppress ordinary records above their configured level. The boot
@@ -32,9 +32,13 @@ typed/static state and emitted after installation, not as an unbounded log
 buffer. When an application owns logging, the same boot records use its backend
 and filters; visibility depends on the application's policy.
 
-Cloudflare and Spin logger initializers remain explicitly documented no-ops.
-Their platform consoles do not automatically install a Rust `log` backend.
-This change adds neither a logger dependency nor a new capability there.
+Cloudflare and Spin expose `init_logger(level) -> Result<(), ManagedLoggerError>` and install
+Workers-console and stderr backends respectively. Their standard runners resolve the runtime
+environment once and initialize before assembly unless logging is application-owned. A shared
+`ManagedLoggerInstallation` retains one immutable configuration: identical repeated setup succeeds,
+different configuration returns `ConfigurationChanged`, and a foreign logger yields
+`AlreadyInstalled` without replacement. Cloudflare off-target initialization returns
+`UnsupportedTarget`. There is no compatibility no-op or new capability flag.
 
 The bundled CLI must not install its CLI logger before running the Axum demo.
 Axum's `run_app_with_preflight` runs reusable startup checks after logging setup

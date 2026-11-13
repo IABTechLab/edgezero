@@ -413,7 +413,11 @@ pub(super) fn validate_artifact(events: &[Value], adapter: &str) -> Result<()> {
             && inventory["accepted"] == receipts
             && inventory["origin_requests"] == receipts,
         "incomplete forwarding cases or cleanup accounting",
-    )
+    )?;
+    if adapter == "spin" {
+        validate_length_artifact(events)?;
+    }
+    Ok(())
 }
 
 pub(super) fn run(adapter: &str, port: u16, records: &mut Records) -> Result<()> {
@@ -481,10 +485,6 @@ pub(super) fn run(adapter: &str, port: u16, records: &mut Records) -> Result<()>
         "late or partial forwarding origin connection",
     )?;
     records.push(json!({"event":"inbound-forwarding-inventory","adapter":adapter,"ports":ports,"cases":cases(adapter).len(),"origin_requests":total,"accepted":total,"status":"pass","qualification":false}))?;
-    validate_artifact(
-        &super::super::ci::read_events(&records.path, super::super::ci::WIRE_ARTIFACT_RECORDS)?,
-        adapter,
-    )?;
     let environment = match adapter {
         "fastly" => "viceroy",
         "cloudflare" => "workerd",
@@ -504,7 +504,189 @@ pub(super) fn run(adapter: &str, port: u16, records: &mut Records) -> Result<()>
     if adapter == "fastly" {
         println!("ez_1_acceptance_11_viceroy: passed");
     }
+    if adapter == "spin" {
+        declared_length_controls(port, records)?;
+    }
+    validate_artifact(
+        &super::super::ci::read_events(&records.path, super::super::ci::WIRE_ARTIFACT_RECORDS)?,
+        adapter,
+    )?;
     Ok(())
+}
+
+fn declared_length_controls(port: u16, records: &mut Records) -> Result<()> {
+    let origins = WireOrigins::start()?;
+    let ports = [origins.port(0), origins.port(1)];
+    let outcome = (|| -> Result<()> {
+        for (case, framing, declared) in [
+            ("declared-length", Framing::Declared4096, true),
+            ("unknown-length", Framing::Chunked4096, false),
+        ] {
+            let token = token();
+            let target = format!("http://127.0.0.1:{}/forward/large/{token}", origins.port(0));
+            let response = net::forward_request(port, case, "POST", framing, &token, &target)?;
+            let report = report(&response)?;
+            let origin = origins.take_wire()?;
+            let event = json!({"event":"forwarded-stream-length","adapter":"spin","case":case,
+                "token":token,"origin":origin,"response":response,"report":report,
+                "status":"pass","qualification":false});
+            records.push(event.clone())?;
+            validate_declared_length_control(&event, declared)?;
+        }
+        Ok(())
+    })();
+    let cleanup = origins.finish_counted();
+    outcome?;
+    require(
+        cleanup? == 2,
+        "forwarded length controls left a late or partial origin request",
+    )?;
+    for case in ["short", "long", "cap", "source", "closed"] {
+        let response = net::request(
+            port,
+            &format!("/progress/upload-length/{case}"),
+            &token(),
+            None,
+            None,
+        )?;
+        if response["status"] != 200 {
+            records.push(json!({"event":"forwarded-upload-pump-failure","case":case,"response":response,"qualification":false}))?;
+            return Err("live upload pump fixture failed".into());
+        }
+        let result: Value =
+            serde_json::from_str(response["body"].as_str().ok_or("missing live pump body")?)?;
+        let event = json!({"event":"forwarded-upload-pump","case":case,"result":result,"adapter":"spin","status":"pass","qualification":false});
+        records.push(event.clone())?;
+        validate_pump_control(&event)?;
+    }
+    records.push(
+        json!({"event":"forwarded-stream-length-inventory","adapter":"spin",
+        "ports":ports,"cases":2,"pump_cases":5,"accepted":2,"origin_requests":2,
+        "status":"pass","qualification":false}),
+    )
+}
+
+fn validate_declared_length_control(event: &Value, declared: bool) -> Result<()> {
+    let source = &event["report"]["source"];
+    let origin = &event["origin"];
+    require(
+        event["adapter"] == "spin"
+            && event["status"] == "pass"
+            && event["qualification"] == false
+            && report(&event["response"])? == event["report"]
+            && origin["target"]
+                == format!(
+                    "/forward/large/{}",
+                    event["token"].as_str().ok_or("missing length token")?
+                ),
+        "invalid forwarded length identity",
+    )?;
+    net::validate_forward_length_capture(origin)?;
+    require(
+        event["response"]["status"] == 201
+            && event["report"]["streamed"] == true
+            && event["report"]["error"].is_null()
+            && source["bytes"] == 4096
+            && source["eofs"] == 1
+            && source["drops"] == 1
+            && origin["method"] == "POST"
+            && origin["token"] == event["token"]
+            && origin["payload"] == "z".repeat(4096),
+        "forwarded 4096-byte stream was not transferred and released exactly once",
+    )?;
+    require(
+        if declared {
+            origin["content_length"] == json!(["4096"]) && origin["transfer_encoding"] == json!([])
+        } else {
+            origin["content_length"] == json!([])
+                && origin["transfer_encoding"] == json!(["chunked"])
+        },
+        "forwarded stream length was lost, invented or combined with Transfer-Encoding",
+    )
+}
+
+fn validate_length_artifact(events: &[Value]) -> Result<()> {
+    let inventories: Vec<_> = events
+        .iter()
+        .filter(|e| e["event"] == "forwarded-stream-length-inventory")
+        .collect();
+    let [inventory] = inventories.as_slice() else {
+        return Err("missing or duplicate forwarded length inventory".into());
+    };
+    let ports = inventory["ports"]
+        .as_array()
+        .filter(|ports| ports.len() == 2)
+        .ok_or("invalid length origin ports")?;
+    require(
+        ports.iter().all(|port| {
+            port.as_u64()
+                .is_some_and(|p| (1..=u64::from(u16::MAX)).contains(&p))
+        }) && ports[0] != ports[1]
+            && inventory["adapter"] == "spin"
+            && inventory["cases"] == 2
+            && inventory["pump_cases"] == 5
+            && inventory["accepted"] == 2
+            && inventory["origin_requests"] == 2
+            && inventory["status"] == "pass"
+            && inventory["qualification"] == false,
+        "invalid length cleanup accounting",
+    )?;
+    let mut seen = HashSet::new();
+    let mut tokens = HashSet::new();
+    for event in events
+        .iter()
+        .filter(|e| e["event"] == "forwarded-stream-length")
+    {
+        let case = event["case"].as_str().ok_or("missing length case")?;
+        require(
+            matches!(case, "declared-length" | "unknown-length")
+                && seen.insert(case)
+                && tokens.insert(event["token"].clone().to_string())
+                && event["origin"]["port"] == ports[0],
+            "duplicate or invalid forwarded length case",
+        )?;
+        validate_declared_length_control(event, case == "declared-length")?;
+    }
+    require(seen.len() == 2, "incomplete forwarded length controls")?;
+    let mut pumps = HashSet::new();
+    for event in events
+        .iter()
+        .filter(|e| e["event"] == "forwarded-upload-pump")
+    {
+        require(
+            pumps.insert(event["case"].clone().to_string()),
+            "duplicate live upload pump case",
+        )?;
+        validate_pump_control(event)?;
+    }
+    require(pumps.len() == 5, "incomplete live upload pump controls")
+}
+
+fn validate_pump_control(event: &Value) -> Result<()> {
+    let case = event["case"].as_str().ok_or("missing pump case")?;
+    let (status, prefix, polls, complete) = match case {
+        "short" | "long" => (400, "abc", 2, false),
+        "cap" => (413, "", 1, false),
+        "source" => (408, "abc", 2, false),
+        "closed" => (200, "", 1, false),
+        _ => return Err("unknown live pump case".into()),
+    };
+    let result = &event["result"];
+    require(
+        event["adapter"] == "spin"
+            && event["status"] == "pass"
+            && event["qualification"] == false
+            && result["case"] == case
+            && result["status"] == status
+            && result["prefix"] == prefix
+            && result["source_steps"] == polls
+            && result["source_drops"] == 1
+            && result["complete"] == complete
+            && result["held_completion_until_failure"] == matches!(case, "short" | "long")
+            && result["provider_detail"] == false
+            && result["qualification"] == false,
+        "live upload pump lost incremental delivery, failure precedence or exactly-once release",
+    )
 }
 
 #[cfg(test)]
@@ -549,6 +731,38 @@ pub(super) mod tests {
             events.push(json!({"event":"inbound-forwarding-case","adapter":adapter,"case":index,"method":case.method,"framing":format!("{:?}",case.framing),"token":token,"report":report,"response":response,"origin":origin,"accepted":count,"status":"pass","qualification":false}));
         }
         events.push(json!({"event":"inbound-forwarding-inventory","adapter":adapter,"ports":[4001,4002],"cases":cases(adapter).len(),"accepted":total,"origin_requests":total,"status":"pass","qualification":false}));
+        if adapter == "spin" {
+            for (case, declared) in [("declared-length", true), ("unknown-length", false)] {
+                let token = format!("length-{case}");
+                let payload = "z".repeat(4096);
+                let encoded = if declared {
+                    payload.clone()
+                } else {
+                    format!("1000\r\n{payload}\r\n0\r\n\r\n")
+                };
+                let report = json!({"streamed":true,"error":null,"source":{"bytes":4096,"eofs":1,"drops":1}});
+                events.push(json!({"event":"forwarded-stream-length","adapter":"spin","case":case,"token":token,
+                    "report":report,"response":{"status":201,"headers":[["x-forward-report",report.to_string()]]},
+                    "origin":{"port":4001,"method":"POST","target":format!("/forward/large/{token}"),"token":token,
+                        "payload":payload,"encoded_body_hex":encoded.as_bytes().iter().map(|b|format!("{b:02x}")).collect::<String>(),
+                        "content_length":if declared {json!(["4096"])} else {json!([])},
+                        "transfer_encoding":if declared {json!([])} else {json!(["chunked"])}},
+                    "status":"pass","qualification":false}));
+            }
+            events.push(json!({"event":"forwarded-stream-length-inventory","adapter":"spin","ports":[4001,4002],
+                "cases":2,"pump_cases":5,"accepted":2,"origin_requests":2,"status":"pass","qualification":false}));
+            for (case, status, prefix, polls, complete) in [
+                ("short", 400, "abc", 2, false),
+                ("long", 400, "abc", 2, false),
+                ("cap", 413, "", 1, false),
+                ("source", 408, "abc", 2, false),
+                ("closed", 200, "", 1, false),
+            ] {
+                events.push(json!({"event":"forwarded-upload-pump","case":case,"adapter":"spin","status":"pass","qualification":false,
+                    "result":{"case":case,"status":status,"prefix":prefix,"source_steps":polls,"source_drops":1,"complete":complete,
+                        "held_completion_until_failure":matches!(case,"short"|"long"),"provider_detail":false,"qualification":false}}));
+            }
+        }
         events
     }
 

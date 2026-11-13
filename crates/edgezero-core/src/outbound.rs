@@ -18,6 +18,7 @@ mod scope_tests;
 mod task;
 #[cfg(feature = "test-utils")]
 pub mod test_support;
+mod upload;
 
 use std::net::IpAddr;
 use std::num::NonZeroU64;
@@ -72,6 +73,7 @@ pub use scope::{
     OutboundScopeOwner,
 };
 pub use task::OutboundTask;
+pub use upload::OutboundUploadCounter;
 
 pub const DEFAULT_MAX_DECODER_BYTES: u64 = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
@@ -510,6 +512,11 @@ pub enum ContentTypeProvenance {
 pub struct ResponseHeadNormalization {
     pub body_disposition: ResponseBodyDisposition,
     pub content_type_provenance: ContentTypeProvenance,
+}
+
+struct RequestHeadNormalization {
+    forwarded_content_length: Option<u64>,
+    invalidates_forwarded_length: bool,
 }
 
 pub struct ResponseHeaderLimiter {
@@ -1058,6 +1065,7 @@ impl OutboundRequest {
         BodyValue: Into<Body>,
     {
         self.body = body.into();
+        self.body.set_forwarded_content_length(None);
         self
     }
 
@@ -1151,6 +1159,9 @@ impl OutboundRequest {
 
     /// Creates an outbound request from an inbound request while removing framing and
     /// hop-by-hop metadata.
+    /// A single valid, non-nominated Content-Length without Transfer-Encoding is retained
+    /// separately on a streamed body, never as an unchecked forwarded header. Replacing
+    /// the body clears that declaration. Provider upload validation remains demand-driven.
     ///
     /// # Errors
     /// Returns [`EdgeError::BadRequest`] when the target is invalid or a `connection`
@@ -1165,7 +1176,10 @@ impl OutboundRequest {
             .get::<ForwardedReadDeadline>()
             .map(ForwardedReadDeadline::deadline);
         outbound.headers = parts.headers;
-        normalize_request_headers(&mut outbound.headers)?;
+        let normalized = normalize_request_headers(&mut outbound.headers)?;
+        outbound
+            .body
+            .set_forwarded_content_length(normalized.forwarded_content_length);
         Ok(outbound)
     }
 
@@ -1745,7 +1759,11 @@ pub fn limit_encoded_stream(stream: BodyStream, max: Option<u64>) -> BodyStream 
 /// Returns [`EdgeError::BadRequest`] when a `connection` nomination is malformed.
 #[inline]
 pub fn normalize_for_dispatch(request: &mut OutboundRequest) -> Result<(), EdgeError> {
-    normalize_request_headers(&mut request.headers)
+    let normalized = normalize_request_headers(&mut request.headers)?;
+    if normalized.invalidates_forwarded_length {
+        request.body.set_forwarded_content_length(None);
+    }
+    Ok(())
 }
 
 /// Normalizes raw upstream metadata before response-body policy is selected.
@@ -2085,11 +2103,35 @@ fn ensure_deadline_live(deadline: Deadline, clock: &MonotonicClock) -> Result<()
     }
 }
 
-fn normalize_request_headers(headers: &mut HeaderMap) -> Result<(), EdgeError> {
+fn normalize_request_headers(
+    headers: &mut HeaderMap,
+) -> Result<RequestHeadNormalization, EdgeError> {
     let nominated = connection_nominations(headers, false)?;
+    let invalidates_forwarded_length =
+        headers.contains_key(TRANSFER_ENCODING) || nominated.contains(&CONTENT_LENGTH);
+    let forwarded_content_length = if invalidates_forwarded_length {
+        None
+    } else {
+        let mut lengths = headers.get_all(CONTENT_LENGTH).iter();
+        lengths.next().and_then(|value| {
+            if lengths.next().is_some() {
+                return None;
+            }
+            let raw = str::from_utf8(value.as_bytes())
+                .ok()?
+                .trim_matches([' ', '\t']);
+            if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            raw.parse().ok()
+        })
+    };
     retain_utf8_header_values(headers, false);
     strip_hop_by_hop(headers, nominated, true);
-    Ok(())
+    Ok(RequestHeadNormalization {
+        forwarded_content_length,
+        invalidates_forwarded_length,
+    })
 }
 
 fn connection_nominations(

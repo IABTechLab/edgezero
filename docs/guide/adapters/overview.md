@@ -92,9 +92,10 @@ exclusions. Consumers upgrading platform resource or response construction APIs 
 
 ## Logging Initialisation
 
-Fastly wires `log_fastly`, and Axum uses `simple_logger`. Their runners initialize logging
-before application configuration. Cloudflare and Spin `init_logger` helpers are no-ops: host
-console or stdout/stderr capture does not install a Rust `log` backend.
+Fastly wires `log_fastly`, Axum uses `simple_logger`, Cloudflare installs a Workers-console
+backend, and Spin installs a stderr backend. Standard runners initialize logging before
+application configuration unless the application owns logging. Prebuilt `dispatch_app` paths
+retain caller-owned setup; they do not install a logger implicitly.
 
 `owns_logging = true` skips adapter logger setup completely. Install your backend **before**
 entering the adapter runner, apply the configured runtime filter to that backend, and set the
@@ -102,11 +103,17 @@ facade maximum high enough for all enabled targets. `edgezero_core::resolve_logg
 resolves the supplied platform environment's runtime level (invalid or absent means `Info`);
 it neither installs a logger nor reads manifest defaults implicitly.
 
-Managed Fastly and Axum backends filter `edgezero_core::BOOT_LOG_TARGET` (`edgezero::boot`) at
+All managed backends filter `edgezero_core::BOOT_LOG_TARGET` (`edgezero::boot`) at
 `BOOT_LOG_LEVEL` (`Warn`) independently of ordinary records. Consequently boot warnings and
 errors still appear with ordinary logging set to `Error` or `Off`. Boot `Info`/`Debug` messages
 do not appear. The target is not a physical Fastly endpoint. Application-owned loggers choose
 their own boot policy; raising `log::set_max_level` alone cannot restore backend-filtered records.
+
+Cloudflare and Spin expose fallible `init_logger(level)` for manual lifecycle owners. Repeating
+the same resolved level is idempotent. A different level on a reused isolate/instance returns
+`ManagedLoggerError::ConfigurationChanged`, rather than racing live requests with global filter
+changes. A foreign installed logger returns `AlreadyInstalled` without replacement. Cloudflare
+manual initialization outside its Worker target returns `UnsupportedTarget`.
 
 ## Contract Tests
 

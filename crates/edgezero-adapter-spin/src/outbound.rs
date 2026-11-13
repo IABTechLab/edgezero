@@ -591,7 +591,7 @@ mod spin_impl {
         OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture, OutboundHead,
         OutboundHttpClient, OutboundPending, OutboundPreparedBatch, OutboundProgressRuntime,
         OutboundRequest, OutboundRequestParts, OutboundResponseContext, OutboundSendMode,
-        OutboundTime,
+        OutboundTime, OutboundUploadCounter,
     };
     use edgezero_core::time::{DispatchBudget, MonotonicClock};
     use futures_util::StreamExt as _;
@@ -913,6 +913,11 @@ mod spin_impl {
             })?;
             headers.insert(CONTENT_LENGTH, length);
         }
+        if !matches!(*method, Method::GET | Method::HEAD)
+            && let Some(length) = body.forwarded_content_length()
+        {
+            headers.insert(CONTENT_LENGTH, HeaderValue::from(length));
+        }
         let fields = Fields::new();
         for (name, value) in headers.iter() {
             fields
@@ -1091,7 +1096,7 @@ mod spin_impl {
             result_writer,
             ..
         } = writer;
-        let mut total = 0_u64;
+        let mut counter = OutboundUploadCounter::new(&body, maximum);
         let (payload, _scope) = body.into_parts();
         let mut source = match payload {
             BodyPayload::Once(bytes) => once(async move { Ok(bytes) }).boxed_local(),
@@ -1110,24 +1115,19 @@ mod spin_impl {
                     return Err(error);
                 }
             };
-            let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            let Some(next_total) = total.checked_add(length) else {
+            if let Err(error) = counter.observe(bytes.len()) {
                 drop(stream_writer);
-                signal_upload_failure(result_writer, ErrorCode::HttpRequestBodySize(None)).await;
-                return Err(EdgeError::payload_too_large(
-                    edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
-                ));
-            };
-            if next_total > maximum {
-                drop(stream_writer);
-                signal_upload_failure(
-                    result_writer,
-                    ErrorCode::HttpRequestBodySize(Some(next_total)),
-                )
-                .await;
-                return Err(EdgeError::payload_too_large(
-                    edgezero_core::RequestBodyOverflowOrigin::OutboundUpload,
-                ));
+                if matches!(error, EdgeError::PayloadTooLarge { .. }) {
+                    signal_upload_failure(
+                        result_writer,
+                        ErrorCode::HttpRequestBodySize(counter.observed_bytes()),
+                    )
+                    .await;
+                    return Err(error);
+                }
+                // The writer's default error-on-drop aborts without delaying this local failure.
+                drop(result_writer);
+                return Err(error);
             }
             let unwritten = stream_writer.write_all(bytes.to_vec()).await;
             budget_remaining(budget, &time)?;
@@ -1136,10 +1136,11 @@ mod spin_impl {
                 drop(result_writer.write(Ok(None)).await);
                 return Ok(UploadCompletion::ReaderGone);
             }
-            total = next_total;
             cooperative_yield_once().await;
         }
 
+        budget_remaining(budget, &time)?;
+        counter.finish()?;
         drop(stream_writer);
         if result_writer.write(Ok(None)).await.is_err() {
             return Ok(UploadCompletion::ReaderGone);

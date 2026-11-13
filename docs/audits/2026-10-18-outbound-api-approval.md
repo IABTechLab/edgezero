@@ -923,3 +923,22 @@ is introduced. The existing runtime must still enable I/O and timers; disabled-d
 misuse is outside this repair's abort-safe guarantee. A binary fixture compiled with
 `panic=abort` exercises live scheduling without an ambient LocalSet and invalid ownership.
 This approval does not promote a capability, waive a timing failure or authorize deployment.
+
+## Managed Logging And Stream Framing Repair (2026-11-13)
+
+AG approved the scoped repairs to PR comment `6863865880`, then directed a hard migration
+without compatibility wrappers. Cloudflare/Spin replace the parameterless no-op initializer
+with `init_logger(LevelFilter) -> Result<(), ManagedLoggerError>`, initialized before assembly
+unless application-owned. Identical instance configuration is idempotent; changed or foreign
+configuration is an explicit error, not live global reconfiguration.
+
+`from_request` captures an eligible streamed Content-Length as immutable Body-owned scalar
+metadata before stripping raw CL/TE. Replacement/JSON/transformed/raw-extracted bodies lose
+the fact. Spin reconstructs native length and validates observed bytes with the shared scalar
+upload counter; unknown lengths remain unknown. Upload-cap precedence, typed source errors,
+deadlines, GET/HEAD and Begin/Batch restrictions stay intact. Early response/ReaderGone never
+forces a validation drain; equality is limited to observed chunks and clean EOF.
+
+This scoped amendment supersedes the former blanket statement that every streamed upload
+omits CL. No second transport, reader, buffer, executor, compatibility path, runtime pin,
+capability promotion or deployment authorization is introduced. Existing hosted gates remain open.

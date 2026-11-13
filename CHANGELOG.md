@@ -13,6 +13,18 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Replace Cloudflare/Spin no-op log initializers with fallible `init_logger(level)`: Workers
+  console and Spin stderr backends apply the resolved runtime filter and independent Warn boot
+  filter before assembly. Same-level initialization is idempotent; changed instance configuration
+  and foreign loggers fail explicitly. Application-owned logging remains untouched.
+  Align the reusable test fixture's bindings with the production lock so one CLI validates
+  ingress and reusable runtime probes; provider SDK/runtime and audited decoder pins stay intact.
+- Preserve an eligible inbound streamed Content-Length as body-owned scalar metadata before
+  stripping raw framing. Spin reconstructs that length without Transfer-Encoding and validates
+  observed chunks/clean EOF against it. Replacement bodies clear it; unknown streams remain
+  unknown, and early responses abandon unread upload bytes without a validation drain.
+  The scalar declaration adds 16 inline bytes: measured Body layouts are 56 native / 40 WASM
+  bytes with Rust 1.98.1. Recalculate application structure charges; this is not a stable ABI size.
 - Require an explicit `AxumOutboundExecutorHandle` in native outbound client constructors
   and request conversion. Standard servers own one LocalSet; missing, dropped or foreign
   ownership returns Internal without panic probing, including in abort-profile builds.

@@ -6,6 +6,10 @@
 - **Scope:** Core application ownership and the Fastly, Cloudflare, Spin, and Axum adapter surfaces, including custom dispatch, examples, documentation, and validation.
 - **Evidence:** Host contracts and local provider fixtures; deployed lifetimes and application performance remain unverified.
 
+The historical Cloudflare/Spin no-op logging statements below are superseded by the approved
+[managed logging repair](2026-10-05-logging-ownership-boot-diagnostics-design.md).
+Current standard runners install their console/stderr backend unless logging is application-owned.
+
 The original private-helper design in §§8/9.1 is superseded by
 [the custom serving lifecycle plan](../plans/2026-09-17-custom-serving-lifecycle.md).
 The implemented `lifecycle::{Sandbox, serve_custom, run_custom}` surface, including

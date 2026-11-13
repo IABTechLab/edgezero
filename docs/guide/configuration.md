@@ -547,13 +547,14 @@ Logging can be configured per adapter under `[adapters.<name>.logging]` or via a
 | `echo_stdout` | Fastly   | Mirror logs to stdout. The Axum runner ignores it           |
 
 Manifest logging settings and runtime `EDGEZERO__LOGGING__*` overrides are separate; consult
-the adapter guide for which source its runner consumes. Cloudflare and Spin do not install a
-Rust `log` backend. `owns_logging = true` transfers installation **and filter configuration**
+the adapter guide for which source its runner consumes. Cloudflare resolves the runtime level
+from Worker bindings; Spin reads the runtime environment, not the manifest logging table.
+`owns_logging = true` transfers installation **and filter configuration**
 to the application, before entering the runner. The pure
 `edgezero_core::resolve_logging_level(&EnvConfig)` helper resolves runtime levels without
 implicitly applying manifest defaults or changing global state.
 
-Managed Fastly/Axum loggers retain `edgezero::boot` errors and warnings at `Warn` even when
+All managed adapter loggers retain `edgezero::boot` errors and warnings at `Warn` even when
 ordinary runtime logging is `Off`. See [Logging Initialisation](/guide/adapters/overview#logging-initialisation).
 
 ## Full Example

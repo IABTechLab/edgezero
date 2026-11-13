@@ -426,9 +426,25 @@ impl Process {
         Ok(p)
     }
     pub fn start(command: &mut Command, log: &Path, port: u16) -> Result<Self> {
+        Self::start_logged(command, log, None, port)
+    }
+    pub fn start_with_stdout(
+        command: &mut Command,
+        log: &Path,
+        stdout: &Path,
+        port: u16,
+    ) -> Result<Self> {
+        Self::start_logged(command, log, Some(stdout), port)
+    }
+    fn start_logged(
+        command: &mut Command,
+        log: &Path,
+        stdout: Option<&Path>,
+        port: u16,
+    ) -> Result<Self> {
         let deadline = Instant::now() + Duration::from_secs(45);
         startup::require_configured(command)?;
-        let mut p = Self::spawn(command, log)?;
+        let mut p = Self::spawn_logged(command, log, stdout)?;
         p.1.launch = Some(startup::register(command, p.0.clone(), log, port, deadline));
         loop {
             p.check_running()?;

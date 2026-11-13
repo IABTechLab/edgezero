@@ -300,11 +300,21 @@ pub(super) fn capture_wire_body(
     reader: &mut impl BufRead,
     head: &Head,
 ) -> std::result::Result<(Vec<u8>, Vec<u8>), Failure> {
+    capture_wire_body_bounded(reader, head, 1024, 4096)
+}
+
+pub(super) fn capture_wire_body_bounded(
+    reader: &mut impl BufRead,
+    head: &Head,
+    payload_cap: usize,
+    wire_cap: usize,
+) -> std::result::Result<(Vec<u8>, Vec<u8>), Failure> {
     struct Recording<'a, R> {
         inner: &'a mut R,
         bytes: Vec<u8>,
         pending: Vec<u8>,
         position: usize,
+        wire_cap: usize,
     }
     impl<R: BufRead> Read for Recording<'_, R> {
         fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
@@ -317,7 +327,7 @@ pub(super) fn capture_wire_body(
     }
     impl<R: BufRead> BufRead for Recording<'_, R> {
         fn fill_buf(&mut self) -> io::Result<&[u8]> {
-            let remaining = 4097usize.saturating_sub(self.bytes.len());
+            let remaining = self.wire_cap.saturating_sub(self.bytes.len());
             if remaining == 0 {
                 return Err(io::ErrorKind::InvalidData.into());
             }
@@ -342,6 +352,7 @@ pub(super) fn capture_wire_body(
         bytes: Vec::new(),
         pending: Vec::new(),
         position: 0,
+        wire_cap: wire_cap.saturating_add(1),
     };
     let mut body = Vec::new();
     let outcome = payload(
@@ -349,11 +360,11 @@ pub(super) fn capture_wire_body(
         head,
         &mut 0,
         &mut body,
-        1024,
+        payload_cap,
         false,
         Profile::Wire,
     );
-    if recording.bytes.len() > 4096 {
+    if recording.bytes.len() > wire_cap {
         return Err(Failure::CaptureLimit);
     }
     outcome?;

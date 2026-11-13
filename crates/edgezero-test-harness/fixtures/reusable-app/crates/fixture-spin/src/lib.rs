@@ -4,6 +4,7 @@
     reason = "spin's #[http_service] macro generates the unsafe wasm export"
 )]
 
+mod managed_logging;
 #[cfg(feature = "progress")]
 mod progress;
 use edgezero_core::MonotonicClock;
@@ -49,13 +50,14 @@ async fn dispatch_selected<A: Hooks>(
 async fn handle(req: Request) -> anyhow::Result<edgezero_adapter_spin::SpinResponse> {
     let mode = std::env::var("FIXTURE_MODE").unwrap_or_else(|_| "per-request".to_owned());
     fixture_core::launch::initialize_environment(&format!("fixture-spin-{mode}"));
+    if req.uri().path().starts_with("/managed-logging") {
+        return managed_logging::dispatch(req).await;
+    }
     #[cfg(feature = "progress")]
     if req.uri().path().starts_with("/progress/") {
         return progress::dispatch(req).await;
     }
-    if !FixtureApp::owns_logging() {
-        drop(edgezero_adapter_spin::init_logger());
-    } else {
+    if FixtureApp::owns_logging() {
         fixture_core::init_fixture_logging(telemetry)?;
     }
     let retained = std::env::var("FIXTURE_MODE").as_deref() == Ok("retained");

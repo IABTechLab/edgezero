@@ -112,6 +112,14 @@ scripts/test_integration.sh --adapter cloudflare --suite assembly
 scripts/test_integration.sh --adapter spin --suite assembly
 ```
 
+The Cloudflare/Spin assembly suite also checks managed logging through actual `wrangler dev`
+and `spin up` stderr: absent/invalid/mixed-case levels, all six filters, boot Warn/Error under
+ordinary Off, immutable repeated initialization and the application-owned negative control.
+It compares records before/after rejected configuration changes. Cloudflare starts the Off case
+with an assembly failure; Spin records the failure without assuming instance reuse. Spin first
+attests its general assembly guest with a healthy request because canonical detached failures
+intentionally have no application headers. No startup-identity gate is bypassed.
+
 This local-only suite exercises the standard entrypoints and the same app-free canonical
 error delivery used by custom retention recipes. It checks typed JSON/status/retry headers,
 HEAD suppression, internal redaction and one full boot log per failed attempt. Retained
@@ -295,6 +303,18 @@ counts, requiring zero setup for rejected requests. Each group reuses the bounde
 existing capture/deadline limits, joins cleanup, then reopens its persisted evidence before
 printing acceptance sentinels. Parent validation requires the group; mutations reject omission,
 duplication, reassociation, impossible source reports, unframed/trailing bytes and cleanup failure.
+
+Spin additionally forwards separately bounded 4096-byte declared/unknown streams. The origin
+requires exactly CL=4096 without TE, or unknown-length chunking respectively; raw-byte replay,
+both records and exactly two cleaned-up origin exchanges are required in saved artifacts.
+The original eight-byte controls and validators retain their bounds. Five active-P3 pump probes
+gate a second chunk on first-prefix receipt and check short EOF, overrun before its chunk is
+written, simultaneous cap/length overflow, typed source error and reader abandonment. Short/long
+keep the completion peer live but unpolled until local failure; they cannot pass by awaiting
+abort acknowledgment. Post-error source polls trap. The runtime forbids intra-component reads
+of the resource-bearing completion future, so these local probes do not read that future or
+claim full HTTP completion; the two real origin exchanges establish the actual HTTP boundary.
+All new records remain local supporting evidence with `qualification:false`.
 Chunk boundaries are not prescribed. Existing redirect, batch, marker and normalization counts
 stay unchanged. The separate co-located Axum pending-body TCP proof covers criterion 06's
 unchanged 200/205 ms and 100/105 ms windows, including 20 ms of work before forwarding under

@@ -27,6 +27,20 @@ type Slot = (usize, DispatchBudget, OutboundFuture<OutboundResponse>);
 
 #[doc(hidden)]
 #[inline]
+pub async fn pump_request_body(
+    body: Body,
+    maximum: u64,
+    writer: BodyWriter,
+    budget: DispatchBudget,
+    time: OutboundTime,
+) -> Result<bool, EdgeError> {
+    super::pump_request_body(body, maximum, writer, budget, time)
+        .await
+        .map(|completion| matches!(completion, super::UploadCompletion::Complete))
+}
+
+#[doc(hidden)]
+#[inline]
 pub fn request_body_resources(method: &Method, body: &Body) -> RequestBodyResources {
     let prepared = super::prepare_request_body(method, body);
     (prepared.writer, prepared.contents, prepared.trailers)

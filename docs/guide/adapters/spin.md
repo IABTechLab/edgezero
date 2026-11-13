@@ -296,17 +296,19 @@ surfaces before `provision` / `config push` run.
 
 ## Logging
 
-`edgezero_adapter_spin::init_logger()` is a no-op; `run_app` calls it before application
-configuration unless your app sets `owns_logging = true`. An
-`[adapters.spin.logging]` table in `edgezero.toml` is not consumed by the Spin runtime.
-View output through `spin up` or your Spin host's log files.
+`run_app` installs a Rust `log` stderr backend before assembly unless `owns_logging = true`.
+It resolves `EDGEZERO__LOGGING__LEVEL` from the runtime environment: absent or invalid means
+`Info`, and valid values are case-insensitive. The manifest's `[adapters.spin.logging]` table
+is not consumed by the runtime. View stderr through `spin up` or your host's log files.
+`edgezero::boot` preserves Error/Warn independently of ordinary Error/Off.
 
-::: tip Logging status
-Host stdout/stderr capture does not install a Rust `log` backend. Install yours before the
-adapter entrypoint and set `owns_logging = true` if you need facade output. Resolve ordinary
-levels with `edgezero_core::resolve_logging_level(&EnvConfig)` and apply both backend and facade
-filters; the adapter does not promise boot-target visibility without that backend.
-:::
+Manual lifecycle owners call `init_logger(level)?`; the parameterless no-op API is removed.
+Repeated same-level setup is idempotent. Changed instance configuration or a foreign installed
+logger returns a typed error instead of replacing filters during concurrent work.
+
+To own logging, install your backend before entering the runner and set `owns_logging = true`.
+Apply both backend and facade filters, using `resolve_logging_level(&EnvConfig)` and the boot
+constants as appropriate. EdgeZero makes no logging-state changes in that mode.
 
 ## Context Access
 

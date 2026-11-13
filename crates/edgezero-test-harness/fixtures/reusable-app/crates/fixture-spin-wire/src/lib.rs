@@ -1,4 +1,7 @@
 #[cfg(target_arch = "wasm32")]
+mod upload_length;
+
+#[cfg(target_arch = "wasm32")]
 mod sdk {
     use core::str::from_utf8;
     use std::cell::{Cell, RefCell};
@@ -54,6 +57,16 @@ mod sdk {
     impl Guest for BodylessWire {
         async fn handle(request: Request) -> Result<Response, ErrorCode> {
             let path = request.get_path_with_query().unwrap_or_default();
+            if let Some(case) = path.strip_prefix("/progress/upload-length/") {
+                drop(request);
+                return super::upload_length::run(case)
+                    .await
+                    .map_err(|_| {
+                        ErrorCode::InternalError(Some("upload length fixture failed".to_owned()))
+                    })?
+                    .to_string()
+                    .into_response();
+            }
             if path == "/sdk-provider-diagnostics" {
                 drop(request);
                 if !fixture_spin_support::outbound::provider_error_payloads_hold() {

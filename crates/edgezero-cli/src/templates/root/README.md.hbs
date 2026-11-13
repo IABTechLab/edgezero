@@ -56,13 +56,15 @@ limit failures retain their original typed error classification.
 
 ## Logging
 
-Axum and Fastly entrypoints delegate logging to the reusable adapter runners;
+All adapter entrypoints delegate logging to the reusable adapter runners;
 do not initialize a second CLI logger before a runtime runner. Ordinary levels
 come from `EDGEZERO__LOGGING__LEVEL` (Fastly reads its runtime Config Store), with
 `Info` as the absent/invalid fallback. Managed boot warnings use `edgezero::boot`
 at `Warn`, independently of ordinary `Error` or `Off`.
 
-Cloudflare and Spin logger initializers are no-ops, not Rust facade backends.
+Cloudflare uses the Workers console and Spin writes to stderr. Their runners resolve
+runtime levels before assembly; manual setup uses fallible `init_logger(level)`.
+Repeated setup must keep the same level for the lifetime of the isolate/instance.
 To own logging on any target, set `owns_logging = true` in `app!`, install your
 backend before entering the runner, and configure both backend and facade filters.
 Reuse `edgezero_core::resolve_logging_level(&EnvConfig)`, `BOOT_LOG_TARGET`, and
