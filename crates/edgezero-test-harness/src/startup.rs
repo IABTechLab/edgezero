@@ -9,6 +9,7 @@ use std::{
 };
 
 mod build_identity;
+pub(crate) use build_identity::OutputDirectory;
 
 pub const HEADER: &str = "x-edgezero-fixture-launch";
 pub const NONCE: &str = "EDGEZERO_FIXTURE_LAUNCH_NONCE";

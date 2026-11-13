@@ -1,16 +1,44 @@
 use sha2::{Digest, Sha256};
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     env,
     ffi::{OsStr, OsString},
     fs,
     io::{self, Read as _},
+    marker::PhantomData,
     path::{Path, PathBuf},
     process::Command,
+    rc::Rc,
 };
 
 // Hash source trees directly, including dirty/untracked inputs, but never build outputs.
 const ROOTS: &[&str] = &["crates"];
+
+thread_local! {
+    static SELECTED_OUTPUT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+pub(crate) struct OutputDirectory {
+    previous: Option<PathBuf>,
+    thread: PhantomData<Rc<()>>,
+}
+
+impl OutputDirectory {
+    pub(crate) fn enter(path: &Path) -> io::Result<Self> {
+        let path = path.canonicalize()?;
+        Ok(Self {
+            previous: SELECTED_OUTPUT.with_borrow_mut(|selected| selected.replace(path)),
+            thread: PhantomData,
+        })
+    }
+}
+
+impl Drop for OutputDirectory {
+    fn drop(&mut self) {
+        SELECTED_OUTPUT.with_borrow_mut(|selected| *selected = self.previous.take());
+    }
+}
 
 pub(super) fn current() -> crate::Result<String> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -159,14 +187,17 @@ fn ignored_output(path: &Path) -> bool {
                 }))
 }
 
-fn hash_tree(hash: &mut Sha256, root: &Path, path: &Path) -> io::Result<()> {
+fn hash_tree(hash: &mut Sha256, root: &Path, path: &Path, output: Option<&Path>) -> io::Result<()> {
+    if output.is_some_and(|selected| path.starts_with(selected)) {
+        return Ok(());
+    }
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_dir() {
         let mut entries = fs::read_dir(path)?.collect::<io::Result<Vec<_>>>()?;
         entries.sort_by_key(fs::DirEntry::file_name);
         for entry in entries {
             if !ignored_output(&entry.path()) {
-                hash_tree(hash, root, &entry.path())?;
+                hash_tree(hash, root, &entry.path(), output)?;
             }
         }
     } else if metadata.is_file() {
@@ -203,15 +234,16 @@ fn capture(
     field(&mut hash, env::consts::ARCH.as_bytes());
     field(&mut hash, compiler);
     field(&mut hash, cargo);
+    let output = SELECTED_OUTPUT.with_borrow(Clone::clone);
     for (name, value) in environment.iter().filter(|(name, _)| build_variable(name)) {
         field(&mut hash, name.as_os_str().as_encoded_bytes());
         field(&mut hash, value.as_os_str().as_encoded_bytes());
     }
     for input in ["Cargo.toml", "Cargo.lock", ".tool-versions"] {
-        hash_tree(&mut hash, root, &root.join(input))?;
+        hash_tree(&mut hash, root, &root.join(input), output.as_deref())?;
     }
     for input in ROOTS {
-        hash_tree(&mut hash, root, &root.join(input))?;
+        hash_tree(&mut hash, root, &root.join(input), output.as_deref())?;
     }
     let local_configs = [
         ".cargo/config",
@@ -248,6 +280,63 @@ fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_output_is_excluded_but_sources_and_unselected_siblings_are_not() {
+        let fixture = fixture();
+        let root = fixture.path().canonicalize().unwrap();
+        let output = root.join("crates/edgezero-test-harness/results/run-1");
+        fs::create_dir_all(&output).unwrap();
+        let _selection = OutputDirectory::enter(&output).unwrap();
+        let first = identity(&root);
+        for name in ["events.jsonl", "build/artifact.wasm", "component/log.txt"] {
+            write(&output, name, b"output-only mutation");
+            assert_eq!(identity(&root), first, "selected output {name}");
+        }
+        for name in [
+            "crates/edgezero-test-harness/results/run-10/events.jsonl",
+            "crates/edgezero-test-harness/results/run-2/artifact.wasm",
+            "crates/edgezero-core/src/untracked.rs",
+        ] {
+            write(&root, name, b"unselected source input");
+            assert_ne!(identity(&root), first, "unselected {name}");
+            fs::remove_file(root.join(name)).unwrap();
+            assert_eq!(identity(&root), first);
+        }
+        write(&root, FILES[4], b"dirty tracked source");
+        assert_ne!(identity(&root), first);
+    }
+
+    #[test]
+    fn selected_output_scope_restores_after_nesting_panic_and_thread_switch() {
+        let fixture = fixture();
+        let root = fixture.path().canonicalize().unwrap();
+        let outer = root.join("crates/results/outer");
+        let inner = root.join("crates/results/inner");
+        write(&outer, "events.jsonl", b"outer evidence");
+        write(&inner, "events.jsonl", b"inner evidence");
+        let unselected = identity(&root);
+        {
+            let _outer = OutputDirectory::enter(&outer).unwrap();
+            let selected = identity(&root);
+            assert_ne!(selected, unselected);
+            let panic = std::panic::catch_unwind(|| {
+                let _inner = OutputDirectory::enter(&inner).unwrap();
+                assert_ne!(identity(&root), selected);
+                panic!("controlled output-scope unwind");
+            });
+            assert!(panic.is_err());
+            assert_eq!(identity(&root), selected);
+            let other_root = root.clone();
+            assert_eq!(
+                std::thread::spawn(move || identity(&other_root))
+                    .join()
+                    .unwrap(),
+                unselected
+            );
+        }
+        assert_eq!(identity(&root), unselected);
+    }
 
     #[cfg(unix)]
     #[test]

@@ -40,6 +40,9 @@ pub const PARITY_CASES: &[&str] = &[
     "parity-upload-cap",
     "parity-zero-timeout",
     "parity-expired",
+    "parity-empty-post",
+    "parity-empty-delete",
+    "parity-empty-options",
 ];
 
 #[derive(Clone, Copy)]
@@ -290,7 +293,9 @@ fn parity_request(
 ) -> Result<OutboundRequest, EdgeError> {
     let method = match case {
         "parity-head" => Method::HEAD,
-        "parity-post" | "parity-upload-cap" => Method::POST,
+        "parity-post" | "parity-upload-cap" | "parity-empty-post" => Method::POST,
+        "parity-empty-delete" => Method::DELETE,
+        "parity-empty-options" => Method::OPTIONS,
         _ => Method::GET,
     };
     let mut request = OutboundRequest::new(method, uri)?
@@ -587,8 +592,15 @@ mod tests {
                 request.method(),
                 if *case == "parity-head" {
                     Method::HEAD
-                } else if matches!(*case, "parity-post" | "parity-upload-cap") {
+                } else if matches!(
+                    *case,
+                    "parity-post" | "parity-upload-cap" | "parity-empty-post"
+                ) {
                     Method::POST
+                } else if *case == "parity-empty-delete" {
+                    Method::DELETE
+                } else if *case == "parity-empty-options" {
+                    Method::OPTIONS
                 } else {
                     Method::GET
                 }

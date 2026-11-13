@@ -303,6 +303,56 @@ mod tests {
     use futures::StreamExt as _;
 
     #[test]
+    fn fixture_logging_emits_raw_lifecycle_events_but_filters_ordinary_info() {
+        static EVENTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+        fn sink(line: &str) {
+            EVENTS
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(line).unwrap());
+        }
+        crate::init_fixture_logging(sink).expect("fixture logger");
+        let trace = test_trace("logging-regression");
+        let source = ProbeSource::new(Arc::clone(&trace));
+        let resource = ResourceDropProbe(Arc::clone(&trace));
+        drop(source);
+        trace.record("terminal", |state| state.terminals += 1, json!({}));
+        drop(resource);
+        drop(trace);
+        log::info!(target: "ordinary-fixture-regression", "filtered-info-control");
+        log::warn!(target: "ordinary-fixture-regression", "retained-warning-control");
+
+        let events = EVENTS.lock().unwrap();
+        let lifecycle: Vec<_> = events
+            .iter()
+            .filter(|event| event["case"] == "logging-regression")
+            .collect();
+        assert_eq!(
+            lifecycle.len(),
+            4,
+            "lifecycle telemetry must reach the raw sink"
+        );
+        for (sequence, (event, kind)) in lifecycle
+            .iter()
+            .zip(["source-drop", "terminal", "resource-drop", "trace-closed"])
+            .enumerate()
+        {
+            assert_eq!(event["event"], kind);
+            assert_eq!(event["sequence"], sequence);
+            assert_eq!(event["schema"], 1);
+            assert_eq!(event["run"], "test-run");
+            assert_eq!(event["probe"], "test-1");
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|event| event["message"] == "filtered-info-control")
+        );
+        assert!(events.iter().any(|event| event["event"] == "fixture_log"
+            && event["message"] == "retained-warning-control"));
+    }
+
+    #[test]
     fn finite_source_releases_once_and_never_polls_after_terminal() {
         let trace = test_trace("normal");
         let mut source = ProbeSource::new(Arc::clone(&trace));
