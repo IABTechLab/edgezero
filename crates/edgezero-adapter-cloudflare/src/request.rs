@@ -11,12 +11,13 @@ use std::{io, task::Poll};
 #[cfg(feature = "test-utils")]
 use bytes::Bytes;
 use edgezero_core::OutboundScopeOwner;
-use edgezero_core::app::{App, StoreMetadata};
+use edgezero_core::app::{App, FrameworkErrorDetail, StoreMetadata};
 use edgezero_core::body::Body;
 use edgezero_core::config_store::{ConfigStoreHandle, ConfigStoreOpenFailure};
 use edgezero_core::context::RuntimeVariables;
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
+use edgezero_core::geo::{GeoOutcome, GeoSource};
 use edgezero_core::http::{HeaderValue, Method as CoreMethod, Request, Uri, request_builder};
 use edgezero_core::ingress::{
     CapturedTarget, HeaderFidelity, InboundOrigin, IngressBeginOutcome, IngressDispatchOutcome,
@@ -41,7 +42,8 @@ use futures_util::stream::poll_fn;
 use futures_util::stream::{LocalBoxStream, unfold};
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use worker::{
-    Context, Delay, Env, Error as WorkerError, Method, Request as CfRequest, Response as CfResponse,
+    Cf, Context, Delay, Env, Error as WorkerError, Method, Request as CfRequest,
+    Response as CfResponse,
 };
 
 use crate::config_store::CloudflareConfigStore;
@@ -506,6 +508,7 @@ where
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
         move || Ok(Some(source)),
         Ok,
     ))
@@ -540,6 +543,7 @@ where
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
         move || make_source().map(Some),
         deliver,
     ))
@@ -566,6 +570,7 @@ pub async fn dispatch_ingress_source_error_for_test(
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
         || -> Result<Option<Empty<Result<Bytes, io::Error>>>, EdgeError> {
             Err(EdgeError::internal(anyhow::anyhow!(
                 "cloudflare source construction failed"
@@ -599,6 +604,7 @@ pub(crate) async fn dispatch_with_handles(
         CoreMethod::from_bytes(req.inner().method().as_bytes()).unwrap_or(CoreMethod::GET);
     let context = Arc::new(ctx);
     let runtime = CloudflareEgressRuntime::new(signal, Arc::clone(&context));
+    let geo = request_geo(&req);
     let head_request = match into_core_request_head(&req, env, context, app.monotonic_clock()) {
         Ok(request) => request,
         Err(error) => {
@@ -613,6 +619,7 @@ pub(crate) async fn dispatch_with_handles(
         head_request,
         stores,
         request_start,
+        geo,
         move || cloudflare_body_stream(req),
         move |egress| from_egress_response(egress, runtime),
     )
@@ -624,6 +631,7 @@ async fn dispatch_ingress_stream_and<Source, SourceError, MakeSource, Output, De
     mut head_request: Request,
     stores: Stores,
     request_start: MonotonicInstant,
+    geo: GeoOutcome,
     make_source: MakeSource,
     deliver: Deliver,
 ) -> Result<Output, WorkerError>
@@ -679,7 +687,17 @@ where
     *head_request.body_mut() = source.map_or_else(Body::empty, |stream| {
         cloudflare_deadline_body(stream, prepared.read_deadline(), prepared.monotonic_clock())
     });
-    dispatch_core_request(app, head_request, stores, prepared, deliver).await
+    dispatch_core_request(app, head_request, stores, prepared, geo, deliver).await
+}
+
+/// Cloudflare's own geolocation from the request's `cf` metadata.
+fn request_geo(req: &CfRequest) -> GeoOutcome {
+    let cf = req.cf();
+    GeoOutcome::platform(
+        GeoSource::Cloudflare,
+        cf.and_then(Cf::country).as_deref(),
+        cf.and_then(Cf::region_code).as_deref(),
+    )
 }
 
 /// Dispatch with per-id store registries built from baked metadata.
@@ -827,6 +845,7 @@ async fn dispatch_core_request<Output, Deliver>(
     mut core_request: Request,
     mut stores: Stores,
     prepared: PreparedIngress,
+    geo: GeoOutcome,
     deliver: Deliver,
 ) -> Result<Output, WorkerError>
 where
@@ -849,7 +868,13 @@ where
     if let Some(registry) = secret_registry {
         core_request.extensions_mut().insert(registry);
     }
-    let response = Box::pin(app.dispatch_admitted(prepared, core_request)).await;
+    let response = Box::pin(app.dispatch_admitted_with_geo(
+        prepared,
+        core_request,
+        FrameworkErrorDetail::Default,
+        geo,
+    ))
+    .await;
     deliver(response).map_err(|err| edge_error_to_worker(&err))
 }
 
@@ -998,6 +1023,7 @@ mod tests {
     use async_stream::stream;
     use edgezero_core::app::Hooks;
     use edgezero_core::context::{BodyKind, RequestContext};
+    use edgezero_core::geo::GeoStatus;
     use edgezero_core::http::{Response, StatusCode, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
     #[cfg(feature = "test-utils")]
@@ -1875,6 +1901,49 @@ mod tests {
         assert!(RETAINED_UPLOAD.with(|upload_ref| upload_ref.borrow().upgrade().is_none()));
     }
 
+    /// Rebuilds a request whose JS object carries the given incoming `cf` metadata.
+    fn request_with_cf(fields: &[(&str, &str)]) -> CfRequest {
+        let inner = Clone::clone(native_request(Method::Get, "/", None).inner());
+        let cf = Object::new();
+        for (key, value) in fields {
+            Reflect::set(&cf, &JsValue::from_str(key), &JsValue::from_str(value))
+                .expect("cf field");
+        }
+        Reflect::set(&inner, &JsValue::from_str("cf"), &cf).expect("cf");
+        CfRequest::from(inner)
+    }
+
+    #[wasm_bindgen_test]
+    fn cf_metadata_becomes_cloudflare_geo() {
+        let platform =
+            |country, region| GeoOutcome::platform(GeoSource::Cloudflare, country, region);
+        let us_ca = request_with_cf(&[("country", "US"), ("regionCode", "CA")]);
+        assert_eq!(request_geo(&us_ca), platform(Some("US"), Some("CA")));
+        assert!(matches!(
+            request_geo(&us_ca),
+            GeoOutcome::Selected {
+                status: GeoStatus::Located { .. },
+                ..
+            }
+        ));
+        let country_only = request_with_cf(&[("country", "GB")]);
+        assert_eq!(request_geo(&country_only), platform(Some("GB"), None));
+        // Cloudflare reports unknown and Tor traffic with placeholder countries.
+        let tor = request_with_cf(&[("country", "T1")]);
+        assert_eq!(request_geo(&tor), platform(Some("T1"), None));
+        assert!(matches!(
+            request_geo(&tor),
+            GeoOutcome::Selected {
+                status: GeoStatus::Unavailable(_),
+                ..
+            }
+        ));
+        assert_eq!(
+            request_geo(&native_request(Method::Get, "/", None)),
+            platform(None, None)
+        );
+    }
+
     fn native_request(method: Method, path: &str, body: Option<&[u8]>) -> CfRequest {
         let mut init = worker::RequestInit::new();
         init.with_method(method);
@@ -1914,6 +1983,7 @@ mod tests {
             head,
             Stores::default(),
             app.monotonic_now(),
+            GeoOutcome::NoSelection,
             move || cloudflare_body_stream(req),
             Ok,
         )
