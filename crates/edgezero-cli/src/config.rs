@@ -32,6 +32,7 @@ use edgezero_core::app_config::{
     SecretPathSegment,
 };
 use edgezero_core::blob_envelope::{BlobEnvelope, BlobEnvelopeError, ENVELOPE_VERSION_V1};
+use edgezero_core::config_diagnostics::ValidationReport;
 use edgezero_core::env_config::{EnvConfig, merge_env_defaults};
 use edgezero_core::manifest::{Manifest, ManifestAdapter, ManifestLoader, StoreDeclaration};
 use serde::Serialize;
@@ -261,8 +262,12 @@ where
         &opts,
     )
     .map_err(|err| format_app_config_error(&err))?;
-    app_config::validate_excluding_secrets(&typed)
-        .map_err(|err| format!("typed app-config failed validation: {err}"))?;
+    app_config::validate_excluding_secrets(&typed).map_err(|err| {
+        format!(
+            "typed app-config failed validation: {}",
+            ValidationReport::from_errors(&err, C::validation_diagnostics()).operator_message()
+        )
+    })?;
 
     typed_secret_checks(&typed, &ctx)?;
     run_adapter_typed_checks::<C>(&ctx, AdapterValidationScope::All)?;
@@ -465,8 +470,12 @@ where
         &opts,
     )
     .map_err(|err| format_app_config_error(&err))?;
-    app_config::validate_excluding_secrets(&typed)
-        .map_err(|err| format!("typed app-config failed validation: {err}"))?;
+    app_config::validate_excluding_secrets(&typed).map_err(|err| {
+        format!(
+            "typed app-config failed validation: {}",
+            ValidationReport::from_errors(&err, C::validation_diagnostics()).operator_message()
+        )
+    })?;
     typed_secret_checks(&typed, &ctx.validation)?;
     run_adapter_typed_checks::<C>(&ctx.validation, validation_scope)?;
 
@@ -638,8 +647,12 @@ where
         &opts,
     )
     .map_err(|err| format_app_config_error(&err))?;
-    app_config::validate_excluding_secrets(&typed)
-        .map_err(|err| format!("local validation failed: {err}"))?;
+    app_config::validate_excluding_secrets(&typed).map_err(|err| {
+        format!(
+            "local validation failed: {}",
+            ValidationReport::from_errors(&err, C::validation_diagnostics()).operator_message()
+        )
+    })?;
     typed_secret_checks(&typed, &ctx)?;
     run_adapter_typed_checks::<C>(&ctx, validation_scope)?;
 
@@ -2087,6 +2100,10 @@ fn format_app_config_error(err: &AppConfigError) -> String {
     clippy::default_numeric_fallback,
     reason = "test module groups items by subject (PathPrepend co-located with its fake-spin consumers, fixtures with their tests) rather than by item kind; `range(min = 100, max = 60_000)` bounds default to the field's int type"
 )]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "fixtures exercise the default-empty diagnostic metadata contract"
+)]
 mod tests {
     use super::*;
     use crate::test_support::{EnvOverride, manifest_guard};
@@ -2973,6 +2990,78 @@ timeout_ms = 1500
             err.contains("extra_unknown") || err.to_lowercase().contains("unknown"),
             "error mentions the unknown field: {err}"
         );
+    }
+
+    #[test]
+    fn typed_commands_share_approved_diagnostics_and_redact_validator_values() {
+        use edgezero_core::config_diagnostics::{ApprovedDiagnostic, ValidationPathSegment};
+        use std::borrow::Cow;
+        const RULES: &[ApprovedDiagnostic] = &[ApprovedDiagnostic {
+            path: &[ValidationPathSegment::Field("implementation")],
+            code: "implementation_unavailable",
+            explanation: "Enable feature bidder-x and rebuild both CLI and serving guest.",
+        }];
+        #[derive(Deserialize, Serialize, edgezero_core::AppConfig)]
+        #[app_config(diagnostics = RULES)]
+        struct RefusedConfig {
+            implementation: String,
+        }
+        impl Validate for RefusedConfig {
+            fn validate(&self) -> Result<(), validator::ValidationErrors> {
+                let code = if self.implementation == "unapproved" {
+                    "unknown"
+                } else {
+                    "implementation_unavailable"
+                };
+                let mut error = validator::ValidationError::new(code);
+                error.message = Some(Cow::Borrowed("UNTRUSTED_CUSTOM_MESSAGE_CANARY"));
+                error.add_param(Cow::Borrowed("value"), &"REJECTED_URL_SECRET_CANARY");
+                let mut errors = validator::ValidationErrors::new();
+                errors.add("implementation", error);
+                Err(errors)
+            }
+        }
+        for selection in ["bidder-x", "unapproved"] {
+            let (dir, manifest, _) =
+                setup_project(PUSH_MANIFEST, &format!("implementation = {selection:?}\n"));
+            let diff = ConfigDiffArgs {
+                adapter: "axum".to_owned(),
+                app_config: None,
+                exit_code: false,
+                format: DiffFormat::Unified,
+                key: None,
+                local: false,
+                manifest: manifest.clone(),
+                no_env: true,
+                runtime_config: None,
+                store: None,
+                staging: false,
+            };
+            let errors = [
+                run_config_validate_typed::<RefusedConfig>(&args_for(&manifest))
+                    .expect_err("refused validate"),
+                run_config_push_typed::<RefusedConfig>(&push_args(&manifest, "axum"))
+                    .expect_err("refused push"),
+                run_config_diff_typed::<RefusedConfig>(&diff).expect_err("refused diff"),
+            ];
+            for error in errors {
+                assert!(error.contains("validation"));
+                assert_eq!(
+                    error.contains(RULES[0].explanation),
+                    selection == "bidder-x"
+                );
+                for canary in [
+                    "UNTRUSTED_CUSTOM_MESSAGE_CANARY",
+                    "REJECTED_URL_SECRET_CANARY",
+                ] {
+                    assert!(!error.contains(canary), "unsafe validator output: {error}");
+                }
+            }
+            assert!(
+                !dir.path().join(".edgezero").exists(),
+                "validation must precede remote work"
+            );
+        }
     }
 
     #[test]

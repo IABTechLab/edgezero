@@ -10,6 +10,7 @@ use validator::Validate;
 
 use crate::app_config::{AppConfigMeta, SecretField, SecretKind, SecretPathSegment};
 use crate::blob_envelope::{BlobEnvelope, BlobEnvelopeError};
+use crate::config_diagnostics::ValidationReport;
 use crate::config_store::ConfigStoreHandle;
 use crate::context::RequestContext;
 use crate::error::EdgeError;
@@ -951,18 +952,10 @@ where
     // is a key NAME; RUNTIME runs cfg.validate() because the value is
     // now the resolved secret.
     cfg.validate().map_err(|err| {
-        // SECURITY: `secret_walk` has replaced `#[secret]` fields with their
-        // RESOLVED values, and `validator`'s error params echo the rejected
-        // value — so `err.to_string()` here can leak a secret into the HTTP
-        // response body and logs. Keep the field path (structural, not secret)
-        // but drop the formatted validator details on this runtime path.
-        let field = first_violating_field(&err).unwrap_or_default();
-        let message = if field.is_empty() {
-            "app config failed validation".to_owned()
-        } else {
-            format!("app config failed validation for field `{field}`")
-        };
-        EdgeError::config_out_of_date(message, field)
+        EdgeError::config_validation(ValidationReport::from_errors(
+            &err,
+            C::validation_diagnostics(),
+        ))
     })?;
     Ok(cfg)
 }
@@ -1196,63 +1189,11 @@ fn map_secret_error(
     }
 }
 
-/// Walk `errors` recursively and return the first violating field's DOTTED
-/// PATH (e.g. `"service.timeout_ms"` for a nested failure).
-///
-/// Keys are sorted for determinism across runs — required for the 6.3.1
-/// contract test. An earlier draft only looked at top-level keys,
-/// collapsing nested paths like `service.timeout_ms` to `"service"`.
-fn first_violating_field(errors: &validator::ValidationErrors) -> Option<String> {
-    fn walk(errors: &validator::ValidationErrors, prefix: &str, out: &mut Option<String>) {
-        if out.is_some() {
-            return;
-        }
-        // Validator 0.20 stores keys as `Cow<'static, str>`.
-        // `.as_ref()` gives `&str`; sort for determinism.
-        let mut keys: Vec<&str> = errors.errors().keys().map(AsRef::as_ref).collect();
-        keys.sort_unstable();
-        for key in keys {
-            let path = if prefix.is_empty() {
-                key.to_owned()
-            } else {
-                format!("{prefix}.{key}")
-            };
-            match errors.errors().get(key) {
-                Some(validator::ValidationErrorsKind::Field(_)) => {
-                    *out = Some(path);
-                    return;
-                }
-                Some(validator::ValidationErrorsKind::Struct(inner)) => {
-                    walk(inner, &path, out);
-                    if out.is_some() {
-                        return;
-                    }
-                }
-                Some(validator::ValidationErrorsKind::List(items)) => {
-                    // BTreeMap<usize, Box<ValidationErrors>>; iterate
-                    // in index order for determinism.
-                    let mut indices: Vec<usize> = items.keys().copied().collect();
-                    indices.sort_unstable();
-                    for idx in indices {
-                        if let Some(inner) = items.get(&idx) {
-                            let indexed = format!("{path}[{idx}]");
-                            walk(inner, &indexed, out);
-                            if out.is_some() {
-                                return;
-                            }
-                        }
-                    }
-                }
-                None => {}
-            }
-        }
-    }
-    let mut out: Option<String> = None;
-    walk(errors, "", &mut out);
-    out
-}
-
 #[cfg(test)]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "fixtures exercise the default-empty diagnostic metadata contract"
+)]
 mod tests {
     use super::*;
     use crate::app_config::{AppConfigMeta, SecretField, SecretKind, SecretPathSegment};
@@ -2655,6 +2596,172 @@ mod tests {
         }
     }
 
+    // The existing test-utils feature stands in for a compiled implementation.
+    // Run this same policy with and without that Cargo feature.
+    #[test]
+    fn runtime_approved_diagnostic_tracks_compiled_availability() {
+        use crate::config_diagnostics::{ApprovedDiagnostic, ValidationPathSegment};
+        use crate::response::IntoResponse as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const RULES: &[ApprovedDiagnostic] = &[ApprovedDiagnostic {
+            path: &[ValidationPathSegment::Field("implementation")],
+            code: "implementation_unavailable",
+            explanation: "Enable feature test-utils and rebuild both CLI and serving guest.",
+        }];
+        #[derive(Debug, Deserialize, crate::AppConfig)]
+        #[app_config(diagnostics = RULES)]
+        struct CompiledConfig {
+            implementation: String,
+            #[secret]
+            token: String,
+        }
+        impl Validate for CompiledConfig {
+            fn validate(&self) -> Result<(), validator::ValidationErrors> {
+                if self.implementation == "test-bidder" && !cfg!(feature = "test-utils") {
+                    let mut error = validator::ValidationError::new("implementation_unavailable");
+                    error.message = Some(Cow::Owned(format!("unsafe {}", self.token)));
+                    error.add_param(Cow::Borrowed("value"), &self.token);
+                    let mut errors = validator::ValidationErrors::new();
+                    errors.add("implementation", error);
+                    Err(errors)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        struct CountingStore(Arc<AtomicUsize>);
+        #[async_trait(?Send)]
+        impl ConfigStore for CountingStore {
+            async fn get(&self, _key: &str) -> Result<Option<String>, ConfigStoreError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(make_envelope(
+                    serde_json::json!({"implementation":"test-bidder", "token":"key"}),
+                )))
+            }
+        }
+        let reads = Arc::new(AtomicUsize::new(0));
+        let secrets = InMemorySecretStore::new([(
+            "vault/key",
+            bytes::Bytes::from_static(b"RESOLVED_SECRET_CANARY"),
+        )]);
+        let ctx =
+            ctx_with_config_and_secrets(CountingStore(Arc::clone(&reads)), "key", secrets, "vault");
+        let result = block_on(AppConfig::<CompiledConfig>::from_store(
+            &ctx,
+            "default",
+            Some("key"),
+        ));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        if cfg!(feature = "test-utils") {
+            let loaded = result.expect("compiled implementation accepts same policy");
+            assert_eq!(loaded.implementation, "test-bidder");
+            assert_eq!(loaded.token, "RESOLVED_SECRET_CANARY");
+        } else {
+            let error = result.expect_err("missing compiled implementation");
+            assert_eq!(error.validation_diagnostics().len(), 1);
+            assert!(error.operator_message().contains(RULES[0].explanation));
+            assert!(!error.message().contains(RULES[0].explanation));
+            assert!(!format!("{error:?} {error}").contains("RESOLVED_SECRET_CANARY"));
+            let response = error.into_response().expect("public error");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()["retry-after"], "60");
+            let body = String::from_utf8_lossy(response.body().as_bytes().expect("buffered"));
+            for hidden in [
+                RULES[0].explanation,
+                RULES[0].code,
+                "RESOLVED_SECRET_CANARY",
+            ] {
+                assert!(!body.contains(hidden));
+            }
+        }
+    }
+
+    #[test]
+    fn from_store_preserves_approved_nested_list_diagnostic() {
+        use crate::config_diagnostics::{ApprovedDiagnostic, ValidationPathSegment};
+        const RULES: &[ApprovedDiagnostic] = &[ApprovedDiagnostic {
+            path: &[
+                ValidationPathSegment::Field("bidders"),
+                ValidationPathSegment::Each,
+                ValidationPathSegment::Field("implementation"),
+            ],
+            code: "implementation_unavailable",
+            explanation: "Enable feature bidder-x and rebuild CLI and guest.",
+        }];
+        fn unavailable(_value: &str) -> Result<(), validator::ValidationError> {
+            Err(validator::ValidationError::new(
+                "implementation_unavailable",
+            ))
+        }
+        #[derive(Debug, Deserialize, Validate)]
+        struct Bidder {
+            #[validate(custom(function = "unavailable"))]
+            implementation: String,
+        }
+        #[derive(Debug, Deserialize, Validate, crate::AppConfig)]
+        #[app_config(diagnostics = RULES)]
+        struct NestedPolicy {
+            #[validate(nested)]
+            bidders: Vec<Bidder>,
+        }
+        struct NestedStore;
+        #[async_trait(?Send)]
+        impl ConfigStore for NestedStore {
+            async fn get(&self, _key: &str) -> Result<Option<String>, ConfigStoreError> {
+                Ok(Some(make_envelope(
+                    serde_json::json!({"bidders":[{"implementation":"bidder-x"}]}),
+                )))
+            }
+        }
+        let ctx = ctx_with_config_store(NestedStore, "key");
+        let error = block_on(AppConfig::<NestedPolicy>::from_store(&ctx, "default", None))
+            .expect_err("unavailable");
+        assert_eq!(error.validation_diagnostics().len(), 1);
+        assert_eq!(
+            error.validation_diagnostics()[0].field_path(),
+            "bidders[0].implementation"
+        );
+        assert_eq!(
+            error.validation_diagnostics()[0].explanation(),
+            RULES[0].explanation
+        );
+    }
+
+    #[test]
+    fn runtime_validation_redacts_untrusted_map_keys() {
+        #[derive(Debug, Deserialize)]
+        struct HostileConfig {
+            _unused: Option<String>,
+        }
+        impl AppConfigMeta for HostileConfig {
+            fn secret_fields() -> Vec<SecretField> {
+                Vec::new()
+            }
+        }
+        impl Validate for HostileConfig {
+            fn validate(&self) -> Result<(), validator::ValidationErrors> {
+                let mut errors = validator::ValidationErrors::new();
+                errors.errors_mut().insert(
+                    Cow::Owned("SECRET_MAP_KEY_CANARY".to_owned()),
+                    validator::ValidationErrorsKind::Field(vec![validator::ValidationError::new(
+                        "custom",
+                    )]),
+                );
+                Err(errors)
+            }
+        }
+        struct HostileStore;
+        #[async_trait(?Send)]
+        impl ConfigStore for HostileStore {
+            async fn get(&self, _key: &str) -> Result<Option<String>, ConfigStoreError> {
+                Ok(Some(make_envelope(serde_json::json!({}))))
+            }
+        }
+        let ctx = ctx_with_config_store(HostileStore, "key");
+        let error = block_on(AppConfig::<HostileConfig>::from_request(&ctx)).expect_err("invalid");
+        assert!(!format!("{error:?}").contains("SECRET_MAP_KEY_CANARY"));
+    }
+
     #[test]
     fn app_config_extractor_returns_config_out_of_date_on_validation_failure() {
         use crate::config_store::{ConfigStore, ConfigStoreError};
@@ -2678,8 +2785,8 @@ mod tests {
         );
         if let EdgeError::ConfigOutOfDate { field_path, .. } = &err {
             assert_eq!(
-                field_path, "timeout_ms",
-                "field_path names the violator: {err:?}"
+                field_path, "<redacted>",
+                "unapproved field name is redacted: {err:?}"
             );
         }
     }
@@ -3139,8 +3246,8 @@ mod tests {
         );
         if let EdgeError::ConfigOutOfDate { field_path, .. } = &err {
             assert_eq!(
-                field_path, "api_token",
-                "field_path names the violating secret field: {err:?}"
+                field_path, "<redacted>",
+                "unapproved secret field name is redacted: {err:?}"
             );
         }
     }
@@ -3186,8 +3293,8 @@ mod tests {
 
         // The error message names the field but NOT the secret.
         assert!(
-            err.message().contains("api_token"),
-            "names the field: {err:?}"
+            err.message().contains("<redacted>"),
+            "redacts unapproved field names: {err:?}"
         );
         assert!(
             !err.message().contains(SECRET),

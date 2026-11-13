@@ -386,6 +386,22 @@ Run `<app-cli> config push --adapter <name>` for the deployed code
 revision to fix the first two cases; provision the missing secret to
 fix the third.
 
+### Config validation rejects a compiled implementation
+
+A policy may select an implementation whose Cargo feature is absent from the
+serving guest. Typed validation still fails closed, even if a CLI built with the
+feature accepted the same policy. Rebuild both CLI and guest with matching
+features; another config push cannot add missing compiled code.
+
+Applications can register [safe operator diagnostics](./configuration.md#safe-operator-validation-diagnostics)
+from compiled declarations to identify the required feature. Approved failures use
+`EdgeError::ConfigValidation`; CLI errors include the approved explanation.
+`RequestLogger` includes it when a tracing subscriber or tracing-to-`log` bridge
+is configured; applications can also log `err.operator_message()` explicitly.
+Public responses retain the coarse `config_out_of_date` 503 and `Retry-After: 60`.
+Unregistered failures remain generic, and arbitrary validator
+messages, values, and map keys are never promoted into diagnostics.
+
 ### `config push` reports "this command requires a typed app-config struct"
 
 You ran `edgezero config push` from the BUNDLED binary instead of your

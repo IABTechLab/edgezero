@@ -23,6 +23,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::thread_local;
 
+use crate::config_diagnostics::ApprovedDiagnostic;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 use toml::Value;
@@ -91,6 +92,15 @@ pub trait AppConfigMeta {
     /// including those reached through `#[app_config(nested)]` children,
     /// each carrying its full path from this struct's root.
     fn secret_fields() -> Vec<SecretField>;
+
+    /// Root-owned approval registry for operator-facing validation diagnostics.
+    /// Derived configs opt in with `#[app_config(diagnostics = REGISTRY)]`.
+    /// The default retains generic, redacted reporting.
+    #[inline]
+    #[must_use]
+    fn validation_diagnostics() -> &'static [ApprovedDiagnostic] {
+        &[]
+    }
 }
 
 thread_local! {
@@ -752,6 +762,10 @@ fn walk_and_overlay(
     reason = "test fixtures: `validator` range bounds default to the field's int type; \
               match arms in `expect_err` assertions intentionally collapse all unexpected \
               variants into a single panic"
+)]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "fixtures exercise the default-empty diagnostic metadata contract"
 )]
 mod tests {
     use super::*;

@@ -62,6 +62,25 @@ mod tests {
     use futures::stream;
 
     #[test]
+    fn approved_config_diagnostics_stay_private_after_conversion() {
+        use axum::body::to_bytes;
+        use edgezero_core::config_diagnostics::contract_fixture::{self, CANARY, EXPLANATION};
+        use edgezero_core::response::IntoResponse as _;
+        let error = block_on(contract_fixture::extraction_error()).expect("extraction failure");
+        assert_eq!(error.validation_diagnostics().len(), 1);
+        assert!(error.operator_message().contains(EXPLANATION));
+        let response = into_axum_response(error.into_response().expect("core response"));
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "60");
+        let bytes = block_on(to_bytes(response.into_body(), 4096)).expect("body");
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("config_out_of_date"));
+        for hidden in [CANARY, EXPLANATION, "implementation_unavailable"] {
+            assert!(!body.contains(hidden));
+        }
+    }
+
+    #[test]
     fn converts_core_response_stream_into_axum_body() {
         let stream = stream::iter(vec![
             Ok::<_, anyhow::Error>(bytes::Bytes::from_static(b"hel")),

@@ -77,6 +77,29 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn approved_config_diagnostics_stay_private_after_conversion() {
+        use edgezero_core::config_diagnostics::contract_fixture::{self, CANARY, EXPLANATION};
+        use edgezero_core::response::IntoResponse as _;
+        let error = contract_fixture::extraction_error()
+            .await
+            .expect("extraction failure");
+        assert_eq!(error.validation_diagnostics().len(), 1);
+        assert!(error.operator_message().contains(EXPLANATION));
+        let mut response = from_core_response(error.into_response().expect("core response"))
+            .expect("worker response");
+        assert_eq!(response.status_code(), 503);
+        assert_eq!(
+            response.headers().get("retry-after").expect("header"),
+            Some("60".to_owned())
+        );
+        let body = response.text().await.expect("body");
+        assert!(body.contains("config_out_of_date"));
+        for hidden in [CANARY, EXPLANATION, "implementation_unavailable"] {
+            assert!(!body.contains(hidden));
+        }
+    }
+
+    #[wasm_bindgen_test]
     async fn ingress_invalid_runtime_header_value_is_a_bad_request() {
         let raw = web_sys::Request::new_with_str("https://example.com/reserved")
             .expect("should construct Web Request");

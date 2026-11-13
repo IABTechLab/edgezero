@@ -146,7 +146,13 @@ fn expand(input: &DeriveInput) -> Result<TokenStream2, syn::Error> {
         }
     }
 
-    Ok(emit_impl(input, &annotations, &nested_descriptors))
+    let diagnostics = diagnostics_registry(&input.attrs)?;
+    Ok(emit_impl(
+        input,
+        &annotations,
+        &nested_descriptors,
+        diagnostics.as_ref(),
+    ))
 }
 
 /// Classify every field as a direct `#[secret]` annotation or a
@@ -198,7 +204,9 @@ fn emit_impl(
     input: &DeriveInput,
     annotations: &[FieldAnnotation],
     nested_descriptors: &[NestedDescriptor<'_>],
+    diagnostics: Option<&syn::Path>,
 ) -> TokenStream2 {
+    let diagnostic_method = emit_diagnostic_method(diagnostics);
     let struct_ident = &input.ident;
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
 
@@ -311,6 +319,7 @@ fn emit_impl(
         impl #impl_generics ::edgezero_core::app_config::AppConfigMeta
             for #struct_ident #type_generics #where_clause
         {
+            #diagnostic_method
             fn secret_fields() -> ::std::vec::Vec<::edgezero_core::app_config::SecretField> {
                 #root_bound_checks
                 #secret_fields_body
@@ -649,4 +658,85 @@ fn enforce_no_disallowed_serde_attrs(field: &Field) -> Result<(), syn::Error> {
         }
     }
     Ok(())
+}
+
+/// Parse the root-only diagnostic registry opt-in, rejecting typos/duplicates.
+fn diagnostics_registry(attrs: &[Attribute]) -> Result<Option<syn::Path>, syn::Error> {
+    let mut registry = None;
+    for attr in attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("app_config"))
+    {
+        let mut seen = false;
+        attr.parse_nested_meta(|meta| {
+            seen = true;
+            if !meta.path.is_ident("diagnostics") {
+                return Err(meta.error("root app_config only accepts diagnostics = REGISTRY"));
+            }
+            if registry.is_some() {
+                return Err(meta.error("duplicate diagnostics registry"));
+            }
+            registry = Some(meta.value()?.parse()?);
+            Ok(())
+        })?;
+        if !seen {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "expected diagnostics = REGISTRY",
+            ));
+        }
+    }
+    Ok(registry)
+}
+
+fn emit_diagnostic_method(diagnostics: Option<&syn::Path>) -> Option<TokenStream2> {
+    diagnostics.map(|registry| quote! {
+        fn validation_diagnostics() -> &'static [::edgezero_core::config_diagnostics::ApprovedDiagnostic] {
+            #registry
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_registry_attribute_rejects_unknown_duplicate_and_empty_options() {
+        for input in [
+            syn::parse_quote!(
+                #[app_config(bogus = RULES)]
+                struct C {
+                    value: String,
+                }
+            ),
+            syn::parse_quote!(
+                #[app_config(diagnostics = A, diagnostics = B)]
+                struct C {
+                    value: String,
+                }
+            ),
+            syn::parse_quote!(
+                #[app_config()]
+                struct C {
+                    value: String,
+                }
+            ),
+        ] {
+            expand(&input).expect_err("invalid registry declaration");
+        }
+    }
+
+    #[test]
+    fn diagnostic_registry_attribute_emits_root_method() {
+        let input = syn::parse_quote!(
+            #[app_config(diagnostics = crate::RULES)]
+            struct C {
+                value: String,
+            }
+        );
+        let output = expand(&input).expect("registry attribute").to_string();
+        assert!(output.contains("fn validation_diagnostics"));
+        assert!(output.contains("crate :: RULES"));
+    }
 }
