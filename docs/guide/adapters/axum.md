@@ -290,7 +290,8 @@ request identity, counters, and deployment examples.
 
 ## Native Geo providers
 
-Geo is off by default and selected only through `AxumRunOptions::with_geo`. The opt-in
+Geo is off by default. Select it with `[adapters.axum.geo]` in `edgezero.toml` and
+`EDGEZERO__ADAPTER__GEO__*` settings, or in code with `AxumRunOptions::with_geo`. The opt-in
 `geo-cloudfront` feature adds a bounded local CloudFront parser, not AWS SDKs or store setup.
 Both built-in and supplied providers require a separate `ProtectedCloudFrontAlb` policy using
 the actual socket peer. Ordinary trusted-proxy configuration does not admit geographic assertions.

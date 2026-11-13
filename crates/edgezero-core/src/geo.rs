@@ -64,7 +64,8 @@ impl GeoProviderId {
     /// Validate an application provider label matching `[a-z][a-z0-9._-]{0,63}`.
     ///
     /// # Errors
-    /// Returns a bounded category for invalid labels or the reserved `cloudfront` ID.
+    /// Returns a bounded category for invalid labels or the reserved `cloudfront`, `fastly`
+    /// and `cloudflare` IDs.
     #[inline]
     pub fn new(value: &str) -> Result<Self, GeoValueError> {
         if value.is_empty()
@@ -76,7 +77,7 @@ impl GeoProviderId {
         {
             return Err(GeoValueError::InvalidProviderId);
         }
-        if value == "cloudfront" {
+        if matches!(value, "cloudfront" | "fastly" | "cloudflare") {
             return Err(GeoValueError::ReservedProviderId);
         }
         Ok(Self(value.to_owned()))
@@ -313,16 +314,22 @@ pub enum GeoUnavailableReason {
 
 /// The source of a located assertion, not a distribution identity attestation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GeoSource {
     CloudFront,
+    Cloudflare,
+    Fastly,
 }
 
 /// The declared infrastructure protection used for source admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GeoTrustBasis {
     /// Operator-declared credential-gated, network-isolated ALB path.
     /// This does not prove the external listener or network configuration.
     DeclaredProtectedAlb,
+    /// Request metadata the hosting platform attaches itself; no client header is read.
+    PlatformMetadata,
 }
 
 /// Framework-owned status for a selected provider.
@@ -348,6 +355,40 @@ pub enum GeoOutcome {
         provider: GeoProviderId,
         status: GeoStatus,
     },
+}
+
+impl GeoOutcome {
+    /// Outcome for geography an edge platform attaches to the request itself.
+    ///
+    /// `subdivision` is the ISO 3166-2 code without its country prefix. Platform
+    /// metadata is not client-supplied, so a value that fails validation, such as
+    /// Cloudflare's `XX` (unknown) or `T1` (Tor), means the platform has no usable
+    /// geography rather than a forged assertion: an absent or unusable country is
+    /// missing metadata, and an unusable subdivision leaves a country-only result.
+    #[inline]
+    #[must_use]
+    pub fn platform(source: GeoSource, country: Option<&str>, subdivision: Option<&str>) -> Self {
+        let provider = GeoProviderId(
+            match source {
+                GeoSource::CloudFront => "cloudfront",
+                GeoSource::Cloudflare => "cloudflare",
+                GeoSource::Fastly => "fastly",
+            }
+            .to_owned(),
+        );
+        let status = match country.and_then(|raw| CountryCode::new(raw).ok()) {
+            None => GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata),
+            Some(country_code) => GeoStatus::Located {
+                location: GeoLocation::new(
+                    country_code,
+                    subdivision.and_then(|raw| SubdivisionCode::new(raw).ok()),
+                ),
+                source,
+                trust_basis: GeoTrustBasis::PlatformMetadata,
+            },
+        };
+        Self::Selected { provider, status }
+    }
 }
 
 #[cfg(test)]
@@ -461,11 +502,59 @@ mod tests {
                 Err(GeoValueError::InvalidProviderId)
             );
         }
-        assert_eq!(
-            GeoProviderId::new("cloudfront"),
-            Err(GeoValueError::ReservedProviderId)
-        );
+        for value in ["cloudfront", "fastly", "cloudflare"] {
+            assert_eq!(
+                GeoProviderId::new(value),
+                Err(GeoValueError::ReservedProviderId)
+            );
+        }
         assert_eq!(GeoProviderId::cloudfront().as_str(), "cloudfront");
+    }
+
+    #[test]
+    fn platform_outcome_treats_unusable_values_as_missing() {
+        let status = |outcome: GeoOutcome| match outcome {
+            GeoOutcome::Selected { provider, status } => {
+                assert_eq!(provider.as_str(), "fastly");
+                status
+            }
+            GeoOutcome::NoSelection => panic!("platform geo is always selected"),
+        };
+        let located = |country: &str, subdivision: Option<&str>| GeoStatus::Located {
+            location: GeoLocation::new(
+                CountryCode::new(country).unwrap(),
+                subdivision.map(|value| SubdivisionCode::new(value).unwrap()),
+            ),
+            source: GeoSource::Fastly,
+            trust_basis: GeoTrustBasis::PlatformMetadata,
+        };
+        let platform = |country, subdivision| {
+            status(GeoOutcome::platform(
+                GeoSource::Fastly,
+                country,
+                subdivision,
+            ))
+        };
+        assert_eq!(platform(Some("us"), Some("ca")), located("US", Some("CA")));
+        assert_eq!(platform(Some("US"), None), located("US", None));
+        assert_eq!(
+            platform(None, None),
+            GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata)
+        );
+        // Platform placeholders are unavailable geography, never a forged assertion.
+        for (country, subdivision) in [(Some("XX"), None), (Some("T1"), Some("CA"))] {
+            assert_eq!(
+                platform(country, subdivision),
+                GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata)
+            );
+        }
+        assert_eq!(platform(Some("US"), Some("US-CA")), located("US", None));
+        let GeoOutcome::Selected { provider, .. } =
+            GeoOutcome::platform(GeoSource::Cloudflare, None, None)
+        else {
+            panic!("selected")
+        };
+        assert_eq!(provider.as_str(), "cloudflare");
     }
 
     #[test]
