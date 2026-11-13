@@ -17,6 +17,7 @@ axum = [
     "dep:tokio",
     "dep:tower",
     "dep:futures-util",
+    "dep:ipnet",
     "dep:reqwest",
     "dep:redb",
 ]
@@ -41,6 +42,7 @@ ctor = { workspace = true, optional = true }
 futures = { workspace = true }
 futures-util = { workspace = true, optional = true }
 http = { workspace = true }
+ipnet = { workspace = true, optional = true }
 log = { workspace = true }
 redb = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }

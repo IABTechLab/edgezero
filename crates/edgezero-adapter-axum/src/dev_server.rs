@@ -31,6 +31,7 @@ use simple_logger::SimpleLogger;
 use std::collections::BTreeMap;
 
 use crate::config_store::AxumConfigStore;
+use crate::ja4::TrustedJa4Header;
 use crate::key_value_store::PersistentKvStore;
 use crate::secret_store::EnvSecretStore;
 use crate::service::EdgeZeroAxumService;
@@ -77,6 +78,7 @@ pub struct AxumDevServer {
     config: AxumDevServerConfig,
     router: RouterService,
     stores: Stores,
+    trusted_ja4_header: Option<TrustedJa4Header>,
 }
 
 impl AxumDevServer {
@@ -87,6 +89,7 @@ impl AxumDevServer {
             config: AxumDevServerConfig::default(),
             router,
             stores: Stores::default(),
+            trusted_ja4_header: None,
         }
     }
 
@@ -107,6 +110,7 @@ impl AxumDevServer {
             router,
             config,
             stores,
+            trusted_ja4_header,
         } = self;
 
         // Allow binding to already-open listener if caller created one to surface errors early.
@@ -119,7 +123,14 @@ impl AxumDevServer {
         let listener = TokioTcpListener::from_std(std_listener)
             .context("failed to adopt std listener into tokio")?;
 
-        serve_with_stores(router, listener, config.enable_ctrl_c, stores).await
+        serve_with_stores(
+            router,
+            listener,
+            config.enable_ctrl_c,
+            stores,
+            trusted_ja4_header,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -128,8 +139,16 @@ impl AxumDevServer {
             router,
             config,
             stores,
+            trusted_ja4_header,
         } = self;
-        serve_with_stores(router, listener, config.enable_ctrl_c, stores).await
+        serve_with_stores(
+            router,
+            listener,
+            config.enable_ctrl_c,
+            stores,
+            trusted_ja4_header,
+        )
+        .await
     }
 
     #[must_use]
@@ -139,6 +158,7 @@ impl AxumDevServer {
             config,
             router,
             stores: Stores::default(),
+            trusted_ja4_header: None,
         }
     }
 
@@ -191,6 +211,14 @@ impl AxumDevServer {
     #[inline]
     pub fn with_secret_registry(mut self, registry: SecretRegistry) -> Self {
         self.stores.secret_registry = Some(registry);
+        self
+    }
+
+    /// Read the client's JA4 from a trusted TLS-terminating proxy's header.
+    #[must_use]
+    #[inline]
+    pub fn with_trusted_ja4_header(mut self, config: TrustedJa4Header) -> Self {
+        self.trusted_ja4_header = Some(config);
         self
     }
 }
@@ -279,6 +307,7 @@ async fn serve_with_stores(
     listener: TokioTcpListener,
     enable_ctrl_c: bool,
     stores: Stores,
+    trusted_ja4_header: Option<TrustedJa4Header>,
 ) -> anyhow::Result<()> {
     let service = {
         let mut service = EdgeZeroAxumService::new(router);
@@ -299,6 +328,9 @@ async fn serve_with_stores(
         }
         if let Some(handle) = stores.secrets {
             service = service.with_secret_handle(handle);
+        }
+        if let Some(config) = trusted_ja4_header {
+            service = service.with_trusted_ja4_header(config);
         }
         service
     };
@@ -357,6 +389,7 @@ where
         log::warn!("{warning}");
     }
     let addr = resolution.addr;
+    let trusted_ja4_header = TrustedJa4Header::from_env(&env)?;
     let app = A::build_app();
     let router = app.router().clone();
 
@@ -386,7 +419,7 @@ where
             secret_registry,
             ..Stores::default()
         };
-        serve_with_stores(router, listener, true, request_stores).await
+        serve_with_stores(router, listener, true, request_stores, trusted_ja4_header).await
     })
 }
 
@@ -983,6 +1016,57 @@ mod integration_tests {
         assert_eq!(response.text().await.unwrap(), "hello from dev server");
 
         server.handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_reads_ja4_only_from_trusted_proxy_peers() {
+        use edgezero_core::ja4::{CapturedJa4, Ja4Source, Ja4Unavailable};
+
+        async fn ja4_state(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+            Ok(match ctx.ja4() {
+                Some(CapturedJa4::Captured {
+                    fingerprint,
+                    source: Ja4Source::TrustedProxyHeader,
+                }) if fingerprint.as_str() == "t13d1516h2_8daaf6152771_e5627efa2ab1" => "captured",
+                Some(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed)) => "not_exposed",
+                _ => "unexpected",
+            })
+        }
+
+        // The test client connects from loopback, so only the first policy trusts it.
+        for (trusted_proxies, expected) in
+            [("127.0.0.0/8", "captured"), ("192.0.2.0/24", "not_exposed")]
+        {
+            let listener = TokioTcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            let config = AxumDevServerConfig {
+                addr,
+                enable_ctrl_c: false,
+            };
+            let trusted = TrustedJa4Header::parse("x-ja4", trusted_proxies)
+                .expect("should parse trusted proxy config");
+            let server = AxumDevServer::with_config(
+                RouterService::builder().get("/ja4", ja4_state).build(),
+                config,
+            )
+            .with_trusted_ja4_header(trusted);
+            let handle = tokio::spawn(async move {
+                let _result = server.run_with_listener(listener).await;
+            });
+
+            let client = reqwest::Client::new();
+            let url = format!("http://{addr}/ja4");
+            let response = send_with_retry(&client, |http_client| {
+                http_client
+                    .get(url.as_str())
+                    .header("x-ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1")
+            })
+            .await;
+            assert_eq!(response.text().await.expect("body"), expected);
+            handle.abort();
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
