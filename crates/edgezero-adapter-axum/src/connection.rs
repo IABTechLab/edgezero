@@ -1498,7 +1498,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn json_extractor_overflow_reaches_custom_renderer_without_retry_after() {
-        use edgezero_core::context::DEFAULT_INBOUND_JSON_BYTES;
+        use crate::run_options::JsonBodyLimit;
         use edgezero_core::extractor::Json;
 
         #[edgezero_core::action]
@@ -1517,7 +1517,7 @@ mod tests {
                 .body(Body::from("extractor overflow"))
                 .expect("custom error response")
         });
-        let cap = DEFAULT_INBOUND_JSON_BYTES;
+        let cap = JsonBodyLimit::DEFAULT.get().get();
         let body = serde_json::to_string(&serde_json::json!("x".repeat(cap - 1)))
             .expect("valid oversized JSON string");
         assert_eq!(body.len(), cap + 1);
