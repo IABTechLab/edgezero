@@ -337,8 +337,14 @@ configuration again cannot add code to the guest.
 Approved failures use `EdgeError::ConfigValidation`; unapproved failures retain
 `ConfigOutOfDate`. Applications opting in should account for the new variant and
 use `err.validation_diagnostics()` or `err.operator_message()` for operator output.
-`RequestLogger` uses the operator view. `message()`, `Display`, and the HTTP response
-stay coarse: status 503, kind `config_out_of_date`, and `Retry-After: 60`, without
+`RequestLogger` uses the operator view through `tracing`. To receive these events,
+configure a tracing subscriber, or enable tracing's `log` feature and initialize a
+`log` logger. Adapter logger initialization alone does not guarantee that tracing
+events reach a log sink. Alternatively, log `err.operator_message()` explicitly
+through your application's configured logger.
+
+`message()`, `Display`, and the HTTP response stay coarse: status 503, kind
+`config_out_of_date`, and `Retry-After: 60`, without
 approved codes or explanations. `Debug` includes the safe report, never the raw
 validation error. This policy concerns typed validation failures; it does not make
 arbitrary application errors or local loader errors safe to log.

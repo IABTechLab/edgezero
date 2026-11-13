@@ -395,9 +395,11 @@ features; another config push cannot add missing compiled code.
 
 Applications can register [safe operator diagnostics](./configuration.md#safe-operator-validation-diagnostics)
 from compiled declarations to identify the required feature. Approved failures use
-`EdgeError::ConfigValidation`; operator logs and CLI errors include the approved
-explanation, while public responses retain the coarse `config_out_of_date` 503 and
-`Retry-After: 60`. Unregistered failures remain generic, and arbitrary validator
+`EdgeError::ConfigValidation`; CLI errors include the approved explanation.
+`RequestLogger` includes it when a tracing subscriber or tracing-to-`log` bridge
+is configured; applications can also log `err.operator_message()` explicitly.
+Public responses retain the coarse `config_out_of_date` 503 and `Retry-After: 60`.
+Unregistered failures remain generic, and arbitrary validator
 messages, values, and map keys are never promoted into diagnostics.
 
 ### `config push` reports "this command requires a typed app-config struct"
