@@ -35,9 +35,15 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-`run_app` installs `simple_logger` (unless `owns_logging = true`), builds the app, and reads bind /
-store / logging config at runtime from `EDGEZERO__*` environment
-variables (see [the migration guide](../manifest-store-migration.md)).
+`run_app` installs `simple_logger` unless `owns_logging = true`, builds the app, and reads bind,
+store, and logging config at runtime from `EDGEZERO__*` environment
+variables. See [the migration guide](../manifest-store-migration.md).
+
+Incoming proxy trust defaults to no trusted networks. Managed hosting strips raw forwarding
+headers before admission and exposes checked ingress metadata instead. See
+[Axum diagnostics and trusted proxies](/guide/axum-diagnostics) for configuration, migration,
+request records, and work snapshots.
+
 The portable store metadata baked into `App` by the `app!` macro
 drives which logical stores are exposed; no `edgezero.toml` needs to
 be loaded by the runtime.
@@ -131,6 +137,11 @@ portable 8 MiB fallback. Explicit JSON caps take the minimum of the caller cap a
 JSON helpers enforce it regardless of Content-Type; generic buffered helpers enforce it for the
 original `application/json` or `application/*+json` ingress classification. Ordinary Form retains
 its 1 MiB caller cap. Header/extension mutation and context reconstruction cannot loosen policy.
+
+Native-managed JSON deserialization failures return HTTP 400 with the fixed text
+`invalid JSON payload`. Custom renderers receive that same fixed error, not serde detail.
+Legacy/unmanaged JSON errors and application-authored `EdgeError` messages retain their
+existing behavior. See [privacy limits](/guide/axum-diagnostics#timing-failures-and-privacy-limits).
 
 Taken streams and proxy forwarding receive no new aggregate size cap. Manual body collection
 keeps its supplied cap and existing typed 413 overflow behavior. The ceiling bounds logical buffered
@@ -344,9 +355,26 @@ address takes precedence over `config.addr`. Resolving the shutdown future cance
 connections and waits for the local worker and its resources; it does not drain responses.
 Dropping the serving future signals cancellation but cannot wait for cleanup.
 
-::: tip Logging status
-`run_app` wires logging automatically; custom entrypoints should install a logger explicitly.
-:::
+The development `run_app` helper installs `simple_logger` at the level read from
+`EDGEZERO__LOGGING__LEVEL`, falling back to `info` when that variable is unset or unparseable.
+Production `AxumRunOptions` rejects an invalid supplied level. Neither reads `edgezero.toml`
+for logger setup, and `echo_stdout` has no runtime effect.
+
+To install your own logger, set `owns_logging = true` in the `app!` declaration and initialize
+it once in `main` before entering the runner. Ownership controls installation, not framework
+facade output. Safe native request and lifecycle records use target `edgezero::native`.
+
+Request records are on by default. `EDGEZERO__LOGGING__REQUEST_RECORDS` accepts exactly
+`true` or `false`; invalid supplied values fail startup in development and production.
+`AxumRunOptions::with_request_records(false)` and `AxumDevServer::with_request_records(false)`
+suppress only default native request logs. Application/native observers, lifecycle records,
+counts, and snapshots remain active. Explicit builders do not merge ambient record settings.
+
+Use `with_diagnostics` to attach a `NativeDiagnosticsHandle` for snapshots or an optional
+native request observer. No exporter or public metrics endpoint is installed. See
+[logger ownership](/guide/axum-diagnostics#records-and-logger-ownership) and
+[snapshots and metrics](/guide/axum-diagnostics#snapshots-and-optional-metrics) for examples
+and the synchronous sink limitations.
 
 ## Testing
 
@@ -617,6 +645,7 @@ Consumers that require DNS-label syntax must apply that additional policy.
 
 ## Next Steps
 
+- Configure [native diagnostics and trusted proxies](/guide/axum-diagnostics)
 - Deploy to [Fastly Compute](/guide/adapters/fastly) for production
 - Deploy to [Cloudflare Workers](/guide/adapters/cloudflare) as an alternative
 - Explore [Configuration](/guide/configuration) for manifest options
