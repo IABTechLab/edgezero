@@ -1165,9 +1165,10 @@ must clone the policy deliberately.
 not an outbound request header or TTL/freshness override. It extends origin response surrogate
 keys without making private/no-store responses cacheable. The typed enum cannot also select
 Bypass, whose pass mode would be cleared by Fastly's tag setter. Space-separated keys are
-permitted; SDK 0.13.1 ignores invalid individual keys outside printable ASCII 0x21..=0x7e.
-No extra key-size/count/ASCII restriction is added. Callers preserve their own fail-closed
-policy if a string cannot become HeaderValue. Axum/Spin ignore this metadata and Cloudflare
+permitted; the Fastly adapter discards invalid individual space-delimited keys outside
+printable ASCII 0x21..=0x7e before calling SDK 0.13.1, whose whole-value text conversion
+would otherwise discard valid neighboring keys too. No extra key-size/count/ASCII restriction
+is added. Callers preserve their own fail-closed policy if a string cannot become HeaderValue. Axum/Spin ignore this metadata and Cloudflare
 keeps platform-default caching without purge emulation; other capabilities remain unchanged.
 Image Optimizer still requires exactly PlatformDefault because the pinned SDK overrides tags
 on its optimizer path. Tagged+optimizer fails preflight before body polling/provider I/O.

@@ -154,7 +154,9 @@ let policy = request.cache_policy_setting();
 
 Fastly extends origin response surrogate keys without a TTL/stale override. Origin
 `private`/`no-store` remains origin policy; tags are not permission to cache a private response.
-Fastly ignores invalid individual keys outside printable ASCII `0x21..=0x7e`; this API adds no
+The Fastly adapter discards individual space-delimited keys outside printable ASCII
+`0x21..=0x7e` before calling the SDK, preserving valid neighboring keys. SDK 0.13.1 would
+otherwise discard the whole list when its text conversion fails. This API adds no
 key-size/count or extra ASCII policy. Parse application strings into `HeaderValue` at their
 boundary. A caller whose purge contract requires a tag must fail closed, such as selecting
 `Bypass`, if that conversion fails rather than silently sending an untagged default request.

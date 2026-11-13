@@ -420,8 +420,9 @@ pub enum OutboundCachePolicy {
     PlatformDefault,
     /// Fastly cache metadata, not an outbound `Surrogate-Key` request header.
     ///
-    /// The value may contain space-separated keys. Fastly ignores individual
-    /// keys outside printable ASCII 0x21..=0x7e; no additional key policy is imposed.
+    /// The value may contain space-separated keys. The Fastly adapter discards
+    /// individual keys outside printable ASCII 0x21..=0x7e before calling the SDK,
+    /// preserving valid neighboring keys. No additional key policy is imposed.
     /// Image Optimizer cannot retain this metadata and rejects this variant.
     PlatformDefaultWithSurrogateKey(HeaderValue),
 }

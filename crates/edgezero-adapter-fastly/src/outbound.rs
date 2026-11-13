@@ -1133,10 +1133,39 @@ mod fastly_impl {
             OutboundCachePolicy::Bypass => request.set_pass(true),
             OutboundCachePolicy::PlatformDefault => {}
             OutboundCachePolicy::PlatformDefaultWithSurrogateKey(value) => {
-                request.set_surrogate_key(value);
+                request.set_surrogate_key(filter_surrogate_keys(value));
             }
         }
         request
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "space-separated printable ASCII keys always form a valid HeaderValue"
+    )]
+    fn filter_surrogate_keys(value: HeaderValue) -> HeaderValue {
+        let bytes = value.as_bytes();
+        if bytes
+            .iter()
+            .all(|byte| *byte == b' ' || byte.is_ascii_graphic())
+        {
+            return value;
+        }
+        // SDK 0.13.1 converts the entire value to text, so one opaque token would
+        // otherwise discard valid neighboring keys as well.
+        let mut filtered = Vec::with_capacity(bytes.len());
+        for key in bytes.split(|byte| *byte == b' ') {
+            if key.is_empty() || !key.iter().all(u8::is_ascii_graphic) {
+                continue;
+            }
+            if !filtered.is_empty() {
+                filtered.push(b' ');
+            }
+            filtered.extend_from_slice(key);
+        }
+        let mut normalized = HeaderValue::from_bytes(&filtered).expect("printable ASCII keys");
+        normalized.set_sensitive(value.is_sensitive());
+        normalized
     }
 
     fn ceil_millis(duration: Duration) -> u64 {
@@ -2104,6 +2133,62 @@ mod fastly_impl {
                     policy,
                 );
                 assert!(format!("{native:?}").contains(expected));
+                assert!(native.get_header("surrogate-key").is_none());
+            }
+        }
+
+        #[test]
+        fn surrogate_key_filter_preserves_text_and_sensitivity() {
+            for (keys, expected) in [
+                (b"first bad-\xff last".as_slice(), "first last"),
+                (b"  first last  ".as_slice(), "  first last  "),
+                (b"bad-\xff".as_slice(), ""),
+            ] {
+                for sensitive in [false, true] {
+                    let mut value = HeaderValue::from_bytes(keys).expect("header bytes");
+                    value.set_sensitive(sensitive);
+                    let filtered = filter_surrogate_keys(value);
+                    assert_eq!(filtered.to_str().expect("SDK text conversion"), expected);
+                    assert_eq!(filtered.is_sensitive(), sensitive);
+                }
+            }
+        }
+
+        #[test]
+        fn tagged_cache_metadata_filters_invalid_keys_without_losing_valid_neighbors() {
+            for (keys, expected) in [
+                (b"first bad-\xff last".as_slice(), "first last"),
+                ("first caf\u{e9} last".as_bytes(), "first last"),
+                (b"first bad\tkey last".as_slice(), "first last"),
+                (b"bad-\xff".as_slice(), ""),
+                (b"".as_slice(), ""),
+                (b"   ".as_slice(), "   "),
+                (
+                    b"  !   ~ duplicate duplicate  ".as_slice(),
+                    "  !   ~ duplicate duplicate  ",
+                ),
+            ] {
+                let native = build_fastly_request(
+                    &Method::GET,
+                    &"https://origin.example.com/resource".parse().expect("URI"),
+                    &HeaderMap::new(),
+                    OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                        HeaderValue::from_bytes(keys).expect("valid header bytes"),
+                    ),
+                );
+                let rendered = format!("{native:?}");
+                assert!(
+                    rendered.contains(&format!("surrogate_key: Some({expected:?})")),
+                    "{rendered}"
+                );
+                assert!(rendered.contains("cache_override: Override"), "{rendered}");
+                assert!(rendered.contains("ttl: None"), "{rendered}");
+                assert!(
+                    rendered.contains("stale_while_revalidate: None"),
+                    "{rendered}"
+                );
+                assert!(rendered.contains("stale_if_error: None"), "{rendered}");
+                assert!(!rendered.contains("cache_override: Pass"), "{rendered}");
                 assert!(native.get_header("surrogate-key").is_none());
             }
         }
