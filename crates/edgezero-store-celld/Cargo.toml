@@ -14,6 +14,7 @@ workspace = true
 default = []
 config = ["_transport"]
 kv = ["_transport", "dep:base64", "dep:sha2"]
+records = ["kv"]
 _transport = ["dep:edgezero-core", "dep:bytes", "dep:async-trait", "dep:reqwest", "dep:tokio", "dep:futures-util", "dep:serde_json"]
 
 [dependencies]
