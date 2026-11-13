@@ -655,14 +655,20 @@ impl RequestContext {
     ///
     /// # Errors
     /// Returns 413 on overflow, 400 on malformed input, and preserves body drain errors.
+    /// Managed JSON parse errors use fixed text rather than private serde details.
     #[inline]
     pub async fn json_within<T>(&self, max: usize) -> Result<T, EdgeError>
     where
         T: DeserializeOwned,
     {
         let bytes = self.buffered_bytes(max, true).await?;
-        serde_json::from_slice(bytes.as_ref())
-            .map_err(|err| EdgeError::bad_request(format!("invalid JSON payload: {err}")))
+        serde_json::from_slice(bytes.as_ref()).map_err(|err| {
+            if self.body_policy.is_some() {
+                EdgeError::bad_request("invalid JSON payload")
+            } else {
+                EdgeError::bad_request(format!("invalid JSON payload: {err}"))
+            }
+        })
     }
 
     /// Resolve the [`BoundKvStore`] for `id`. Strict lookup: when a
@@ -1284,6 +1290,27 @@ mod tests {
                     .status(),
                 StatusCode::BAD_REQUEST
             );
+        }
+
+        #[test]
+        fn managed_json_parse_errors_do_not_reflect_payload_but_unmanaged_errors_keep_detail() {
+            for native in [true, false] {
+                let payload = serde_json::to_string("PAYLOAD_SENTINEL").expect("payload");
+                let body = Body::from(payload);
+                let selected = if native {
+                    managed(body, 64, true)
+                } else {
+                    body
+                };
+                let context = ctx("/json", selected, PathParams::default());
+                let error = block_on(context.json_within::<u64>(64)).expect_err("wrong JSON type");
+                assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+                if native {
+                    assert_eq!(error.message(), "invalid JSON payload");
+                } else {
+                    assert!(error.message().contains("PAYLOAD_SENTINEL"));
+                }
+            }
         }
 
         fn managed(body: Body, cap: usize, is_json: bool) -> Body {

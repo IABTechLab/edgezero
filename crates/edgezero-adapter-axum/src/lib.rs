@@ -12,6 +12,8 @@ pub mod context;
 #[cfg(feature = "axum")]
 pub mod dev_server;
 #[cfg(feature = "axum")]
+pub mod diagnostics;
+#[cfg(feature = "axum")]
 mod header_deadline;
 pub mod ingress_config;
 #[cfg(feature = "axum")]
@@ -36,6 +38,9 @@ pub mod cli;
 
 #[cfg(all(feature = "axum", any(test, feature = "test-utils")))]
 pub mod test_utils;
+
+#[cfg(feature = "axum")]
+pub mod trusted_proxy;
 
 /// Native Axum resource limits and accounting are operator-configured.
 pub const AXUM_PLATFORM: edgezero_core::PlatformMetadata = edgezero_core::PlatformMetadata::new(
