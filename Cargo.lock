@@ -1193,6 +1193,7 @@ dependencies = [
  "edgezero-adapter-cloudflare",
  "edgezero-core",
  "edgezero-store-aws",
+ "edgezero-store-celld",
  "flate2",
  "futures",
  "futures-util",
@@ -1329,12 +1330,14 @@ dependencies = [
  "proc-macro2",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "similar",
  "simple_logger",
  "syn 3.0.9",
  "tempfile",
  "thiserror 2.0.21",
  "toml",
+ "url",
  "validator",
  "walkdir",
 ]
@@ -1425,6 +1428,25 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml",
+ "url",
+]
+
+[[package]]
+name = "edgezero-store-celld"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "edgezero-core",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
  "url",
 ]
 
