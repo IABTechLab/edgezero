@@ -140,7 +140,7 @@ pub fn serve_app_with_hooks<A, Prepare, Finalize, State>(
 where
     A: Hooks,
     Prepare: FnMut(&mut fastly::Request, &mut Extensions),
-    Finalize: FnMut(&mut edgezero_core::Response) -> State;
+    Finalize: FnMut(&mut edgezero_core::http::Response) -> State;
 ```
 
 `serve_app` delegates with empty preparation and finalization callbacks. Both helpers:
@@ -164,11 +164,14 @@ Capture preparation and finalization callbacks in the serving closure and pass
 fresh mutable reborrows on every request. Do not move either callback out on the
 first invocation or retain request-owned values in its captures.
 
-An initialization `Err` leaves `Sandbox` empty. Standard serving propagates that
-error and terminates; custom callbacks may handle a recoverable failure and retry
-on a later request. Configuration is fallible, and panics remain sandbox failures.
-Partial global setup side effects are not rolled back, so custom retry policy must
-make setup safe to repeat.
+An application assembly `Err` leaves `Sandbox` empty. Standard serving delivers
+the typed error through detached response egress. Successful error delivery lets
+the callback finish normally and a later request retries assembly; only a
+successful app is retained. Logging/setup failures and terminal-delivery errors
+still propagate through the SDK serving result. Custom callbacks choose their
+own recoverable-error policy. Configuration is fallible, and panics remain
+sandbox failures. Partial global setup side effects are not rolled back, so
+retryable setup must be safe to repeat.
 
 Example entry point after implementation:
 

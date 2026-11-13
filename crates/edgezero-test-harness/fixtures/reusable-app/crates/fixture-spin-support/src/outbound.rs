@@ -110,11 +110,11 @@ pub fn provider_error_payloads_hold() -> bool {
     true
 }
 
-fn bodyless_request_resources_hold() -> bool {
+pub fn bodyless_request_resources_hold() -> bool {
     if !matches!(test_support::empty_request_trailers(), Ok(None)) {
         return false;
     }
-    for method in [Method::GET, Method::HEAD] {
+    for method in [Method::GET, Method::HEAD, Method::DELETE, Method::OPTIONS] {
         let body = request_body_resources(&method, &Body::empty());
         if body.0.is_some() || body.1.is_some() {
             drop((body.1, body.2, body.0));
@@ -136,6 +136,10 @@ fn bodyless_request_resources_hold() -> bool {
     }
     for (method, source) in [
         (Method::POST, Body::empty()),
+        (Method::PUT, Body::empty()),
+        (Method::PATCH, Body::empty()),
+        (Method::DELETE, Body::from("payload")),
+        (Method::OPTIONS, Body::from("payload")),
         (Method::GET, Body::from("payload")),
     ] {
         let (writer, contents, trailers) = request_body_resources(&method, &source);
@@ -325,7 +329,7 @@ pub async fn eager_outbound_paths_hold() -> Result<(), EdgeError> {
     scopes::canonical_callback_releases_retained_handles().await?;
     if !bodyless_request_resources_hold() {
         return Err(EdgeError::internal(anyhow::anyhow!(
-            "certified empty GET/HEAD must omit WASI contents and close cleanly; other methods retain upload resources"
+            "known-empty non-content methods must omit WASI contents and close cleanly; content-bearing methods retain upload resources"
         )));
     }
     check_eager_begin().await?;

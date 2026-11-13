@@ -44,8 +44,8 @@ pub const BROTLI_DECODER_FIXED_CHARGE_BYTES: u64 = 16_777_216;
 ///
 /// The source audit in
 /// `docs/audits/2026-09-29-flate-decoder-memory-accounting.md` derives a
-/// 73,728-byte reviewed subtotal. The 1 MiB reservation leaves conservative
-/// headroom for wrapper objects, the boxed coroutine, alignment, and allocator
+/// 77,824-byte reviewed subtotal, including the codec-wrapper reserve. The 1 MiB
+/// reservation leaves conservative headroom for the boxed coroutine, alignment, and allocator
 /// variance that are not claimed as exact heap bounds. Dependency upgrades must
 /// repeat the audit before changing either the pins or this charge.
 pub const FLATE_DECODER_FIXED_CHARGE_BYTES: u64 = 0x0010_0000;
@@ -780,8 +780,9 @@ mod tests {
         assert_eq!(decode_buffer_bytes, 8_192);
         assert_eq!(FLATE_DECODER_FIXED_CHARGE_BYTES, PUBLIC_CHARGE_BYTES);
 
-        let audited_payload_bytes = INFLATE_STATE_RESERVE_BYTES + decode_buffer_bytes;
-        assert_eq!(audited_payload_bytes, 73_728);
+        let audited_payload_bytes =
+            INFLATE_STATE_RESERVE_BYTES + CODEC_WRAPPER_RESERVE_BYTES + decode_buffer_bytes;
+        assert_eq!(audited_payload_bytes, 77_824);
         assert!(audited_payload_bytes <= FLATE_DECODER_FIXED_CHARGE_BYTES);
     }
 

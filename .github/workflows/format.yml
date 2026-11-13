@@ -75,6 +75,9 @@ jobs:
       - name: Run cargo clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      - name: Check CLI-only library feature
+        run: cargo check --offline --locked -p edgezero-cli --lib --no-default-features --features cli
+
       # The all-features build unifies the fastly adapter's `cli` and `fastly`
       # features, which can MASK a dead-code or cfg mistake that only surfaces in
       # one supported mode. Gate the two the matrix above does not: `cli` alone
