@@ -341,7 +341,8 @@ mod worker_impl {
             let worker_body =
                 request_body(body, max_request_body_bytes, budget, time.clone()).await?;
             let url = uri.to_string();
-            let request = build_worker_request(&method, &url, &headers, worker_body, cache_policy)?;
+            let request =
+                build_worker_request(&method, &url, &headers, worker_body, &cache_policy)?;
             let (response, abort_guard) = raw_fetch(
                 request,
                 budget,
@@ -581,13 +582,13 @@ mod worker_impl {
         url: &str,
         headers: &HeaderMap,
         request_body: Option<JsValue>,
-        cache_policy: OutboundCachePolicy,
+        cache_policy: &OutboundCachePolicy,
     ) -> Result<WorkerRequest, EdgeError> {
         let mut init = RequestInit::new();
         init.with_headers(build_headers(headers)?)
             .with_method(worker_method(method))
             .with_redirect(RequestRedirect::Manual);
-        if cache_policy == OutboundCachePolicy::Bypass {
+        if matches!(cache_policy, OutboundCachePolicy::Bypass) {
             init.with_cache(CacheMode::NoStore);
         }
         if let Some(worker_body) = request_body {
@@ -2232,6 +2233,46 @@ mod worker_impl {
         }
 
         #[wasm_bindgen_test]
+        fn tagged_default_keeps_worker_default_cache_mode_without_wire_tags() {
+            for (policy, expected) in [
+                (OutboundCachePolicy::PlatformDefault, "default"),
+                (
+                    OutboundCachePolicy::PlatformDefaultWithSurrogateKey(HeaderValue::from_static(
+                        "example-all example-reader-0123",
+                    )),
+                    "default",
+                ),
+                (
+                    OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                        HeaderValue::from_bytes(b"example-all opaque-\xff")
+                            .expect("opaque metadata"),
+                    ),
+                    "default",
+                ),
+                (OutboundCachePolicy::Bypass, "no-store"),
+            ] {
+                let request = build_worker_request(
+                    &Method::GET,
+                    "https://origin.example.com/resource",
+                    &HeaderMap::new(),
+                    None,
+                    &policy,
+                )
+                .expect("Workers request");
+                let mode = Reflect::get(request.inner().as_ref(), &JsValue::from_str("cache"))
+                    .expect("cache mode");
+                assert_eq!(mode.as_string().as_deref(), Some(expected));
+                assert!(
+                    request
+                        .headers()
+                        .get("surrogate-key")
+                        .expect("header")
+                        .is_none()
+                );
+            }
+        }
+
+        #[wasm_bindgen_test]
         fn provider_diagnostics_preserve_preparation_errors_without_changing_sources() {
             let mut headers = HeaderMap::new();
             headers.insert(
@@ -2262,7 +2303,7 @@ mod worker_impl {
                 "https://example.com/?token=provider-secret-token",
                 &HeaderMap::new(),
                 Some(JsValue::from_str("body")),
-                OutboundCachePolicy::PlatformDefault,
+                &OutboundCachePolicy::PlatformDefault,
             )
             .expect_err("GET body rejection");
             assert_eq!(
@@ -2358,7 +2399,7 @@ mod worker_impl {
                     "https://example.com/?token=provider-secret-token",
                     &HeaderMap::new(),
                     None,
-                    OutboundCachePolicy::PlatformDefault,
+                    &OutboundCachePolicy::PlatformDefault,
                 )
                 .expect("valid request");
                 let start = MonotonicInstant::now();
@@ -3762,6 +3803,28 @@ mod header_bridge_tests {
     use edgezero_core::http::{HeaderMap, HeaderValue};
 
     use super::*;
+
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn tagged_default_is_an_accepted_cache_noop() {
+        use edgezero_core::outbound::validate_for_dispatch;
+        let request = edgezero_core::OutboundRequest::get("https://origin.example.com/resource")
+            .expect("request")
+            .cache_policy(
+                edgezero_core::OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                    HeaderValue::from_static("example-all"),
+                ),
+            );
+        super::validate_supported_options(&request).expect("metadata ignored on Workers");
+        for mode in [
+            edgezero_core::OutboundSendMode::Send,
+            edgezero_core::OutboundSendMode::Begin,
+            edgezero_core::OutboundSendMode::Batch,
+        ] {
+            validate_for_dispatch(&request, mode).expect("valid metadata");
+        }
+        assert!(!request.headers().contains_key("surrogate-key"));
+    }
 
     #[derive(Default)]
     struct AppendSink(BTreeMap<String, Vec<String>>);

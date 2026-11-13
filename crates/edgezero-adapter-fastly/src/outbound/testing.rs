@@ -1,5 +1,6 @@
 //! Obtain opaque test inputs through the real facade, never by reconstructing core policies.
 
+use futures_util::FutureExt as _;
 use futures_util::future::pending;
 use std::cell::RefCell;
 use std::iter::repeat_with;
@@ -9,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Waker};
 use std::time::Duration;
 
+use edgezero_core::http::HeaderValue;
 use edgezero_core::{
     Deadline, EdgeError, HttpClient, IndependentOutboundProgress, MonotonicClock, MonotonicInstant,
     OutboundBatch, OutboundBatchContext, OutboundDispatchRequest, OutboundExchangeOwner,
@@ -25,6 +27,7 @@ std::thread_local! {
 enum CaptureMode {
     BatchContext,
     BatchRequest,
+    BeginRequest,
     Dispatch,
 }
 
@@ -50,7 +53,10 @@ impl Capture {
 }
 
 impl OutboundHttpClient for Capture {
-    fn begin(&self, _: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+    fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
+        if matches!(self.mode, CaptureMode::BeginRequest) {
+            DISPATCH.with(|saved| saved.replace(Some(request)));
+        }
         Err(EdgeError::internal(anyhow::anyhow!(
             "capture fixture does not begin exchanges"
         )))
@@ -71,7 +77,9 @@ impl OutboundHttpClient for Capture {
     fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
         let (context, mut requests) = batch.into_slots();
         match self.mode {
-            CaptureMode::Dispatch => return OutboundBatch::cutoff(context),
+            CaptureMode::BeginRequest | CaptureMode::Dispatch => {
+                return OutboundBatch::cutoff(context);
+            }
             CaptureMode::BatchRequest => {
                 assert_eq!(requests.len(), 1, "one captured request");
                 DISPATCH
@@ -120,6 +128,20 @@ pub(super) fn dispatch(request: OutboundRequest, time: OutboundTime) -> Outbound
     })
 }
 
+pub(super) fn begin_dispatch(
+    request: OutboundRequest,
+    time: OutboundTime,
+) -> OutboundDispatchRequest {
+    let client = HttpClient::with_client(Capture::new(time, CaptureMode::BeginRequest));
+    assert!(matches!(client.begin(request).now_or_never(), Some(Err(_))));
+    DISPATCH.with(|saved| {
+        saved
+            .borrow_mut()
+            .take()
+            .expect("facade prepared begun request")
+    })
+}
+
 pub(crate) fn batch_context(slot_count: usize) -> OutboundBatchContext {
     batch_context_at(slot_count, instant(), Duration::from_secs(60))
 }
@@ -139,6 +161,24 @@ pub(super) fn batch_dispatch(
             .take()
             .expect("facade prepared batch request")
     })
+}
+
+#[test]
+fn captured_begun_request_keeps_tag_metadata_and_mode() {
+    let request = OutboundRequest::get("https://origin.example.com/resource")
+        .expect("request")
+        .cache_policy(
+            edgezero_core::OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                HeaderValue::from_static("example-all"),
+            ),
+        );
+    let captured = begin_dispatch(request, batch_context(1).time().clone());
+    let (parts, context) = captured.into_parts();
+    assert_eq!(context.mode(), OutboundSendMode::Begin);
+    assert!(
+        matches!(parts.cache_policy, edgezero_core::OutboundCachePolicy::PlatformDefaultWithSurrogateKey(value) if value.as_bytes() == b"example-all")
+    );
+    assert!(!parts.headers.contains_key("surrogate-key"));
 }
 
 #[test]
