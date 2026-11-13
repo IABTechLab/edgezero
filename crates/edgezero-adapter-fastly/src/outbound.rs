@@ -1129,10 +1129,43 @@ mod fastly_impl {
         for (name, value) in headers {
             request.append_header(name.as_str(), value.as_bytes());
         }
-        if cache_policy == OutboundCachePolicy::Bypass {
-            request.set_pass(true);
+        match cache_policy {
+            OutboundCachePolicy::Bypass => request.set_pass(true),
+            OutboundCachePolicy::PlatformDefault => {}
+            OutboundCachePolicy::PlatformDefaultWithSurrogateKey(value) => {
+                request.set_surrogate_key(filter_surrogate_keys(value));
+            }
         }
         request
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "space-separated printable ASCII keys always form a valid HeaderValue"
+    )]
+    fn filter_surrogate_keys(value: HeaderValue) -> HeaderValue {
+        let bytes = value.as_bytes();
+        if bytes
+            .iter()
+            .all(|byte| *byte == b' ' || byte.is_ascii_graphic())
+        {
+            return value;
+        }
+        // SDK 0.13.1 converts the entire value to text, so one opaque token would
+        // otherwise discard valid neighboring keys as well.
+        let mut filtered = Vec::with_capacity(bytes.len());
+        for key in bytes.split(|byte| *byte == b' ') {
+            if key.is_empty() || !key.iter().all(u8::is_ascii_graphic) {
+                continue;
+            }
+            if !filtered.is_empty() {
+                filtered.push(b' ');
+            }
+            filtered.extend_from_slice(key);
+        }
+        let mut normalized = HeaderValue::from_bytes(&filtered).expect("printable ASCII keys");
+        normalized.set_sensitive(value.is_sensitive());
+        normalized
     }
 
     fn ceil_millis(duration: Duration) -> u64 {
@@ -2033,9 +2066,136 @@ mod fastly_impl {
             }
         }
 
+        #[test]
+        fn tagged_cache_metadata_reaches_sdk_from_send_begin_and_batch_without_ttl() {
+            let trace = NativeSdkTrace::new(Duration::ZERO);
+            for mode in [
+                OutboundSendMode::Send,
+                OutboundSendMode::Begin,
+                OutboundSendMode::Batch,
+            ] {
+                let request =
+                    OutboundRequest::get("https://origin.example.com/resource?signature=a%2Fb")
+                        .expect("request")
+                        .header("authorization", "fixture-signature")
+                        .expect("signature")
+                        .cache_policy(OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                            HeaderValue::from_static("example-all example-reader-0123"),
+                        ));
+                let dispatch = match mode {
+                    OutboundSendMode::Send => testing::dispatch(request, trace.time()),
+                    OutboundSendMode::Begin => testing::begin_dispatch(request, trace.time()),
+                    OutboundSendMode::Batch => testing::batch_dispatch(
+                        request,
+                        trace.time(),
+                        Deadline::after(Duration::from_secs(1)),
+                    ),
+                    OutboundSendMode::Follow => panic!("covered by redirect replay tests"),
+                };
+                let (parts, context) = dispatch.into_parts();
+                assert_eq!(context.mode(), mode);
+                let native = build_fastly_request(
+                    &parts.method,
+                    &parts.uri,
+                    &parts.headers,
+                    parts.cache_policy,
+                );
+                assert!(native.get_header("surrogate-key").is_none());
+                assert_eq!(
+                    native
+                        .get_header("authorization")
+                        .expect("signature")
+                        .as_bytes(),
+                    b"fixture-signature"
+                );
+                let rendered = format!("{native:?}");
+                assert!(rendered.contains("cache_override: Override"), "{rendered}");
+                assert!(
+                    rendered.contains("example-all example-reader-0123"),
+                    "{rendered}"
+                );
+                assert!(rendered.contains("ttl: None"), "{rendered}");
+                assert!(
+                    rendered.contains("stale_while_revalidate: None"),
+                    "{rendered}"
+                );
+                assert!(rendered.contains("stale_if_error: None"), "{rendered}");
+                assert!(!rendered.contains("cache_override: Pass"), "{rendered}");
+            }
+            for (policy, expected) in [
+                (OutboundCachePolicy::Bypass, "cache_override: Pass"),
+                (OutboundCachePolicy::PlatformDefault, "cache_override: None"),
+            ] {
+                let native = build_fastly_request(
+                    &Method::HEAD,
+                    &"https://origin.example.com/".parse().expect("URI"),
+                    &HeaderMap::new(),
+                    policy,
+                );
+                assert!(format!("{native:?}").contains(expected));
+                assert!(native.get_header("surrogate-key").is_none());
+            }
+        }
+
+        #[test]
+        fn surrogate_key_filter_preserves_text_and_sensitivity() {
+            for (keys, expected) in [
+                (b"first bad-\xff last".as_slice(), "first last"),
+                (b"  first last  ".as_slice(), "  first last  "),
+                (b"bad-\xff".as_slice(), ""),
+            ] {
+                for sensitive in [false, true] {
+                    let mut value = HeaderValue::from_bytes(keys).expect("header bytes");
+                    value.set_sensitive(sensitive);
+                    let filtered = filter_surrogate_keys(value);
+                    assert_eq!(filtered.to_str().expect("SDK text conversion"), expected);
+                    assert_eq!(filtered.is_sensitive(), sensitive);
+                }
+            }
+        }
+
+        #[test]
+        fn tagged_cache_metadata_filters_invalid_keys_without_losing_valid_neighbors() {
+            for (keys, expected) in [
+                (b"first bad-\xff last".as_slice(), "first last"),
+                ("first caf\u{e9} last".as_bytes(), "first last"),
+                (b"first bad\tkey last".as_slice(), "first last"),
+                (b"bad-\xff".as_slice(), ""),
+                (b"".as_slice(), ""),
+                (b"   ".as_slice(), "   "),
+                (
+                    b"  !   ~ duplicate duplicate  ".as_slice(),
+                    "  !   ~ duplicate duplicate  ",
+                ),
+            ] {
+                let native = build_fastly_request(
+                    &Method::GET,
+                    &"https://origin.example.com/resource".parse().expect("URI"),
+                    &HeaderMap::new(),
+                    OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                        HeaderValue::from_bytes(keys).expect("valid header bytes"),
+                    ),
+                );
+                let rendered = format!("{native:?}");
+                assert!(
+                    rendered.contains(&format!("surrogate_key: Some({expected:?})")),
+                    "{rendered}"
+                );
+                assert!(rendered.contains("cache_override: Override"), "{rendered}");
+                assert!(rendered.contains("ttl: None"), "{rendered}");
+                assert!(
+                    rendered.contains("stale_while_revalidate: None"),
+                    "{rendered}"
+                );
+                assert!(rendered.contains("stale_if_error: None"), "{rendered}");
+                assert!(!rendered.contains("cache_override: Pass"), "{rendered}");
+                assert!(native.get_header("surrogate-key").is_none());
+            }
+        }
+
         fn sdk_cache_selection(
             mode: OutboundSendMode,
-            policy: OutboundCachePolicy,
+            policy: &OutboundCachePolicy,
             method: Method,
         ) {
             use edgezero_core::OutboundScopeOwner;
@@ -2053,7 +2213,7 @@ mod fastly_impl {
                     .expect("target"),
             )
             .expect("request")
-            .cache_policy(policy)
+            .cache_policy(policy.clone())
             .timeout(Duration::from_secs(1));
             let dispatch = callback.with(|| match mode {
                 OutboundSendMode::Batch => testing::batch_dispatch(
@@ -2078,7 +2238,7 @@ mod fastly_impl {
                 &prepared.parts.method,
                 &prepared.parts.uri,
                 &prepared.parts.headers,
-                policy,
+                policy.clone(),
             );
             native.set_before_send(|_| Ok(()));
             native.set_body(Vec::<u8>::new());
@@ -2097,7 +2257,8 @@ mod fastly_impl {
                 cause: FastlyFailureCause::HttpCacheApiUnsupported,
             });
             match policy {
-                OutboundCachePolicy::PlatformDefault => {
+                OutboundCachePolicy::PlatformDefault
+                | OutboundCachePolicy::PlatformDefaultWithSurrogateKey(_) => {
                     let error = outcome
                         .expect("SDK rejects unsupported guest caching")
                         .expect_err("cache API unavailable in pinned Viceroy");
@@ -2127,7 +2288,18 @@ mod fastly_impl {
         fn buffered_send_and_batch_preserve_sdk_cache_selection() {
             for mode in [OutboundSendMode::Send, OutboundSendMode::Batch] {
                 for method in [Method::HEAD, Method::GET] {
-                    sdk_cache_selection(mode, OutboundCachePolicy::PlatformDefault, method);
+                    sdk_cache_selection(
+                        mode,
+                        &OutboundCachePolicy::PlatformDefault,
+                        method.clone(),
+                    );
+                    sdk_cache_selection(
+                        mode,
+                        &OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                            HeaderValue::from_static("example-all"),
+                        ),
+                        method,
+                    );
                 }
             }
         }
@@ -2136,7 +2308,7 @@ mod fastly_impl {
         fn buffered_send_and_batch_bypass_unsupported_guest_cache_hooks() {
             for mode in [OutboundSendMode::Send, OutboundSendMode::Batch] {
                 for method in [Method::HEAD, Method::GET] {
-                    sdk_cache_selection(mode, OutboundCachePolicy::Bypass, method);
+                    sdk_cache_selection(mode, &OutboundCachePolicy::Bypass, method);
                 }
             }
         }
@@ -4306,7 +4478,7 @@ mod fastly_impl {
                     &plan.parts.method,
                     &plan.parts.uri,
                     &plan.parts.headers,
-                    plan.parts.cache_policy,
+                    plan.parts.cache_policy.clone(),
                 );
                 assert_eq!(native.get_method(), &method);
                 assert_eq!(native.get_url_str(), target);

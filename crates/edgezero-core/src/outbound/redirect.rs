@@ -448,7 +448,7 @@ fn replay_request(request: &OutboundRequest) -> (OutboundRequest, bool) {
     (
         OutboundRequest {
             body: replayed_body,
-            cache_policy: *cache_policy,
+            cache_policy: cache_policy.clone(),
             connect_timeout: *connect_timeout,
             deadline: *deadline,
             headers: headers.clone(),
