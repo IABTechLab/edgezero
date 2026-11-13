@@ -1,0 +1,9 @@
+{
+  "name": "edgezero-tooling",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "smol-toml": "1.9.1",
+    "yaml": "2.9.1"
+  }
+}

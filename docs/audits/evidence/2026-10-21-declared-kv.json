@@ -1,0 +1,1566 @@
+{
+  "schema": 1,
+  "recorded_date": "2026-10-21",
+  "base_revision": "0ee562529aaac450f313bc0a4dc5c18a214539ff",
+  "source_state": "uncommitted-working-tree-characterization",
+  "qualification": false,
+  "status": "local-declared-kv-cases-pass-independent-spin-overlap-unverified",
+  "scope": "F8 / EZ-20 local implementation and adopted Cloudflare/Spin behavior; not release cutover certification",
+  "adoption": {
+    "decision": "Include all three serverless adapters",
+    "source": "Requester reply in this conversation on 2026-10-21",
+    "scope": "Implementation adoption only; formal release approval fields remain pending."
+  },
+  "source_snapshot_scope": "Selected final checkout inputs, not a frozen candidate or full build-input attestation. Final C uses final runtime and harness logic; later production edits clarify Rustdoc only, with source-path tests rerun. No outbound transport/API, SDK/decoder pin or capability change.",
+  "frozen_api_plan": {
+    "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md",
+    "bytes": 65279,
+    "sha256": "c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774a5d9f1a7ffae80"
+  },
+  "approved_interfaces_sha256": "c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a",
+  "requirements": {
+    "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
+    "bytes": 390165,
+    "sha256": "86691fe7f0dfae0e489678f01eeb4385c9acdc238778801d700c7ef8585f2fd6",
+    "baseline_sha256": "5d9833ebb13bf191377eeec6f9ada89d236044546701d01478c7f12f65b175ec",
+    "acceptance_criteria": 255,
+    "acceptance_criteria_identical": true,
+    "reviewed_legs_unchanged": 511
+  },
+  "source_files": [
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/crates/edgezero-adapter-cloudflare/src/key_value_store.rs",
+      "bytes": 10745,
+      "sha256": "1ca3d1a60ac6dfdd32e0016140929d489b82b85318d609c59cf15d4ff6101407"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/crates/edgezero-adapter-cloudflare/src/request.rs",
+      "bytes": 41781,
+      "sha256": "0d6b5e888c0b352f5372e06d5fa04c06ac21b2d3177f4d23313a0058889a267b"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/crates/edgezero-adapter-fastly/src/key_value_store.rs",
+      "bytes": 12677,
+      "sha256": "dc55c32c9d7d143275dd0e025fb96b5020a4a30bfd4547f311406102993b58e4"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/crates/edgezero-adapter-fastly/src/request.rs",
+      "bytes": 46822,
+      "sha256": "3bdcabc9c5f18e9cd7d76695f0aacea81e24f135b51b0bc2ada7c67b13eb1dcf"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/crates/edgezero-adapter-spin/src/key_value_store.rs",
+      "bytes": 7543,
+      "sha256": "19941a845fdd46b7221c7ce89f8f86c6d73e17fe96897e4ba4c995aceb9ca0ed"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/crates/edgezero-adapter-spin/src/request.rs",
+      "bytes": 34214,
+      "sha256": "1ba2cff36a9a32ffcf17686fcab1fe2baf23537e5264eb049dc2b8f4f7b943fa"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/crates/edgezero-core/src/key_value_store.rs",
+      "bytes": 62623,
+      "sha256": "37edf3f5491193ee120aafeab74d31afc419a93dfe9e959aec5383246b8717c4"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app/crates/fixture-cloudflare/src/lib.rs",
+      "bytes": 2794,
+      "sha256": "ed27e95ad3783767832a974e152c762628fef6316c4944a05a5a831cb5702161"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app/crates/fixture-core/src/lib.rs",
+      "bytes": 19614,
+      "sha256": "576eb54ed6c4213dbc027a001929177de13ef42899b21ba182803a1784d37ef3"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app/crates/fixture-fastly/src/lib.rs",
+      "bytes": 19398,
+      "sha256": "68445dccf097c92906fbe409477c5d7ae616137f3f1d2f39c6a4ee3751ab67d2"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app/crates/fixture-harness/src/runners.rs",
+      "bytes": 61859,
+      "sha256": "89f5275cb58fa639b845f7a65d40cb868f0455934f4cfbf899e7238540d9c66d"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app/crates/fixture-spin/src/lib.rs",
+      "bytes": 3113,
+      "sha256": "ebcea9b59e905a2bc0670f561463b5c74d5512795a4e63674db452db6f2c8668"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app/outbound-cutover-cases.json",
+      "bytes": 754487,
+      "sha256": "8ecbc115bbb5d61ad3273386932fe8087ca2d15adcc48c1a922176762eca4333"
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/crates/edgezero-adapter-spin/tests/key_value_store_lazy.rs",
+      "bytes": 6017,
+      "sha256": "7db17ee83225da25eed2e7e8209011d1c013a9330cd8f17338e14380636fda33"
+    }
+  ],
+  "locks": [
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/Cargo.lock",
+      "bytes": 96111,
+      "sha256": "7f65719e408c31d4e6c32f2e168b00ace4f73de412ca6b5469b831bd151c04ac",
+      "unchanged_from_base": true
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app/Cargo.lock",
+      "bytes": 84127,
+      "sha256": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee",
+      "unchanged_from_base": true
+    },
+    {
+      "path": "/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/examples/app-demo/Cargo.lock",
+      "bytes": 87596,
+      "sha256": "d1dad662166f73b278b4ba0c33a017f3d30f4749f6e1a6a9a43fc1287c31f423",
+      "unchanged_from_base": true
+    }
+  ],
+  "sdk_versions": {
+    "fastly": "0.13.1",
+    "worker": "0.8.5",
+    "spin_sdk": "7.0.0"
+  },
+  "runtime_observations": [
+    {
+      "adapter": "fastly",
+      "event": "runtime",
+      "executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+      "expected": "0.21.0",
+      "version": "viceroy 0.21.0"
+    },
+    {
+      "adapter": "cloudflare",
+      "event": "runtime",
+      "executable": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/bin/wrangler.js",
+      "version": "4.131.0"
+    },
+    {
+      "adapter": "spin",
+      "event": "runtime",
+      "executable": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+      "version": "spin 4.1.0 (c0b3726 2026-08-25)"
+    }
+  ],
+  "tool_identities": [
+    {
+      "path": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+      "bytes": 53317104,
+      "sha256": "751ff2c1a83063b109bc212b95be5f52e5ab6284b9027fa03aa229087eba3f30"
+    },
+    {
+      "path": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/bin/wrangler.js",
+      "bytes": 3088,
+      "sha256": "780661a508810f3b65786895b1ca9aacbc4f55d329ae6b8c1e49ec8433569f77"
+    },
+    {
+      "path": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+      "bytes": 116793168,
+      "sha256": "0efe71a81495a75e81624186d457afa5398117e685567ba2cf90bd01a269128a"
+    },
+    {
+      "path": "/private/tmp/edgezero-pr275-tools/wasm-bindgen-0.2.129/bin/wasm-bindgen",
+      "bytes": 6938208,
+      "sha256": "b86e33b3c64362c44d8807ed35797e6b8220dd0232b6b19743caf7c2c68a2284"
+    },
+    {
+      "path": "/private/tmp/mocktioneer-pr275-20261021.YgmPJO/tools/bin/wasm-bindgen-test-runner",
+      "bytes": 10179856,
+      "sha256": "95966cd7a78035f433b367303e74df4784db2b7a50f9bcfa5b421535fe33d1b3"
+    },
+    {
+      "path": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/node_modules/@cloudflare/workerd-darwin-arm64/bin/workerd",
+      "bytes": 156374824,
+      "sha256": "eb132e3e489b47d804cc70b510a6da8f82dabec4748cdcdaba32a1a1c5c2e285"
+    }
+  ],
+  "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "cloudflare": {
+    "compatibility_date": "2026-04-22",
+    "compatibility_flags": ["enable_request_signal", "enable_weak_ref"],
+    "workerd_package_version": "1.20260910.1",
+    "workerd_identity_basis": "Wrangler bundled workerd default executable, not independent per-process attestation."
+  },
+  "final_run": {
+    "environment": {
+      "SSL_CERT_FILE": "/etc/ssl/cert.pem",
+      "WASM_BINDGEN_BIN": "/private/tmp/edgezero-pr275-tools/wasm-bindgen-0.2.129/bin/wasm-bindgen",
+      "WORKER_BUILD_BIN": "/Users/ag/.asdf/installs/rust/1.98.1/bin/worker-build",
+      "ESBUILD_BIN": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+      "WASM_OPT_BIN": "/Users/ag/Library/Caches/worker-build/wasm-opt-arm64-macos-130/bin/wasm-opt",
+      "WRANGLER_BIN": "/Users/ag/.asdf/installs/nodejs/24.12.0/bin/wrangler",
+      "WRANGLER_LOG_PATH": "/private/tmp/edgezero-pr275-wrangler-logs",
+      "WRANGLER_SEND_METRICS": "false",
+      "CARGO_NET_OFFLINE": "true"
+    },
+    "command": "scripts/smoke_test_reusable_app.sh --adapter all --suite smoke --output /private/tmp/edgezero-f8-all-final-c",
+    "exit_code": 2,
+    "events": {
+      "path": "/private/tmp/edgezero-f8-all-final-c/events.jsonl",
+      "bytes": 1785349,
+      "sha256": "88b9c651ab9f5b3584abc0aa2746c8bc4fe33162117746c0239bd963540395b4"
+    },
+    "summary": {
+      "path": "/private/tmp/edgezero-f8-all-final-c/summary.json",
+      "bytes": 469058,
+      "sha256": "0d5303b0fc309b26efbd4e926bba24dc5987a6b52a1e7de229f64cbdcdf721f1"
+    },
+    "f8_request_cases": [
+      {
+        "event": "declared-kv-case",
+        "adapter": "fastly",
+        "path": "/declared-kv/free",
+        "token": "18e0a73d57e3c918-13ab6-82",
+        "status": "pass",
+        "http_status": 200,
+        "warnings": 0,
+        "instance": "18e0a73d57522bc0-13ab6-81",
+        "body_sha256": "114095efdb9546df42494cd1abbe7b475312fac70784b82a3dc8bddc43702949",
+        "body_bytes": 283,
+        "request_start": {
+          "correlation": "00000000000000000000000000000006",
+          "cpu_ms": 5,
+          "event": "request_start",
+          "heap_mib": 2,
+          "instance": "18e0a73d57522bc0-13ab6-81",
+          "native_id": true,
+          "ordinal": 2,
+          "repetition": 0,
+          "service_id": "0000000000000000000000",
+          "token": "18e0a73d57e3c918-13ab6-82",
+          "variant": "c"
+        },
+        "egress_terminal": {
+          "body_kind": "Application",
+          "bytes_written": 283,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a73d57522bc0-13ab6-81",
+          "outcome": "Completed",
+          "repetition": 0,
+          "token": "18e0a73d57e3c918-13ab6-82",
+          "variant": "c"
+        }
+      },
+      {
+        "event": "declared-kv-case",
+        "adapter": "fastly",
+        "path": "/declared-kv/missing/read",
+        "token": "18e0a73d57f30770-13ab6-83",
+        "status": "pass",
+        "http_status": 500,
+        "warnings": 1,
+        "instance": "18e0a73d57522bc0-13ab6-81",
+        "body_sha256": "f7cd249a93d558f2efcfd085d1f107068820182465b1d7154d1eb2c4463aec87",
+        "body_bytes": 76,
+        "request_start": {
+          "correlation": "00000000000000000000000000000007",
+          "cpu_ms": 5,
+          "event": "request_start",
+          "heap_mib": 2,
+          "instance": "18e0a73d57522bc0-13ab6-81",
+          "native_id": true,
+          "ordinal": 3,
+          "repetition": 0,
+          "service_id": "0000000000000000000000",
+          "token": "18e0a73d57f30770-13ab6-83",
+          "variant": "c"
+        },
+        "egress_terminal": {
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a73d57522bc0-13ab6-81",
+          "outcome": "Completed",
+          "repetition": 0,
+          "token": "18e0a73d57f30770-13ab6-83",
+          "variant": "c"
+        }
+      },
+      {
+        "event": "declared-kv-case",
+        "adapter": "fastly",
+        "path": "/declared-kv/missing/read",
+        "token": "18e0a73d580c4078-13ab6-84",
+        "status": "pass",
+        "http_status": 500,
+        "warnings": 1,
+        "instance": "18e0a73d57522bc0-13ab6-81",
+        "body_sha256": "f7cd249a93d558f2efcfd085d1f107068820182465b1d7154d1eb2c4463aec87",
+        "body_bytes": 76,
+        "request_start": {
+          "correlation": "00000000000000000000000000000008",
+          "cpu_ms": 6,
+          "event": "request_start",
+          "heap_mib": 2,
+          "instance": "18e0a73d57522bc0-13ab6-81",
+          "native_id": true,
+          "ordinal": 4,
+          "repetition": 0,
+          "service_id": "0000000000000000000000",
+          "token": "18e0a73d580c4078-13ab6-84",
+          "variant": "c"
+        },
+        "egress_terminal": {
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a73d57522bc0-13ab6-81",
+          "outcome": "Completed",
+          "repetition": 0,
+          "token": "18e0a73d580c4078-13ab6-84",
+          "variant": "c"
+        }
+      },
+      {
+        "event": "declared-kv-case",
+        "adapter": "fastly",
+        "path": "/declared-kv/free",
+        "token": "18e0a73d581ece78-13ab6-85",
+        "status": "pass",
+        "http_status": 200,
+        "warnings": 1,
+        "instance": "18e0a73d57522bc0-13ab6-81",
+        "body_sha256": "cf6f203005d6190a40a4f1257ac972faa85666a964d977684a5c9de1fdf82157",
+        "body_bytes": 283,
+        "request_start": {
+          "correlation": "00000000000000000000000000000009",
+          "cpu_ms": 6,
+          "event": "request_start",
+          "heap_mib": 2,
+          "instance": "18e0a73d57522bc0-13ab6-81",
+          "native_id": true,
+          "ordinal": 5,
+          "repetition": 0,
+          "service_id": "0000000000000000000000",
+          "token": "18e0a73d581ece78-13ab6-85",
+          "variant": "c"
+        },
+        "egress_terminal": {
+          "body_kind": "Application",
+          "bytes_written": 283,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a73d57522bc0-13ab6-81",
+          "outcome": "Completed",
+          "repetition": 0,
+          "token": "18e0a73d581ece78-13ab6-85",
+          "variant": "c"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "fastly",
+        "operation": "write",
+        "token": "18e0a73d583465d0-13ab6-86",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a73d57522bc0-13ab6-81",
+        "body_sha256": "4931e42d4d10b497efe95243d1044f28a089462424ff5c01deaa85f257a0b4d4",
+        "body_bytes": 250,
+        "request_start": {
+          "correlation": "0000000000000000000000000000000a",
+          "cpu_ms": 7,
+          "event": "request_start",
+          "heap_mib": 2,
+          "instance": "18e0a73d57522bc0-13ab6-81",
+          "native_id": true,
+          "ordinal": 6,
+          "repetition": 0,
+          "service_id": "0000000000000000000000",
+          "token": "18e0a73d583465d0-13ab6-86",
+          "variant": "c"
+        },
+        "egress_terminal": {
+          "body_kind": "Application",
+          "bytes_written": 250,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a73d57522bc0-13ab6-81",
+          "outcome": "Completed",
+          "repetition": 0,
+          "token": "18e0a73d583465d0-13ab6-86",
+          "variant": "c"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "fastly",
+        "operation": "read",
+        "token": "18e0a73d5854ea08-13ab6-87",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a73d5854ea08-13ab6-87",
+        "body_sha256": "91fa2b6c6292d81ea6cb05b7f2f23f6d8254191c6e2e40a4d798000819282b47",
+        "body_bytes": 251,
+        "request_start": {
+          "correlation": "0000000000000000000000000000000b",
+          "cpu_ms": 0,
+          "event": "request_start",
+          "heap_mib": 2,
+          "instance": "18e0a73d5854ea08-13ab6-87",
+          "native_id": true,
+          "ordinal": 1,
+          "repetition": 0,
+          "service_id": "0000000000000000000000",
+          "token": "18e0a73d5854ea08-13ab6-87",
+          "variant": "c"
+        },
+        "egress_terminal": {
+          "body_kind": "Application",
+          "bytes_written": 251,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a73d5854ea08-13ab6-87",
+          "outcome": "Completed",
+          "repetition": 0,
+          "token": "18e0a73d5854ea08-13ab6-87",
+          "variant": "c"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "fastly",
+        "operation": "list",
+        "token": "18e0a73d586b1da0-13ab6-88",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a73d5854ea08-13ab6-87",
+        "body_sha256": "209a3acf86f251dbd21098dda091b7dd83189918c49d98c1ae7a8bf6ecfbdc41",
+        "body_bytes": 251,
+        "request_start": {
+          "correlation": "0000000000000000000000000000000c",
+          "cpu_ms": 0,
+          "event": "request_start",
+          "heap_mib": 2,
+          "instance": "18e0a73d5854ea08-13ab6-87",
+          "native_id": true,
+          "ordinal": 2,
+          "repetition": 0,
+          "service_id": "0000000000000000000000",
+          "token": "18e0a73d586b1da0-13ab6-88",
+          "variant": "c"
+        },
+        "egress_terminal": {
+          "body_kind": "Application",
+          "bytes_written": 251,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a73d5854ea08-13ab6-87",
+          "outcome": "Completed",
+          "repetition": 0,
+          "token": "18e0a73d586b1da0-13ab6-88",
+          "variant": "c"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "fastly",
+        "operation": "delete",
+        "token": "18e0a73d588df398-13ab6-89",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a73d5854ea08-13ab6-87",
+        "body_sha256": "52deb0ecf9577e6fa4549821ed3927e6a86ae3413a9b913923836d97ee87eb8a",
+        "body_bytes": 250,
+        "request_start": {
+          "correlation": "0000000000000000000000000000000d",
+          "cpu_ms": 1,
+          "event": "request_start",
+          "heap_mib": 2,
+          "instance": "18e0a73d5854ea08-13ab6-87",
+          "native_id": true,
+          "ordinal": 3,
+          "repetition": 0,
+          "service_id": "0000000000000000000000",
+          "token": "18e0a73d588df398-13ab6-89",
+          "variant": "c"
+        },
+        "egress_terminal": {
+          "body_kind": "Application",
+          "bytes_written": 250,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a73d5854ea08-13ab6-87",
+          "outcome": "Completed",
+          "repetition": 0,
+          "token": "18e0a73d588df398-13ab6-89",
+          "variant": "c"
+        }
+      },
+      {
+        "event": "declared-kv-case",
+        "adapter": "cloudflare",
+        "path": "/declared-kv/free",
+        "token": "18e0a743d811f3c0-13ab6-132",
+        "status": "pass",
+        "http_status": 200,
+        "warnings": 0,
+        "instance": "18e0a743d811f3c0-13ab6-132",
+        "body_sha256": "cdbb54dbb500fb9b7c818c88fe00e2a4198aed55a4865543b1738a568c8e56f8",
+        "body_bytes": 280,
+        "request_start": {
+          "adapter": "cloudflare",
+          "correlation": "18e0a743d811f3c0-13ab6-132",
+          "event": "request_start",
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 1,
+          "token": "18e0a743d811f3c0-13ab6-132"
+        },
+        "egress_terminal": {
+          "adapter": "cloudflare",
+          "body_kind": "Application",
+          "bytes_written": 280,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a743d811f3c0-13ab6-132"
+        }
+      },
+      {
+        "event": "declared-kv-case",
+        "adapter": "cloudflare",
+        "path": "/declared-kv/missing/read",
+        "token": "18e0a743e2ed10e0-13ab6-133",
+        "status": "pass",
+        "http_status": 500,
+        "warnings": 1,
+        "instance": "18e0a743d811f3c0-13ab6-132",
+        "body_sha256": "f7cd249a93d558f2efcfd085d1f107068820182465b1d7154d1eb2c4463aec87",
+        "body_bytes": 76,
+        "request_start": {
+          "adapter": "cloudflare",
+          "correlation": "18e0a743e2ed10e0-13ab6-133",
+          "event": "request_start",
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 2,
+          "token": "18e0a743e2ed10e0-13ab6-133"
+        },
+        "egress_terminal": {
+          "adapter": "cloudflare",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a743e2ed10e0-13ab6-133"
+        }
+      },
+      {
+        "event": "declared-kv-case",
+        "adapter": "cloudflare",
+        "path": "/declared-kv/missing/read",
+        "token": "18e0a743e68dea08-13ab6-134",
+        "status": "pass",
+        "http_status": 500,
+        "warnings": 1,
+        "instance": "18e0a743d811f3c0-13ab6-132",
+        "body_sha256": "f7cd249a93d558f2efcfd085d1f107068820182465b1d7154d1eb2c4463aec87",
+        "body_bytes": 76,
+        "request_start": {
+          "adapter": "cloudflare",
+          "correlation": "18e0a743e68dea08-13ab6-134",
+          "event": "request_start",
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 3,
+          "token": "18e0a743e68dea08-13ab6-134"
+        },
+        "egress_terminal": {
+          "adapter": "cloudflare",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a743e68dea08-13ab6-134"
+        }
+      },
+      {
+        "event": "declared-kv-case",
+        "adapter": "cloudflare",
+        "path": "/declared-kv/free",
+        "token": "18e0a743e6d33450-13ab6-135",
+        "status": "pass",
+        "http_status": 200,
+        "warnings": 1,
+        "instance": "18e0a743d811f3c0-13ab6-132",
+        "body_sha256": "c3127e0969fc3c595a2d2b3bf1b95204b72c846cb0f4e657817f5c9dd63bf3ca",
+        "body_bytes": 280,
+        "request_start": {
+          "adapter": "cloudflare",
+          "correlation": "18e0a743e6d33450-13ab6-135",
+          "event": "request_start",
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 4,
+          "token": "18e0a743e6d33450-13ab6-135"
+        },
+        "egress_terminal": {
+          "adapter": "cloudflare",
+          "body_kind": "Application",
+          "bytes_written": 280,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a743e6d33450-13ab6-135"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "cloudflare",
+        "operation": "write",
+        "token": "18e0a743ea513b68-13ab6-136",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a743d811f3c0-13ab6-132",
+        "body_sha256": "d2a2d355646b99dff6d620e5da4be67fe69372290a955c1f7ca483a2b91feb77",
+        "body_bytes": 247,
+        "request_start": {
+          "adapter": "cloudflare",
+          "correlation": "18e0a743ea513b68-13ab6-136",
+          "event": "request_start",
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 5,
+          "token": "18e0a743ea513b68-13ab6-136"
+        },
+        "egress_terminal": {
+          "adapter": "cloudflare",
+          "body_kind": "Application",
+          "bytes_written": 247,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a743ea513b68-13ab6-136"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "cloudflare",
+        "operation": "read",
+        "token": "18e0a743edba89d0-13ab6-137",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a743d811f3c0-13ab6-132",
+        "body_sha256": "0b7017140152d50a78ebd4539c4fabea534676fafad8822fac66a0e54636a9a1",
+        "body_bytes": 248,
+        "request_start": {
+          "adapter": "cloudflare",
+          "correlation": "18e0a743edba89d0-13ab6-137",
+          "event": "request_start",
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 6,
+          "token": "18e0a743edba89d0-13ab6-137"
+        },
+        "egress_terminal": {
+          "adapter": "cloudflare",
+          "body_kind": "Application",
+          "bytes_written": 248,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a743edba89d0-13ab6-137"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "cloudflare",
+        "operation": "list",
+        "token": "18e0a743f152bc20-13ab6-138",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a743d811f3c0-13ab6-132",
+        "body_sha256": "d16763e60064382e839ccd5b0fea7fbc639ca2420d7db6407d79fadd482b9ceb",
+        "body_bytes": 248,
+        "request_start": {
+          "adapter": "cloudflare",
+          "correlation": "18e0a743f152bc20-13ab6-138",
+          "event": "request_start",
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 7,
+          "token": "18e0a743f152bc20-13ab6-138"
+        },
+        "egress_terminal": {
+          "adapter": "cloudflare",
+          "body_kind": "Application",
+          "bytes_written": 248,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a743f152bc20-13ab6-138"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "cloudflare",
+        "operation": "delete",
+        "token": "18e0a743f4c72260-13ab6-139",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a743d811f3c0-13ab6-132",
+        "body_sha256": "a9e53031b4cb61678f190b24dbefbacf65c1ce8f3c0431cb31dada65f5704c20",
+        "body_bytes": 247,
+        "request_start": {
+          "adapter": "cloudflare",
+          "correlation": "18e0a743f4c72260-13ab6-139",
+          "event": "request_start",
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 8,
+          "token": "18e0a743f4c72260-13ab6-139"
+        },
+        "egress_terminal": {
+          "adapter": "cloudflare",
+          "body_kind": "Application",
+          "bytes_written": 247,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a743d811f3c0-13ab6-132",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a743f4c72260-13ab6-139"
+        }
+      },
+      {
+        "event": "declared-kv-case",
+        "adapter": "spin",
+        "path": "/declared-kv/free",
+        "token": "18e0a746d4d0e290-13ab6-1be",
+        "status": "pass",
+        "http_status": 200,
+        "warnings": 0,
+        "instance": "18e0a746d4d0e290-13ab6-1be",
+        "body_sha256": "2cdbcdea5274672c290584568be8efd05539bfd4d23b980055bbc819a8303151",
+        "body_bytes": 280,
+        "request_start": {
+          "adapter": "spin",
+          "correlation": "18e0a746d4d0e290-13ab6-1be",
+          "event": "request_start",
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 1,
+          "token": "18e0a746d4d0e290-13ab6-1be"
+        },
+        "egress_terminal": {
+          "adapter": "spin",
+          "body_kind": "Application",
+          "bytes_written": 280,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a746d4d0e290-13ab6-1be"
+        }
+      },
+      {
+        "event": "declared-kv-case",
+        "adapter": "spin",
+        "path": "/declared-kv/missing/read",
+        "token": "18e0a746d4f5f2d8-13ab6-1bf",
+        "status": "pass",
+        "http_status": 500,
+        "warnings": 1,
+        "instance": "18e0a746d4d0e290-13ab6-1be",
+        "body_sha256": "f7cd249a93d558f2efcfd085d1f107068820182465b1d7154d1eb2c4463aec87",
+        "body_bytes": 76,
+        "request_start": {
+          "adapter": "spin",
+          "correlation": "18e0a746d4f5f2d8-13ab6-1bf",
+          "event": "request_start",
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 2,
+          "token": "18e0a746d4f5f2d8-13ab6-1bf"
+        },
+        "egress_terminal": {
+          "adapter": "spin",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a746d4f5f2d8-13ab6-1bf"
+        }
+      },
+      {
+        "event": "declared-kv-case",
+        "adapter": "spin",
+        "path": "/declared-kv/missing/read",
+        "token": "18e0a746d5071978-13ab6-1c0",
+        "status": "pass",
+        "http_status": 500,
+        "warnings": 1,
+        "instance": "18e0a746d4d0e290-13ab6-1be",
+        "body_sha256": "f7cd249a93d558f2efcfd085d1f107068820182465b1d7154d1eb2c4463aec87",
+        "body_bytes": 76,
+        "request_start": {
+          "adapter": "spin",
+          "correlation": "18e0a746d5071978-13ab6-1c0",
+          "event": "request_start",
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 3,
+          "token": "18e0a746d5071978-13ab6-1c0"
+        },
+        "egress_terminal": {
+          "adapter": "spin",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a746d5071978-13ab6-1c0"
+        }
+      },
+      {
+        "event": "declared-kv-case",
+        "adapter": "spin",
+        "path": "/declared-kv/free",
+        "token": "18e0a746d5178498-13ab6-1c1",
+        "status": "pass",
+        "http_status": 200,
+        "warnings": 1,
+        "instance": "18e0a746d4d0e290-13ab6-1be",
+        "body_sha256": "8f5ff82549486530c1f26565e746b4dba0d4b65f25858988172bd7311fa48885",
+        "body_bytes": 280,
+        "request_start": {
+          "adapter": "spin",
+          "correlation": "18e0a746d5178498-13ab6-1c1",
+          "event": "request_start",
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 4,
+          "token": "18e0a746d5178498-13ab6-1c1"
+        },
+        "egress_terminal": {
+          "adapter": "spin",
+          "body_kind": "Application",
+          "bytes_written": 280,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a746d5178498-13ab6-1c1"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "spin",
+        "operation": "write",
+        "token": "18e0a746d526c6d8-13ab6-1c2",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a746d4d0e290-13ab6-1be",
+        "body_sha256": "7b0a6b006fc4dedec483a5ff809774104d7250dac6ad7b195f4142e48b2882e4",
+        "body_bytes": 247,
+        "request_start": {
+          "adapter": "spin",
+          "correlation": "18e0a746d526c6d8-13ab6-1c2",
+          "event": "request_start",
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 5,
+          "token": "18e0a746d526c6d8-13ab6-1c2"
+        },
+        "egress_terminal": {
+          "adapter": "spin",
+          "body_kind": "Application",
+          "bytes_written": 247,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a746d526c6d8-13ab6-1c2"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "spin",
+        "operation": "read",
+        "token": "18e0a746d5396090-13ab6-1c3",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a746d4d0e290-13ab6-1be",
+        "body_sha256": "3de25875a8b682c899f60474b078541bbc8b70a15ca466ea2181774fe9e28d6b",
+        "body_bytes": 248,
+        "request_start": {
+          "adapter": "spin",
+          "correlation": "18e0a746d5396090-13ab6-1c3",
+          "event": "request_start",
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 6,
+          "token": "18e0a746d5396090-13ab6-1c3"
+        },
+        "egress_terminal": {
+          "adapter": "spin",
+          "body_kind": "Application",
+          "bytes_written": 248,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a746d5396090-13ab6-1c3"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "spin",
+        "operation": "list",
+        "token": "18e0a746d5493f10-13ab6-1c4",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a746d4d0e290-13ab6-1be",
+        "body_sha256": "8a40e3f37434e9ad8f570c769a7e2120050d307deef5cf53fbbf8d2d02f75b79",
+        "body_bytes": 248,
+        "request_start": {
+          "adapter": "spin",
+          "correlation": "18e0a746d5493f10-13ab6-1c4",
+          "event": "request_start",
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 7,
+          "token": "18e0a746d5493f10-13ab6-1c4"
+        },
+        "egress_terminal": {
+          "adapter": "spin",
+          "body_kind": "Application",
+          "bytes_written": 248,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a746d5493f10-13ab6-1c4"
+        }
+      },
+      {
+        "event": "declared-kv-linked",
+        "adapter": "spin",
+        "operation": "delete",
+        "token": "18e0a746d5943290-13ab6-1c5",
+        "status": "pass",
+        "http_status": 200,
+        "instance": "18e0a746d4d0e290-13ab6-1be",
+        "body_sha256": "efb619e74f318739c03c3a30eafb0b026762520f289c34e70802cbe493669647",
+        "body_bytes": 247,
+        "request_start": {
+          "adapter": "spin",
+          "correlation": "18e0a746d5943290-13ab6-1c5",
+          "event": "request_start",
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "native_id": false,
+          "ordinal": 8,
+          "token": "18e0a746d5943290-13ab6-1c5"
+        },
+        "egress_terminal": {
+          "adapter": "spin",
+          "body_kind": "Application",
+          "bytes_written": 247,
+          "event": "egress_terminal",
+          "fallback": null,
+          "instance": "18e0a746d4d0e290-13ab6-1be",
+          "mode": "retained",
+          "outcome": "HostHandoff",
+          "token": "18e0a746d5943290-13ab6-1c5"
+        }
+      }
+    ],
+    "post_shutdown_warning_checks": [
+      {
+        "adapter": "fastly",
+        "event": "declared-kv-after-shutdown",
+        "qualification": false,
+        "warnings": 1
+      },
+      {
+        "adapter": "cloudflare",
+        "event": "declared-kv-after-shutdown",
+        "instance": "18e0a743d811f3c0-13ab6-132",
+        "qualification": false,
+        "status": "pass",
+        "warnings": 1
+      },
+      {
+        "adapter": "spin",
+        "event": "declared-kv-after-shutdown",
+        "instance": "18e0a746d4d0e290-13ab6-1be",
+        "qualification": false,
+        "status": "pass",
+        "warnings": 1
+      }
+    ],
+    "independent_unverified": [
+      {
+        "adapter": "spin",
+        "assertion": "same_guest_overlap",
+        "attempt_limit": 3,
+        "mode": "per-request",
+        "status": "unverified"
+      },
+      {
+        "adapter": "spin",
+        "assertion": "same_guest_overlap",
+        "attempt_limit": 3,
+        "mode": "retained",
+        "status": "unverified"
+      }
+    ],
+    "failed_records": [],
+    "raw_logs": [
+      {
+        "path": "/private/tmp/edgezero-f8-all-final-c/c-0.log",
+        "bytes": 19446,
+        "sha256": "d49d1e81cd49d19e35f0c8ad945524a57e8261aec40331f58a5d77ded6ac5e02"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-all-final-c/cloudflare-retained.log",
+        "bytes": 10838,
+        "sha256": "c19b3387ff0fd73b9c118d56b6b3b46481daa7919d19fa5ac67a62db15fdeb46"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-all-final-c/spin-retained.log",
+        "bytes": 9142,
+        "sha256": "6186c80ad38575a3e22ff0a70dec6cd99eecbb3a347202eacf29c6d96768695a"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-all-final-c/spin-per-request.log",
+        "bytes": 5625,
+        "sha256": "6a5d7adc33b2676b614b02595cad33885fc6d9aa606c44b92700746267689f5c"
+      }
+    ],
+    "artifacts": [
+      {
+        "path": "/private/tmp/edgezero-f8-all-final-c/artifacts/fixture-fastly-retained-app.wasm",
+        "bytes": 3573569,
+        "sha256": "0a74ce9574e118814335f217e870ea387fb1a4a1ec1492219af88da449dfb298"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-all-final-c/artifacts/fixture_spin.wasm",
+        "bytes": 2150292,
+        "sha256": "9ee055bc2f014866b7c766bed0b85f640de39dde59ee6616a9cb0f6961ba2b2c"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-all-final-c/artifacts/build/index_bg.wasm",
+        "bytes": 1626105,
+        "sha256": "8a959911b8e8350f4ccbe7ba40e3ecd9d7a49da20dfd221bddb81460c69fb48e"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-all-final-c/artifacts/build/worker/shim.mjs",
+        "bytes": 164,
+        "sha256": "ac99177861405a6046923cbacabbd6adfa1853a56d0c679b9f5e09097c2f4728"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-all-final-c/wrangler.toml",
+        "bytes": 447,
+        "sha256": "6d09e29b802287dbfffcbfa8111f4ed1a2aa4397bc80396a035cd7a66c2b2923"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-all-final-c/spin-retained.toml",
+        "bytes": 567,
+        "sha256": "07a7991f4d6eec98e4f0521812dd05871037196e331e1566a7e2cec33d931b0a"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-all-final-c/fastly.toml",
+        "bytes": 463,
+        "sha256": "4444af855e1f5db54da213ddfc6a84ea34aa52f9fd868d047521b0ab78a3fd18"
+      }
+    ]
+  },
+  "verification": {
+    "workspace_core_tests": 794,
+    "fixture_core_qualification_tests": 17,
+    "fixture_harness_tests": 56,
+    "spin_source_harness_tests": 12,
+    "cloudflare_js_tests": 2,
+    "fastly_kv_wasi_tests": 3,
+    "fastly_request_wasi_tests": 12,
+    "commands": {
+      "workspace_tests": "cargo test --offline --locked --workspace --all-targets",
+      "workspace_clippy": "cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings",
+      "feature_check": "cargo check --offline --locked --workspace --all-targets --features \"fastly cloudflare spin\"",
+      "spin_target": "cargo check --offline --locked -p edgezero-adapter-spin --target wasm32-wasip2 --features spin",
+      "cf_js": "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=/private/tmp/mocktioneer-pr275-20261021.YgmPJO/tools/bin/wasm-bindgen-test-runner cargo test --offline --locked -p edgezero-adapter-cloudflare --no-default-features --features cloudflare,test-utils --target wasm32-unknown-unknown --lib key_value_store::tests::",
+      "fastly_wasi_kv": "CARGO_TARGET_WASM32_WASIP1_RUNNER='viceroy run --' cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib key_value_store::tests:: -- --nocapture",
+      "fastly_wasi_requests": "CARGO_TARGET_WASM32_WASIP1_RUNNER='viceroy run --' cargo test --offline --locked -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib request::synthesis_tests:: -- --nocapture"
+    },
+    "logs": [
+      {
+        "path": "/private/tmp/edgezero-f8-workspace-tests-final.log",
+        "bytes": 175986,
+        "sha256": "6a37222f82d29ce40c2fed2b749d848d6c88876707801e2a1c79607d58114bea",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-workspace-clippy-final.log",
+        "bytes": 836,
+        "sha256": "5106046a86a13e5e095c93df308ba725a6f8e219fd310bc6405dc5629a43987e",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-feature-check-final.log",
+        "bytes": 836,
+        "sha256": "0facd333d569f4c2b2fa334c37e0961c94ca74fc18a6267b9db1c85e774fae42",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-spin-check-final.log",
+        "bytes": 483,
+        "sha256": "993e72af1e919eeddd8c6d4053122cc9e0a02171a83f0823e184a3d3542286e4",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-fixture-final-d.log",
+        "bytes": 6196,
+        "sha256": "7b5a8854a5a110c660cda00f9858c40669d37c54372e57c46953d065cb9c4d8c",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-fixture-core-qualification.log",
+        "bytes": 2458,
+        "sha256": "c8fd7e0cca00baa104d5c41c6b285504b2dd2d3da9c400e9f2209ce144939f75",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-fixture-clippy-final-c.log",
+        "bytes": 553,
+        "sha256": "8d8f0215ec66f5621f866d9fd4020443b4cc7656a2150dc6c11d557f4691a236",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-spin-unit-final.log",
+        "bytes": 1514,
+        "sha256": "4fea553169eaba1f7c31b9278fb4d5b49e945f38cded60535bbeddf74ef59a5e",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-cf-js-final.log",
+        "bytes": 962,
+        "sha256": "cafe873cb0685fad97be98a72de97a22937771214902bd66f2bff062eb7b7445",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-cf-final-review-clippy.log",
+        "bytes": 495,
+        "sha256": "17d00f02f2fc8f4b5c7c323aa18e781cbadd22004bd1d602358a9dde95fcb280",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-final-review-fastly-kv-wasi-host.log",
+        "bytes": 956,
+        "sha256": "655a53dbc09255ff62357fcdad8e1831271056eb0cb699b90a23b2feea75ecf0",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-final-review-fastly-requests-wasi-host.log",
+        "bytes": 1873,
+        "sha256": "8823576d430934a331094a805c4075889a69aada3d1835330648db386ba71dcd",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-final-review-spin-wasm-clippy.log",
+        "bytes": 538,
+        "sha256": "8dc34de8e64c67104b11a9a12fbaf5632b6e17344d0baffd449e9f43e3a8d5da",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-script-tests-final.log",
+        "bytes": 2048,
+        "sha256": "6f8bd4776b81f7b87a63df58d08f4411e4a053fd74724fde4acfc63e0d18974d",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-inventory-check-final.log",
+        "bytes": 87,
+        "sha256": "5ff471df1974e9c78508fec0a63e32cc491a25dc31c9510b89b889ee5be21b40",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-docs-format-final.log",
+        "bytes": 118,
+        "sha256": "43ba3f26abc1bc66ab5eaa42bcc64ba4c70edea76a4a621144b929d0812736f1",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-docs-lint.log",
+        "bytes": 40,
+        "sha256": "81521cc702a8a0674ad78ee506a2ec936217876334be26daf9c738d03779be16",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-docs-build.log",
+        "bytes": 234,
+        "sha256": "f71693d704917f0610e36d65b5cad8682a25b5ab88cb597d3eb9ae92de22cb3e",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-core-red.log",
+        "bytes": 4519,
+        "sha256": "4d3b5cd9805d3289cf46fb9ecc672e45a4626528cf9b61a5dae3688409189b1a",
+        "exit_code": 101
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-fastly-red-detail.log",
+        "bytes": 12731,
+        "sha256": "18580bf01b6d9e0889e324a66dddb622e3d792cb5ebc214c493788480fbea544",
+        "exit_code": 134
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-spin-unit-red.log",
+        "bytes": 3511,
+        "sha256": "fbb159e35f16b4701d5e051e3dbac427fff045323855f98cda15af7f28b6e3ac",
+        "exit_code": 101
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-fastly-native-tests.log",
+        "bytes": 30520,
+        "sha256": "4722a168cdf6fd1908f72a79256060a05b3d520dbae29e8c3a06c627015c9609",
+        "exit_code": 101
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-final-review-fastly-kv-wasi.log",
+        "bytes": 1088,
+        "sha256": "a5878264ea67f8a249d31f722e5f0647752ad337c843725a3820ec981e959392",
+        "exit_code": 1
+      }
+    ],
+    "native_fastly_feature_linking": "Native SDK-feature test linking is unsupported by the Fastly host ABI; real Fastly tests execute on WASI/Viceroy. A sandbox keychain failure was followed by the already-configured host runner; no code or SDK workaround."
+  },
+  "retained_attempts": [
+    {
+      "directory": "/private/tmp/edgezero-f8-fastly-smoke-a",
+      "exit_code": 1,
+      "scope": "Fixture path-param type mismatch; no runtime verdict.",
+      "log": {
+        "path": "/private/tmp/edgezero-f8-fastly-smoke-a.log",
+        "bytes": 4468,
+        "sha256": "bf95fec75bde9a4ebcd90b2ee511c619a8917e94f28931f7c4872560ac3a6710"
+      },
+      "events": {
+        "path": "/private/tmp/edgezero-f8-fastly-smoke-a/events.jsonl",
+        "bytes": 1097,
+        "sha256": "9c947795bfa0b54574662f2b787ccbdd4b5174b03fcfb9473dc6825698ab098e"
+      },
+      "diagnostics": [
+        {
+          "adapter": "fastly",
+          "error": "command cd \"/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app\" && CARGO_TARGET_DIR=\"/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app/target\" FIXTURE_BUILD_ROUNDS=\"0\" FIXTURE_MAX_REQUESTS=\"10\" \"/Users/ag/.asdf/installs/rust/1.98.1/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo\" \"build\" \"--locked\" \"--release\" \"-p\" \"fixture-fastly\" \"--bins\" \"--target\" \"wasm32-wasip1\" failed: exit status: 101",
+          "status": "fail"
+        }
+      ]
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-fastly-smoke-b",
+      "exit_code": 1,
+      "scope": "Harness demanded HostHandoff; actual Fastly contract reports Completed.",
+      "log": {
+        "path": "/private/tmp/edgezero-f8-fastly-smoke-b.log",
+        "bytes": 1688,
+        "sha256": "4931bf4382d2a2c8610c9ef8609aa332a4dcab5d381e9b572512c0368366d4ab"
+      },
+      "events": {
+        "path": "/private/tmp/edgezero-f8-fastly-smoke-b/events.jsonl",
+        "bytes": 1010340,
+        "sha256": "c33725b898d0a9621eaf225de482ef562b406e6280b4b951cc8bdfc4187e2d20"
+      },
+      "diagnostics": [
+        {
+          "adapter": "fastly",
+          "error": "declared KV terminal disposition mismatch",
+          "repetition": 0,
+          "status": "fail",
+          "variant": "c"
+        }
+      ]
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-fastly-smoke-c",
+      "exit_code": 1,
+      "scope": "Overlong missing-operation sequence crossed sandbox identities; retirement cause unproved. Exact four-request acceptance prefix retained instead; all six operations tested in WASI.",
+      "log": {
+        "path": "/private/tmp/edgezero-f8-fastly-smoke-c.log",
+        "bytes": 1534,
+        "sha256": "766be467723368a8e0658aec8ae472859e1f50375e657cc68495586093e3618e"
+      },
+      "events": {
+        "path": "/private/tmp/edgezero-f8-fastly-smoke-c/events.jsonl",
+        "bytes": 1018133,
+        "sha256": "2422d5e3104fcdfa7210233f6368364a87684d426ad983ec9cb90cdbbdec6e88"
+      },
+      "diagnostics": [
+        {
+          "adapter": "fastly",
+          "error": "declared KV sandbox turnover: deduplication unverified",
+          "repetition": 0,
+          "status": "fail",
+          "variant": "c"
+        }
+      ]
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-fastly-smoke-e",
+      "exit_code": 0,
+      "scope": "Earlier Fastly-only complete smoke; superseded by final C for final fixture code.",
+      "log": {
+        "path": "/private/tmp/edgezero-f8-fastly-smoke-e.log",
+        "bytes": 1922,
+        "sha256": "dec98ea5d48bfe3436b0f878cc2f2507887a2de74f6947abd64ab5226fab7520"
+      },
+      "events": {
+        "path": "/private/tmp/edgezero-f8-fastly-smoke-e/events.jsonl",
+        "bytes": 1226090,
+        "sha256": "de1c4faab1c668376a7b70b6b10a39737ca8db98ec2d66fc06e800016d910b47"
+      },
+      "diagnostics": []
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-spin-red",
+      "exit_code": 1,
+      "scope": "Unused missing declaration failed provider-free route before handler.",
+      "log": {
+        "path": "/private/tmp/edgezero-f8-spin-red.log",
+        "bytes": 1431,
+        "sha256": "b8734345c5d9f2a02f50cf0eac4f1b05fc9eb5893f365c3f457e9c1432f19bb4"
+      },
+      "events": {
+        "path": "/private/tmp/edgezero-f8-spin-red/events.jsonl",
+        "bytes": 1491,
+        "sha256": "80f4654180df4c6c7245ca277bd1916d4a245cf2dab79f8dec746616617ff6e8"
+      },
+      "diagnostics": [
+        {
+          "adapter": "spin",
+          "error": "unexpected response: {\"body\":\"\",\"complete_ns\":42570250,\"event\":\"client_completed\",\"first_byte_ns\":42558084,\"header_ns\":42558084,\"headers\":[[\"connection\",\"close\"],[\"content-length\",\"0\"],[\"date\",\"Wed, 21 Oct 2026 20:43:01 GMT\"]],\"status\":500,\"token\":\"18e0a63101faa830-2dbc-0\"}",
+          "mode": "per-request",
+          "phase": "probe",
+          "repetition": 0,
+          "status": "fail"
+        }
+      ]
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-cloudflare-red-b",
+      "exit_code": 1,
+      "scope": "Fixture service import typo; no runtime verdict.",
+      "log": {
+        "path": "/private/tmp/edgezero-f8-cloudflare-red-b.log",
+        "bytes": 2178,
+        "sha256": "b58b88f77b4ace2143f8ec63ce43200c84038b42006986cdbd4c8f3835de53cb"
+      },
+      "events": {
+        "path": "/private/tmp/edgezero-f8-cloudflare-red-b/events.jsonl",
+        "bytes": 1561,
+        "sha256": "8a9b21e519bc2fb54e0c7439a6297bf98a2b15e1b50d6718411bbea0c0534b3d"
+      },
+      "diagnostics": [
+        {
+          "adapter": "cloudflare",
+          "error": "command cd \"/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app/crates/fixture-cloudflare\" && CARGO_TARGET_DIR=\"/Users/ag/projects/stackpop/prebid/edgezero/.claude/worktrees/pr-275-outbound-http/tests/fixtures/reusable-app/target\" \"/Users/ag/.asdf/installs/rust/1.98.1/bin/worker-build\" \"--release\" \".\" \"--\" \"--locked\" failed: exit status: 1",
+          "status": "fail"
+        }
+      ]
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-cloudflare-red-c",
+      "exit_code": 1,
+      "scope": "Unused missing declaration failed provider-free route before handler.",
+      "log": {
+        "path": "/private/tmp/edgezero-f8-cloudflare-red-c.log",
+        "bytes": 1950,
+        "sha256": "291d915e037fcc25d1b08e4a32bc975bde4fe64aa951a445593c9c801ae791f5"
+      },
+      "events": {
+        "path": "/private/tmp/edgezero-f8-cloudflare-red-c/events.jsonl",
+        "bytes": 1939,
+        "sha256": "c724c7963d9efc4ae6d2c4ede123a234754f37bcbd145fcccdd3f7ee3bff79f9"
+      },
+      "diagnostics": [
+        {
+          "adapter": "cloudflare",
+          "error": "unexpected response: {\"body\":\"INTERNAL SERVER ERROR\",\"complete_ns\":138536458,\"event\":\"client_completed\",\"first_byte_ns\":138527083,\"header_ns\":138523166,\"headers\":[[\"Content-Length\",\"21\"]],\"status\":500,\"token\":\"18e0a6587cc34fc8-5df8-0\"}",
+          "mode": "per-request",
+          "phase": "probe",
+          "repetition": 0,
+          "status": "fail"
+        }
+      ]
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-cloudflare-green-a",
+      "exit_code": 1,
+      "scope": "Explicit fault constructed another measured app and changed build count; fixture now reuses retained app.",
+      "log": {
+        "path": "/private/tmp/edgezero-f8-cloudflare-green-a.log",
+        "bytes": 3222,
+        "sha256": "2374d5401e311090b44bda4e851e9962ae4581bd5b002f17efbeba12159d71db"
+      },
+      "events": {
+        "path": "/private/tmp/edgezero-f8-cloudflare-green-a/events.jsonl",
+        "bytes": 21231,
+        "sha256": "67d7862e447e88f51be70bd10a762e3358d4c089918f4a8857f41b3caccee4b7"
+      },
+      "diagnostics": [
+        {
+          "adapter": "cloudflare",
+          "error": "app rebuilt after binding failure",
+          "mode": "retained",
+          "phase": "binding_failure",
+          "status": "fail"
+        }
+      ]
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-all-final-a",
+      "exit_code": 1,
+      "scope": "After overlap created two Spin instances, the sequential dedup prefix crossed instances and failed. No identity check was relaxed.",
+      "log": {
+        "path": "/private/tmp/edgezero-f8-all-final-a.log",
+        "bytes": 9817,
+        "sha256": "2467cd2a7ee2aa1070a24de1fec2477e3083d9157d351c7608b8b23c2953c09a"
+      },
+      "events": {
+        "path": "/private/tmp/edgezero-f8-all-final-a/events.jsonl",
+        "bytes": 1575597,
+        "sha256": "2af1ca388238d8927201ae166bdee4a49ce1a819bbc3cb49719612105e483e45"
+      },
+      "diagnostics": [
+        {
+          "adapter": "spin",
+          "assertion": "same_guest_overlap",
+          "attempt_limit": 3,
+          "mode": "per-request",
+          "status": "unverified"
+        },
+        {
+          "adapter": "spin",
+          "assertion": "same_guest_overlap",
+          "attempt_limit": 3,
+          "mode": "retained",
+          "status": "unverified"
+        },
+        {
+          "adapter": "spin",
+          "error": "declared KV sandbox turnover: deduplication unverified",
+          "mode": "retained",
+          "phase": "declared_kv",
+          "status": "fail"
+        }
+      ]
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-all-final-b",
+      "exit_code": 2,
+      "scope": "All 24 F8 request cases and three shutdown checks pass; Spin per-request overlap remains unverified.",
+      "log": {
+        "path": "/private/tmp/edgezero-f8-all-final-b.log",
+        "bytes": 7811,
+        "sha256": "5f5da1b36620c80b07afd2f30e534712669b9d0dfdb7a9a1084c6c3ffa4b7c42"
+      },
+      "events": {
+        "path": "/private/tmp/edgezero-f8-all-final-b/events.jsonl",
+        "bytes": 1775142,
+        "sha256": "9539a7812287e041e0ef82a95f19897ba920c3f09165923e0d9c77979c3d50d9"
+      },
+      "diagnostics": [
+        {
+          "adapter": "spin",
+          "assertion": "same_guest_overlap",
+          "attempt_limit": 3,
+          "mode": "per-request",
+          "status": "unverified"
+        }
+      ]
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-all-final-c",
+      "exit_code": 2,
+      "scope": "Final harness source after warning snapshot fix. All 24 F8 cases and three shutdown checks pass; independent Spin per-request and retained overlap remain unverified.",
+      "log": {
+        "path": "/private/tmp/edgezero-f8-all-final-c.log",
+        "bytes": 7438,
+        "sha256": "8406d6c9e853ceca037ec0242c0fbe2cd6219418dd4694c14d66cd3cbdf0bb7d"
+      },
+      "events": {
+        "path": "/private/tmp/edgezero-f8-all-final-c/events.jsonl",
+        "bytes": 1785349,
+        "sha256": "88b9c651ab9f5b3584abc0aa2746c8bc4fe33162117746c0239bd963540395b4"
+      },
+      "diagnostics": [
+        {
+          "adapter": "spin",
+          "assertion": "same_guest_overlap",
+          "attempt_limit": 3,
+          "mode": "per-request",
+          "status": "unverified"
+        },
+        {
+          "adapter": "spin",
+          "assertion": "same_guest_overlap",
+          "attempt_limit": 3,
+          "mode": "retained",
+          "status": "unverified"
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "No hosted provider outage/restoration evidence; fresh-cell recovery is scripted unit/source-path proof, not backend repair.",
+    "Healthy linked-store CRUD proves continuity, not restoration of the missing binding.",
+    "Fastly Completed and Cloudflare/Spin HostHandoff do not certify end-client delivery.",
+    "Final C retains two independent Spin overlap observations as unverified; no whole-suite pass claimed.",
+    "No request-affinity guarantee after overlap; strict sequential dedup prefix still fails on identity turnover.",
+    "No KV allocation/deadline or host cleanup certification.",
+    "Consumer EZ-20 acceptance 5 and canonical cutover activation remain open.",
+    "G2 readiness failure, Cloudflare post-overflow front-proxy recovery failure, and full P1 hard migration remain unchanged.",
+    "Raw logs and binaries are local ephemeral artifacts, not immutable release assets.",
+    "No tests required credentials, remote deployments, downloads, dependency repins or failure waivers."
+  ]
+}

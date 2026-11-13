@@ -11,10 +11,15 @@ surfaces, maintenance requirements and verification procedure.
 ## Implemented surfaces
 
 - `crates/edgezero-core/src/router.rs`: optional `PreDispatchHook` before lookup,
-  state, introspection, context and middleware. Register a value with
+  state, introspection and middleware. Register a value with
   `pre_dispatch_hook` or an Arc with `pre_dispatch_hook_arc`; duplicate
   registration panics. Continued method/path changes return an internal error;
-  header, extension, body and query changes remain allowed. Futures may be
+  header, extension and query changes remain allowed and normalized heads are
+  revalidated against captured ingress limits. PR #275 hard-cuts the hook argument
+  to `PreDispatchRequest`: bounded cached reads, buffered transformations and synchronous
+  per-chunk maps share one body cell and retain the original admission input policy.
+  Raw body replacement is removed; fallback overflow/timeout responses remain sticky.
+  Futures may be
   non-Send; hook values are Send + Sync.
 - `crates/edgezero-core/src/ingress.rs`: bounded target/origin metadata,
   infallible `RequestIngress::new`, fallible `with_header_overrides` with an
