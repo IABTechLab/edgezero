@@ -11,6 +11,7 @@ use edgezero_core::ingress::{
     CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
     TargetSource,
 };
+use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
 use edgezero_core::proxy::ProxyHandle;
 
 use crate::context::AxumRequestContext;
@@ -85,6 +86,7 @@ fn capture_request_ingress(
     let target = CapturedTarget::capture(&uri.to_string(), source, Preservation::Unknown);
     let common = HeaderFidelity::RUNTIME_HEADER_MAP;
     RequestIngress::new(target, inbound_origin(uri, headers, transport), common)
+        .with_ja4(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed))
 }
 
 fn inbound_origin(
@@ -268,6 +270,31 @@ mod ingress_tests {
         CapturedTarget, MAX_TARGET_BYTES, OriginSource, Preservation, RequestIngress,
         TargetUnavailable,
     };
+
+    #[tokio::test]
+    async fn ingress_ja4_is_not_exposed_even_with_ja4_headers() {
+        use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
+        let request = request_builder()
+            .uri("/")
+            .header("ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1")
+            .header(
+                "cloudfront-viewer-ja4-fingerprint",
+                "t13d1516h2_8daaf6152771_e5627efa2ab1",
+            )
+            .body(AxumBody::empty())
+            .expect("should build request");
+        let core = into_core_request(request)
+            .await
+            .expect("should convert request");
+        let ingress = core
+            .extensions()
+            .get::<RequestIngress>()
+            .expect("should insert metadata");
+        assert_eq!(
+            ingress.ja4(),
+            Some(&CapturedJa4::Unavailable(Ja4Unavailable::NotExposed))
+        );
+    }
 
     #[tokio::test]
     async fn ingress_retains_runtime_parts_without_trusting_headers() {

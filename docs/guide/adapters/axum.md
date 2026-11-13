@@ -304,6 +304,11 @@ Origin validation checks HTTP(S) URI authority syntax, including registered
 names and trailing-dot hosts. It does not establish DNS resolution or ownership.
 Consumers that require DNS-label syntax must apply that additional policy.
 
+The Axum adapter serves plain HTTP and never sees a TLS handshake, so
+`ctx.ja4()` reports `Unavailable(NotExposed)`. JA4 headers such as
+`cloudfront-viewer-ja4-fingerprint` are not trusted. See
+[Client TLS fingerprint](./overview#client-tls-fingerprint-ja4).
+
 ## Next Steps
 
 - Deploy to [Fastly Compute](/guide/adapters/fastly) for production

@@ -13,6 +13,7 @@ use edgezero_core::http::{Extensions, HeaderValue, Request, Uri, request_builder
 use edgezero_core::ingress::{
     CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, RequestIngress, TargetUnavailable,
 };
+use edgezero_core::ja4::CapturedJa4;
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::proxy::ProxyHandle;
 use edgezero_core::secret_store::SecretHandle;
@@ -608,6 +609,7 @@ pub fn capture_request_ingress(req: &FastlyRequest) -> RequestIngress {
         None
     };
     RequestIngress::new(target, origin, HeaderFidelity::default())
+        .with_ja4(CapturedJa4::from_runtime_tls(req.get_tls_ja4()))
 }
 
 fn origin_from_runtime_uri<'header>(
@@ -1099,6 +1101,17 @@ mod ingress_tests {
             CapturedTarget::Unavailable(TargetUnavailable::NotExposed)
         ));
         assert!(ingress.origin().is_none());
+    }
+
+    #[test]
+    fn ingress_ja4_is_missing_for_non_client_request_despite_header() {
+        use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
+        let mut native = FastlyRequest::get("https://example.com/");
+        native.set_header("ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1");
+        assert_eq!(
+            capture_request_ingress(&native).ja4(),
+            Some(&CapturedJa4::Unavailable(Ja4Unavailable::Missing))
+        );
     }
 
     #[test]

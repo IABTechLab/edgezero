@@ -185,6 +185,27 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn ingress_ja4_is_missing_without_cf_despite_header() {
+        use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
+        let raw = web_sys::Request::new_with_str("https://example.com/").expect("should construct");
+        raw.headers()
+            .set("ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1")
+            .expect("should set header");
+        let (env, ctx) = test_env_ctx();
+        let converted = into_core_request(CfRequest::from(raw), env, ctx)
+            .await
+            .expect("should convert Web Request");
+        assert_eq!(
+            converted
+                .extensions()
+                .get::<RequestIngress>()
+                .expect("should insert metadata")
+                .ja4(),
+            Some(&CapturedJa4::Unavailable(Ja4Unavailable::Missing))
+        );
+    }
+
+    #[wasm_bindgen_test]
     async fn ingress_non_http_runtime_url_has_no_origin() {
         let raw = web_sys::Request::new_with_str("ftp://example.com/reserved")
             .expect("should construct runtime URL");

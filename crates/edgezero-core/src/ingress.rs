@@ -13,6 +13,7 @@ use http::uri::Authority;
 
 use crate::error::EdgeError;
 use crate::http::HeaderName;
+use crate::ja4::CapturedJa4;
 
 /// Maximum complete target metadata, measured in UTF-8 bytes.
 pub const MAX_TARGET_BYTES: usize = 16 * 1024;
@@ -308,6 +309,7 @@ pub enum Preservation {
 #[derive(Clone)]
 pub struct RequestIngress {
     common_header_fidelity: HeaderFidelity,
+    ja4: Option<CapturedJa4>,
     origin: Option<InboundOrigin>,
     overrides: Vec<(HeaderName, HeaderFidelity)>,
     target: CapturedTarget,
@@ -324,6 +326,13 @@ impl RequestIngress {
             .unwrap_or(self.common_header_fidelity)
     }
 
+    /// Borrow the adapter's JA4 capture. `None` means the adapter made no claim.
+    #[inline]
+    #[must_use]
+    pub const fn ja4(&self) -> Option<&CapturedJa4> {
+        self.ja4.as_ref()
+    }
+
     /// Construct metadata without header-specific overrides.
     ///
     /// Sources and preservation guarantees are caller assertions, not validated
@@ -337,6 +346,7 @@ impl RequestIngress {
     ) -> Self {
         Self {
             common_header_fidelity,
+            ja4: None,
             origin,
             overrides: Vec::new(),
             target,
@@ -378,6 +388,14 @@ impl RequestIngress {
         self.overrides = overrides;
         Ok(self)
     }
+
+    /// Record the adapter's JA4 capture.
+    #[inline]
+    #[must_use]
+    pub fn with_ja4(mut self, ja4: CapturedJa4) -> Self {
+        self.ja4 = Some(ja4);
+        self
+    }
 }
 
 impl fmt::Debug for CapturedTarget {
@@ -414,6 +432,7 @@ impl fmt::Debug for RequestIngress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RequestIngress")
             .field("common_header_fidelity", &self.common_header_fidelity)
+            .field("ja4", &self.ja4)
             .finish_non_exhaustive()
     }
 }
@@ -604,6 +623,23 @@ mod tests {
             ),
             "should retain no truncated prefix",
         );
+    }
+
+    #[test]
+    fn ingress_ja4_defaults_to_no_claim_and_round_trips() {
+        use crate::ja4::CapturedJa4;
+        let ingress = RequestIngress::new(
+            CapturedTarget::Unavailable(TargetUnavailable::NotExposed),
+            None,
+            HeaderFidelity::default(),
+        );
+        assert!(ingress.ja4().is_none());
+        let captured = CapturedJa4::from_runtime_tls(Some("t13d1516h2_8daaf6152771_e5627efa2ab1"));
+        let with_ja4 = ingress.with_ja4(captured.clone());
+        assert_eq!(with_ja4.ja4(), Some(&captured));
+        let output = format!("{with_ja4:?}");
+        assert!(output.contains("RuntimeTls"));
+        assert!(!output.contains("8daaf6152771"));
     }
 
     #[test]
