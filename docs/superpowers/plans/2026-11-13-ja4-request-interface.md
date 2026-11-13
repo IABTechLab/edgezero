@@ -74,9 +74,19 @@ Files: `crates/edgezero-core/src/ingress.rs`, `crates/edgezero-core/src/context.
 | Spin contract tests, wasmtime 48.0.1                                    | 12 passed            |
 | Docs Prettier                                                           | pass                 |
 
-**Deviation from spec §10 (Spin).** The spec asks for a wasmtime contract test
-through `into_core_request` with a `ja4` header. `spin_sdk::http::Request`
+| Runner unit tests (`justrust test`)                                     | 20 passed            |
+| Real-runtime fixture `scripts/test-request-fidelity.sh all` (Spin 4.1.0, Viceroy 0.21.0, workerd) | pass; observations unchanged except new `ja4_state` |
+
+**Spin through `into_core_request` (spec §10).** `spin_sdk::http::Request`
 wraps a WASI-HTTP incoming-request resource that only a Spin host can create,
-so plain wasmtime cannot construct one. `capture_request_ingress` takes only
-the URI, so headers cannot influence the JA4 result; the native colocated test
-(`ingress_reports_ja4_not_exposed`) covers the behaviour.
+so the plain-wasmtime contract suite cannot construct one. Instead, the
+request-fidelity fixture reports a fixed `ja4_state` label from its
+pre-dispatch hook, and its `spoof` case sends `ja4` and
+`cloudfront-viewer-ja4-fingerprint` headers. Against the real runtimes, every
+intercepted case reports `missing` on Fastly (Viceroy, plain HTTP) and
+Cloudflare (workerd, no `cf`) and `not_exposed` on Spin, spoofed headers
+included. The runner asserts this for each platform.
+
+**Still manual.** Live Fastly (HTTPS → `captured`, HTTP → `missing`) and
+Cloudflare (Bot Management → `captured`) checks need provider credentials and a
+deployment; record results in the PR.

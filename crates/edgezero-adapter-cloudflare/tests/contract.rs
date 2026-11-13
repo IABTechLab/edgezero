@@ -34,6 +34,7 @@ mod tests {
         CapturedTarget, MAX_TARGET_BYTES, OriginSource, Preservation, RequestIngress,
         TargetUnavailable,
     };
+    use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
     use edgezero_core::router::{PreDispatchHook, RouterService};
     use futures::stream;
     use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
@@ -186,7 +187,6 @@ mod tests {
 
     #[wasm_bindgen_test]
     async fn ingress_ja4_is_missing_without_cf_despite_header() {
-        use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
         let raw = web_sys::Request::new_with_str("https://example.com/").expect("should construct");
         raw.headers()
             .set("ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1")

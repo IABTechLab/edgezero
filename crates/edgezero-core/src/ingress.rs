@@ -469,6 +469,8 @@ mod tests {
         CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
         TargetSource, TargetUnavailable,
     };
+    use crate::ja4::CapturedJa4;
+    use crate::ja4::tests::FOXIO_EXAMPLE;
 
     #[test]
     fn ingress_fidelity_defaults_are_unknown() {
@@ -627,19 +629,18 @@ mod tests {
 
     #[test]
     fn ingress_ja4_defaults_to_no_claim_and_round_trips() {
-        use crate::ja4::CapturedJa4;
         let ingress = RequestIngress::new(
             CapturedTarget::Unavailable(TargetUnavailable::NotExposed),
             None,
             HeaderFidelity::default(),
         );
         assert!(ingress.ja4().is_none());
-        let captured = CapturedJa4::from_runtime_tls(Some("t13d1516h2_8daaf6152771_e5627efa2ab1"));
+        let captured = CapturedJa4::from_runtime_tls(Some(FOXIO_EXAMPLE));
         let with_ja4 = ingress.with_ja4(captured.clone());
         assert_eq!(with_ja4.ja4(), Some(&captured));
         let output = format!("{with_ja4:?}");
         assert!(output.contains("RuntimeTls"));
-        assert!(!output.contains("8daaf6152771"));
+        assert!(!output.contains(FOXIO_EXAMPLE));
     }
 
     #[test]

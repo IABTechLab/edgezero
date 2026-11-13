@@ -270,10 +270,10 @@ mod ingress_tests {
         CapturedTarget, MAX_TARGET_BYTES, OriginSource, Preservation, RequestIngress,
         TargetUnavailable,
     };
+    use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
 
     #[tokio::test]
     async fn ingress_ja4_is_not_exposed_even_with_ja4_headers() {
-        use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
         let request = request_builder()
             .uri("/")
             .header("ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1")

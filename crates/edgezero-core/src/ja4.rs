@@ -9,7 +9,11 @@ use std::fmt;
 
 use crate::error::EdgeError;
 
-/// Length in bytes of a JA4 fingerprint.
+/// Byte offset of the `_` that ends `JA4_a`.
+const SUMMARY_END: usize = 10;
+/// Byte offset of the `_` that ends `JA4_b`.
+const CIPHER_HASH_END: usize = 23;
+/// Length in bytes of a JA4 fingerprint, which ends with `JA4_c`.
 const JA4_LEN: usize = 36;
 
 /// A JA4 TLS client fingerprint, validated as `a_b_c`.
@@ -31,14 +35,16 @@ impl Ja4Fingerprint {
     #[inline]
     #[must_use]
     pub fn cipher_hash(&self) -> &str {
-        self.0.get(11..23).unwrap_or_default()
+        self.0
+            .get(SUMMARY_END + 1..CIPHER_HASH_END)
+            .unwrap_or_default()
     }
 
     /// `FoxIO` `JA4_c`: truncated SHA-256 of the sorted extensions and signature algorithms.
     #[inline]
     #[must_use]
     pub fn extension_hash(&self) -> &str {
-        self.0.get(24..JA4_LEN).unwrap_or_default()
+        self.0.get(CIPHER_HASH_END + 1..JA4_LEN).unwrap_or_default()
     }
 
     /// Validate `value` as a JA4 fingerprint without normalising it.
@@ -49,18 +55,24 @@ impl Ja4Fingerprint {
     #[inline]
     pub fn parse(value: &str) -> Result<Self, EdgeError> {
         let valid = value.len() == JA4_LEN
-            && value.bytes().enumerate().all(|(position, byte)| {
-                let lower_hex = byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
-                match position {
+            && value
+                .bytes()
+                .enumerate()
+                .all(|(position, byte)| match position {
+                    // Protocol: TLS, QUIC or DTLS.
                     0 => matches!(byte, b't' | b'q' | b'd'),
-                    1 | 2 => byte.is_ascii_lowercase() || byte.is_ascii_digit(),
+                    // TLS version code; tolerant of future codes.
+                    1 | 2 => matches!(byte, b'a'..=b'z' | b'0'..=b'9'),
+                    // SNI: domain or IP/none.
                     3 => matches!(byte, b'd' | b'i'),
+                    // Cipher and extension counts.
                     4..=7 => byte.is_ascii_digit(),
+                    // First and last ALPN characters.
                     8 | 9 => byte.is_ascii_alphanumeric(),
-                    10 | 23 => byte == b'_',
-                    _ => lower_hex,
-                }
-            });
+                    SUMMARY_END | CIPHER_HASH_END => byte == b'_',
+                    // `JA4_b` and `JA4_c`: lowercase hex.
+                    _ => matches!(byte, b'0'..=b'9' | b'a'..=b'f'),
+                });
         if valid {
             Ok(Self(Box::from(value)))
         } else {
@@ -72,7 +84,7 @@ impl Ja4Fingerprint {
     #[inline]
     #[must_use]
     pub fn summary(&self) -> &str {
-        self.0.get(0..10).unwrap_or_default()
+        self.0.get(..SUMMARY_END).unwrap_or_default()
     }
 }
 
@@ -134,15 +146,16 @@ pub enum Ja4Unavailable {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::ja4::{CapturedJa4, Ja4Fingerprint, Ja4Source, Ja4Unavailable};
 
-    const EXAMPLE: &str = "t13d1516h2_8daaf6152771_e5627efa2ab1";
+    /// The example from the `FoxIO` JA4 technical details.
+    pub(crate) const FOXIO_EXAMPLE: &str = "t13d1516h2_8daaf6152771_e5627efa2ab1";
 
     #[test]
     fn ja4_accepts_valid_fingerprints() {
         for value in [
-            EXAMPLE,
+            FOXIO_EXAMPLE,
             "q13d0310h3_55b375c5d22e_cd85d2d88918",
             "d12i0000h2_000000000000_000000000000",
             "t13i1516H2_8daaf6152771_e5627efa2ab1",
@@ -155,7 +168,7 @@ mod tests {
 
     #[test]
     fn ja4_section_accessors() {
-        let parsed = Ja4Fingerprint::parse(EXAMPLE).expect("should accept JA4");
+        let parsed = Ja4Fingerprint::parse(FOXIO_EXAMPLE).expect("should accept JA4");
         assert_eq!(parsed.summary(), "t13d1516h2");
         assert_eq!(parsed.cipher_hash(), "8daaf6152771");
         assert_eq!(parsed.extension_hash(), "e5627efa2ab1");
@@ -197,9 +210,9 @@ mod tests {
             CapturedJa4::Unavailable(Ja4Unavailable::Missing)
         );
         assert_eq!(
-            CapturedJa4::from_runtime_tls(Some(EXAMPLE)),
+            CapturedJa4::from_runtime_tls(Some(FOXIO_EXAMPLE)),
             CapturedJa4::Captured {
-                fingerprint: Ja4Fingerprint::parse(EXAMPLE).expect("should accept JA4"),
+                fingerprint: Ja4Fingerprint::parse(FOXIO_EXAMPLE).expect("should accept JA4"),
                 source: Ja4Source::RuntimeTls,
             }
         );
@@ -211,7 +224,7 @@ mod tests {
 
     #[test]
     fn ja4_never_prints_fingerprint_or_input() {
-        let captured = CapturedJa4::from_runtime_tls(Some(EXAMPLE));
+        let captured = CapturedJa4::from_runtime_tls(Some(FOXIO_EXAMPLE));
         let output = format!("{captured:?}");
         assert!(!output.contains("8daaf6152771"));
         assert!(output.contains("redacted"));
