@@ -650,13 +650,15 @@ pub(super) fn run(
     records.push(json!({"event":"fastly-budget-inventory","adapter":adapter,
         "cases":CASES.len(),"origin_requests":CASES.iter().map(|case|expected_labels(case).len()).sum::<usize>(),
         "ports":ports,"status":"pass","qualification":false}))?;
-    let persisted = match super::super::ci::read_events(&records.path) {
-        Ok(events) => events,
-        Err(error) => {
-            retain_case_result(Err(error), &mut first_hard);
-            Vec::new()
-        }
-    };
+    let persisted =
+        match super::super::ci::read_events(&records.path, super::super::ci::WIRE_ARTIFACT_RECORDS)
+        {
+            Ok(events) => events,
+            Err(error) => {
+                retain_case_result(Err(error), &mut first_hard);
+                Vec::new()
+            }
+        };
     let checked = persisted
         .get(first..)
         .ok_or_else(|| "truncated budget artifact".into())

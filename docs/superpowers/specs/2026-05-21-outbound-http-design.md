@@ -3,7 +3,7 @@
 > **Status:** Normative baseline for non-superseded contracts. The head-first API supersession below replaces historical implementer and batch-construction sketches without compatibility wrappers. Earlier Phases 1a-7 and owned response-egress integration are implemented on PR 275; the current adoption tracker distinguishes implementation, remaining scope/redirect work and qualification. Response-egress capabilities remain `BestEffort` pending deployed proof. · **Baseline Date:** 2026-09-15
 > **Branch:** `docs/outbound-http-spec` · **Audience:** EdgeZero maintainers
 > **Driving pattern:** fan-out HTTP workloads — N outbound requests under a shared wall-clock deadline, terminal results observed in completion order while preserving input indices. The spec is written against this pattern as a portable substrate; it deliberately does not name a specific consumer.
-> **Historical target baseline:** [`stackpop/edgezero` PR #269](https://github.com/stackpop/edgezero/pull/269) (`feature/extensible-cli`, rev `b4c80e9`) — **now merged into `main`** (squash-merged as `e483723`). Relevant baseline changes were the `edgezero_cli::adapter::execute(..)` shell-or-registry dispatcher, expanded runtime `AdapterAction` variants, the then-current Spin SDK 6 / wasip2 integration, the contributor-only `demo` command replacing `dev`, and the app-demo integration crate. The current implementation pins Spin SDK 7.0.0. Non-outbound store/config lifecycle changes remain outside this design.
+> **Historical target baseline:** [`stackpop/edgezero` PR #269](https://github.com/stackpop/edgezero/pull/269) (`feature/extensible-cli`, rev `b4c80e9`) — **now merged into `main`** (squash-merged as `e483723`). Relevant baseline changes were the `edgezero_cli::adapter::execute(..)` shell-or-registry dispatcher, expanded runtime `AdapterAction` variants, the then-current Spin SDK 6 / wasip2 integration, the contributor-only `demo` command replacing `dev`, and the app-demo integration crate. The current implementation pins registry Spin SDK 8.0.0. Non-outbound store/config lifecycle changes remain outside this design.
 > **Current checkout (post-#269 and staging-deploy work):** the CLI surface includes `Command::{Build, Serve, Deploy, Auth, Provision, Config, Demo, New}`; `Action` / `AdapterAction` additionally include `DeployStaging`, `EmitVersion`, `Healthcheck`, and `Rollback`; and adapter dispatch has both `execute(..)` and `execute_capture(..)` entry points. `dev` is gone. This outbound spec gates construction/deployment of the current runtime: `build` / `serve` / `deploy` / `deploy --staging` through both dispatch entry points, plus `demo` before Axum starts. Operational auth/version/health/rollback actions and provisioning/config/store lifecycle policy are exempt or belong to their owning specifications (§3.5.3).
 > **Where rebase claims live (authoritative surfaces):** §3.5.3 build-enforcement, §3.5.2 `Adapter` trait shape, §5.4 capability tests, and the §7 `edgezero-cli` migration bullet. The §3.5.3 + §7 active text is authoritative.
 
@@ -7086,13 +7086,12 @@ was inspected. The implementation phases pin `async-compression = "=0.4.43"`,
 gzip/deflate decoder graph. The fixed flate decoder charge and checksum/source contract are
 recorded in `docs/audits/2026-09-29-flate-decoder-memory-accounting.md` and enforced by the
 separate flate dependency audit.
-`reqwest = "=0.13.4"`, `worker = "=0.8.5"`, `spin-sdk = "=7.0.0"`, `fastly = "=0.13.1"`,
+`reqwest = "=0.13.4"`, `worker = "=0.8.5"`, `spin-sdk = "=8.0.0"`, `fastly = "=0.13.1"`,
 `fastly-shared = "=0.13.1"`, `fastly-sys = "=0.13.1"`, and
 `log-fastly = "=0.13.1"` in the workspace manifests that own those dependencies, refresh
 both the root and excluded app-demo lockfiles, and assert both resolved graphs. Spin uses the
-SDK's `wasip3` re-export rather than a second direct dependency. SDK 7 is pinned to
-`https://github.com/stackpop/spin-rust-sdk.git` at
-`6c59ed5b4fcb377072763aee0b27a3abdd8edb72`, selecting `wasip3 0.10.0+wasi-0.3.2` and the
+SDK's `wasip3` re-export rather than a second direct dependency. Registry SDK 8.0.0
+includes the upstream eager-progress repair, selecting `wasip3 0.10.0+wasi-0.3.2` and the
 corrected `wit-bindgen 0.63.0` executor. See the
 [SDK dependency audit](../../audits/2026-10-27-spin-sdk-eager-progress.md) and
 [upstream change](https://github.com/spinframework/spin-rust-sdk/pull/169).

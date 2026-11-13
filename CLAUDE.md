@@ -195,6 +195,12 @@ Every PR must pass:
 4. `cargo check --workspace --all-targets --features "fastly cloudflare spin"`
 5. `cargo check -p edgezero-adapter-spin --target wasm32-wasip2 --features spin`
 
+The isolated integration harness has its own workspace and lockfile. Also run
+`cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml`.
+The complete prescribed suite is `scripts/run_tests.sh`; it includes the
+adapter feature matrices, excluded demo/generated projects and harness checks.
+Runtime/hosted qualification is separate; see `crates/edgezero-test-harness/SUITES.md`.
+
 Docs CI additionally runs ESLint + Prettier on the `docs/` directory.
 
 ## Standard Workflow

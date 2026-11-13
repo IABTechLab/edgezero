@@ -901,3 +901,25 @@ comparison flag, original 140 test titles and 223 scenarios.
 | Requirements before clarification | `7212a3baeedf32598b1bd7eedf019554e2f7749334689c0202ef237af9843bff` |
 | Clarified requirements            | `45f265a199a91ccaf7bb08dc5bff6ff5d62fa27915437d7058c7aaddd2394c21` |
 | Reviewed 514-leg identity set     | `4c2ca209d21e88c30ca11317ef5d39b81423ea06788c3199a5a36dceec3acae4` |
+
+## Axum Executor Ownership Repair (2026-11-12)
+
+AG approved replacing the missing-LocalSet panic probe with explicit executor ownership,
+including a hard migration of constructors, converters, service wiring and test clients.
+This supersedes only the earlier Axum constructor rows, not the portable outbound trait,
+clock pairing, limits, admission, scope ownership or batch termination contracts.
+
+| Surface                                   | Hard-Cut Contract                                                                                                          |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `outbound_executor::AxumOutboundExecutor` | `new()`, `handle()`, `run_until(&mut self, future)`; owns one LocalSet on its creating thread, not another runtime         |
+| `AxumOutboundClient`                      | `try_new(handle)`, `try_with_time(handle, time)`; clients retain only revocable identity and never keep the executor alive |
+| `request::into_core_request`              | Requires the executor handle; converted requests retain it in native extensions                                            |
+| Standard server                           | Creates and drives the sole owner; app-provided clients still bypass default transport initialization                      |
+
+Scheduling resolves the explicit live owner and calls its actual `LocalSet::spawn_local`.
+Foreign or dropped ownership fails before request work is polled. No ambient-local-set
+panic recovery, compatibility constructor, unsafe Send implementation or second executor
+is introduced. The existing runtime must still enable I/O and timers; disabled-driver
+misuse is outside this repair's abort-safe guarantee. A binary fixture compiled with
+`panic=abort` exercises live scheduling without an ambient LocalSet and invalid ownership.
+This approval does not promote a capability, waive a timing failure or authorize deployment.

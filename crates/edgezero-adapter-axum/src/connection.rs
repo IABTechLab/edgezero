@@ -265,6 +265,7 @@ mod bounded_tests {
 
 #[cfg(test)]
 mod tests {
+    use crate::outbound_executor::AxumOutboundExecutor;
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -487,13 +488,15 @@ mod tests {
         app: App,
         request: String,
     ) -> (String, Result<ConnectionExit, hyper::Error>) {
-        LocalSet::new()
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner
             .run_until(async {
                 let listener = TcpListener::bind("127.0.0.1:0")
                     .await
                     .expect("bind listener");
                 let address = listener.local_addr().expect("listener address");
-                let state = AxumServiceState::from_app(app);
+                let state = AxumServiceState::from_app(app, executor_handle.clone());
                 let server = spawn_local(async move {
                     let (socket, peer) = listener.accept().await.expect("accept client");
                     let responses = EgressConnection::default();
@@ -1189,6 +1192,8 @@ mod tests {
         reason = "bounded timing evidence is emitted only after measured response and cleanup"
     )]
     async fn pending_chunked_forward_preserves_original_deadlines_over_tcp() {
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         for (read_budget, expected, budget) in [
             (
                 Duration::from_secs(10),
@@ -1201,7 +1206,7 @@ mod tests {
                 Duration::from_millis(100),
             ),
         ] {
-            LocalSet::new()
+            executor_owner
                 .run_until(async {
                     let origin = TcpListener::bind("127.0.0.1:0").await.expect("origin");
                     let target = format!("http://{}/asset", origin.local_addr().expect("origin address"))
@@ -1218,7 +1223,7 @@ mod tests {
                         grant: IngressGrant::empty(),
                         read_deadline: head.read_deadline_after(read_budget),
                     });
-                    let state = AxumServiceState::from_app(app);
+                    let state = AxumServiceState::from_app(app, executor_handle.clone());
                     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
                     let address = listener.local_addr().expect("listener address");
                     let server = async {

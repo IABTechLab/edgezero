@@ -2351,9 +2351,9 @@ for (const [path, source] of currentDocumentation) {
 }
 
 const outboundImplementationIndexSource = currentDocumentation[0][1]
-if (!outboundImplementationIndexSource.includes('Spin SDK 7 / WASI HTTP 0.3')) {
+if (!outboundImplementationIndexSource.includes('Spin SDK 8 / WASI HTTP 0.3')) {
   fail(
-    'outbound implementation index must name the current Spin SDK 7 baseline'
+    'outbound implementation index must name the current Spin SDK 8 baseline'
   )
 }
 if (
@@ -2890,7 +2890,7 @@ for (const adapterPath of outboundAdapterPaths) {
   const adapterSource = readFileSync(adapterPath, 'utf8')
   const adapterCode = productionCode(adapterSource)
   const pairedConstructor = adapterPath.includes('axum')
-    ? /pub fn try_with_time\(time: OutboundTime\)/u
+    ? /pub fn try_with_time\(\s*executor: AxumOutboundExecutorHandle,\s*time: OutboundTime,\s*\)/u
     : /pub fn with_time\(time: OutboundTime\)/u
   if (
     !pairedConstructor.test(adapterCode) ||

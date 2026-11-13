@@ -23,21 +23,24 @@ exists.
 Update these in your application's workspace `Cargo.toml` at the same
 time as the EdgeZero dependency:
 
-| Crate        | Old    | New                                  | Applies to                  |
-| ------------ | ------ | ------------------------------------ | --------------------------- |
-| `fastly`     | `0.12` | `=0.13.1`                            | Fastly adapter              |
-| `log-fastly` | `0.12` | `=0.13.1`                            | Fastly adapter              |
-| `spin-sdk`   | `6`    | `=7.0.0` plus immutable Git revision | Spin adapter                |
-| `validator`  | `0.20` | `0.21`                               | Any typed app config        |
-| `rusqlite`   | `0.32` | `0.40`                               | Only if you use it directly |
+| Crate        | Old    | New                     | Applies to                  |
+| ------------ | ------ | ----------------------- | --------------------------- |
+| `fastly`     | `0.12` | `=0.13.1`               | Fastly adapter              |
+| `log-fastly` | `0.12` | `=0.13.1`               | Fastly adapter              |
+| `spin-sdk`   | `6`    | `=8.0.0` from crates.io | Spin adapter                |
+| `validator`  | `0.20` | `0.21`                  | Any typed app config        |
+| `rusqlite`   | `0.32` | `0.40`                  | Only if you use it directly |
 
 Keep the audited SDK requirements exact, including
 `worker = { version = "=0.8.5", default-features = false, features = ["http"] }`
-for Cloudflare applications. Spin applications that name the SDK directly must also copy
-the Git URL and full revision from the matching EdgeZero pin, not mix registry and Git SDKs.
+for Cloudflare applications. Spin applications that name the SDK directly must use
+`spin-sdk = "=8.0.0"` from crates.io, not the superseded Git fork.
 The [Spin dependency audit](../audits/2026-10-27-spin-sdk-eager-progress.md) records that source
 and the upstream contribution. Migrate SDK spawn calls to `wasip3::spawn_local`; no compatibility
-alias or second executor is provided. Then refresh the lockfile:
+alias or second executor is provided. Exact normal dependencies intentionally constrain
+downstream resolution to the source whose error taxonomy and memory charges were audited.
+Applications must coordinate SDK/decoder updates with that audit, including security updates;
+do not loosen pins merely to resolve a conflicting application dependency. Then refresh the lockfile:
 
 ```bash
 cargo update
@@ -46,9 +49,10 @@ cargo test --workspace --all-targets
 
 ## Runtime requirement: Spin 4.1
 
-`spin-sdk` 7 imports `wasi:http/types@0.3.0`, which Spin 4.0.x does not
+`spin-sdk` 8 uses WASI HTTP 0.3.2, which Spin 4.0.x does not
 provide. This one does not fail at build time — the component compiles,
-its tests pass under `wasmtime`, and only `spin up` reports:
+its tests can pass under `wasmtime`, and only `spin up` reports a linker mismatch.
+For example, the earlier SDK 7 migration produced this historical diagnostic:
 
 ```
 Error: component imports instance `wasi:http/types@0.3.0`, but a

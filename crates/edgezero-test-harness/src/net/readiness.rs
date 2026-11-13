@@ -549,7 +549,7 @@ fn serve(socket: TcpStream, index: usize, shared: &Shared) {
 mod tests {
     use crate::net::ReadinessOrigin;
     use serde_json::json;
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
     use std::net::{Shutdown, TcpStream};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -844,9 +844,9 @@ mod tests {
             .get_mut()
             .set_read_timeout(Some(Duration::from_secs(4)))
             .unwrap();
-        let end = reader.read(&mut [0]);
+        let end = reader.read_exact(&mut [0]);
         let snapshot = origin.finish();
-        assert_eq!(end.unwrap(), 0);
+        assert_eq!(end.unwrap_err().kind(), ErrorKind::UnexpectedEof);
         assert!(started.elapsed() >= Duration::from_secs(3));
         assert!(started.elapsed() < Duration::from_secs(4));
         assert_eq!(snapshot["watchdog"], true);

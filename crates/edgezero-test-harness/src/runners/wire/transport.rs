@@ -769,7 +769,10 @@ pub(super) fn run(adapter: &str, port: u16, records: &mut Records) -> Result<()>
         "parity_cases":PARITY.len(),"origin_requests":expected.iter().map(|c|receipts(c).len()).sum::<usize>(),
         "accepted_connections":accepted,"status":"pass","qualification":false}))?;
     contract::run(adapter, port, records)?;
-    validate_artifact(&super::super::ci::read_events(&records.path)?, adapter)?;
+    validate_artifact(
+        &super::super::ci::read_events(&records.path, super::super::ci::WIRE_ARTIFACT_RECORDS)?,
+        adapter,
+    )?;
     println!("native_buffered_begin_send_parity_{adapter}: passed");
     match adapter {
         "fastly" => {

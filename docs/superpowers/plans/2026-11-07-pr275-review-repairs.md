@@ -295,3 +295,130 @@ complete four-adapter/demo/generated-project and hosted gates remain separate.
 Inactive fixture build output was removed to recover working space. Only this
 task's disposable validation/build outputs may be removed after remote-head
 verification; preserve source, the active worktrees and runtime/test evidence.
+
+## Approved Review Followup (2026-11-12)
+
+AG approved these repairs in the existing PR, without compatibility wrappers or
+changes to logical deadlines, body suppression, limits, admission or batch semantics:
+
+- [x] Replace the watchdog test's signal-sensitive single read with `read_exact`;
+      assert EOF after joining the origin and retain the original timing/cleanup checks.
+- [x] Migrate root, demo, both fixtures and generator to exact published SDK 8.0.0;
+      retain registry checksum/source guards and the prior decoder pins.
+- [x] Re-audit SDK interfaces and execute resource, wire and progress checks.
+- [x] Replace Axum's ambient local-spawn panic probe with explicit executor ownership;
+      migrate all callers and prove missing/dead/foreign ownership fails before polling work.
+- [x] Document the standalone harness gate and exact-pin tradeoffs.
+- [ ] Run the prescribed validation, push and reply separately to each finding.
+
+The unchanged baseline `scripts/run_tests.sh` failed the Axum pending-upload TCP
+gate: the complete response took 105.035167 ms against a 105 ms maximum. Retain
+that failed attempt, all original assertions and the separate hosted qualification
+gates. CI's compiler-cache publication also failed after three attempts; its log
+does not establish a source cause. No tolerance, exclusion or cache check is waived.
+
+## Authorized Rebuild (2026-11-13)
+
+AG directed rebuilding from `a7d7fd0f2face027e3810ed67e80f6341fcf68b6`
+and approved including the scoped `b97efec1` repairs and the saved SDK 8,
+Axum ownership and watchdog changes. This supersedes the earlier publication
+instruction to retain `410a1623`; that paragraph remains historical evidence.
+The rebuild is isolated on `prfection/275-a7-rebuild`. The original PR worktree,
+its uncommitted diff, untracked source and a backup ref at `14a6ca8b` are retained.
+No remote rewrite or merge is part of the local rebuild authorization.
+
+- [x] Replay only the approved repairs from `b97efec1`, with `a7d7fd0f` as
+      their direct parent (`ac5a6aaa`). Do not carry the unused received-head
+      preparation API from `410a1623`: no approved consumer or adapter call site
+      requires it. Existing normalization and outbound provenance remain intact.
+- [x] Restore the saved published SDK 8, watchdog and explicit Axum ownership
+      repairs. Declare the connection runtime before its executor so executor
+      tasks are released while the runtime remains alive, including on unwind.
+- [x] Independently repair evidence capacity: retain one reader, the 4 MiB
+      artifact limit and 512 records for general CI evidence; use an explicit
+      1,024-record limit for wire captures. Reject overflow before parsing an
+      excess record, without truncation. The expanded-inventory regression first
+      failed at 518 records and passes with the separate wire bound.
+- [x] Independently repair framing receipt formatting. A counting writer proved
+      that formatting the JSON value produced 24 writes. Serialize the complete
+      record and newline before writing, retaining short-write/error handling.
+      This is not a provider-level atomic-write guarantee.
+- [x] Independently remove host-I/O timing from the callback-scope test. A
+      never-ready upload supplies pending work; a separate deterministic
+      item-then-pending driver verifies partial-consumption revocation across
+      callbacks. Retain typed Internal failures and fresh-scope assertions.
+- [x] Complete current-tree validation, including the reviewed local Viceroy
+      repair, all adapter/runtime gates, demo/generated projects and docs.
+- [x] Complete independent verification and report any residual failures before
+      requesting authorization to replace the PR branch.
+
+### Retained Baseline Evidence
+
+The unchanged `a7d7fd0f` full-suite run passes its workspace, 653 harness tests
+and Axum integration stages, but exits 134 in the Fastly SDK timeout-readback
+test under stock Viceroy 0.21.0. That runtime lacks the already tracked repair;
+the assertion and runtime pins are not relaxed. Rebuild the exact reviewed
+patch for local verification, recording its source and executable identity.
+
+The replayed repairs pass root tests, formatting and strict Clippy. The first
+harness run reports 659 passes and one socket-close assertion failure in
+unchanged `net/wire.rs`; its focused rerun and full 660-test rerun pass. The
+cause is unproven. Retain all attempts rather than relabeling the initial
+failure as passing or weakening its assertions.
+
+### Rebuild Verification Checkpoint
+
+Two fresh read-only verification agents found no further issues in their
+non-overlapping scopes: explicit Axum ownership/shutdown, and SDK/fixture/tooling
+contracts. The abort-profile fixture proves rejection and queue ownership; it
+does not independently prove successful I/O or shutdown with active producers.
+Keep those runtime checks separate. The chosen repairs use one existing runtime,
+transport and evidence reader rather than carrying the three excluded commits.
+
+The rebuilt tree passes all five primary Rust gates, all 661 harness tests,
+80 qualification-fixture tests, strict root/harness/fixture Clippy and the docs
+contract. The Axum scoped run passes 329 tests. An initial harness failure caught
+the CI dispatch fingerprint changed solely by supplying the wire record bound;
+explicit review updated that one fingerprint, with all controllers/predicates
+unchanged. The initial Clippy import-style error and docs constructor-signature
+guard failure were repaired without suppressions or compatibility overloads.
+
+Docs lint/build pass. Two modified Markdown files required formatting; the
+formatting rerun passes. The standalone tooling invocation initially lacked
+`EDGEZERO_TEST_HARNESS_BIN`; build and supply the actual harness executable before
+rerunning, as the prescribed full suite already does. The attempted native
+Fastly-SDK test cannot link provider imports; only actual WASM/runtime execution
+can establish that SDK callback case. These attempts are not runtime passes.
+
+### Completed Local Rebuild Validation
+
+`scripts/run_tests.sh` passes on the unchanged rebuilt source with Rust 1.98.1,
+reviewed patched Viceroy 0.21.0, Wasmtime 48.0.2, Spin 4.1.0 and matching
+wasm-bindgen 0.2.128 tools. All four adapter CI suites, native feature matrices,
+dependency/forwarding guards, the full ignored generated-project build,
+demo tests and all three demo WASM builds pass. The workspace reports 2,708
+passing tests across 33 binaries, the harness 661, fixture core 80 and demo 66.
+Strict WASM all-targets Clippy passes for Fastly, Cloudflare and Spin, in addition
+to the five primary Rust gates and strict harness/fixture Clippy. The standalone
+170-test tooling rerun also passes with the actual harness executable supplied.
+
+The first full rebuild run stopped at the browser probe after selecting Safari
+and receiving a WebDriver HTTP 500. Retain it. The same five ingress tests pass
+with matching Chrome/ChromeDriver 157.0.8103.52; the subsequent complete run
+passes with that explicit selection. No source, assertion, deadline or capability
+changed between these attempts. Logs are retained at
+`/private/tmp/pr275-a7-rebuild-NdW5Yx/`.
+
+Latest supporting captures beneath the reusable fixture's `.runs/` are:
+
+- Axum: `18e7ab63cdd89c08-106dc-0`.
+- Fastly: `18e7ab6d05568830-10e61-0`, including both callback regressions
+  in the 324-test SDK runtime run and the complete 518-record wire artifact.
+- Cloudflare: `18e7ab85f9d628d0-12164-0`.
+- Spin: `18e7ab9fd9ee4970-13909-0`.
+
+These are working-tree supporting captures, not a frozen-candidate or hosted
+qualification claim. Keep all `qualification:false` dispositions and manual
+hosted gates open. The original PR branch and dirty worktree remain unchanged;
+remote replacement, new-head hosted checks and independent review acceptance
+are still outstanding.

@@ -135,7 +135,10 @@ pub(super) fn run(adapter: &str, port: u16, records: &mut Records) -> Result<()>
     outcome?;
     cleanup?;
     records.push(json!({"event":"outbound-marker-inventory","adapter":adapter,"origin_port":origin_port,"cases":10,"origin_requests":10,"status":"pass","qualification":false}))?;
-    validate_artifact(&super::super::ci::read_events(&records.path)?, adapter)?;
+    validate_artifact(
+        &super::super::ci::read_events(&records.path, super::super::ci::WIRE_ARTIFACT_RECORDS)?,
+        adapter,
+    )?;
     println!("ez_7_acceptance_04_{adapter}_runtime: passed");
     Ok(())
 }

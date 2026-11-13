@@ -247,7 +247,10 @@ pub(super) fn run(adapter: &str, port: u16, records: &mut Records) -> Result<()>
     outcome?;
     cleanup?;
     records.push(json!({"event":"batch-recovery-inventory","adapter":adapter,"cases":6,"origin_requests":32,"origin_port":origin,"status":"pass","qualification":false}))?;
-    validate_artifact(&super::super::ci::read_events(&records.path)?, adapter)?;
+    validate_artifact(
+        &super::super::ci::read_events(&records.path, super::super::ci::WIRE_ARTIFACT_RECORDS)?,
+        adapter,
+    )?;
     println!("ez_6_acceptance_22_{adapter}_runtime: passed");
     Ok(())
 }

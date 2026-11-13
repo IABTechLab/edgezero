@@ -140,6 +140,53 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
     let repo = repository_root();
     match adapter {
         "axum" => {
+            let ownership_build = phase(
+                adapter,
+                "executor-ownership-build",
+                Command::new("cargo")
+                    .args(["rustc", "--offline", "--locked", "--manifest-path"])
+                    .arg(fixture_root().join("Cargo.toml"))
+                    .args([
+                        "-p",
+                        "fixture-axum",
+                        "--features",
+                        "progress",
+                        "--bin",
+                        "fixture-axum-executor-ownership",
+                        "--message-format=json",
+                        "--",
+                        "-C",
+                        "panic=abort",
+                    ]),
+                &repo,
+                output,
+                records,
+            )?;
+            let executable = built_executable(
+                read_artifact(&ownership_build)?.as_bytes(),
+                "fixture-axum-executor-ownership",
+            )?;
+            let executable = stage(&executable, output)?;
+            let ownership_log = phase(
+                adapter,
+                "executor-ownership",
+                &mut Command::new(executable),
+                &repo,
+                output,
+                records,
+            )?;
+            let ownership = read_events(&ownership_log, CI_ARTIFACT_RECORDS)?;
+            require(
+                ownership.len() == 1
+                    && ownership[0]["event"] == "axum-executor-ownership"
+                    && ownership[0]["status"] == "pass"
+                    && ownership[0]["panic"] == "abort"
+                    && ownership[0]["live_without_ambient"] == true
+                    && ownership[0]["foreign_rejected"] == true
+                    && ownership[0]["dropped_rejected"] == true
+                    && ownership[0]["qualification"] == false,
+                "missing abort-profile executor ownership proof",
+            )?;
             phase(
                 adapter,
                 "native-tests",
@@ -406,7 +453,10 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
             records,
             2,
         )?;
-        validate_progress(&read_events(&progress.join("events.jsonl"))?)?;
+        validate_progress(&read_events(
+            &progress.join("events.jsonl"),
+            CI_ARTIFACT_RECORDS,
+        )?)?;
     }
     if matches!(adapter, "axum" | "fastly") {
         let wire = output.join("wire");
@@ -418,7 +468,10 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
             output,
             records,
         )?;
-        validate_wire(&read_events(&wire.join("events.jsonl"))?, adapter)?;
+        validate_wire(
+            &read_events(&wire.join("events.jsonl"), WIRE_ARTIFACT_RECORDS)?,
+            adapter,
+        )?;
     }
     records.push(
         json!({"event":"ci-inventory","adapter":adapter,"status":"pass","qualification":false}),

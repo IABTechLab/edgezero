@@ -1,13 +1,14 @@
 use core::num::NonZeroU64;
+use edgezero_core::IndependentOutboundProgress;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use tokio::task::LocalSet;
 
 use edgezero_core::outbound::{
     HttpClient, OutboundCollectedSlot, OutboundProxyMarker, ResponseDecoding, ResponseMode,
 };
 
 use super::*;
+use crate::outbound_executor::AxumOutboundExecutor;
 
 type FixtureHead = Box<dyn FnOnce(OutboundResponseContext) -> Result<OutboundHead, EdgeError>>;
 
@@ -17,6 +18,7 @@ thread_local! {
 }
 
 struct ResponseClient {
+    executor: AxumOutboundExecutorHandle,
     id: u64,
     time: OutboundTime,
 }
@@ -35,7 +37,10 @@ impl Drop for ResponseClient {
 impl OutboundHttpClient for ResponseClient {
     fn begin(&self, request: OutboundDispatchRequest) -> Result<OutboundPending, EdgeError> {
         let head = self.dispatch_head(request);
-        schedule_response(Box::pin(async move { head.await?.finish().await }))
+        schedule_response(
+            &self.executor,
+            Box::pin(async move { head.await?.finish().await }),
+        )
     }
 
     fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
@@ -54,7 +59,7 @@ impl OutboundHttpClient for ResponseClient {
     }
 
     fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
-        schedule_batch(self, batch)
+        schedule_batch(self, &self.executor, batch)
     }
 
     fn time(&self) -> OutboundTime {
@@ -70,7 +75,11 @@ impl OutboundHttpClient for ResponseClient {
     }
 }
 
-fn fixture_client<Head>(time: OutboundTime, head: Head) -> Result<HttpClient, EdgeError>
+fn fixture_client<Head>(
+    executor: AxumOutboundExecutorHandle,
+    time: OutboundTime,
+    head: Head,
+) -> Result<HttpClient, EdgeError>
 where
     Head: FnOnce(OutboundResponseContext) -> Result<OutboundHead, EdgeError> + 'static,
 {
@@ -84,7 +93,11 @@ where
         })
         .ok_or_else(|| EdgeError::internal(anyhow::anyhow!("fixture identity overflow")))?;
     RESPONSES.with(|responses| responses.borrow_mut().insert(id, Box::new(head)));
-    Ok(HttpClient::with_client(ResponseClient { id, time }))
+    Ok(HttpClient::with_client(ResponseClient {
+        executor,
+        id,
+        time,
+    }))
 }
 
 #[expect(
@@ -107,6 +120,7 @@ pub(super) async fn finish_fixture_response(
     max_response_header_count: Option<u64>,
     time: OutboundTime,
 ) -> Result<OutboundResponse, EdgeError> {
+    let mut executor = AxumOutboundExecutor::new();
     let mut parts = OutboundRequest::get("http://fixture.invalid/")?.into_parts();
     parts.method = request_method;
     parts.proxy_marker = proxy_marker;
@@ -129,9 +143,11 @@ pub(super) async fn finish_fixture_response(
         | _ => panic!("unsupported fixture governing source"),
     }
     let request = OutboundRequest::from_parts(parts)?;
-    let client = fixture_client(time, move |context| response_head(response, context))?;
+    let client = fixture_client(executor.handle(), time, move |context| {
+        response_head(response, context)
+    })?;
     if budget.cause == BudgetSource::BatchCutoff {
-        LocalSet::new()
+        executor
             .run_until(async {
                 let results = client
                     .start_batch_until(vec![request], budget.deadline)
@@ -160,6 +176,7 @@ pub(super) async fn finish_fixture_stream(
     budget: DispatchBudget,
     time: OutboundTime,
 ) -> Result<BodyStream, EdgeError> {
+    let executor = AxumOutboundExecutor::new();
     let mut parts = OutboundRequest::get("http://fixture.invalid/")?
         .stream_response()
         .into_parts();
@@ -177,7 +194,7 @@ pub(super) async fn finish_fixture_stream(
             )));
         }
     }
-    let client = fixture_client(time, move |context| {
+    let client = fixture_client(executor.handle(), time, move |context| {
         OutboundHead::new(
             StatusCode::OK,
             OutboundHeaderInput::new(

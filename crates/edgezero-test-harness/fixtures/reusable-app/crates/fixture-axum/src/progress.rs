@@ -66,9 +66,17 @@ impl ProbeRuntime for NativeRuntime {
     fn adapter(&self) -> &'static str {
         "axum"
     }
-    fn outbound_client(&self) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
+    fn outbound_client(
+        &self,
+        ctx: &edgezero_core::context::RequestContext,
+    ) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
+        let executor = ctx
+            .extensions()
+            .get::<edgezero_adapter_axum::outbound_executor::AxumOutboundExecutorHandle>()
+            .cloned()
+            .ok_or_else(progress::probe_failure)?;
         Ok(Arc::new(
-            edgezero_adapter_axum::outbound::AxumOutboundClient::try_new()
+            edgezero_adapter_axum::outbound::AxumOutboundClient::try_new(executor)
                 .map_err(|_| progress::probe_failure())?,
         ))
     }

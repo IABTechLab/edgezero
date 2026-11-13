@@ -11,7 +11,7 @@
 ## Current Baseline
 
 - Rust 1.95, edition 2024, resolver 2.
-- Four runtime adapters: Axum, Cloudflare, Fastly, and Spin SDK 7 / WASI HTTP 0.3.
+- Four runtime adapters: Axum, Cloudflare, Fastly, and Spin SDK 8 / WASI HTTP 0.3.
 - Adapter dispatch has both `execute(..)` and `execute_capture(..)` entry points.
 - The action set includes staged deploy, version emission, healthcheck, and rollback in
   addition to build/serve/deploy/auth.

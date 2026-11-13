@@ -416,7 +416,8 @@ mod tests {
     #[test]
     fn retained_client_resolves_fresh_callback_scope() {
         use crate::outbound::FastlyOutboundClient;
-        use edgezero_core::{Deadline, OutboundBatchNext, OutboundRequest};
+        use edgezero_core::{Body, Deadline, OutboundBatchNext, OutboundRequest};
+        use futures::stream::pending;
         use std::time::Duration;
 
         let client = edgezero_core::HttpClient::with_client(FastlyOutboundClient::new());
@@ -431,19 +432,21 @@ mod tests {
                 let request = OutboundRequest::get("https://example.com")
                     .unwrap()
                     .stream_response();
-                let mut batch = client.start_batch_until(
-                    vec![
-                        request,
-                        OutboundRequest::post("http://127.0.0.1:9/callback-scope")
-                            .unwrap()
-                            .body("pending"),
-                    ],
-                    Deadline::after(Duration::from_secs(1)),
-                );
+                let mut batch = client
+                    .start_batch_until(vec![request], Deadline::after(Duration::from_secs(1)));
                 let OutboundBatchNext::Item(_) = block_on(batch.next()).unwrap() else {
                     panic!("fresh scope");
                 };
-                batch
+                drop(batch);
+                // A never-ready upload keeps this batch pending without depending on host I/O.
+                client.start_batch_until(
+                    vec![
+                        OutboundRequest::post("http://127.0.0.1:9/callback-scope")
+                            .unwrap()
+                            .body(Body::from_stream(pending())),
+                    ],
+                    Deadline::after(Duration::from_secs(1)),
+                )
             });
             previous = Some(batch);
         }

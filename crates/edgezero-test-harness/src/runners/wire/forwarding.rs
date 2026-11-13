@@ -481,7 +481,10 @@ pub(super) fn run(adapter: &str, port: u16, records: &mut Records) -> Result<()>
         "late or partial forwarding origin connection",
     )?;
     records.push(json!({"event":"inbound-forwarding-inventory","adapter":adapter,"ports":ports,"cases":cases(adapter).len(),"origin_requests":total,"accepted":total,"status":"pass","qualification":false}))?;
-    validate_artifact(&super::super::ci::read_events(&records.path)?, adapter)?;
+    validate_artifact(
+        &super::super::ci::read_events(&records.path, super::super::ci::WIRE_ARTIFACT_RECORDS)?,
+        adapter,
+    )?;
     let environment = match adapter {
         "fastly" => "viceroy",
         "cloudflare" => "workerd",

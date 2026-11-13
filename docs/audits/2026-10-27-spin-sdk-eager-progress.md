@@ -1,6 +1,47 @@
 # Spin SDK Eager Progress Dependency Audit
 
-## Current Reviewed Revision (2026-10-28)
+## Published SDK Migration (2026-11-12)
+
+The approved replacement is exact registry `spin-sdk = "=8.0.0"`, published on
+2026-11-05 and including merged upstream PR #169. Its package source records
+upstream commit `acf428a09f516dd1b9fe6ddfd33038f5b0f3e7e0`; the registry checksums are
+`9df1f876031b7906a9e802a8bbadf599a423f49adacde532535c6270dc4f11a1` (SDK) and
+`45fefea15ed93ab2b6830a0249ce7cae2300202f569e013e12d39f3fba519ecc` (macro).
+All four application lockfiles replace only the SDK/macro packages, retaining
+the existing WASIp3 0.10.0+wasi-0.3.2 and wit-bindgen 0.63.0 executor graph.
+The package's WASI HTTP interfaces, typed classifier and actual resource/progress
+tests must be rechecked; the historical fork results below do not qualify SDK 8.
+EdgeZero retains one `spawn_local` executor and its independent cancellation owner.
+No deprecated SDK wrapper, fallback Git source or second transport is introduced.
+
+Source comparison against the prior fork retains all 39 typed HTTP error variants
+and payloads; macro implementation sources are identical. Registry archive checksums
+match the lockfiles. On Rust 1.98.1, the generator's 24 tests, native Spin tests,
+WASM compilation and the complete Spin CI runner pass. The latter executes the
+feature matrix, SDK/shared-resource tests, async component, wire controls and
+ingress probes under Wasmtime 48.0.2 and Spin 4.1.0. The capture is
+`fixtures/reusable-app/.runs/18e75f7f7672eac0-5329-0` beneath the harness;
+it retains `qualification:false`. That capture precedes the subsequent shared
+fixture-context migration and is not verification of that later combined tree.
+
+### Rebuilt Tree Verification (2026-11-13)
+
+The rebuilt PR source, including the shared fixture-context migration, passes
+the complete prescribed `scripts/run_tests.sh` suite with exact registry SDK 8.
+Its Spin CI capture is
+`fixtures/reusable-app/.runs/18e7ab9fd9ee4970-13909-0` beneath the harness.
+This executes the native/SDK/shared-resource tests, independent async progress,
+wire controls and ingress checks with Wasmtime 48.0.2 and Spin 4.1.0. Strict
+Spin WASM all-targets Clippy also passes. Demo and freshly generated apps pass
+native tests and all three WASM adapter builds without a Git-source fallback.
+
+All captures remain `qualification:false`. This replaces neither the separate
+hosted qualification nor the historical failed timing evidence. The repository
+plan `docs/superpowers/plans/2026-11-07-pr275-review-repairs.md` records source
+ancestry, prior failed attempts and the exact local tooling setup under
+"Authorized Rebuild (2026-11-13)".
+
+## Historical Reviewed Revision (2026-10-28)
 
 The requester authorized updating the coordinated SDK pin to reviewed fork revision
 `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`. The upstream contribution remains

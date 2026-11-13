@@ -365,7 +365,10 @@ pub(super) fn run(adapter: &str, port: u16, records: &mut Records) -> Result<()>
         "base_policy_pairs":18,"cohort_limit":COHORT_PAIRS,"cohorts":cohorts,
         "origin_requests":cases.iter().filter(|case|case.expects_origin(adapter)).count()*2,"accepted_connections":accepted_total,"status":"pass","qualification":false}))?;
     validate_artifact(
-        &super::super::super::ci::read_events(&records.path)?,
+        &super::super::super::ci::read_events(
+            &records.path,
+            super::super::super::ci::WIRE_ARTIFACT_RECORDS,
+        )?,
         adapter,
     )
 }

@@ -3,6 +3,8 @@ use super::*;
 mod platforms;
 
 const ARTIFACT_BYTES: u64 = 4 * 1024 * 1024;
+pub(super) const CI_ARTIFACT_RECORDS: usize = 512;
+pub(super) const WIRE_ARTIFACT_RECORDS: usize = 1024;
 
 fn ci_cargo_command(sentinels: Option<&str>) -> Command {
     // Keep the PATH proxy instead of executing inherited Cargo metadata through Bash.
@@ -27,13 +29,13 @@ fn read_artifact(path: &Path) -> Result<String> {
     Ok(text)
 }
 
-pub(super) fn read_events(path: &Path) -> Result<Vec<Value>> {
+pub(super) fn read_events(path: &Path, max_records: usize) -> Result<Vec<Value>> {
     let text = read_artifact(path)?;
-    let events = text
-        .lines()
-        .map(serde_json::from_str)
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    require(events.len() <= 512, "too many CI artifact records")?;
+    let mut events = Vec::new();
+    for line in text.lines() {
+        require(events.len() < max_records, "too many CI artifact records")?;
+        events.push(serde_json::from_str(line)?);
+    }
     Ok(events)
 }
 
@@ -377,7 +379,10 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
         run,
         records,
     )?;
-    super::wire::validate_spin_artifact(&read_events(&wire_dir.join("events.jsonl"))?)?;
+    super::wire::validate_spin_artifact(&read_events(
+        &wire_dir.join("events.jsonl"),
+        WIRE_ARTIFACT_RECORDS,
+    )?)?;
     let inventory: Value = serde_json::from_slice(&fs::read(
         acceptance_root().join("outbound-cutover-cases.json"),
     )?)?;
@@ -775,19 +780,48 @@ mod tests {
     }
 
     #[test]
+    fn persisted_wire_artifact_accepts_the_expanded_case_inventory() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("events.jsonl");
+        let record = format!("{}\n", json!({"event":"wire-case", "status":"pass"}));
+        fs::write(&file, record.repeat(518)).unwrap();
+        assert_eq!(
+            read_events(&file, WIRE_ARTIFACT_RECORDS).unwrap().len(),
+            518
+        );
+        fs::write(&file, record.repeat(WIRE_ARTIFACT_RECORDS)).unwrap();
+        assert_eq!(
+            read_events(&file, WIRE_ARTIFACT_RECORDS).unwrap().len(),
+            WIRE_ARTIFACT_RECORDS
+        );
+        fs::write(&file, record.repeat(WIRE_ARTIFACT_RECORDS + 1)).unwrap();
+        assert!(read_events(&file, WIRE_ARTIFACT_RECORDS).is_err());
+    }
+
+    #[test]
     fn persisted_artifacts_reject_empty_malformed_truncated_and_oversized_jsonl() {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("events.jsonl");
-        assert!(read_events(&file).is_err());
+        assert!(read_events(&file, CI_ARTIFACT_RECORDS).is_err());
         for text in ["", "{", "{}\n{", "{}\n\n"] {
             fs::write(&file, text).unwrap();
-            assert!(read_events(&file).is_err(), "accepted {text:?}");
+            assert!(
+                read_events(&file, CI_ARTIFACT_RECORDS).is_err(),
+                "accepted {text:?}"
+            );
         }
         fs::write(&file, format!("{}\n", json!({"event":"pass"}))).unwrap();
-        assert_eq!(read_events(&file).unwrap().len(), 1);
-        fs::write(&file, "{}\n".repeat(513)).unwrap();
-        assert!(read_events(&file).is_err());
+        assert_eq!(read_events(&file, CI_ARTIFACT_RECORDS).unwrap().len(), 1);
+        let record = format!("{}\n", json!({}));
+        fs::write(&file, record.repeat(CI_ARTIFACT_RECORDS)).unwrap();
+        assert_eq!(
+            read_events(&file, CI_ARTIFACT_RECORDS).unwrap().len(),
+            CI_ARTIFACT_RECORDS
+        );
+        fs::write(&file, record.repeat(CI_ARTIFACT_RECORDS + 1)).unwrap();
+        assert!(read_events(&file, CI_ARTIFACT_RECORDS).is_err());
         fs::write(&file, vec![b' '; ARTIFACT_BYTES as usize + 1]).unwrap();
-        assert!(read_events(&file).is_err());
+        assert!(read_events(&file, CI_ARTIFACT_RECORDS).is_err());
+        assert!(read_events(&file, WIRE_ARTIFACT_RECORDS).is_err());
     }
 }

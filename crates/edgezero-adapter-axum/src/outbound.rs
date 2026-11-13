@@ -6,9 +6,11 @@
     )
 )]
 
+use crate::outbound_executor::AxumOutboundExecutorHandle;
 use async_stream::stream;
 use bytes::Bytes;
 use core::time::Duration;
+use edgezero_core::OutboundProgressRuntime;
 use edgezero_core::body::{Body, BodyPayload, BodyStream};
 use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError};
 use edgezero_core::error_detail::{
@@ -27,7 +29,6 @@ use edgezero_core::outbound::{
     OutboundResponse, OutboundResponseContext, OutboundSendMode, OutboundTask, OutboundTime,
 };
 use edgezero_core::time::{Deadline, DispatchBudget, MonotonicClock, MonotonicInstant};
-use edgezero_core::{IndependentOutboundProgress, OutboundProgressRuntime};
 use futures::channel::{mpsc, oneshot};
 use futures_util::StreamExt as _;
 use futures_util::future::{FutureExt as _, LocalBoxFuture, poll_fn};
@@ -37,12 +38,13 @@ use reqwest::redirect::Policy;
 use std::error::Error as _;
 use std::future::Future;
 use std::io::Error as IoError;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
+#[cfg(test)]
+use std::panic::catch_unwind;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
 use tokio::runtime::Handle;
-use tokio::task::spawn_local;
 #[cfg(test)]
 use tokio::time::timeout;
 use tokio::time::{Instant as TokioInstant, sleep_until};
@@ -54,6 +56,7 @@ mod testing;
 #[derive(Clone)]
 pub struct AxumOutboundClient {
     client: Arc<reqwest::Client>,
+    executor: AxumOutboundExecutorHandle,
     time: OutboundTime,
 }
 
@@ -121,8 +124,8 @@ impl AxumOutboundClient {
     /// # Errors
     /// Returns the underlying client-construction error when TLS initialization fails.
     #[inline]
-    pub fn try_new() -> Result<Self, reqwest::Error> {
-        Self::try_with_time(native_time(MonotonicClock::default()))
+    pub fn try_new(executor: AxumOutboundExecutorHandle) -> Result<Self, reqwest::Error> {
+        Self::try_with_time(executor, native_time(MonotonicClock::default()))
     }
 
     #[expect(
@@ -146,8 +149,11 @@ impl AxumOutboundClient {
     /// # Errors
     /// Returns the underlying client-construction error when TLS initialization fails.
     #[inline]
-    pub fn try_with_time(time: OutboundTime) -> Result<Self, reqwest::Error> {
-        Self::try_transport().map(|client| Self::with_transport_and_time(client, time))
+    pub fn try_with_time(
+        executor: AxumOutboundExecutorHandle,
+        time: OutboundTime,
+    ) -> Result<Self, reqwest::Error> {
+        Self::try_transport().map(|client| Self::with_transport_and_time(client, executor, time))
     }
 
     fn validate_options(request: &OutboundRequest) -> Result<(), EdgeError> {
@@ -161,9 +167,14 @@ impl AxumOutboundClient {
 
     pub(crate) fn with_transport_and_time(
         client: Arc<reqwest::Client>,
+        executor: AxumOutboundExecutorHandle,
         time: OutboundTime,
     ) -> Self {
-        Self { client, time }
+        Self {
+            client,
+            executor,
+            time,
+        }
     }
 }
 
@@ -174,11 +185,14 @@ impl OutboundHttpClient for AxumOutboundClient {
         let time = request.time().clone();
         let entered_at = request.entered_at();
         let head = self.dispatch_head(request);
-        schedule_response(scope.run(
-            time,
-            entered_at,
-            Box::pin(async move { head.await?.finish().await }),
-        ))
+        schedule_response(
+            &self.executor,
+            scope.run(
+                time,
+                entered_at,
+                Box::pin(async move { head.await?.finish().await }),
+            ),
+        )
     }
 
     #[inline]
@@ -194,12 +208,12 @@ impl OutboundHttpClient for AxumOutboundClient {
 
     #[inline]
     fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
-        Rc::new(IndependentOutboundProgress)
+        Rc::new(self.executor.clone())
     }
 
     #[inline]
     fn start_batch_until(&self, batch: OutboundPreparedBatch) -> OutboundBatch {
-        schedule_batch(self, batch)
+        schedule_batch(self, &self.executor, batch)
     }
 
     #[inline]
@@ -217,7 +231,11 @@ impl OutboundHttpClient for AxumOutboundClient {
     }
 }
 
-fn schedule_batch(client: &dyn OutboundHttpClient, batch: OutboundPreparedBatch) -> OutboundBatch {
+fn schedule_batch(
+    client: &dyn OutboundHttpClient,
+    executor: &AxumOutboundExecutorHandle,
+    batch: OutboundPreparedBatch,
+) -> OutboundBatch {
     let (context, slots) = batch.into_slots();
     if slots.is_empty() {
         return OutboundBatch::cutoff(context);
@@ -265,7 +283,7 @@ fn schedule_batch(client: &dyn OutboundHttpClient, batch: OutboundPreparedBatch)
             let _closed = sender.try_send(OutboundBatchDriverEvent::Cutoff);
         }
     });
-    match spawn_owned(task) {
+    match spawn_owned(executor, task) {
         Ok(owner) => OutboundBatch::from_driver(context, receiver, owner),
         Err(error) => OutboundBatch::from_driver(
             context,
@@ -275,16 +293,13 @@ fn schedule_batch(client: &dyn OutboundHttpClient, batch: OutboundPreparedBatch)
     }
 }
 
-fn spawn_owned(work: LocalBoxFuture<'static, ()>) -> Result<OutboundExchangeOwner, EdgeError> {
-    Handle::try_current().map_err(|_missing| {
-        EdgeError::internal(anyhow::anyhow!(
-            "outbound work requires a Tokio local scheduler"
-        ))
-    })?;
+fn spawn_owned(
+    executor: &AxumOutboundExecutorHandle,
+    work: LocalBoxFuture<'static, ()>,
+) -> Result<OutboundExchangeOwner, EdgeError> {
+    executor.check()?;
     let (runner, owner) = OutboundTask::new(work)?;
-    let task = catch_unwind(AssertUnwindSafe(|| spawn_local(runner))).map_err(|_missing| {
-        EdgeError::internal(anyhow::anyhow!("outbound work requires a Tokio LocalSet"))
-    })?;
+    let task = executor.spawn(Box::pin(runner))?;
     let abort = task.abort_handle();
     Ok(OutboundExchangeOwner::new(move || {
         drop(owner);
@@ -292,11 +307,17 @@ fn spawn_owned(work: LocalBoxFuture<'static, ()>) -> Result<OutboundExchangeOwne
     }))
 }
 
-fn schedule_response(work: OutboundFuture<OutboundResponse>) -> Result<OutboundPending, EdgeError> {
+fn schedule_response(
+    executor: &AxumOutboundExecutorHandle,
+    work: OutboundFuture<OutboundResponse>,
+) -> Result<OutboundPending, EdgeError> {
     let (sender, receiver) = oneshot::channel();
-    let owner = spawn_owned(Box::pin(async move {
-        let _closed = sender.send(work.await);
-    }))?;
+    let owner = spawn_owned(
+        executor,
+        Box::pin(async move {
+            let _closed = sender.send(work.await);
+        }),
+    )?;
     Ok(OutboundPending::new(
         Box::pin(async move {
             receiver.await.map_err(|_closed| {
@@ -674,6 +695,7 @@ async fn race_with_timer<Output>(
 
 #[cfg(test)]
 mod clock_tests {
+    use crate::outbound_executor::AxumOutboundExecutor;
 
     use super::testing::{finish_fixture_response, finish_fixture_stream};
     use edgezero_core::outbound::{
@@ -702,7 +724,7 @@ mod clock_tests {
     use futures_util::stream;
     use http_body::Frame;
     use tokio::net::TcpListener;
-    use tokio::task::{LocalSet, yield_now};
+    use tokio::task::yield_now;
 
     use super::*;
 
@@ -785,12 +807,15 @@ mod clock_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn streamed_send_keeps_original_scope_under_foreign_request_polling() {
-        LocalSet::new()
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner
             .run_until(async {
                 let original = OutboundScopeOwner::callback();
                 let foreign = OutboundScopeOwner::callback();
-                let client =
-                    HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+                let client = HttpClient::with_client(
+                    AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+                );
                 let nested_client = client.clone();
                 let nested = Rc::new(RefCell::new(None::<OutboundFuture<OutboundResponse>>));
                 let retained = Rc::clone(&nested);
@@ -852,6 +877,9 @@ mod clock_tests {
 
     #[tokio::test]
     async fn missing_local_scheduler_never_polls_owned_upload() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        drop(executor_owner);
         let polls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&polls);
         let source = stream::poll_fn(move |_| {
@@ -861,18 +889,23 @@ mod clock_tests {
         .boxed_local();
         let pair = native_time(MonotonicClock::default());
         let budget = test_budget(pair.clock().now(), Duration::from_secs(1));
-        let pending = schedule_response(Box::pin(async move {
-            collect_request_body(Body::from_stream(source), 8, budget, &pair).await?;
-            Err(EdgeError::internal(anyhow::anyhow!(
-                "fixture upload unexpectedly completed"
-            )))
-        }));
+        let pending = schedule_response(
+            &executor_handle,
+            Box::pin(async move {
+                collect_request_body(Body::from_stream(source), 8, budget, &pair).await?;
+                Err(EdgeError::internal(anyhow::anyhow!(
+                    "fixture upload unexpectedly completed"
+                )))
+            }),
+        );
         assert!(matches!(pending, Err(EdgeError::Internal { .. })));
         assert_eq!(polls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
     fn supplied_timer_setup_error_precedes_upload_polling() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let reads = Arc::new(AtomicUsize::new(0));
         let captured = Arc::clone(&reads);
         let source = stream::poll_fn(move |_context| {
@@ -886,7 +919,9 @@ mod clock_tests {
                 )))
             })
         });
-        let client = HttpClient::with_client(AxumOutboundClient::try_with_time(pair).unwrap());
+        let client = HttpClient::with_client(
+            AxumOutboundClient::try_with_time(executor_handle.clone(), pair).unwrap(),
+        );
         let request = OutboundRequest::post("http://127.0.0.1:9/upload")
             .unwrap()
             .body(Body::from_stream(source));
@@ -897,11 +932,17 @@ mod clock_tests {
 
     #[tokio::test(flavor = "current_thread")]
     #[cfg(feature = "test-utils")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the complete retained-handle release proof together with explicit executor setup"
+    )]
     async fn native_pending_heads_release_before_retained_handles_are_collected() {
         use edgezero_core::outbound::test_support::NativeBodyWitness;
         use tokio::io::AsyncReadExt as _;
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
 
-        LocalSet::new()
+        executor_owner
             .run_until(async {
                 let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
                 let address = listener.local_addr().expect("address");
@@ -931,8 +972,9 @@ mod clock_tests {
                     request
                 };
                 let callback = OutboundScopeOwner::callback();
-                let client =
-                    HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+                let client = HttpClient::with_client(
+                    AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+                );
                 let (pending, batch) = callback
                     .run(async {
                         let pending = client.begin(request(0)).await.expect("begin");
@@ -1001,7 +1043,9 @@ mod clock_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn closed_scope_rejects_scheduling_before_work_is_polled() {
-        LocalSet::new()
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner
             .run_until(async {
                 let callback = OutboundScopeOwner::callback();
                 callback.close();
@@ -1010,11 +1054,14 @@ mod clock_tests {
                 let resource = Rc::new(());
                 let released = Rc::downgrade(&resource);
                 let refused = callback.with(|| {
-                    schedule_response(Box::pin(poll_fn(move |_| {
-                        assert_eq!(Rc::strong_count(&resource), 1);
-                        observed.set(observed.get().saturating_add(1));
-                        Poll::Pending
-                    })))
+                    schedule_response(
+                        &executor_handle,
+                        Box::pin(poll_fn(move |_| {
+                            assert_eq!(Rc::strong_count(&resource), 1);
+                            observed.set(observed.get().saturating_add(1));
+                            Poll::Pending
+                        })),
+                    )
                 });
                 assert!(matches!(refused, Err(EdgeError::Internal { .. })));
                 assert_eq!(polls.get(), 0);
@@ -1025,7 +1072,9 @@ mod clock_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn local_set_drop_releases_work_and_fails_retained_manual_pending() {
-        let local = LocalSet::new();
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        let mut local = executor_owner;
         let resource = Rc::new(());
         let released = Rc::downgrade(&resource);
         let polls = Rc::new(Cell::new(0_usize));
@@ -1037,7 +1086,8 @@ mod clock_tests {
                     observed.set(observed.get().saturating_add(1));
                     Poll::Pending
                 });
-                let retained = schedule_response(Box::pin(work)).expect("manual pending");
+                let retained =
+                    schedule_response(&executor_handle, Box::pin(work)).expect("manual pending");
                 yield_now().await;
                 retained
             })
@@ -1065,7 +1115,9 @@ mod clock_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn scheduled_work_allows_reentrant_cancellation_while_polling() {
-        LocalSet::new()
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner
             .run_until(async {
                 let owner = Rc::new(RefCell::new(None::<OutboundExchangeOwner>));
                 let cancelled = Rc::clone(&owner);
@@ -1083,7 +1135,8 @@ mod clock_tests {
                     Poll::Pending
                 })
                 .boxed_local();
-                *owner.borrow_mut() = Some(spawn_owned(work).expect("local scheduler"));
+                *owner.borrow_mut() =
+                    Some(spawn_owned(&executor_handle, work).expect("local scheduler"));
                 yield_now().await;
                 assert_eq!(polls.get(), 1, "cancelled work must not be polled again");
                 assert!(
@@ -1205,9 +1258,11 @@ mod clock_tests {
     #[test]
     fn zero_connect_timeout_rejects_before_transport() {
         use edgezero_core::outbound::test_support::check_zero_connect_timeout_preflight;
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
 
         block_on(check_zero_connect_timeout_preflight(|time| {
-            AxumOutboundClient::try_with_time(time).expect("client")
+            AxumOutboundClient::try_with_time(executor_handle.clone(), time).expect("client")
         }))
         .expect("zero connect timeout conformance");
     }
@@ -1216,9 +1271,13 @@ mod clock_tests {
     fn unsupported_optimizer_precedes_expiry_without_transport() {
         use edgezero_core::outbound::test_support::check_unsupported_image_optimizer_preflight;
         use futures::executor::block_on;
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
 
         block_on(check_unsupported_image_optimizer_preflight(
-            |time| AxumOutboundClient::try_with_time(time).expect("client"),
+            |time| {
+                AxumOutboundClient::try_with_time(executor_handle.clone(), time).expect("client")
+            },
             "axum",
             &[
                 OutboundSendMode::Send,
@@ -1236,6 +1295,8 @@ mod clock_tests {
         use futures::executor::block_on;
         use std::cell::Cell;
         use std::rc::Rc;
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
 
         let polls = Rc::new(Cell::new(0_usize));
         let counted = Rc::clone(&polls);
@@ -1248,7 +1309,8 @@ mod clock_tests {
             .image_optimizer(OutboundImageOptimizerOptions::new())
             .body(body)
             .timeout(Duration::ZERO);
-        let client = HttpClient::with_client(AxumOutboundClient::try_new().unwrap());
+        let client =
+            HttpClient::with_client(AxumOutboundClient::try_new(executor_handle.clone()).unwrap());
         let error = block_on(client.send(request)).expect_err("unsupported");
         assert!(matches!(error, EdgeError::BadRequest { .. }));
         assert!(error.message().contains("image_optimizer"));
@@ -1258,7 +1320,9 @@ mod clock_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn image_optimizer_batch_rejection_keeps_live_plain_sibling() {
-        LocalSet::new().run_until(async {
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner.run_until(async {
         use edgezero_core::{OutboundImageOptimizerOptions, http::request_builder};
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -1274,7 +1338,7 @@ mod clock_tests {
                 Poll::Pending
             })))
             .unwrap();
-        let client = HttpClient::with_client(AxumOutboundClient::try_new().unwrap());
+        let client = HttpClient::with_client(AxumOutboundClient::try_new(executor_handle.clone()).unwrap());
         for request in [OutboundRequest::get(&target).unwrap(),
             OutboundRequest::from_request(incoming, target.parse().unwrap()).unwrap()] {
             let error = client.send(request
@@ -1462,7 +1526,9 @@ mod clock_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn clamped_batch_cutoff_uses_actual_observation_cutoff() {
-        LocalSet::new()
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner
             .run_until(async {
                 for (elapsed_hours, unresolved) in [(168_u64, false), (192, true)] {
                     let start = MonotonicInstant::now();
@@ -1470,7 +1536,7 @@ mod clock_tests {
                     let sampled = Arc::clone(&now);
                     let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
                     let client = HttpClient::with_client(
-                        AxumOutboundClient::try_with_time(native_time(clock)).expect("client"),
+                        AxumOutboundClient::try_with_time(executor_handle.clone(), native_time(clock)).expect("client"),
                     );
                     let cutoff = Deadline::at_instant(
                         start
@@ -2300,16 +2366,19 @@ mod clock_tests {
 
     #[tokio::test]
     async fn method_entry_and_preflight_elapsed_use_the_injected_clock() {
-        LocalSet::new()
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner
             .run_until(async {
                 let start = MonotonicInstant::now();
                 let completed = start
                     .checked_add(Duration::from_millis(9))
                     .expect("completed instant");
                 let client = HttpClient::with_client(
-                    AxumOutboundClient::try_with_time(native_time(scripted_clock(vec![
-                        start, completed,
-                    ])))
+                    AxumOutboundClient::try_with_time(
+                        executor_handle.clone(),
+                        native_time(scripted_clock(vec![start, completed])),
+                    )
                     .expect("client"),
                 );
                 let request = OutboundRequest::get("https://example.com/")
@@ -2331,16 +2400,19 @@ mod clock_tests {
 
     #[tokio::test]
     async fn backwards_clock_fails_slot_without_invalid_elapsed() {
-        LocalSet::new()
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner
             .run_until(async {
                 let start = MonotonicInstant::now();
                 let earlier = start
                     .checked_sub(Duration::from_millis(1))
                     .expect("earlier instant");
                 let client = HttpClient::with_client(
-                    AxumOutboundClient::try_with_time(native_time(scripted_clock(vec![
-                        start, earlier,
-                    ])))
+                    AxumOutboundClient::try_with_time(
+                        executor_handle.clone(),
+                        native_time(scripted_clock(vec![start, earlier])),
+                    )
                     .expect("client"),
                 );
                 let request = OutboundRequest::get("https://example.com/")
@@ -2481,6 +2553,8 @@ mod clock_tests {
         use edgezero_core::{ContentTypeIneligibility, ContentTypeProvenance};
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use tokio::net::TcpListener;
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
 
         for opaque_sibling in [false, true] {
             let listener = TcpListener::bind("127.0.0.1:0")
@@ -2505,8 +2579,9 @@ mod clock_tests {
                 head.extend_from_slice(b"\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
                 socket.write_all(&head).await.expect("upstream response");
             });
-            let client =
-                HttpClient::with_client(AxumOutboundClient::try_new().expect("outbound client"));
+            let client = HttpClient::with_client(
+                AxumOutboundClient::try_new(executor_handle.clone()).expect("outbound client"),
+            );
             let request = OutboundRequest::get(format!("http://{address}/"))
                 .expect("request")
                 .timeout(Duration::from_secs(5));

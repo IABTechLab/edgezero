@@ -125,6 +125,12 @@ artifacts and JSONL evidence are scoped to the run directory. Results are workin
 characterization, not hosted qualification; this suite neither changes capability levels
 nor closes the separate Fastly readiness/scheduling gate.
 
+Persisted CI artifacts are capped at 4 MiB. The shared JSONL reader also rejects
+more than 512 records for general CI evidence, or 1,024 for the expanded wire
+inventory. It rejects an excess record before deserializing it and never truncates
+an artifact to obtain a passing result. Framing receipts are serialized together
+with their newline before writing; this does not assert provider-level atomic I/O.
+
 ### Qualification Inventory
 
 Start with the implementation plan's
@@ -359,6 +365,11 @@ and independent-cap criterion 10 through the real host-wire matrix. A generous r
 tested final-buffer overflow. Fastly's test-only lease witnesses prove release of EdgeZero's
 encoded stream, not host-side interruption or delivery. Provider-inexpressible fields are injected
 only at the explicitly labelled shared-head boundary; they do not establish raw-header fidelity.
+Axum's existing `--suite ci` also builds and stages its executor-ownership binary with
+`-C panic=abort`. It requires live scheduling without an ambient LocalSet, rejects foreign
+and dropped owners in Send/Begin/Batch before body polling, and checks upload release.
+It reuses the existing supervised process runner and does not create another transport.
+
 Cloudflare and Fastly use one inventory-guarded library suite each. Spin has one local/CI entrypoint:
 
 ```sh
@@ -1191,8 +1202,8 @@ shared dependencies, and keep its Fastly SDK requirement aligned with the root.
 
 Select executables with `VICEROY_BIN`, `WORKER_BUILD_BIN`, `WRANGLER_BIN`, and
 `SPIN_BIN`. Install tools explicitly; the runner never deploys or installs them.
-The PR pins Fastly SDK 0.13.1, Viceroy 0.21.0, `worker` 0.8.5, and `spin-sdk` 7.0.0
-from `stackpop/spin-rust-sdk` at `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`, using its
+The PR pins Fastly SDK 0.13.1, Viceroy 0.21.0, `worker` 0.8.5, and registry `spin-sdk` 8.0.0,
+using its
 `wasip3 0.10.0` / `wit-bindgen 0.63.0` re-export and `spawn_local`. See the
 [dependency audit](../../docs/audits/2026-10-27-spin-sdk-eager-progress.md).
 The repository pins Spin CLI 4.1.0. Use a worker-build
@@ -1346,7 +1357,7 @@ that Viceroy 0.21.0 reproduces an older runtime's ceiling. Verify deployed evict
 and long-lived memory behavior separately. The runner checks the Viceroy version against
 `.tool-versions` and reports a mismatch as unverified.
 
-Building with `spin-sdk` 7.0.0 emits the SDK's `wasip3` WASI HTTP interface. A
+Building with `spin-sdk` 8.0.0 emits the SDK's `wasip3` WASI HTTP 0.3.2 interface. A
 successful build does not prove the selected Spin CLI 4.1.0 host can execute that
 component. Retained dispatch also depends on provider-specific runtime support;
 an unavailable host, interface mismatch, or missing HTTP/reuse evidence cannot
