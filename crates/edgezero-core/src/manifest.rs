@@ -343,6 +343,7 @@ impl ManifestLoader {
 #[derive(Debug, Deserialize, Serialize, Validate)]
 #[serde(deny_unknown_fields)]
 #[validate(schema(function = "validate_manifest_adapter_keys_case_unique"))]
+#[validate(schema(function = "validate_manifest_adapter_geo_placement"))]
 #[expect(
     clippy::partial_pub_fields,
     reason = "deserialized fields are pub for the public API; internal state is private"
@@ -678,8 +679,13 @@ pub struct ManifestAdapter {
     #[serde(default)]
     #[validate(nested)]
     pub commands: ManifestAdapterCommands,
-    /// Catch-all for any sub-table other than the four canonical ones
-    /// (`adapter`, `build`, `commands`, `logging`). The pre-rewrite
+    /// `[adapters.axum.geo]`: native geo selection. Only Axum reads it; other
+    /// adapters use their platform's geo and reject the table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[validate(nested)]
+    pub geo: Option<ManifestAdapterGeo>,
+    /// Catch-all for any sub-table other than the canonical ones
+    /// (`adapter`, `build`, `commands`, `geo`, `logging`). The pre-rewrite
     /// `[adapters.<name>.stores.*]` tables land here and are rejected by
     /// `validate_manifest_adapter` with the migration-guide message.
     #[serde(flatten)]
@@ -687,6 +693,35 @@ pub struct ManifestAdapter {
     #[serde(default)]
     #[validate(nested)]
     pub logging: ManifestLoggingConfig,
+}
+
+/// `[adapters.axum.geo]`. Each key is a default that the matching
+/// `EDGEZERO__ADAPTER__GEO__*` variable overrides at startup, so deployment-only
+/// values such as ALB networks can stay out of the compiled manifest. The
+/// merged selection is validated before the server listens.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, Validate)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+#[validate(schema(function = "validate_manifest_adapter_geo"))]
+pub struct ManifestAdapterGeo {
+    /// ALB peer networks admitted as the protected `CloudFront` source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alb_peer_cidrs: Option<Vec<String>>,
+    /// Header the ALB strips after checking the origin credential. Never the credential value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_credential_header_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ManifestGeoProvider>,
+}
+
+/// Geo provider an Axum deployment selects.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum ManifestGeoProvider {
+    #[serde(rename = "cloudfront")]
+    CloudFront,
+    Off,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Validate)]
@@ -1441,6 +1476,37 @@ fn validate_manifest_adapter_definition(
             .into(),
         );
         return Err(error);
+    }
+    Ok(())
+}
+
+fn validate_manifest_adapter_geo(geo: &ManifestAdapterGeo) -> Result<(), ValidationError> {
+    if geo.provider == Some(ManifestGeoProvider::Off)
+        && (geo.alb_peer_cidrs.is_some() || geo.origin_credential_header_name.is_some())
+    {
+        let mut error = ValidationError::new("geo_off_with_policy");
+        error.message = Some(
+            "`[adapters.axum.geo]` with `provider = \"off\"` must not set source policy fields"
+                .into(),
+        );
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn validate_manifest_adapter_geo_placement(manifest: &Manifest) -> Result<(), ValidationError> {
+    for (name, adapter) in &manifest.adapters {
+        if adapter.geo.is_some() && !name.eq_ignore_ascii_case("axum") {
+            let mut error = ValidationError::new("geo_adapter_unsupported");
+            error.message = Some(
+                format!(
+                    "`[adapters.{name}.geo]` is not supported; only Axum selects geo, \
+                     other adapters use their platform's geo"
+                )
+                .into(),
+            );
+            return Err(error);
+        }
     }
     Ok(())
 }
@@ -3401,6 +3467,66 @@ ids = ["default"]
                     .contains("docs/guide/manifest-store-migration.md"),
                 "legacy adapter-subtable error must reference the migration guide, got: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn axum_geo_table_loads_partial_defaults() {
+        let loaded = ManifestLoader::try_load_from_str(
+            "[adapters.axum.geo]\nprovider = \"cloudfront\"\norigin_credential_header_name = \"x-origin-verify\"\n",
+        )
+        .expect("axum geo table");
+        let geo = loaded.manifest().adapters["axum"].geo.clone().expect("geo");
+        assert_eq!(geo.provider, Some(ManifestGeoProvider::CloudFront));
+        assert_eq!(geo.alb_peer_cidrs, None);
+        assert_eq!(
+            geo.origin_credential_header_name.as_deref(),
+            Some("x-origin-verify")
+        );
+        // `app!` bakes the serialized manifest; the geo table must survive the round trip.
+        let json: &'static str = Box::leak(
+            serde_json::to_string(loaded.manifest())
+                .expect("serialize")
+                .into_boxed_str(),
+        );
+        let BakedManifest::Present(baked) = Manifest::from_baked_json(json) else {
+            panic!("baked manifest with geo must load: {json}");
+        };
+        assert_eq!(baked.adapters["axum"].geo.as_ref(), Some(&geo));
+        assert!(
+            ManifestLoader::try_load_from_str("[adapters.axum]\n")
+                .expect("no geo")
+                .manifest()
+                .adapters["axum"]
+                .geo
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn axum_geo_table_rejects_invalid_shapes() {
+        for (manifest, expected) in [
+            (
+                "[adapters.axum.geo]\nprovider = \"off\"\nalb_peer_cidrs = []\n",
+                "must not set source policy fields",
+            ),
+            (
+                "[adapters.axum.geo]\nprovider = \"maxmind\"\n",
+                "unknown variant",
+            ),
+            (
+                "[adapters.axum.geo]\nregion_header = \"x\"\n",
+                "unknown field",
+            ),
+            (
+                "[adapters.fastly.geo]\nprovider = \"cloudfront\"\n",
+                "only Axum selects geo",
+            ),
+        ] {
+            let err = ManifestLoader::try_load_from_str(manifest)
+                .err()
+                .unwrap_or_else(|| panic!("must reject: {manifest}"));
+            assert!(err.to_string().contains(expected), "{manifest}: {err}");
         }
     }
 

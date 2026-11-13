@@ -8,14 +8,15 @@ use std::str::FromStr as _;
 use std::time::{Duration, Instant};
 
 use edgezero_core::addr;
-use edgezero_core::app::StoresMetadata;
+use edgezero_core::app::{Hooks, StoresMetadata};
 use edgezero_core::env_config::EnvConfig;
+use edgezero_core::manifest::BakedManifest;
 use edgezero_store_aws::settings::{AgentAccessToken, AwsPreparationLimits};
 use edgezero_store_celld::settings::{CelldAccessToken, CelldPreparationLimits};
 use log::LevelFilter;
 
 use crate::diagnostics::NativeDiagnosticsHandle;
-use crate::geo::{NativeGeo, NativeGeoCapability, NativeGeoConfigError, NativeGeoSelection};
+use crate::geo::{self, NativeGeo, NativeGeoCapability, NativeGeoConfigError, NativeGeoSelection};
 use crate::native_bindings::{
     NativeBindingsLimits, NativeConfigBinding, NativeKvBinding, NativePreparationPolicySources,
     NativeStoreBindings, NativeStoreBindingsInput,
@@ -74,7 +75,8 @@ pub struct AxumRunOptions {
     data_dir: Option<PathBuf>,
     diagnostics: NativeDiagnosticsHandle,
     env: EnvConfig,
-    geo: NativeGeoSelection,
+    /// `None` until [`Self::with_geo`]; the manifest and settings then decide.
+    geo: Option<NativeGeoSelection>,
     grace: Duration,
     json_body_limit: JsonBodyLimit,
     level: LevelFilter,
@@ -364,7 +366,7 @@ impl AxumRunOptions {
             data_dir: None,
             diagnostics: NativeDiagnosticsHandle::new(),
             env: EnvConfig::default(),
-            geo: NativeGeoSelection::Off,
+            geo: None,
             grace: Duration::from_secs(10),
             json_body_limit: JsonBodyLimit::DEFAULT,
             level: LevelFilter::Info,
@@ -378,21 +380,46 @@ impl AxumRunOptions {
     #[must_use]
     #[inline]
     pub fn with_geo(mut self, selection: NativeGeoSelection) -> Self {
-        self.geo = selection;
+        self.geo = Some(selection);
         self
     }
 
-    /// Validate the finalized selection and capture its startup capability.
+    /// Validate an explicit [`Self::with_geo`] selection and capture its capability.
+    ///
+    /// Without one this reports `Off`; it does not read `EDGEZERO__ADAPTER__GEO__*`
+    /// settings or a manifest. Use [`Self::geo_capability_for`] for the selection the
+    /// runner will actually use.
     ///
     /// # Errors
     /// Rejects unavailable implementations and invalid protected-source policies.
     #[inline]
     pub fn geo_capability(&self) -> Result<NativeGeoCapability, NativeGeoConfigError> {
-        self.native_geo().map(|geo| geo.capability())
+        geo::resolve(
+            self.geo.as_ref(),
+            &EnvConfig::default(),
+            &BakedManifest::Absent,
+        )
+        .map(|geo| geo.capability())
     }
 
-    pub(crate) fn native_geo(&self) -> Result<NativeGeo, NativeGeoConfigError> {
-        NativeGeo::validate(&self.geo)
+    /// Capture the capability the runner will use for `A`: an explicit selection,
+    /// then `EDGEZERO__ADAPTER__GEO__*` settings, then its baked `[adapters.axum.geo]`.
+    ///
+    /// # Errors
+    /// Rejects unavailable implementations and invalid protected-source policies.
+    #[inline]
+    pub fn geo_capability_for<A>(&self) -> Result<NativeGeoCapability, NativeGeoConfigError>
+    where
+        A: Hooks,
+    {
+        self.native_geo(&A::manifest()).map(|geo| geo.capability())
+    }
+
+    pub(crate) fn native_geo(
+        &self,
+        manifest: &BakedManifest,
+    ) -> Result<NativeGeo, NativeGeoConfigError> {
+        geo::resolve(self.geo.as_ref(), &self.env, manifest)
     }
 
     pub(crate) fn request_records(&self) -> bool {
@@ -754,8 +781,22 @@ fn fixed_setting(path: &[String]) -> Option<&'static str> {
         ["adapter", "json_body_limit_bytes"] => Some("JSON_BODY_LIMIT_BYTES"),
         ["logging", "level"] => Some("LOGGING__LEVEL"),
         ["store_bindings_file"] => Some("STORE_BINDINGS_FILE"),
-        _ => native_limit_setting(path),
+        _ => geo_setting(path).or_else(|| native_limit_setting(path)),
     }
+}
+
+/// `EDGEZERO__ADAPTER__GEO__*` names, shared by the dev and production input checks.
+pub(crate) fn geo_setting(path: &[String]) -> Option<&'static str> {
+    let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+    matches!(
+        segments.as_slice(),
+        [
+            "adapter",
+            "geo",
+            "provider" | "alb_peer_cidrs" | "origin_credential_header_name"
+        ]
+    )
+    .then_some("GEO")
 }
 
 pub(crate) fn native_limit_setting(path: &[String]) -> Option<&'static str> {

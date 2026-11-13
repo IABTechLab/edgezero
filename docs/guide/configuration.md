@@ -556,6 +556,28 @@ implicitly applying manifest defaults or changing global state.
 Managed Fastly/Axum loggers retain `edgezero::boot` errors and warnings at `Warn` even when
 ordinary runtime logging is `Off`. See [Logging Initialisation](/guide/adapters/overview#logging-initialisation).
 
+### Geo (Axum only)
+
+`[adapters.axum.geo]` selects native geo so `RequestContext::geo()` works without application
+code. Fastly and Cloudflare always report their platform's geo, and other adapters reject the
+table.
+
+```toml
+[adapters.axum.geo]
+provider = "cloudfront"
+origin_credential_header_name = "x-origin-verify-randomsuffix"
+# alb_peer_cidrs usually comes from EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS at deploy time
+```
+
+| Field                           | Runtime override                                        | Description                                 |
+| ------------------------------- | ------------------------------------------------------- | ------------------------------------------- |
+| `provider`                      | `EDGEZERO__ADAPTER__GEO__PROVIDER`                      | `cloudfront` or `off`                       |
+| `alb_peer_cidrs`                | `EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS` (comma list)   | ALB peer networks admitted as the source    |
+| `origin_credential_header_name` | `EDGEZERO__ADAPTER__GEO__ORIGIN_CREDENTIAL_HEADER_NAME` | Header the ALB strips; never the credential |
+
+Each runtime setting overrides its manifest key. See the [native Geo guide](./native-geo.md#select-from-the-manifest-and-settings)
+for precedence and validation.
+
 ## Full Example
 
 ```toml
