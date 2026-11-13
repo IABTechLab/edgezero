@@ -257,6 +257,69 @@ mod tests {
     }
 
     #[test]
+    fn tagged_optimizer_rejection_never_polls_uploads_or_changes_signing() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Poll;
+
+        use futures_util::stream::poll_fn;
+
+        use crate::Body;
+        use crate::http::{HeaderValue, Method};
+        use crate::outbound::{OutboundCachePolicy, OutboundSendMode, validate_for_dispatch};
+
+        let polls = Arc::new(AtomicUsize::new(0));
+        let options =
+            OutboundImageOptimizerOptions::new().region(OutboundImageOptimizerRegion::Asia);
+        for mode in [
+            OutboundSendMode::Send,
+            OutboundSendMode::Begin,
+            OutboundSendMode::Batch,
+            OutboundSendMode::Follow,
+        ] {
+            let body_polls = Arc::clone(&polls);
+            let request = OutboundRequest::get("https://origin.example.com/image?signature=a%2Fb")
+                .expect("request")
+                .header("authorization", "fixture-signature")
+                .expect("signature")
+                .cache_policy(OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                    HeaderValue::from_static("example-all example-reader-0123"),
+                ))
+                .image_optimizer(options.clone())
+                .body(Body::from_stream(poll_fn(move |_cx| {
+                    body_polls.fetch_add(1, Ordering::SeqCst);
+                    Poll::Pending
+                })));
+            let error =
+                validate_for_dispatch(&request, mode).expect_err("optimizer cannot retain tags");
+            assert_eq!(error.status().as_u16(), 400);
+            assert_eq!(request.headers()["authorization"], "fixture-signature");
+            assert_eq!(request.uri().query(), Some("signature=a%2Fb"));
+        }
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        let signed = |method| {
+            OutboundRequest::new(
+                method,
+                "https://origin.example.com/image?signature=a%2Fb"
+                    .parse()
+                    .expect("URI"),
+            )
+            .expect("request")
+            .header("authorization", "fixture-signature")
+            .expect("signature")
+        };
+        let bypass_head = signed(Method::HEAD).cache_policy(OutboundCachePolicy::Bypass);
+        validate_for_dispatch(&bypass_head, OutboundSendMode::Send).expect("signed bypass HEAD");
+        let optimized_get = signed(Method::GET).image_optimizer(options);
+        validate_for_dispatch(&optimized_get, OutboundSendMode::Send)
+            .expect("signed default optimized GET");
+        assert_eq!(
+            optimized_get.cache_policy_setting(),
+            &OutboundCachePolicy::PlatformDefault
+        );
+    }
+
+    #[test]
     fn image_optimizer_defaults_leave_every_selector_unset() {
         let options = OutboundImageOptimizerOptions::new();
         assert_eq!(options, OutboundImageOptimizerOptions::default());
