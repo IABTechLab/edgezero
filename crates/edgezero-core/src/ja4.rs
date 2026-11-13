@@ -8,6 +8,7 @@
 use std::fmt;
 
 use crate::error::EdgeError;
+use crate::http::HeaderValue;
 
 /// Byte offset of the `_` that ends `JA4_a`.
 const SUMMARY_END: usize = 10;
@@ -114,14 +115,44 @@ impl CapturedJa4 {
     #[inline]
     #[must_use]
     pub fn from_runtime_tls(value: Option<&str>) -> Self {
-        match value.map(Ja4Fingerprint::parse) {
-            None => Self::Unavailable(Ja4Unavailable::Missing),
-            Some(Ok(fingerprint)) => Self::Captured {
-                fingerprint,
-                source: Ja4Source::RuntimeTls,
-            },
-            Some(Err(_error)) => Self::Unavailable(Ja4Unavailable::Malformed),
+        value.map_or(Self::Unavailable(Ja4Unavailable::Missing), |present| {
+            Self::validated(present, Ja4Source::RuntimeTls)
+        })
+    }
+
+    /// Map the values of a JA4 header from a proxy peer the adapter has
+    /// already verified as trusted.
+    ///
+    /// No field is `Missing`. Exactly one field must be a valid fingerprint;
+    /// a repeated field, non-UTF-8 bytes or an invalid value is `Malformed`
+    /// and discarded. Callers must not pass headers from unverified peers.
+    #[inline]
+    #[must_use]
+    pub fn from_trusted_proxy_header<'value, I>(values: I) -> Self
+    where
+        I: IntoIterator<Item = &'value HeaderValue>,
+    {
+        let mut fields = values.into_iter();
+        match (fields.next(), fields.next()) {
+            (None, _) => Self::Unavailable(Ja4Unavailable::Missing),
+            (Some(field), None) => field
+                .to_str()
+                .map_or(Self::Unavailable(Ja4Unavailable::Malformed), |value| {
+                    Self::validated(value, Ja4Source::TrustedProxyHeader)
+                }),
+            (Some(_), Some(_)) => Self::Unavailable(Ja4Unavailable::Malformed),
         }
+    }
+
+    /// Capture a present provider value, discarding it when invalid.
+    fn validated(value: &str, source: Ja4Source) -> Self {
+        Ja4Fingerprint::parse(value).map_or(
+            Self::Unavailable(Ja4Unavailable::Malformed),
+            |fingerprint| Self::Captured {
+                fingerprint,
+                source,
+            },
+        )
     }
 }
 
@@ -131,22 +162,26 @@ impl CapturedJa4 {
 pub enum Ja4Source {
     /// Computed by the runtime that terminated the client's TLS connection.
     RuntimeTls,
+    /// Computed by a TLS-terminating proxy and read from an operator-configured
+    /// header, only when the direct peer is a configured trusted proxy.
+    TrustedProxyHeader,
 }
 
 /// Why no fingerprint was captured.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Ja4Unavailable {
-    /// The runtime returned a value that failed validation; it was discarded.
+    /// The provider returned a value that failed validation; it was discarded.
     Malformed,
-    /// The runtime exposes JA4 but returned none for this request.
+    /// The provider exposes JA4 but supplied none for this request.
     Missing,
-    /// The runtime offers no JA4 API.
+    /// No trusted JA4 provider is available for this request.
     NotExposed,
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use crate::http::HeaderValue;
     use crate::ja4::{CapturedJa4, Ja4Fingerprint, Ja4Source, Ja4Unavailable};
 
     /// The example from the `FoxIO` JA4 technical details.
@@ -220,6 +255,31 @@ pub(crate) mod tests {
             CapturedJa4::from_runtime_tls(Some("not-a-ja4")),
             CapturedJa4::Unavailable(Ja4Unavailable::Malformed)
         );
+    }
+
+    #[test]
+    fn ja4_trusted_proxy_header_mapping() {
+        let valid = HeaderValue::from_static(FOXIO_EXAMPLE);
+        assert_eq!(
+            CapturedJa4::from_trusted_proxy_header([]),
+            CapturedJa4::Unavailable(Ja4Unavailable::Missing)
+        );
+        assert_eq!(
+            CapturedJa4::from_trusted_proxy_header([&valid]),
+            CapturedJa4::Captured {
+                fingerprint: Ja4Fingerprint::parse(FOXIO_EXAMPLE).expect("should accept JA4"),
+                source: Ja4Source::TrustedProxyHeader,
+            }
+        );
+        let invalid = HeaderValue::from_static("not-a-ja4");
+        let non_utf8 = HeaderValue::from_bytes(b"t13d1516h2_8daaf6152771_e5627efa2a\xff\xff")
+            .expect("should build opaque value");
+        for fields in [vec![&valid, &valid], vec![&invalid], vec![&non_utf8]] {
+            assert_eq!(
+                CapturedJa4::from_trusted_proxy_header(fields),
+                CapturedJa4::Unavailable(Ja4Unavailable::Malformed)
+            );
+        }
     }
 
     #[test]

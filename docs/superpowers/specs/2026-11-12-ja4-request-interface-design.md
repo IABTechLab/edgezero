@@ -1,6 +1,6 @@
 # Standard JA4 request interface
 
-**Status:** Draft for review. No implementation has started.
+**Status:** Implemented in [#469](https://github.com/IABTechLab/edgezero/pull/469), including the Axum trusted-proxy path (§5.8).
 **Date:** 2026-11-12.
 **Issue:** [#283 Expose JA4 through a standard request interface](https://github.com/IABTechLab/edgezero/issues/283).
 **Baseline:** EdgeZero `origin/main` `e11ea308`, which includes the request ingress metadata from [#403](https://github.com/IABTechLab/edgezero/pull/403).
@@ -51,7 +51,8 @@ Additional constraints from `CLAUDE.md` and the workspace configuration:
 - JA3, and Fastly's proprietary HTTP/2 and original-header fingerprints. These remain reachable through the existing Fastly hook.
 - Lookups against FoxIO's JA4DB or any other fingerprint database.
 - The unhashed and original-order variants (`ja4_r`, `ja4_o`, `ja4_ro`). No provider exposes them.
-- Computing JA4 inside EdgeZero, and accepting JA4 from a trusted proxy header. Both are follow-ups (§13).
+- Computing JA4 inside EdgeZero (§13.3).
+- A trusted-proxy path for Spin (§13.2). Axum's is in scope (§5.8).
 - A dedicated `FromRequest` extractor. `RequestContext::ja4()` is enough, and an extractor can be added later without breaking anything.
 
 ## 3. Background
@@ -87,7 +88,7 @@ Verified against the SDK versions pinned in `Cargo.lock` on the baseline.
 | Fastly (`fastly` 0.13.1) | `fastly::Request::get_tls_ja4() -> Option<&str>`                          | Client requests over TLS. `None` for plain HTTP (including Viceroy's local server) and non-client requests.                                               |
 | Cloudflare (`worker` 0.8.5) | `Request::cf()?.bot_management()?.ja4() -> Option<String>`             | Only on zones with Enterprise Bot Management. `None` otherwise, and in local development and tests, which have no `cf` object. |
 | Spin (`spin-sdk` 7.0.0) | none                                                                       | WASI-HTTP gives the component method, URI, headers and body only. The runtime's `spin-*` headers carry no TLS data.            |
-| Axum (native)          | none                                                                        | The adapter listens on plain TCP and never sees a TLS handshake. #409's design explicitly excludes an incoming TLS implementation. |
+| Axum (native)          | none natively; an operator-configured header from a trusted proxy (§5.8)    | The adapter listens on plain TCP and never sees a TLS handshake. #409's design explicitly excludes an incoming TLS implementation. A TLS-terminating proxy in front of it can compute JA4. |
 
 ## 4. Approaches considered
 
@@ -158,6 +159,9 @@ impl CapturedJa4 {
 pub enum Ja4Source {
     /// Computed by the runtime that terminated the client's TLS connection.
     RuntimeTls,
+    /// Computed by a TLS-terminating proxy and read from an operator-configured
+    /// header, only when the direct peer is a configured trusted proxy (§5.8).
+    TrustedProxyHeader,
 }
 
 /// Why no fingerprint was captured.
@@ -173,7 +177,7 @@ pub enum Ja4Unavailable {
 }
 ```
 
-`Ja4Source` and `Ja4Unavailable` are `#[non_exhaustive]` because the follow-ups in §13 add variants (`TrustedProxyHeader`, `Computed`). `CapturedJa4` is exhaustive: "captured or unavailable" is the whole space.
+`Ja4Source` and `Ja4Unavailable` are `#[non_exhaustive]` so later work can add variants (§5.8 adds `TrustedProxyHeader`; §13.3 would add `Computed`). `CapturedJa4` is exhaustive: "captured or unavailable" is the whole space.
 
 ### 5.2 Validation grammar
 
@@ -265,6 +269,41 @@ A JA4 fingerprint helps identify a client, and the `ingress` module already keep
 - **Ordering in the Fastly adapter.** The ingress snapshot, and therefore JA4, is inserted after the application's raw-request hook values are merged (`dispatch_with_handles` and `into_core_request_with_registries_and_ingress` in `crates/edgezero-adapter-fastly/src/request.rs`). A hook that inserts its own `RequestIngress` is overwritten.
 - **Out of scope for the guarantee.** It does not protect against the application's own code. A caller of `dispatch_with_registries_and_ingress` supplies its own snapshot, and middleware or a pre-dispatch hook can mutate request extensions. This matches the existing `RequestIngress` contract: "Sources and preservation guarantees are caller assertions."
 
+### 5.8 Axum: JA4 from a trusted proxy header
+
+Axum normally runs behind a TLS-terminating proxy. Several proxies can compute JA4 and forward it in a header: FoxIO's [ja4-nginx-module](https://github.com/FoxIO-LLC/ja4-nginx-module), HAProxy's ja4 module, the Apache Traffic Server JA4 plugin and CloudFront (`CloudFront-Viewer-JA4-Fingerprint`). The Axum adapter accepts that header only from a proxy the operator names.
+
+**Core.** `Ja4Source::TrustedProxyHeader` and:
+
+```rust
+impl CapturedJa4 {
+    /// Header values from a peer the adapter already verified as trusted.
+    pub fn from_trusted_proxy_header<'v, I: IntoIterator<Item = &'v HeaderValue>>(values: I) -> Self;
+}
+```
+
+| Header fields                          | `CapturedJa4`                                          |
+| -------------------------------------- | ------------------------------------------------------ |
+| none                                   | `Unavailable(Missing)`                                 |
+| exactly one, valid (§5.2)              | `Captured { fingerprint, source: TrustedProxyHeader }` |
+| exactly one, invalid or non-UTF-8      | `Unavailable(Malformed)`; value dropped                |
+| more than one                          | `Unavailable(Malformed)`; a proxy writes one field, so repetition means something else also wrote it |
+
+**Axum adapter** (`crates/edgezero-adapter-axum/src/ja4.rs`). `TrustedJa4Header { header, trusted_proxies: Vec<IpNet> }`:
+
+- **Peer check.** The direct TCP peer comes from Axum's `ConnectInfo`. IPv4-mapped IPv6 peers are canonicalised first, so a dual-stack listener matches IPv4 networks. A peer inside the allowlist gets `from_trusted_proxy_header(headers.get_all(header))`. An untrusted peer, or a request with no known peer, gets `NotExposed` and the header is ignored.
+- **Configuration.** `EDGEZERO__ADAPTER__JA4_HEADER` (header name) and `EDGEZERO__ADAPTER__JA4_TRUSTED_PROXY_CIDRS` (comma-separated CIDRs or bare IPs), read by `run_app`. Programmatic users call `TrustedJa4Header::parse` or `new` and pass it to `AxumDevServer::with_trusted_ja4_header` or `EdgeZeroAxumService::with_trusted_ja4_header`.
+- **Fail closed.** Startup fails if only one variable is set, the header name is invalid, the list is empty or has an invalid entry, or an entry is a `/0` network, which would trust every client.
+- **Default.** With no configuration, Axum reports `NotExposed` exactly as before.
+- **Wiring.** `EdgeZeroAxumService` inserts the configuration as a request extension. `into_core_request` removes it, reads the peer, and records the result on `RequestIngress`, the same way it handles `HttpTransport`. Calling `into_core_request` on a request without the extension gives `NotExposed`.
+- **Dependency.** `ipnet` 2, already in the lockfile through `reqwest` and also used by #409. Native-only; no WASM impact.
+
+**Relationship to #409.** #409's `TrustedProxyPolicy` (`EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS`) governs forwarding headers such as `Forwarded`. This setting is separate on purpose: trusting a proxy for its JA4 header is a narrower claim than trusting its forwarding headers, and it keeps this change independent of #409's merge. Once #409 lands, `TrustedJa4Header` can take its peer check from `CheckedProxyMetadata` without changing the public `ctx.ja4()` contract.
+
+**Operator requirement.** The trusted proxy must overwrite the header on every request and remove any client-sent copy, including when it has no JA4 (for example, plain HTTP). A proxy that only adds the header, or passes a client's copy through, lets a client forge JA4 even though the peer check passes. The docs show this for nginx.
+
+**What the guarantee covers.** It establishes which hop set the header. It does not make the proxy's JA4 implementation match Fastly's or Cloudflare's; `Ja4Source` records the difference.
+
 ## 6. Adapter requirements
 
 | Adapter    | Location on baseline                                                                         | Change                                                                                                                                                                                     |
@@ -272,7 +311,7 @@ A JA4 fingerprint helps identify a client, and the `ingress` module already keep
 | Fastly     | `capture_request_ingress`, `crates/edgezero-adapter-fastly/src/request.rs:601`               | Append `.with_ja4(CapturedJa4::from_runtime_tls(req.get_tls_ja4()))` to the returned `RequestIngress`. Every Fastly entry point builds ingress through this function or receives a caller snapshot. |
 | Cloudflare | `into_core_request`, `crates/edgezero-adapter-cloudflare/src/request.rs:279` (before `req.bytes()` at `:289`) | `let ja4 = req.cf().and_then(\|cf\| cf.bot_management()).and_then(\|bot\| bot.ja4());` then `RequestIngress::new(…).with_ja4(CapturedJa4::from_runtime_tls(ja4.as_deref()))`.            |
 | Spin       | `capture_request_ingress`, `crates/edgezero-adapter-spin/src/ingress.rs:7`                   | `.with_ja4(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed))`.                                                                                                                         |
-| Axum       | `capture_request_ingress`, `crates/edgezero-adapter-axum/src/request.rs:75`                  | `.with_ja4(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed))`.                                                                                                                         |
+| Axum       | `into_core_request` / `capture_request_ingress`, `crates/edgezero-adapter-axum/src/request.rs` | `NotExposed` by default; with a `TrustedJa4Header`, the trusted-proxy capture from §5.8.                                                                                                  |
 
 - `run_app_with_request_extensions` and `FastlyRequestContext` are unchanged. The hook remains the way to reach other Fastly-only signals such as `get_client_h2_fingerprint()`.
 - No adapter reads a request header for JA4.
@@ -284,16 +323,17 @@ A JA4 fingerprint helps identify a client, and the `ingress` module already keep
 | Fastly     | `Captured { RuntimeTls }`                            | `Unavailable(Missing)`               | `Unavailable(Malformed)`        |
 | Cloudflare | `Captured { RuntimeTls }` with Enterprise Bot Management; otherwise `Unavailable(Missing)` | `Unavailable(Missing)` | `Unavailable(Malformed)`        |
 | Spin       | `Unavailable(NotExposed)`                            | `Unavailable(NotExposed)`            | n/a                             |
-| Axum       | `Unavailable(NotExposed)`                            | `Unavailable(NotExposed)`            | n/a                             |
+| Axum, no proxy configured | `Unavailable(NotExposed)`             | `Unavailable(NotExposed)`            | n/a                             |
+| Axum, trusted proxy configured | From a trusted peer: `Captured { TrustedProxyHeader }`, or `Missing` without the header. From any other peer: `Unavailable(NotExposed)` | same | `Unavailable(Malformed)` |
 | Custom adapter or hand-built request | `None`                     | `None`                               | n/a                             |
 
 Fastly's `q` (QUIC/HTTP/3) fingerprints are accepted as-is. Whether Fastly reports JA4 for HTTP/3 connections is unverified (§14).
 
-## 8. Why Spin and Axum report `NotExposed`
+## 8. Why Spin, and Axum by default, report `NotExposed`
 
 - **Spin.** The component receives requests through WASI-HTTP: method, URI, headers and body. The runtime adds `spin-*` headers (`spin-client-addr`, `spin-full-url`, …; see `crates/edgezero-adapter-spin/src/request.rs:58`), none of which carry TLS data. On hosted Spin and SpinKube, TLS ends at the platform ingress. Even when `spin up` terminates TLS itself, the ClientHello is never passed to the component.
 - **Axum.** The adapter serves plain HTTP behind a TLS-terminating proxy, which is the deployment model #409 is built on. It never sees a ClientHello.
-- **Why not read a header.** A header such as `cloudfront-viewer-ja4-fingerprint` reaches these adapters, but without a check on which hop set it, any client could forge it. That breaks R5. The trusted-proxy path in §13.1 makes such a header usable once #409 or #439 provides that check.
+- **Why not read a header.** A header such as `cloudfront-viewer-ja4-fingerprint` reaches these adapters, but without a check on which hop set it, any client could forge it. That breaks R5. §5.8 adds that check for Axum; Spin has no trust configuration yet (§13.2).
 
 ## 9. Edge cases
 
@@ -316,7 +356,7 @@ Fastly's `q` (QUIC/HTTP/3) fingerprints are accepted as-is. Whether Fastly repor
 | Fastly                  | Viceroy (`wasm32-wasip1`)                | • `capture_request_ingress(&FastlyRequest::new(…))` gives `Some(Unavailable(Missing))`.<br>• Through `dispatch_with_registries`, a raw-request hook that inserts a `RequestIngress` with a fake captured JA4 does not change what the handler sees (modelled on the existing hook-override test at `crates/edgezero-adapter-fastly/src/request.rs:1153`).<br>• A client `ja4` header does not produce `Captured`.                                                 |
 | Cloudflare              | `wasm-bindgen-test` in the browser       | `into_core_request` on a `web_sys::Request` (no `cf`) gives `Some(Unavailable(Missing))`, including when the request carries a `ja4` header.                                                                                                                                                                                                                    |
 | Spin                    | native colocated test in `ingress.rs`, plus wasmtime contract test | `capture_request_ingress` gives `Some(Unavailable(NotExposed))`. It takes only the URI, so headers cannot influence it; the wasmtime contract test confirms the same through `into_core_request` with a `ja4` header present.                                                                 |
-| Axum                    | native colocated test in `request.rs`    | `into_core_request` gives `Some(Unavailable(NotExposed))`, including when the request carries `ja4` and `cloudfront-viewer-ja4-fingerprint` headers.                                                                                                                                                                                                         |
+| Axum                    | native colocated tests in `request.rs`, `ja4.rs`, `dev_server.rs` | • `into_core_request` gives `Some(Unavailable(NotExposed))` without configuration, including when the request carries `ja4` and `cloudfront-viewer-ja4-fingerprint` headers.<br>• Trusted IPv4, bare-IP, IPv4-mapped IPv6 and IPv6 peers capture; untrusted and unknown peers give `NotExposed`; a trusted peer without the header gives `Missing`, and with an invalid or repeated header gives `Malformed`.<br>• Configuration rejects empty, invalid and `/0` lists and invalid header names; the environment requires both variables.<br>• Over real TCP through the dev server, a loopback client is captured under `127.0.0.0/8` and `NotExposed` under `192.0.2.0/24`. |
 
 **Manual verification.** This can't run in CI because it needs live provider accounts. Record the results in the pull request.
 
@@ -342,7 +382,8 @@ All five CI gates in `CLAUDE.md` must pass, plus the docs Prettier and ESLint ch
 | `docs/guide/adapters/overview.md`   | New section "Client TLS fingerprint (JA4)" after "Inbound request fidelity": the `ctx.ja4()` example, the capability matrix from §7, the trust model from §5.7 and the FoxIO attribution ("JA4 is a TLS client fingerprinting method by FoxIO, licensed under BSD-3-Clause. JA4+ is a trademark of FoxIO. Other JA4+ methods are not provided."). |
 | `docs/guide/adapters/fastly.md`     | In "Capturing raw-request signals (JA4, H2 fingerprint)", replace the `Ja4(String)` example with a pointer to `ctx.ja4()`, and rename the section to cover the HTTP/2 fingerprint and other raw-request signals.              |
 | `docs/guide/adapters/cloudflare.md` | Note that JA4 needs Enterprise Bot Management and is `Missing` otherwise.                                                                                                                                                      |
-| `docs/guide/adapters/spin.md`, `axum.md` | One line: JA4 is `NotExposed`, with a link to the overview section.                                                                                                                                                       |
+| `docs/guide/adapters/spin.md`       | One line: JA4 is `NotExposed`, with a link to the overview section.                                                                                                                                                       |
+| `docs/guide/adapters/axum.md`       | The trusted-proxy configuration from §5.8, with an nginx (FoxIO module) example and the trust warning.                                                                                                                  |
 
 ## 12. Compatibility
 
@@ -357,12 +398,7 @@ Each needs its own spec or plan, and none blocks this change.
 
 ### 13.1 Axum: JA4 from a trusted proxy
 
-- **Prerequisite.** #409's `TrustedProxyPolicy` / `CheckedProxyMetadata`, or #439's protected-CloudFront check, is on `main`.
-- **Contract.**
-  - When the direct peer passes that check, read one operator-configured header containing exactly one field. Example sources: CloudFront `CloudFront-Viewer-JA4-Fingerprint`, FoxIO's nginx module, the Apache Traffic Server JA4 plugin and HAProxy's ja4 module.
-  - Validate the value with `Ja4Fingerprint::parse` and record it as a new `Ja4Source::TrustedProxyHeader`.
-  - In every other case, keep `NotExposed`. A header from an unchecked peer is never captured.
-- **Open question.** Should "header present but peer not trusted" get its own `Ja4Unavailable` variant?
+Implemented in §5.8. Remaining: reuse #409's peer check once it merges, and decide whether "header present but peer not trusted" deserves its own `Ja4Unavailable` variant (today it is `NotExposed`).
 
 ### 13.2 Spin: trusted proxy or upstream runtime support
 
@@ -396,6 +432,10 @@ Each needs its own spec or plan, and none blocks this change.
 | Redacted `Debug`, no `Display` or `Serialize`    | A fingerprint is a quasi-identifier; follows the `ingress` module's existing redaction.                     |
 | Names follow `ingress.rs`                        | `CapturedTarget` → `CapturedJa4`; `TargetUnavailable::NotExposed` → `Ja4Unavailable::NotExposed`; `OriginSource::RuntimeUri` → `Ja4Source::RuntimeTls`. |
 | JA4 only; no JA4+                                | FoxIO License 1.1 restricts commercial use of the other methods.                                            |
+| Axum trusts a proxy header only by CIDR allowlist | The adapter cannot see TLS; only the peer address proves which hop wrote the header (R5).                  |
+| Separate `JA4_TRUSTED_PROXY_CIDRS` setting       | Narrower than #409's forwarding-header trust and independent of its merge; can converge later.            |
+| Repeated JA4 header field is `Malformed`         | A proxy writes one field; a second means another hop or the client also wrote it.                          |
+| Reject `/0` networks                             | Trusting every peer would let any client forge JA4.                                                        |
 | No extractor                                     | YAGNI; `ctx.ja4()` meets R1, and an extractor can be added later.                                            |
 
 ## 16. References

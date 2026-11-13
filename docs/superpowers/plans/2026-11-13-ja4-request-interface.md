@@ -49,6 +49,14 @@ Files: `crates/edgezero-core/src/ingress.rs`, `crates/edgezero-core/src/context.
 - [x] `cloudflare.md`: Enterprise Bot Management note.
 - [x] `spin.md`, `axum.md`: one-line `NotExposed` note.
 
+### Task 6 — Axum JA4 from a trusted proxy (spec §5.8)
+
+- [x] Core: `Ja4Source::TrustedProxyHeader`, `CapturedJa4::from_trusted_proxy_header` (none → `Missing`, one valid → `Captured`, invalid / non-UTF-8 / repeated → `Malformed`); `from_runtime_tls` shares the validation helper.
+- [x] Axum `ja4.rs`: `TrustedJa4Header` (header + CIDR allowlist via `ipnet`), `parse` / `new` / `from_env`, fail-closed config, canonicalised peer check.
+- [x] Wiring: `EdgeZeroAxumService::with_trusted_ja4_header` inserts it as a request extension; `into_core_request` reads it with the `ConnectInfo` peer; `AxumDevServer::with_trusted_ja4_header`; `run_app` reads the env vars.
+- [x] Tests: core mapping; peer matrix (IPv4, bare IP, mapped IPv6, IPv6, untrusted, unknown); `Missing` / `Malformed`; config rejection; env pairing; real-TCP dev-server test (trusted vs untrusted loopback).
+- [x] Docs: `axum.md` "JA4 from a trusted proxy" with nginx example and overwrite warning; overview matrix and trust model.
+
 ### Task 5 — Verification
 
 - [x] `cargo fmt --all -- --check`

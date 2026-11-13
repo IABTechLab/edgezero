@@ -247,13 +247,13 @@ match ctx.ja4() {
 Pre-dispatch hooks receive the `Request` and read the same value with
 `request.extensions().get::<RequestIngress>().and_then(RequestIngress::ja4)`.
 
-| Adapter                              | HTTPS client request                                                                       | Plain HTTP, local development, tests | Provider value fails validation |
-| ------------------------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------ | ------------------------------- |
-| Fastly                               | `Captured { RuntimeTls }`                                                                  | `Unavailable(Missing)`               | `Unavailable(Malformed)`        |
-| Cloudflare                           | `Captured { RuntimeTls }` with Enterprise Bot Management; otherwise `Unavailable(Missing)` | `Unavailable(Missing)`               | `Unavailable(Malformed)`        |
-| Spin                                 | `Unavailable(NotExposed)`                                                                  | `Unavailable(NotExposed)`            | n/a                             |
-| Axum                                 | `Unavailable(NotExposed)`                                                                  | `Unavailable(NotExposed)`            | n/a                             |
-| Custom adapter or hand-built request | `None`                                                                                     | `None`                               | n/a                             |
+| Adapter                              | HTTPS client request                                                                                                  | Plain HTTP, local development, tests | Provider value fails validation |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ------------------------------- |
+| Fastly                               | `Captured { RuntimeTls }`                                                                                             | `Unavailable(Missing)`               | `Unavailable(Malformed)`        |
+| Cloudflare                           | `Captured { RuntimeTls }` with Enterprise Bot Management; otherwise `Unavailable(Missing)`                            | `Unavailable(Missing)`               | `Unavailable(Malformed)`        |
+| Spin                                 | `Unavailable(NotExposed)`                                                                                             | `Unavailable(NotExposed)`            | n/a                             |
+| Axum                                 | `Unavailable(NotExposed)`; with a [trusted proxy](./axum#ja4-from-a-trusted-proxy), `Captured { TrustedProxyHeader }` | `Unavailable(NotExposed)`            | `Unavailable(Malformed)`        |
+| Custom adapter or hand-built request | `None`                                                                                                                | `None`                               | n/a                             |
 
 `Ja4Fingerprint::parse` accepts only the 36-character `a_b_c` shape, with
 lowercase hex in the hash sections. A provider value that fails validation is
@@ -261,7 +261,8 @@ dropped and reported as `Malformed`. `Ja4Fingerprint`'s `Debug` output is
 redacted, and it has no `Display` or `Serialize`; a fingerprint is a
 quasi-identifier, so do not log it casually.
 
-Trust model: `Captured` values come only from the provider SDK accessor.
+Trust model: `Captured` values come only from the provider SDK accessor, or
+on Axum from a header sent by a proxy peer the operator explicitly trusts.
 The ingress snapshot is inserted after Fastly raw-request hook values are
 merged, so a hook cannot replace it. Application middleware and pre-dispatch
 hooks can still mutate request extensions; values are provider-computed and

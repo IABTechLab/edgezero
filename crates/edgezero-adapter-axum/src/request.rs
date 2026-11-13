@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::body::{Body as AxumBody, to_bytes};
 use axum::extract::connect_info::ConnectInfo;
@@ -15,6 +16,7 @@ use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
 use edgezero_core::proxy::ProxyHandle;
 
 use crate::context::AxumRequestContext;
+use crate::ja4::TrustedJa4Header;
 use crate::proxy::AxumProxyClient;
 
 /// Marks the plain HTTP listener owned by this adapter.
@@ -30,7 +32,15 @@ pub(crate) struct HttpTransport;
 pub async fn into_core_request(request: Request<AxumBody>) -> Result<CoreRequest, String> {
     let (mut parts, axum_body) = request.into_parts();
     let transport = parts.extensions.remove::<HttpTransport>();
-    let ingress = capture_request_ingress(&parts.uri, &parts.headers, transport);
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| *addr);
+    let ja4 = parts.extensions.remove::<Arc<TrustedJa4Header>>().map_or(
+        CapturedJa4::Unavailable(Ja4Unavailable::NotExposed),
+        |trusted| trusted.capture(peer, &parts.headers),
+    );
+    let ingress = capture_request_ingress(&parts.uri, &parts.headers, transport, ja4);
 
     let body = match parts.headers.get(CONTENT_TYPE) {
         Some(value) if is_json_content_type(value) => {
@@ -48,11 +58,7 @@ pub async fn into_core_request(request: Request<AxumBody>) -> Result<CoreRequest
     let mut core_request = CoreRequest::from_parts(parts, body);
     core_request.extensions_mut().insert(ingress);
 
-    if let Some(remote_addr) = core_request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| *addr)
-    {
+    if let Some(remote_addr) = peer {
         core_request
             .extensions_mut()
             .remove::<ConnectInfo<SocketAddr>>();
@@ -77,6 +83,7 @@ fn capture_request_ingress(
     uri: &Uri,
     headers: &HeaderMap,
     transport: Option<HttpTransport>,
+    ja4: CapturedJa4,
 ) -> RequestIngress {
     let source = if uri.scheme().is_some() {
         TargetSource::RuntimeUrl
@@ -85,8 +92,7 @@ fn capture_request_ingress(
     };
     let target = CapturedTarget::capture(&uri.to_string(), source, Preservation::Unknown);
     let common = HeaderFidelity::RUNTIME_HEADER_MAP;
-    RequestIngress::new(target, inbound_origin(uri, headers, transport), common)
-        .with_ja4(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed))
+    RequestIngress::new(target, inbound_origin(uri, headers, transport), common).with_ja4(ja4)
 }
 
 fn inbound_origin(

@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use axum::body::Body as AxumBody;
@@ -16,6 +17,7 @@ use edgezero_core::store_registry::{
 use tokio::{runtime::Handle, task};
 use tower::Service;
 
+use crate::ja4::TrustedJa4Header;
 use crate::request::into_core_request;
 use crate::response::into_axum_response;
 
@@ -29,6 +31,7 @@ pub struct EdgeZeroAxumService {
     router: RouterService,
     secret_handle: Option<SecretHandle>,
     secret_registry: Option<SecretRegistry>,
+    trusted_ja4_header: Option<Arc<TrustedJa4Header>>,
 }
 
 impl EdgeZeroAxumService {
@@ -43,6 +46,7 @@ impl EdgeZeroAxumService {
             router,
             secret_handle: None,
             secret_registry: None,
+            trusted_ja4_header: None,
         }
     }
 
@@ -121,6 +125,16 @@ impl EdgeZeroAxumService {
         self.secret_registry = Some(registry);
         self
     }
+
+    /// Read the client's JA4 from a trusted TLS-terminating proxy's header.
+    ///
+    /// Without this, `ctx.ja4()` reports `NotExposed` on Axum.
+    #[must_use]
+    #[inline]
+    pub fn with_trusted_ja4_header(mut self, config: TrustedJa4Header) -> Self {
+        self.trusted_ja4_header = Some(Arc::new(config));
+        self
+    }
 }
 
 impl Service<Request<AxumBody>> for EdgeZeroAxumService {
@@ -129,7 +143,10 @@ impl Service<Request<AxumBody>> for EdgeZeroAxumService {
     type Response = Response<AxumBody>;
 
     #[inline]
-    fn call(&mut self, req: Request<AxumBody>) -> Self::Future {
+    fn call(&mut self, mut req: Request<AxumBody>) -> Self::Future {
+        if let Some(config) = &self.trusted_ja4_header {
+            req.extensions_mut().insert(Arc::clone(config));
+        }
         let router = self.router.clone();
         // Hard-cutoff: legacy bare `KvHandle` /
         // `ConfigStoreHandle` / `SecretHandle` entries are NO
