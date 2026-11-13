@@ -105,7 +105,7 @@ impl OutboundPending {
     #[inline]
     pub fn collect(mut self) -> OutboundFuture<OutboundResponse> {
         Box::pin(async move {
-            poll_fn(|context| self.observe(context, PendingState::drive)).await;
+            poll_fn(|context| self.poll_ready(context)).await;
             match &mut self.state {
                 PendingStorage::Owned(state) => state.disarm_success(),
                 PendingStorage::Scoped(state) => {
@@ -178,6 +178,16 @@ impl OutboundPending {
                 Poll::Ready(())
             }
         }
+    }
+    /// Polls readiness with the caller's waker, retaining the original result for
+    /// `collect`. Success and failure are both ready; repeated polls reuse the cache.
+    ///
+    /// Unlike `is_ready`, this may drive provider progress. Callers stop polling
+    /// when their observation cutoff wins. Dropping a borrowed readiness wait
+    /// does not cancel this handle; dropping or cancelling the handle still does.
+    #[inline]
+    pub fn poll_ready(&mut self, context: &mut Context<'_>) -> Poll<()> {
+        self.observe(context, PendingState::drive)
     }
 }
 
@@ -271,7 +281,7 @@ mod tests {
     use bytes::Bytes;
     use futures::channel::oneshot;
     use futures::executor::block_on;
-    use futures_util::future::pending;
+    use futures_util::future::{pending, poll_fn};
     use futures_util::stream;
     use futures_util::task::{ArcWake, waker_ref};
 
@@ -681,6 +691,54 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_readiness_wait_registers_real_waker_and_keeps_original_result() {
+        let (sender, mut receiver) = oneshot::channel();
+        let calls = Rc::new(Cell::new(0));
+        let polls = Rc::new(Cell::new(0_usize));
+        let observed = Rc::clone(&polls);
+        let completion = poll_fn(move |cx| {
+            observed.set(observed.get().saturating_add(1));
+            Pin::new(&mut receiver)
+                .poll(cx)
+                .map(|result| result.map_err(EdgeError::internal))
+        });
+        let mut pending = OutboundPending::new(Box::pin(completion), owner(&calls));
+        let count = Arc::new(WakeCount::default());
+        let waker = waker_ref(&count);
+        let mut context = Context::from_waker(&waker);
+        let mut borrowed = Box::pin(poll_fn(|cx| pending.poll_ready(cx)));
+        assert!(borrowed.as_mut().poll(&mut context).is_pending());
+        drop(borrowed);
+        assert_eq!(
+            calls.get(),
+            0,
+            "dropping only the borrow must not cancel work"
+        );
+        sender
+            .send(response(Body::from("retained")))
+            .expect("receiver alive");
+        assert!(
+            count.0.load(Ordering::SeqCst) > 0,
+            "the original real waker is registered"
+        );
+        assert!(pending.poll_ready(&mut context).is_ready());
+        let completed_polls = polls.get();
+        for _ in 0..3_u8 {
+            assert!(pending.poll_ready(&mut context).is_ready());
+            assert!(pending.is_ready());
+        }
+        assert_eq!(polls.get(), completed_polls);
+        let result = block_on(pending.collect()).expect("same cached response");
+        assert_eq!(result.body().as_bytes(), Some(b"retained".as_slice()));
+        assert_eq!(polls.get(), completed_polls);
+        assert_eq!(
+            calls.get(),
+            0,
+            "successful collection retains existing disarm semantics"
+        );
+    }
+
+    #[test]
     fn pending_collection_registers_real_waker_after_readiness_probe() {
         let (sender, receiver) = oneshot::channel();
         let calls = Rc::new(Cell::new(0));
@@ -729,10 +787,20 @@ mod tests {
         .bind(&scope, time, entered_at)
         .expect("scope registration");
         assert!(retained.is_ready());
+        assert!(
+            retained
+                .poll_ready(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
         assert_eq!(body_drops.get(), 0);
         callback.close();
         assert_eq!(body_drops.get(), 1);
         assert_eq!(cancelled.get(), 1);
+        assert!(
+            retained
+                .poll_ready(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
         let error = block_on(retained.collect()).expect_err("closed scope is not success");
         assert!(matches!(error, EdgeError::Internal { .. }));
         assert_eq!(body_drops.get(), 1);
@@ -760,12 +828,18 @@ mod tests {
             Poll::Ready(chunk.take().map(Ok))
         }));
         let cancel_body = Rc::clone(&aborted);
-        let pending = OutboundPending::new(
+        let mut pending = OutboundPending::new(
             Box::pin(async move { Ok(response(body)) }),
             OutboundExchangeOwner::new(move || cancel_body.set(true)),
         )
         .bind(&scope, time, entered_at)
         .expect("scope registration");
+        assert!(
+            pending
+                .poll_ready(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        );
+        assert!(pending.is_ready());
         let collected = block_on(pending.collect()).expect("stream handoff");
         callback.close();
         assert!(!aborted.get());
