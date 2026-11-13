@@ -59,7 +59,7 @@ test("CLI-only compilation is isolated from adapter feature unification", () => 
 test(yamlContractName, () => {
   assert.deepEqual(tests.on, {
     push: { branches: ["main"] },
-    pull_request: { branches: ["main"] },
+    pull_request: null,
   });
   assert.equal(host.strategy["fail-fast"], false);
   const checkout = host.steps.find(
