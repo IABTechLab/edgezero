@@ -1,0 +1,15 @@
+[
+  {"probe":"case-0","case":"normal"}, {"probe":"recovery-0","case":"normal"},
+  {"probe":"case-1","case":"head"}, {"probe":"recovery-1","case":"normal"},
+  {"probe":"case-2","case":"204"}, {"probe":"recovery-2","case":"normal"},
+  {"probe":"case-3","case":"205"}, {"probe":"recovery-3","case":"normal"},
+  {"probe":"case-4","case":"304"}, {"probe":"recovery-4","case":"normal"},
+  {"probe":"case-5","case":"slow"}, {"probe":"recovery-5","case":"normal"},
+  {"probe":"case-6","case":"nonread"}, {"probe":"recovery-6","case":"normal"},
+  {"probe":"case-7","case":"disconnect"}, {"probe":"recovery-7","case":"normal"},
+  {"probe":"case-8","case":"cancel"}, {"probe":"recovery-8","case":"normal"},
+  {"probe":"case-9","case":"pending"}, {"probe":"recovery-9","case":"normal"},
+  {"probe":"case-10","case":"expired"}, {"probe":"recovery-10","case":"normal"},
+  {"probe":"case-11","case":"source-error"}, {"probe":"recovery-11","case":"normal"},
+  {"probe":"case-12","case":"conversion-error"}, {"probe":"recovery-12","case":"normal"}
+]

@@ -1,6 +1,6 @@
 //! Adapter helpers for Cloudflare Workers.
 
-#[cfg(feature = "cli")]
+#[cfg(all(feature = "cli", not(target_arch = "wasm32")))]
 pub mod cli;
 
 // `config_store` compiles on host for its `InMemory` test backend; the
@@ -11,29 +11,76 @@ pub mod config_store;
 pub mod context;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 pub mod key_value_store;
-#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
-pub mod proxy;
+#[cfg(any(
+    test,
+    feature = "test-utils",
+    all(feature = "cloudflare", target_arch = "wasm32")
+))]
+pub mod outbound;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 pub mod request;
-#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
-pub mod response;
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
-mod response_headers;
+pub mod response;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 pub mod secret_store;
+#[cfg(test)]
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+mod test_runtime;
 
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
-use edgezero_core::app::{App, Hooks, StoresMetadata};
+use edgezero_core::OutboundScopeOwner;
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+use edgezero_core::app::StoresMetadata;
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+use edgezero_core::app::{App, Hooks};
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+use edgezero_core::context::RuntimeVariables;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 use edgezero_core::env_config::EnvConfig;
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+use edgezero_core::error::EdgeError;
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+use edgezero_core::manifest::BakedManifest;
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+use edgezero_core::manifest::ResolvedEnvironmentBinding;
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+use edgezero_core::time::MonotonicClock;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 use worker::{Context, Env, Error as WorkerError, Request, Response};
 
+/// Cloudflare Workers' published per-isolate memory limit.
+pub const CLOUDFLARE_PLATFORM: edgezero_core::PlatformMetadata =
+    edgezero_core::PlatformMetadata::new(
+        edgezero_core::PlatformFact::known(
+            edgezero_core::MemoryCeiling::new(
+                128_000_000,
+                edgezero_core::MemoryCeilingScope::PerInstance,
+                None,
+            ),
+            edgezero_core::PlatformResourceSource::PlatformLimit {
+                provider: "Cloudflare Workers",
+            },
+        ),
+        edgezero_core::PlatformFact::unknown(
+            edgezero_core::PlatformUnknownReason::ProviderUnpublished,
+        ),
+        edgezero_core::PlatformFact::unknown(
+            edgezero_core::PlatformUnknownReason::ProviderUnpublished,
+        ),
+    );
+
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+fn build_target_app<A>() -> Result<App, EdgeError>
+where
+    A: Hooks,
+{
+    App::build::<A>(CLOUDFLARE_PLATFORM)
+}
+
 /// # Errors
-/// Never; this is currently a no-op on Cloudflare Workers (Workers manages
-/// its own logging). The signature still returns [`log::SetLoggerError`] so
-/// callers and the non-wasm stub stay drop-in compatible if a real logger
-/// is wired in later.
+/// Never; this is a no-op. Workers console logging does not install a Rust
+/// `log` backend. Applications needing facade output must install a backend
+/// and its filters before [`run_app`] and set `Hooks::owns_logging()` to `true`.
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 #[inline]
 pub fn init_logger() -> Result<(), log::SetLoggerError> {
@@ -86,6 +133,18 @@ fn env_config_from_worker(env: &Env, stores: StoresMetadata) -> EnvConfig {
     EnvConfig::from_vars(vars)
 }
 
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+fn collect_worker_variables(
+    bindings: &[ResolvedEnvironmentBinding],
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) -> RuntimeVariables {
+    RuntimeVariables::from_vars(bindings.iter().filter_map(|binding| {
+        lookup(&binding.env)
+            .or_else(|| binding.value.clone())
+            .map(|value| (binding.name.clone(), value))
+    }))
+}
+
 /// Entry point for a Cloudflare Workers application.
 ///
 /// Portable store config is baked into `A` by the `app!` macro; adapter-specific
@@ -93,35 +152,43 @@ fn env_config_from_worker(env: &Env, stores: StoresMetadata) -> EnvConfig {
 /// variables on the worker `Env`. No `edgezero.toml` is required.
 ///
 /// # Errors
-/// Returns [`worker::Error`] if the inner dispatch fails or any required
-/// store binding cannot be opened.
+/// Returns a category-safe [`worker::Error`] for request conversion, admission abort or failed
+/// delivery. Assembly failures use their typed HTTP status and the default error response.
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 #[inline]
 pub async fn run_app<A>(req: Request, env: Env, ctx: Context) -> Result<Response, WorkerError>
 where
     A: Hooks,
 {
-    // Best-effort: if a logger is already installed, ignore the error rather
-    // than panicking — every Worker request re-enters this function. Skipped
-    // entirely when the app owns logging.
-    if !A::owns_logging() {
-        drop(init_logger());
-    }
-    let app = A::build_app();
-    dispatch_app::<A>(&app, req, env, ctx).await
+    let callback = OutboundScopeOwner::callback();
+    callback
+        .run(async move {
+            if !A::owns_logging() {
+                drop(init_logger());
+            }
+            let clock = MonotonicClock::default();
+            let request_start = clock.now();
+            let app = match build_target_app::<A>() {
+                Ok(app) => app,
+                Err(error) => {
+                    drop(env);
+                    return request::send_assembly_error(req, error, ctx, request_start, clock);
+                }
+            };
+            dispatch_scoped_app::<A>(&app, req, env, ctx).await
+        })
+        .await
 }
 
-#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
-/// Dispatch a caller-owned app using `A::stores()` for fresh request bindings.
+/// Dispatch a caller-owned app through canonical admission and response egress.
 ///
-/// This does not build or cache an app or install logging. The caller must pass
-/// an app built from `A`; `App` erases its construction type, so this pairing
-/// remains a caller precondition. Retain only application-owned values and keep
-/// native handles and pending work request-local. Shared state must support
-/// overlapping invocations.
+/// The app must be built from `A` with [`CLOUDFLARE_PLATFORM`]. This function does not
+/// initialize logging or retain an app. Bindings and runtime variables are resolved
+/// for every request; only application-owned, concurrency-safe state may be retained.
 ///
 /// # Errors
-/// Returns conversion or dispatch errors from the existing adapter boundary.
+/// Returns category-safe configuration, admission-abort, or adapter delivery errors.
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 #[inline]
 pub async fn dispatch_app<A>(
     app: &App,
@@ -132,8 +199,35 @@ pub async fn dispatch_app<A>(
 where
     A: Hooks,
 {
+    request::with_callback_scope(dispatch_scoped_app::<A>(app, req, env, ctx)).await
+}
+
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+async fn dispatch_scoped_app<A>(
+    app: &App,
+    req: Request,
+    env: Env,
+    ctx: Context,
+) -> Result<Response, WorkerError>
+where
+    A: Hooks,
+{
     let stores = A::stores();
     let env_config = env_config_from_worker(&env, stores);
+    let runtime_variables = match A::manifest() {
+        BakedManifest::Absent => RuntimeVariables::default(),
+        BakedManifest::Present(manifest) => {
+            let resolved = manifest.environment_for("cloudflare");
+            collect_worker_variables(&resolved.variables, |key| {
+                env.var(key).ok().map(|value| value.to_string())
+            })
+        }
+        BakedManifest::Malformed(_) | _ => {
+            return Err(WorkerError::RustError(
+                "application manifest is invalid".to_owned(),
+            ));
+        }
+    };
     request::dispatch_with_registries(
         app,
         req,
@@ -144,7 +238,95 @@ where
             kv_meta: stores.kv,
             secret_meta: stores.secrets,
             env_config: &env_config,
+            runtime_variables,
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use edgezero_core::app::{App, Hooks};
+    use edgezero_core::error::EdgeError;
+    use edgezero_core::manifest::ResolvedEnvironmentBinding;
+    use edgezero_core::router::RouterService;
+
+    struct PlatformAwareConfiguration;
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "test hook exercises only target metadata propagation"
+    )]
+    impl Hooks for PlatformAwareConfiguration {
+        fn configure(app: &mut App) -> Result<(), EdgeError> {
+            if app.platform() == crate::CLOUDFLARE_PLATFORM {
+                Ok(())
+            } else {
+                Err(EdgeError::service_unavailable("wrong application platform"))
+            }
+        }
+
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
+        }
+    }
+
+    #[test]
+    fn application_configuration_receives_cloudflare_platform_metadata() {
+        let app = super::build_target_app::<PlatformAwareConfiguration>()
+            .expect("configured application");
+
+        assert_eq!(app.platform(), crate::CLOUDFLARE_PLATFORM);
+    }
+
+    #[test]
+    fn application_route_failure_preserves_target_error() {
+        struct RouteFailure;
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "tests typed route failure at target assembly"
+        )]
+        impl Hooks for RouteFailure {
+            fn configure(_app: &mut App) -> Result<(), EdgeError> {
+                Err(EdgeError::bad_request("configuration must not run"))
+            }
+            fn routes() -> Result<RouterService, EdgeError> {
+                Err(EdgeError::service_unavailable("route state unavailable"))
+            }
+        }
+        let Err(error) = super::build_target_app::<RouteFailure>() else {
+            panic!("route failure must prevent target application assembly");
+        };
+        assert_eq!(error.status().as_u16(), 503);
+        assert_eq!(error.message(), "route state unavailable");
+    }
+
+    #[test]
+    fn declared_worker_variables_prefer_binding_then_manifest_default() {
+        let bindings = [
+            ResolvedEnvironmentBinding {
+                description: None,
+                env: "UPSTREAM_ORIGIN".to_owned(),
+                name: "API_BASE_URL".to_owned(),
+                value: Some("https://default.example".to_owned()),
+            },
+            ResolvedEnvironmentBinding {
+                description: None,
+                env: "OPTIONAL_BINDING".to_owned(),
+                name: "OPTIONAL".to_owned(),
+                value: None,
+            },
+        ];
+        let runtime = super::collect_worker_variables(&bindings, |key| {
+            (key == "UPSTREAM_ORIGIN").then(|| "https://worker.example".to_owned())
+        });
+        assert_eq!(runtime.get("API_BASE_URL"), Some("https://worker.example"));
+        assert_eq!(runtime.get("OPTIONAL"), None);
+
+        let defaulted = super::collect_worker_variables(&bindings, |_| None);
+        assert_eq!(
+            defaulted.get("API_BASE_URL"),
+            Some("https://default.example")
+        );
+    }
 }

@@ -1,0 +1,515 @@
+{
+  "schema": 1,
+  "recorded_date": "2026-10-19",
+  "base_revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+  "source_state": "uncommitted-working-tree-characterization",
+  "qualification": false,
+  "scope": "outbound original/206 coding only; JSON report, not downstream encoded relay",
+  "source_sha256": {
+    "Cargo.toml": "ee73d1318af74a997ecc12bac0f80cd7eefbe8ead34a35b1432c8d6f49fc42e1",
+    "Cargo.lock": "1afb33fe3067419ad5a2a948b330ac1df123d53214e49dc4005a92f7bc69e043",
+    "crates/edgezero-core/src/outbound.rs": "a2ae10cc7ac9c4221cb775ccd689f398527e08b95a7969f551edc219302f788b",
+    "crates/edgezero-core/src/outbound/exchange.rs": "f8ca9867b572b2e40e0c08ae55fefefaefbf82355c83aa8b28f74870d6e2a879",
+    "crates/edgezero-core/src/lib.rs": "bb75c80ecb47152603d75dd3c7c0e51aed9229b082ea983a222c445ef6f44101",
+    "crates/edgezero-core/src/compression.rs": "4acccc0c01009894ebe4f77f57ce8ce501d3f3f2ccb565c6b3d3871d826037d4",
+    "crates/edgezero-core/src/body.rs": "50a8bc65fcbc7df3d9afd3ddc520889f42da46af1c6419e23c19625c33d5bf9e",
+    "crates/edgezero-core/src/time.rs": "bcd7047587f656b6547c860986f0c8f6459a5554850cbac4c1bfd9c480ec7435",
+    "crates/edgezero-adapter-fastly/src/outbound.rs": "5e12fe9409efd446fdc1fdcc770a10bce7a55b79e5630c2bc7797d50dcaf058a",
+    "crates/edgezero-adapter-spin/src/outbound.rs": "3fcfbaed6a51e161023616bf9ef3b1aa60eb6b8830d0386ce2924df43cb44194",
+    "crates/edgezero-adapter-spin/src/response.rs": "03e8b98de3e4854810b4bdabba7783d3a66cacb5e91402e941609d7dfe567075",
+    "tests/fixtures/reusable-app/Cargo.toml": "7665200757e4e565d11fa7eb036215aa583d21fd543bca39fdbdce470fee11ae",
+    "tests/fixtures/reusable-app/Cargo.lock": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee",
+    "tests/fixtures/reusable-app/crates/fixture-core/src/qualification/progress.rs": "a2e03f9201cbc97150b9453e281f20be41fdbb06d9a0451864d875f7d226bce2",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/progress.rs": "b806602abe3aa03a66c68b120906c97436325344ad9512159daf1d1bfa2b5a95",
+    "tests/fixtures/reusable-app/crates/fixture-harness/src/net.rs": "b4b57e2dc0ef627078f5e8d7677b4487c4e0a8101a6993f1eaf201226c6d2d92",
+    "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_progress.rs": "0b4a81e3678459801b9f5a9379de70160452317929936d1b6c85393c1249c704",
+    "tests/fixtures/reusable-app/crates/fixture-spin/src/progress.rs": "58fec2e1968f40d38a40a8e38642d27be22d4bf520bb29fd8d58fffa688f2414"
+  },
+  "limitations": [
+    "not an authoritative frozen candidate",
+    "hosted execution pending",
+    "Cloudflare runtime blocked on exact build tool",
+    "Fastly mixed-choice batch host proof pending",
+    "Fastly readiness gate remains failed"
+  ],
+  "runs": [
+    {
+      "adapter": "fastly",
+      "command": "cargo run --locked --offline --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -- --adapter fastly --suite outbound-progress --output /private/tmp/edgezero-coding-fastly-final",
+      "exit_code": 0,
+      "runtime": {
+        "adapter": "fastly",
+        "event": "progress-runtime",
+        "executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "source_state": "working-tree-characterization",
+        "version": "viceroy 0.21.0"
+      },
+      "artifact": {
+        "bytes": 2123914,
+        "fnv1a64": "4a5b4a54734e4303",
+        "path": "/private/tmp/edgezero-coding-fastly-final/progress-fastly/artifacts/fixture-fastly-outbound-progress.wasm",
+        "purpose": "non-security build identity",
+        "sha256": "03ef67a8004a55ae5e989b6587e0c81497cf749eef5648075f7a1b37bea6cfa4"
+      },
+      "raw_events_sha256": "0c84e5fc2f2900c8d7b7bbfbbc3e7df242f8b50bdd801c24a99130173814935e",
+      "checks": [
+        {
+          "case": "coding-gzip-buffered-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-buffered-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-buffered-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-buffered-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        },
+        {
+          "case": "coding-gzip-streamed-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-streamed-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-streamed-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-streamed-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        },
+        {
+          "case": "coding-deflate-buffered-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-buffered-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-buffered-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-buffered-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        },
+        {
+          "case": "coding-deflate-streamed-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-streamed-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-streamed-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-streamed-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        },
+        {
+          "case": "coding-br-buffered-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-buffered-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-buffered-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-buffered-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        },
+        {
+          "case": "coding-br-streamed-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-streamed-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-streamed-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-streamed-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        }
+      ]
+    },
+    {
+      "adapter": "spin",
+      "command": "cargo run --locked --offline --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness -- --adapter spin --suite outbound-progress --output /private/tmp/edgezero-coding-spin-final",
+      "exit_code": 0,
+      "runtime": {
+        "adapter": "spin",
+        "event": "progress-runtime",
+        "executable": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+        "revision": "7cccaf10734914161803317aec6c55c22c2bccc9",
+        "source_state": "working-tree-characterization",
+        "version": "spin 4.1.0 (c0b3726 2026-08-25)"
+      },
+      "artifact": {
+        "bytes": 2273342,
+        "fnv1a64": "efa8f7778511c0dc",
+        "path": "/private/tmp/edgezero-coding-spin-final/progress-spin/artifacts/fixture_spin.wasm",
+        "purpose": "non-security build identity",
+        "sha256": "affa72b2119189bc818af46957634f83af3bc2f5378bb91206783207df47c2b5"
+      },
+      "raw_events_sha256": "f2df8a2817625d77f4d49dfb4404a7da881cf47cbfd7ce6c053eaa2f3f022a58",
+      "checks": [
+        {
+          "case": "coding-gzip-buffered-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-buffered-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-buffered-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-buffered-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        },
+        {
+          "case": "coding-gzip-streamed-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-streamed-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-streamed-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "gzip",
+          "content_length": "37",
+          "bytes": 37,
+          "bytes_sha256": "064cdf94732ad7431208f0c1eda006adbdf314eaeb0933a9e38ff945d295a27e"
+        },
+        {
+          "case": "coding-gzip-streamed-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        },
+        {
+          "case": "coding-deflate-buffered-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-buffered-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-buffered-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-buffered-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        },
+        {
+          "case": "coding-deflate-streamed-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-streamed-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-streamed-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "deflate",
+          "content_length": "25",
+          "bytes": 25,
+          "bytes_sha256": "f1562246ce7b1c632b2b11380c3afb28296ffae09ef1af5874fb17cc488adead"
+        },
+        {
+          "case": "coding-deflate-streamed-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        },
+        {
+          "case": "coding-br-buffered-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-buffered-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-buffered-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-buffered-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        },
+        {
+          "case": "coding-br-streamed-200-original",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-streamed-206-original",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-streamed-206-decode",
+          "result": "pass",
+          "status": 206,
+          "content_encoding": "br",
+          "content_length": "21",
+          "bytes": 21,
+          "bytes_sha256": "9c8e6d2d051677e038339ab1ebfe2008807a74b79633f11c7f0020d06a909c14"
+        },
+        {
+          "case": "coding-br-streamed-200-decode",
+          "result": "pass",
+          "status": 200,
+          "content_encoding": null,
+          "content_length": null,
+          "bytes": 17,
+          "bytes_sha256": "9db9e64f7fdd4d21f9d843b34b1c7f64c93339f6e713d827522677efed13659b"
+        }
+      ]
+    }
+  ]
+}

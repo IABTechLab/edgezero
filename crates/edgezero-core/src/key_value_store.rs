@@ -303,6 +303,21 @@ struct KvCursorEnvelope {
     prefix: String,
 }
 
+/// Payload-free classification for a declared KV binding that failed to open.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum KvStoreOpenFailure {
+    /// The platform rejected the binding's configuration.
+    #[error("invalid binding configuration")]
+    InvalidConfiguration,
+    /// The declared platform binding does not exist or is not linked.
+    #[error("missing binding")]
+    MissingBinding,
+    /// The provider could not open the binding because of an availability failure.
+    #[error("provider unavailable")]
+    Unavailable,
+}
+
 /// Errors returned by KV store operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -319,6 +334,10 @@ pub enum KvError {
     /// The requested key was not found (used by `delete` when strict).
     #[error("key not found: {key}")]
     NotFound { key: String },
+
+    /// A declared binding failed to open; no name or provider text is retained.
+    #[error("kv store open failed: {reason}")]
+    OpenFailed { reason: KvStoreOpenFailure },
 
     /// A serialization or deserialization error.
     #[error("serialization error: {0}")]
@@ -825,7 +844,10 @@ impl From<KvError> for EdgeError {
     fn from(err: KvError) -> Self {
         match err {
             KvError::NotFound { key } => EdgeError::not_found(format!("kv key: {key}")),
-            KvError::Unavailable => EdgeError::service_unavailable("kv store unavailable"),
+            KvError::Unavailable
+            | KvError::OpenFailed {
+                reason: KvStoreOpenFailure::Unavailable,
+            } => EdgeError::service_unavailable("kv store unavailable"),
             KvError::Validation(msg) => {
                 EdgeError::bad_request(format!("kv validation error: {msg}"))
             }
@@ -833,6 +855,10 @@ impl From<KvError> for EdgeError {
                 EdgeError::internal(anyhow::anyhow!("kv serialization error: {msg}"))
             }
             KvError::Internal(source) => EdgeError::internal(source),
+            KvError::OpenFailed {
+                reason:
+                    KvStoreOpenFailure::MissingBinding | KvStoreOpenFailure::InvalidConfiguration,
+            } => EdgeError::internal(err),
             KvError::Unsupported { operation } => EdgeError::not_implemented(format!(
                 "kv operation not supported by backend: {operation}"
             )),
@@ -1010,10 +1036,44 @@ mod tests {
         count: i32,
     }
 
+    struct Failed(KvStoreOpenFailure);
+
     // In-memory store with TTL support for contract testing.
     // Uses `SystemTime` instead of `Instant` for WASM compatibility.
     struct MockStore {
         data: Mutex<HashMap<String, (Bytes, Option<SystemTime>)>>,
+    }
+
+    #[async_trait(?Send)]
+    impl KvStore for Failed {
+        async fn delete(&self, _key: &str) -> Result<(), KvError> {
+            Err(KvError::OpenFailed { reason: self.0 })
+        }
+        async fn exists(&self, _key: &str) -> Result<bool, KvError> {
+            Err(KvError::OpenFailed { reason: self.0 })
+        }
+        async fn get_bytes(&self, _key: &str) -> Result<Option<Bytes>, KvError> {
+            Err(KvError::OpenFailed { reason: self.0 })
+        }
+        async fn list_keys_page(
+            &self,
+            _prefix: &str,
+            _cursor: Option<&str>,
+            _limit: usize,
+        ) -> Result<KvPage, KvError> {
+            Err(KvError::OpenFailed { reason: self.0 })
+        }
+        async fn put_bytes(&self, _key: &str, _value: Bytes) -> Result<(), KvError> {
+            Err(KvError::OpenFailed { reason: self.0 })
+        }
+        async fn put_bytes_with_ttl(
+            &self,
+            _key: &str,
+            _value: Bytes,
+            _ttl: Duration,
+        ) -> Result<(), KvError> {
+            Err(KvError::OpenFailed { reason: self.0 })
+        }
     }
 
     #[async_trait(?Send)]
@@ -1098,6 +1158,91 @@ mod tests {
 
     fn handle() -> KvHandle {
         KvHandle::new(Arc::new(MockStore::new()))
+    }
+
+    #[test]
+    fn declared_kv_open_failure_retains_binding_and_recovers() {
+        use crate::response::IntoResponse as _;
+        use crate::store_registry::KvRegistry;
+
+        block_on(async {
+            for (reason, status) in [
+                (
+                    KvStoreOpenFailure::MissingBinding,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+                (
+                    KvStoreOpenFailure::InvalidConfiguration,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+                (
+                    KvStoreOpenFailure::Unavailable,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                ),
+            ] {
+                let registry = KvRegistry::single_id(
+                    "credential-bearing-store-token".to_owned(),
+                    KvHandle::new(Arc::new(Failed(reason))),
+                );
+                assert!(registry.named("undeclared").is_none());
+                let handle = registry.default().expect("declared binding retained");
+                for error in [
+                    handle.get_bytes("key").await.unwrap_err(),
+                    handle.get::<serde_json::Value>("key").await.unwrap_err(),
+                    handle.exists("key").await.unwrap_err(),
+                    handle
+                        .put_bytes("key", Bytes::from_static(b"value"))
+                        .await
+                        .unwrap_err(),
+                    handle
+                        .put("key", &serde_json::json!({"value":1_i32}))
+                        .await
+                        .unwrap_err(),
+                    handle
+                        .put_bytes_with_ttl(
+                            "key",
+                            Bytes::from_static(b"value"),
+                            Duration::from_mins(1),
+                        )
+                        .await
+                        .unwrap_err(),
+                    handle.delete("key").await.unwrap_err(),
+                    handle.list_keys_page("", None, 1).await.unwrap_err(),
+                ] {
+                    assert!(
+                        matches!(error, KvError::OpenFailed { reason: actual } if actual == reason)
+                    );
+                    assert!(!error.to_string().contains("credential-bearing-store-token"));
+                    let edge = EdgeError::from(error);
+                    assert_eq!(edge.status(), status);
+                    let response = edge.into_response().unwrap();
+                    let wire = response.into_body().into_bytes_bounded(1024).await.unwrap();
+                    assert!(
+                        !String::from_utf8_lossy(&wire).contains("credential-bearing-store-token")
+                    );
+                }
+                // A fresh request gets a fresh binding, not an availability verdict retained by id.
+                let restored = KvRegistry::single_id(
+                    "credential-bearing-store-token".to_owned(),
+                    KvHandle::new(Arc::new(MockStore::new())),
+                );
+                let recovered = restored.default().unwrap();
+                recovered
+                    .put_bytes("key", Bytes::from_static(b"restored"))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    recovered.get_bytes("key").await.unwrap(),
+                    Some(Bytes::from_static(b"restored"))
+                );
+                assert_eq!(
+                    recovered.list_keys_page("", None, 1).await.unwrap().keys,
+                    ["key"]
+                );
+                recovered.delete("key").await.unwrap();
+                assert!(!recovered.exists("key").await.unwrap());
+            }
+        });
     }
 
     #[test]
