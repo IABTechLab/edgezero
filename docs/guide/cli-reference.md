@@ -335,7 +335,7 @@ edgezero config validate [--manifest <path>] [--app-config <path>] [--strict] [-
 **Arguments:**
 
 - `--manifest <path>` — manifest path (default: `edgezero.toml`).
-- `--app-config <path>` — typed app-config path (default: `<app_name>.toml` next to the manifest).
+- `--app-config <path>` — typed application configuration payload, supported by all four adapters (default: `<app_name>.toml` next to the manifest).
 - `--strict` — additionally check capability-aware completeness for the declared adapter set (spec §6.6) and well-formed Rust handler paths.
 - `--no-env` — skip the `<APP_NAME>__…__<KEY>` env-var overlay when loading the app config. By default the validator reads the overlay so it sees the same values the runtime would.
 
@@ -383,7 +383,7 @@ flags and exits `2` with a pointer to the typed CLI — it cannot push (see
   passing push does not prove portability; run `config validate --strict` in CI
   for that.
 - `--manifest <path>` — manifest path (default: `edgezero.toml`).
-- `--app-config <path>` — typed app-config path (default: `<app_name>.toml` next to the manifest).
+- `--app-config <path>` — typed application configuration payload, supported by all four adapters (default: `<app_name>.toml` next to the manifest).
 - `--store <id>` — logical config-store id to push to. Defaults to `[stores.config].default` (or the only declared id when `[stores.config].ids` has length 1).
 - `--key <key>` — override the config-store key the blob is written under (spec §5.4). Fastly accepts only the logical store ID for every target.
 - `--staging` — target the staging publication flow. It does not change the
@@ -393,7 +393,7 @@ flags and exits `2` with a pointer to the typed CLI — it cannot push (see
   [the blob migration guide](./blob-app-config-migration.md#per-environment-key-override)).
 - `--no-env` — skip the `<APP_NAME>__…__<KEY>` env-var overlay when loading the app config. By default the loader reads the overlay so the push sends the same values the runtime would.
 - `--local` — push into the adapter's local-emulator state instead of the live platform. Fastly edits `[local_server.config_stores]` in `fastly.toml` (Viceroy reads it on startup); Cloudflare runs `wrangler kv bulk put --local` so writes land in `.wrangler/state`; Spin forces SQLite-direct against `<spin.toml dir>/.spin/sqlite_key_value.db` even when the manifest's deploy command targets Fermyon Cloud (the runtime-config `[key_value_store.<label>].type` is also ignored for SQLite path resolution); Axum is local-only already so it's a no-op there.
-- `--runtime-config <path>` — adapter runtime configuration file. Currently only consumed by Spin, which reads `[key_value_store.<label>]` stanzas to dispatch per-backend (`type = "spin"` → SQLite-direct, `redis` / `azure_cosmos` / other → error pointing at the native backend CLI). Default: `runtime-config.toml` next to the adapter manifest. Ignored by the Fermyon Cloud branch — cloud pushes consult only `spin.toml`'s `[application].name`.
+- `--runtime-config <path>` — Spin only. Selects Spin's host-side key-value backend settings; it is not application configuration to publish. Other adapters reject this option before runtime-file access or provider activity. Spin reads `[key_value_store.<label>]` stanzas to dispatch per-backend (`type = "spin"` → SQLite-direct, `redis` / `azure_cosmos` / other → error pointing at the native backend CLI). Default: `runtime-config.toml` next to the adapter manifest. Ignored by the Fermyon Cloud branch — cloud pushes consult only `spin.toml`'s `[application].name`.
 - `--no-diff` — skip the inline diff render of local-vs-remote before writing. By default the push reads back the current remote blob and shows what would change.
 - `--yes` / `-y` — skip the confirmation prompt and write unconditionally (for non-interactive/CI use). Without it, an interactive push prompts before overwriting a differing remote blob — but with **no TTY** (a CI runner, a piped shell) there is no prompt to answer, so a push **without `--yes` fails closed** with `non-interactive run requires --yes`. Always pass `--yes` when invoking `config push` yourself in CI. The `config-push-fastly` action appends `--yes --no-diff` for you, so a push run through the action needs neither flag.
 - `--dry-run` — print the would-be operations without performing them. It makes **no WRITE and no delete** — but it is NOT fully offline: because dry-run's contract is to show the diff, it does a **read-only** remote read-back (a shell-out on Fastly/Cloudflare). That read is **one logical read** but may be **several provider calls** for a chunked Fastly value (describe the root pointer, then describe each referenced chunk to reassemble it). It errors against **Spin Cloud** (whose read-back is unsupported); use `--local` for the on-disk SQLite write, or drop `--dry-run` and write unconditionally with `--yes`.
@@ -458,7 +458,7 @@ stub that absorbs its flags and exits `2` with a pointer to the typed CLI.
   checks still apply. `diff` runs no `--strict` capability checks; a clean diff
   does not prove portability. Run `config validate --strict` in CI for that.
 - `--manifest <path>` — manifest path (default: `edgezero.toml`).
-- `--app-config <path>` — typed app-config path (default: `<app_name>.toml` next to the manifest).
+- `--app-config <path>` — typed application configuration payload, supported by all four adapters (default: `<app_name>.toml` next to the manifest).
 - `--store <id>` — logical config-store id to diff against. Defaults to `[stores.config].default` (or the only declared id when `[stores.config].ids` has length 1).
 - `--key <key>` — override the config-store key to diff against (spec §5.4). Defaults to the logical store id; matches `config push --key`.
 - `--staging` — diff against the physical Config Store selected by the staging
@@ -466,7 +466,7 @@ stub that absorbs its flags and exits `2` with a pointer to the typed CLI.
   `config push --staging`, and the flag remains mutually exclusive with `--key`.
 - `--no-env` — skip the `<APP_NAME>__…__<KEY>` env-var overlay when loading the app config.
 - `--local` — diff against the adapter's local-emulator state instead of the live platform (same resolution as `config push --local`).
-- `--runtime-config <path>` — adapter runtime configuration file (Spin only; same semantics as `config push`).
+- `--runtime-config <path>` — Spin only. Selects host-side key-value backend settings, not the app-config payload (same semantics as `config push`). Other adapters reject this option before runtime-file access or provider activity.
 - `--format <fmt>` — output format: `unified` (default, POSIX unified-diff text), `json` (`{ local_sha256, remote_sha256, added, removed, changed }`), or `structured` (key/old/new triples).
 - `--exit-code` — exit `1` when the local and remote blobs differ, for CI gating (like `git diff --exit-code`). Without it, a completed diff exits `0` whether or not there are changes. Either way, if the adapter cannot read back the remote (an **`Unsupported`** outcome — e.g. Spin Cloud), the diff is structurally impossible and exits `2` regardless of `--exit-code`.
 

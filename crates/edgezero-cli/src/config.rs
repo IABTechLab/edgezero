@@ -453,6 +453,8 @@ pub fn run_config_push_typed<C>(args: &ConfigPushArgs) -> Result<(), String>
 where
     C: DeserializeOwned + Serialize + Validate + AppConfigMeta,
 {
+    validate_runtime_config_adapter(&args.adapter, args.runtime_config.as_deref())?;
+
     // Pre-flight: load + validate.
     let ctx = load_push_context(args)?;
     let validation_scope = AdapterValidationScope::Selected(ctx.adapter);
@@ -610,6 +612,8 @@ pub fn run_config_diff_typed<C>(args: &ConfigDiffArgs) -> Result<DiffExit, Strin
 where
     C: DeserializeOwned + Serialize + Validate + AppConfigMeta,
 {
+    validate_runtime_config_adapter(&args.adapter, args.runtime_config.as_deref())?;
+
     // Load + validate (diff runs the same structural
     // checks as push — validate_excluding_secrets + typed_secret_checks +
     // adapter_typed_checks; no consent gate, no re-fetch).
@@ -1346,6 +1350,16 @@ pub(crate) fn print_unified_diff_inline(
 // -------------------------------------------------------------------
 // Push context + dispatch
 // -------------------------------------------------------------------
+
+fn validate_runtime_config_adapter(
+    adapter: &str,
+    runtime_config: Option<&Path>,
+) -> Result<(), String> {
+    if runtime_config.is_some() && !adapter.eq_ignore_ascii_case("spin") {
+        return Err("--runtime-config is only supported with --adapter spin".to_owned());
+    }
+    Ok(())
+}
 
 fn load_push_context(args: &ConfigPushArgs) -> Result<PushContext, String> {
     // Push is strict — the synthesized validate args
@@ -2696,6 +2710,165 @@ source = "target/wasm32-wasip2/release/demo.wasm"
             store: None,
             staging: false,
             yes: false,
+        }
+    }
+
+    #[test]
+    fn runtime_config_adapter_validation_precedes_file_access() {
+        let dir = TempDir::new().expect("temp dir");
+        let manifest = dir.path().join("missing-manifest.toml");
+        for adapter in [
+            "axum",
+            "AxUm",
+            "cloudflare",
+            "Cloudflare",
+            "fastly",
+            "FASTLY",
+            "spin",
+            "SpIn",
+        ] {
+            for explicit in [false, true] {
+                for local in [false, true] {
+                    let runtime_config = explicit.then(|| dir.path().join("missing-runtime.toml"));
+                    let mut push = push_args(&manifest, adapter);
+                    push.runtime_config = runtime_config.clone();
+                    push.app_config = Some(dir.path().join("missing-app.toml"));
+                    push.local = local;
+                    for dry_run in [false, true] {
+                        push.dry_run = dry_run;
+                        let error = run_config_push_typed::<FixtureConfig>(&push)
+                            .expect_err("missing files or invalid adapter option must fail");
+                        assert_runtime_config_validation(&error, adapter, explicit);
+                    }
+                    let diff = ConfigDiffArgs {
+                        adapter: adapter.to_owned(),
+                        manifest: manifest.clone(),
+                        app_config: push.app_config.clone(),
+                        runtime_config,
+                        local,
+                        ..ConfigDiffArgs::default()
+                    };
+                    let error = run_config_diff_typed::<FixtureConfig>(&diff)
+                        .expect_err("missing files or invalid adapter option must fail");
+                    assert_runtime_config_validation(&error, adapter, explicit);
+                }
+            }
+        }
+    }
+
+    fn assert_runtime_config_validation(error: &str, adapter: &str, explicit: bool) {
+        if explicit && !adapter.eq_ignore_ascii_case("spin") {
+            assert_eq!(
+                error,
+                "--runtime-config is only supported with --adapter spin"
+            );
+        } else {
+            assert!(
+                error.starts_with("failed to load "),
+                "expected normal manifest loading: {error}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_config_rejection_precedes_provider_activity() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        for adapter in ["axum", "cloudflare", "fastly"] {
+            let (dir, manifest, _) =
+                setup_project(&PUSH_MANIFEST.replace("axum", adapter), FIXTURE_APP_CONFIG);
+            let oplog = dir.path().join("provider-ops.log");
+            let fake = fake_fastly_logging(&oplog);
+            // All provider executables fail and record calls; never invoke a real CLI.
+            for name in ["wrangler", "spin"] {
+                fs::copy(fake.path().join("fastly"), fake.path().join(name))
+                    .expect("copy fake CLI");
+            }
+            let _prepend = PathPrepend::new(fake.path());
+            let runtime = dir.path().join("runtime-config.toml");
+            fs::write(&runtime, "invalid runtime TOML [").expect("write runtime config");
+            let mut push = push_args(&manifest, adapter);
+            push.runtime_config = Some(runtime.clone());
+            push.yes = true;
+            let error = run_config_push_typed::<FixtureConfig>(&push).expect_err("reject push");
+            assert_runtime_config_validation(&error, adapter, true);
+            let diff = ConfigDiffArgs {
+                adapter: adapter.to_owned(),
+                manifest,
+                runtime_config: Some(runtime.clone()),
+                no_env: true,
+                ..ConfigDiffArgs::default()
+            };
+            let diff_error =
+                run_config_diff_typed::<FixtureConfig>(&diff).expect_err("reject diff");
+            assert_runtime_config_validation(&diff_error, adapter, true);
+            assert!(!oplog.exists(), "must reject before any provider shell-out");
+            assert!(
+                !dir.path().join(".edgezero").exists(),
+                "must not write local provider state"
+            );
+            assert_eq!(
+                fs::read_to_string(runtime).expect("runtime config"),
+                "invalid runtime TOML ["
+            );
+        }
+    }
+
+    #[test]
+    fn spin_runtime_config_paths_survive_typed_push_and_diff() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let spin_manifest = PUSH_MANIFEST.replace("axum", "spin").replace(
+            "crate = \"crates/demo-app-adapter-spin\"",
+            "crate = \"crates/demo-app-adapter-spin\"\nmanifest = \"adapter/spin.toml\"",
+        );
+        for explicit in [false, true] {
+            for local in [false, true] {
+                let (dir, manifest, app_config) = setup_project(&spin_manifest, FIXTURE_APP_CONFIG);
+                let adapter_dir = dir.path().join("adapter");
+                fs::create_dir_all(&adapter_dir).expect("adapter dir");
+                fs::write(adapter_dir.join("spin.toml"), VALID_SPIN_TOML).expect("spin manifest");
+                let runtime_dir = if explicit {
+                    dir.path().join("custom")
+                } else {
+                    adapter_dir
+                };
+                fs::create_dir_all(&runtime_dir).expect("runtime dir");
+                let runtime = runtime_dir.join("runtime-config.toml");
+                fs::write(
+                    &runtime,
+                    "[key_value_store.app_config]\ntype = \"spin\"\npath = \"config.db\"\n",
+                )
+                .expect("runtime config");
+                let custom_app_config = dir.path().join("payload.toml");
+                fs::rename(app_config, &custom_app_config).expect("custom app-config path");
+                let mut push = push_args(&manifest, "SpIn");
+                push.app_config = Some(custom_app_config.clone());
+                push.runtime_config = explicit.then_some(runtime);
+                push.local = local;
+                push.yes = true;
+                run_config_push_typed::<FixtureConfig>(&push)
+                    .expect("Spin push accepts runtime settings");
+                assert!(
+                    runtime_dir.join("config.db").exists(),
+                    "SQLite path is relative to runtime config"
+                );
+                let diff = ConfigDiffArgs {
+                    adapter: "SPIN".to_owned(),
+                    manifest,
+                    app_config: Some(custom_app_config),
+                    runtime_config: push.runtime_config,
+                    local,
+                    no_env: true,
+                    exit_code: true,
+                    ..ConfigDiffArgs::default()
+                };
+                assert_eq!(
+                    run_config_diff_typed::<FixtureConfig>(&diff)
+                        .expect("Spin diff accepts runtime settings")
+                        .code,
+                    0
+                );
+            }
         }
     }
 
