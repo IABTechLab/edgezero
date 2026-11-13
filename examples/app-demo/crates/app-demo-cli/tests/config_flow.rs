@@ -339,3 +339,40 @@ fn config_push_spin_writes_sqlite_round_tripped_via_rusqlite() {
         "`#[secret(store_ref)]` field must persist its store id at rest: {data}"
     );
 }
+
+#[test]
+fn config_commands_reject_non_spin_runtime_config_through_demo_binary() {
+    let (dir, _) = write_app_demo_project("axum");
+    for command in ["push", "diff"] {
+        for adapter in ["axum", "Cloudflare", "FASTLY"] {
+            let output = std::process::Command::new(env!("CARGO_BIN_EXE_app-demo-cli"))
+                .args([
+                    "config",
+                    command,
+                    "--adapter",
+                    adapter,
+                    "--manifest",
+                    "missing-manifest.toml",
+                    "--runtime-config",
+                    "missing-runtime.toml",
+                ])
+                .current_dir(dir.path())
+                .output()
+                .expect("run demo config command");
+            let diagnostic = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.status.code(), Some(2_i32), "{diagnostic}");
+            assert!(
+                diagnostic.contains("--runtime-config is only supported with --adapter spin"),
+                "{diagnostic}"
+            );
+        }
+    }
+    assert!(
+        !dir.path().join(".edgezero").exists(),
+        "invalid commands must not write config"
+    );
+}
