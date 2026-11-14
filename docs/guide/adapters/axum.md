@@ -229,8 +229,23 @@ capabilities remain `Unsupported`. See [Capabilities](/guide/capabilities).
 
 The Axum adapter uses a `HttpClient` registered in the assembled app's router state when present,
 without initializing its default transport. Otherwise it injects `AxumOutboundClient`, backed by
-`reqwest` and the application clock. Handlers use `RequestContext::http_client()`; direct wiring
-can construct the adapter client with `AxumOutboundClient::try_new()`.
+`reqwest` and the application clock. Handlers use `RequestContext::http_client()`; the standard
+entrypoints own and drive its executor automatically.
+
+Direct wiring requires one explicit `outbound_executor::AxumOutboundExecutor`. Pass its
+`handle()` to `AxumOutboundClient::try_new(handle)` or `try_with_time(handle, time)`, and drive
+that same owner with `run_until`. This replaces the previous zero-argument constructor; an
+ambient Tokio `LocalSet` is not a substitute. The owner does not create another Tokio runtime.
+Use a live runtime with I/O and time enabled; an injected `OutboundTime` must pair its clock
+with a valid cancellable timer factory. Disabled timer-driver misuse is not certified to
+return a typed error in `panic=abort` builds.
+
+Clients remain sendable, but outbound use on another thread or after owner destruction returns
+Internal before polling request work. Dropping the owner cancels its spawned producers; a
+retained direct-send future rejects on its next poll. Queuing eager work while the owner is idle
+is allowed, but progress requires driving it. The request extensions carry the adapter-owned
+`AxumOutboundExecutorHandle` for native factories that need to reuse the existing owner.
+Do not create a second owner in a handler or rebuild the pooled transport per request.
 
 After admission, request conversion preserves a transport-certified empty body
 (`http_body::Body::is_end_stream()`) as buffered empty without polling it. This applies to every
@@ -246,7 +261,7 @@ for an initial buffered-empty body after expiry.
 Unknown GET/HEAD bodies are settled under the original outbound and admitted inbound deadlines.
 Chunked-empty EOF permits dispatch; the first nonempty byte returns 400 before origin contact.
 Unread rejected bytes cannot become the next HTTP/1 request. Other methods keep streamed uploads.
-Eager begin/batch work requires the existing Tokio local scheduling context; missing context
+Eager begin/batch work requires the explicit live executor described above; invalid ownership
 returns a typed setup error before provider I/O. No capability level is promoted by this migration.
 
 Axum provides native total deadlines, completion-order batching, pending-future cancellation,

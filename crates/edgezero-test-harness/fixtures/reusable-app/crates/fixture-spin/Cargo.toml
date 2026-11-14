@@ -9,6 +9,7 @@ qualification = ["fixture-core/qualification"]
 progress = ["fixture-core/qualification", "fixture-core/native-body-witness", "dep:fixture-spin-support", "dep:futures", "dep:http-body", "edgezero-adapter-spin/test-utils"]
 
 [dependencies]
+log.workspace = true
 fixture-spin-support = { workspace = true, optional = true }
 serde_json.workspace = true
 fixture-core.workspace = true

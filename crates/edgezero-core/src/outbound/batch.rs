@@ -56,6 +56,13 @@ pub struct OutboundBatchItem {
 }
 
 /// The ownership state of one input position after collection.
+#[cfg_attr(
+    target_pointer_width = "64",
+    expect(
+        clippy::large_enum_variant,
+        reason = "terminal positional results stay inline; scalar Body framing metadata does not warrant a per-slot allocation"
+    )
+)]
 #[derive(Debug)]
 pub enum OutboundCollectedSlot {
     AlreadyDelivered,

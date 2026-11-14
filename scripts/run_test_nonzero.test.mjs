@@ -608,10 +608,8 @@ test("inventory selection requires the prebuilt harness before starting Cargo", 
   );
 });
 for (const [environment, mode] of [
-  [
-    "axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked",
-    "--include-ignored",
-  ],
+  ["axum/native-tcp,unit/axum,axum/http1,axum", null],
+  ["axum/http1-chunked", "--include-ignored"],
   ["unit/core", null],
   ["unit/cloudflare", null],
   ["unit/fastly", null],
@@ -624,6 +622,7 @@ for (const [environment, mode] of [
         c.command === inventoryCommand(environment),
     )
     .flatMap((c) => [c.sentinel, ...(c.additional_sentinels ?? [])]);
+  assert.ok(required.length > 0, `${environment} must have required sentinels`);
 
   test(`${environment} inventory guard executes the whole suite once`, () => {
     const result = run(mode, [...required, "unrelated::test"], 0, [
