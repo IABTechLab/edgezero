@@ -15,7 +15,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-pub use wire::{WireOrigins, validate_forward_capture};
+pub use wire::{WireOrigins, validate_forward_capture, validate_forward_length_capture};
 
 pub type Signal = Arc<(Mutex<bool>, Condvar)>;
 static CLIENT_EVENTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
@@ -681,18 +681,28 @@ pub enum ForwardFraming {
     FiveBytes,
     ThreeBytes,
     Pending,
+    Declared4096,
+    Chunked4096,
 }
 
 impl ForwardFraming {
-    fn wire(self) -> (&'static str, &'static str) {
-        match self {
+    fn wire(self) -> (&'static str, String) {
+        let (head, body) = match self {
             Self::Absent => ("", ""),
             Self::Zero => ("Content-Length: 0\r\n", ""),
             Self::ChunkedEmpty => ("Transfer-Encoding: chunked\r\n", "0\r\n\r\n"),
             Self::FiveBytes => ("Content-Length: 5\r\n", "abcde"),
             Self::ThreeBytes => ("Transfer-Encoding: chunked\r\n", "3\r\nabc\r\n0\r\n\r\n"),
             Self::Pending => ("Transfer-Encoding: chunked\r\n", ""),
-        }
+            Self::Declared4096 => return ("Content-Length: 4096\r\n", "z".repeat(4096)),
+            Self::Chunked4096 => {
+                return (
+                    "Transfer-Encoding: chunked\r\n",
+                    format!("1000\r\n{}\r\n0\r\n\r\n", "z".repeat(4096)),
+                );
+            }
+        };
+        (head, body.to_owned())
     }
 }
 
@@ -978,7 +988,7 @@ fn exchange(
     };
     let (framing_header, body) = match capture {
         Capture::Forward { framing, .. } => (framing.wire().0.to_owned(), framing.wire().1),
-        _ => (framing_header, body),
+        _ => (framing_header, body.to_owned()),
     };
     write!(
         stream,

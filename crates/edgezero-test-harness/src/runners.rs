@@ -109,9 +109,20 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 fn settle<T>(
     records: &mut Records,
     log: &Path,
+    fields: Value,
+    failure: Value,
+    outcome: Result<T>,
+) -> Result<T> {
+    settle_events(records, log, fields, failure, outcome, Ok(logs(log)))
+}
+
+fn settle_events<T>(
+    records: &mut Records,
+    log: &Path,
     mut fields: Value,
     failure: Value,
     mut outcome: Result<T>,
+    events: Result<Vec<Value>>,
 ) -> Result<T> {
     if let Some(identity) = startup::settle(log) {
         if identity["status"] != "pass" {
@@ -124,8 +135,13 @@ fn settle<T>(
         records.push(annotate(identity, fields.clone()))?;
     }
     records.collect_clients(fields.clone())?;
-    for event in logs(log) {
-        records.push(annotate(event, fields.clone()))?;
+    match events {
+        Ok(values) => {
+            for event in values {
+                records.push(annotate(event, fields.clone()))?;
+            }
+        }
+        Err(error) => outcome = outcome.and(Err(error)),
     }
     if let Err(error) = &outcome {
         records.push(annotate(

@@ -21,6 +21,8 @@ pub mod key_value_store;
 #[cfg(feature = "axum")]
 pub mod outbound;
 #[cfg(feature = "axum")]
+pub mod outbound_executor;
+#[cfg(feature = "axum")]
 pub mod request;
 #[cfg(feature = "axum")]
 mod response;

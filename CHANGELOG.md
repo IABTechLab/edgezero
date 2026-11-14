@@ -25,6 +25,37 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Require the application Hooks type on Fastly `serve_custom` and `run_custom`, with
+  callback errors convertible from `ManagedLoggerError`. Standard/custom lifecycles
+  now share managed setup. Fastly lines include targets; complete endpoint/level/stdout
+  settings are idempotent and immutable. Manual initialization uses shared typed errors
+  and off-target calls return UnsupportedTarget rather than silently succeeding.
+  The optional logging-only `edgezero_logging` Config Store accepts a 16-byte level
+  override, allowing local Debug from the same production wasm. Absent overrides keep
+  the manifest level; invalid values use Info. No compatibility signature remains.
+- Generalize `ManagedLoggerInstallation<Configuration>` to compare complete settings;
+  Cloudflare and Spin explicitly use their level as the identity.
+- Replace Cloudflare/Spin no-op log initializers with fallible `init_logger(level)`: Workers
+  console and Spin stderr backends apply the resolved runtime filter and independent Warn boot
+  filter before assembly. Same-level initialization is idempotent; changed instance configuration
+  and foreign loggers fail explicitly. Application-owned logging remains untouched.
+  Align the reusable test fixture's bindings with the production lock so one CLI validates
+  ingress and reusable runtime probes; provider SDK/runtime and audited decoder pins stay intact.
+- Preserve an eligible inbound streamed Content-Length as body-owned scalar metadata before
+  stripping raw framing. Spin reconstructs that length without Transfer-Encoding and validates
+  observed chunks/clean EOF against it. Replacement bodies clear it; unknown streams remain
+  unknown, and early responses abandon unread upload bytes without a validation drain.
+  The scalar declaration adds 16 inline bytes: measured Body layouts are 56 native / 40 WASM
+  bytes with Rust 1.98.1. Recalculate application structure charges; this is not a stable ABI size.
+- Require an explicit `AxumOutboundExecutorHandle` in native outbound client constructors
+  and request conversion. Standard servers own one LocalSet; missing, dropped or foreign
+  ownership returns Internal without panic probing, including in abort-profile builds.
+  Preserve eager dispatch, callback/body cancellation, pooling and paired time semantics.
+- Replace the Spin SDK fork with exact published SDK 8.0.0 across root, demo, fixtures and
+  generated projects. Revalidate resource/executor behavior without borrowing historical
+  qualification. Keep exact decoder pins and registry source/checksum guards.
+- Make the watchdog EOF assertion retry interrupted reads without changing timing bounds
+  or cleanup assertions. Document the standalone harness in the contributor gate list.
 - Restore isolated CLI-only compilation by enabling the adapter's CLI helpers explicitly;
   check that feature selection independently of provider feature unification.
 - Keep qualification lifecycle JSON unwrapped at the fixture telemetry sink, permitting Info
@@ -471,12 +502,11 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Add exact connect-setting, partial-range, facade-upload and same-client marker conformance
   proofs using existing private clients. Bind seven complete core legs through the existing
   grouped CI guard, preserving all provider legs, frozen source identities and qualification gates.
-- Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
-  `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`; propose it upstream in
+- Pin the coordinated Spin SDK executor upgrade to published `spin-sdk = "=8.0.0"`, including
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).
   Hard-migrate SDK spawn calls to `spawn_local`, using WASIp3 0.10.0 / wit-bindgen 0.63.0
   through one SDK executor. Align the root, demo, reusable/request-fidelity fixtures and generated manifests;
-  compare Git source and revision as well as package version in dependency guards.
+  compare registry source, checksum and package version in dependency guards.
   Preserve absolute deadlines, cutoffs and all limits; scheduler-latency and hosted qualification
   remain separate gates. See the [dependency audit](docs/audits/2026-10-27-spin-sdk-eager-progress.md).
 - Adapt to the reviewed SDK's join-handle return at one private provider launcher, keeping

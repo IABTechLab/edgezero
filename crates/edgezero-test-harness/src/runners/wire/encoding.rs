@@ -329,7 +329,10 @@ pub(super) fn run(adapter: &str, port: u16, records: &mut Records) -> Result<()>
     let accepted = cleanup?;
     records.push(json!({"event":"outbound-encoding-inventory","adapter":adapter,"origin_port":origin_port,
         "cases":count(adapter),"origin_requests":dispatches(adapter),"accepted":accepted,"cleanup":"passed","status":"pass","qualification":false}))?;
-    validate_artifact(&super::super::ci::read_events(&records.path)?, adapter)?;
+    validate_artifact(
+        &super::super::ci::read_events(&records.path, super::super::ci::WIRE_ARTIFACT_RECORDS)?,
+        adapter,
+    )?;
     let environment = match adapter {
         "fastly" => "viceroy",
         "cloudflare" => "workerd",

@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::diagnostics::{NativeDiagnosticsHandle, NativeSession};
+use crate::outbound_executor::{AxumOutboundExecutor, AxumOutboundExecutorHandle};
 pub use crate::run_options::AxumRunOptions;
 use crate::run_options::{
     JsonBodyLimit, config_path, failure, native_limit_setting, native_settings, shutdown_grace,
@@ -39,7 +40,7 @@ use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::signal;
 use tokio::sync::oneshot::{Receiver as ShutdownReceiver, Sender as ShutdownSender, channel};
 use tokio::sync::watch;
-use tokio::task::{LocalSet, spawn_blocking};
+use tokio::task::spawn_blocking;
 use tokio::time::sleep;
 
 use edgezero_core::addr;
@@ -666,8 +667,9 @@ where
             );
             failure("runtime", "local runner", "creation failed")
         })?;
-    let local = LocalSet::new();
-    runtime.block_on(local.run_until(async move {
+    let mut executor = AxumOutboundExecutor::new();
+    let executor_handle = executor.handle();
+    runtime.block_on(executor.run_until(async move {
         let mut signals = Signals::register(enable_signals).inspect_err(|_error| {
             log_native_lifecycle(
                 LifecyclePhase::Starting,
@@ -687,6 +689,7 @@ where
             &mut signals,
             &phase,
             reader,
+            executor_handle,
         )
         .await;
         phase.send_replace(LifecyclePhase::Stopped);
@@ -725,6 +728,7 @@ async fn run_owned<Prepare, Stop>(
     signals: &mut Option<Signals>,
     phase: &watch::Sender<LifecyclePhase>,
     reader: watch::Receiver<LifecyclePhase>,
+    executor: AxumOutboundExecutorHandle,
 ) -> anyhow::Result<()>
 where
     Prepare: Future<Output = anyhow::Result<PreparedApp>>,
@@ -760,9 +764,15 @@ where
         log::warn!(target: BOOT_LOG_TARGET, "application head limits exceed Axum raw ingress limits; the parser rejects first");
     }
     let session = NativeSession::new(native.diagnostics, native.request_records)?;
-    let mut service =
-        AxumServiceState::with_transport(app, transport, json_body_limit, session, native.policy)
-            .with_phase(reader.clone());
+    let mut service = AxumServiceState::with_transport(
+        app,
+        transport,
+        executor,
+        json_body_limit,
+        session,
+        native.policy,
+    )
+    .with_phase(reader.clone());
     if let Some(registry) = stores.config {
         service = service.with_config_registry(registry);
     }

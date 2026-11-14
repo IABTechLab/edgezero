@@ -7,6 +7,12 @@
 > compatibility aliases restore removed APIs. Verification below predates this
 > reconciliation and is not evidence of a current rerun.
 
+The [approved logging repair](../specs/2026-10-05-logging-ownership-boot-diagnostics-design.md)
+supersedes manual callback logger setup: custom wrappers now name the application Hooks
+type and initialize through the shared managed path. Callback errors accept its typed
+setup error; retained application state remains independent. Identical initialization is
+idempotent, so the current negative control changes configuration instead.
+
 ## Objective
 
 Provide reusable lifecycle mechanics for custom Fastly dispatch without taking
