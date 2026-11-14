@@ -2,6 +2,7 @@ use edgezero_adapter_fastly::delivery::{
     FastlyNoAttemptReason, FastlyRequestDelivery, FastlyResponseCommitState,
 };
 use edgezero_adapter_fastly::lifecycle::{Sandbox, serve_custom};
+pub mod managed_logging;
 use edgezero_adapter_fastly::request::{
     send_assembly_error, send_request_with_registries_and_hooks,
 };
@@ -145,16 +146,6 @@ pub fn finish(summary: ServeSummary<Error>) -> Result<(), Error> {
     );
     summary.into_result()
 }
-fn install_logger(logging: &FastlyLogging) -> Result<(), Error> {
-    if logging.use_fastly_logger {
-        init_logger(
-            logging.endpoint.as_deref().unwrap(),
-            logging.level,
-            logging.echo_stdout,
-        )?;
-    }
-    Ok(())
-}
 fn post_commit_error(obs: &Observation, token: &str, error: &dyn std::fmt::Display) {
     println!(
         "{}",
@@ -162,47 +153,59 @@ fn post_commit_error(obs: &Observation, token: &str, error: &dyn std::fmt::Displ
     );
 }
 pub fn rebuilt() -> Result<(), Error> {
-    finish(serve_custom(serving(), |req, setup: &mut Sandbox<()>| {
-        let stores = MeasuredApp::stores();
-        let logging = FastlyLogging::from(MeasuredApp::logging_for("fastly"));
-        setup.setup_once(|| install_logger(&logging))?;
-        let app = App::build::<MeasuredApp>(FASTLY_PLATFORM)?;
-        strict_delivery(send_request_with_registries_and_hooks(
-            &app,
-            stores,
-            req,
-            extend,
-            |_response| (),
-        ))
-    }))
+    finish(serve_custom::<MeasuredApp, _, _, _>(
+        serving(),
+        |req, _setup: &mut Sandbox<()>| {
+            let stores = MeasuredApp::stores();
+            let app = App::build::<MeasuredApp>(FASTLY_PLATFORM)?;
+            strict_delivery(send_request_with_registries_and_hooks(
+                &app,
+                stores,
+                req,
+                extend,
+                |_response| (),
+            ))
+        },
+    ))
 }
 
 pub fn logger_negative() -> Result<(), Error> {
-    finish(serve_custom(serving(), |req, _state: &mut Sandbox<()>| {
-        let obs = observation(&req);
-        let stores = MeasuredApp::stores();
-        let logging = FastlyLogging::from(MeasuredApp::logging_for("fastly"));
-        if let Err(error) = install_logger(&logging) {
-            Response::from_status(500)
-                .with_body(error.to_string())
-                .send_to_client();
-            return Err(error);
-        }
-        let app = App::build::<MeasuredApp>(FASTLY_PLATFORM)?;
-        initialized(
-            &obs,
-            req.get_header_str("x-request-token").unwrap_or("missing"),
-        );
-        strict_delivery(send_request_with_registries_and_hooks(
-            &app,
-            stores,
-            req,
-            |_, extensions| {
-                extensions.insert(obs);
-            },
-            |_response| (),
-        ))
-    }))
+    finish(serve_custom::<MeasuredApp, _, _, _>(
+        serving(),
+        |req, state: &mut Sandbox<()>| {
+            let obs = observation(&req);
+            let stores = MeasuredApp::stores();
+            let logging = FastlyLogging::from(MeasuredApp::logging_for("fastly"));
+            if let Err(error) = init_logger(
+                logging.endpoint.as_deref().unwrap(),
+                logging.level,
+                if state.requests() > 1 {
+                    !logging.echo_stdout
+                } else {
+                    logging.echo_stdout
+                },
+            ) {
+                Response::from_status(500)
+                    .with_body(error.to_string())
+                    .send_to_client();
+                return Err(error.into());
+            }
+            let app = App::build::<MeasuredApp>(FASTLY_PLATFORM)?;
+            initialized(
+                &obs,
+                req.get_header_str("x-request-token").unwrap_or("missing"),
+            );
+            strict_delivery(send_request_with_registries_and_hooks(
+                &app,
+                stores,
+                req,
+                |_, extensions| {
+                    extensions.insert(obs);
+                },
+                |_response| (),
+            ))
+        },
+    ))
 }
 
 fn finalize_response(response: &mut CoreResponse, attempts: u64) {
@@ -244,12 +247,6 @@ fn custom_dispatch(req: Request, sandbox: &mut Sandbox<App>, reuse_app: bool) ->
         return Ok(());
     }
     let stores = MeasuredApp::stores();
-    let logging = FastlyLogging::from(MeasuredApp::logging_for("fastly"));
-    if let Err(error) = sandbox.setup_once(|| install_logger(&logging)) {
-        eprintln!("logger setup failed: {error}");
-        Response::from_status(503).send_to_client();
-        return Ok(());
-    }
     log::info!("fixture request {}", obs.correlation);
     let reject_framing = req.get_path() == "/probe/framing-fallback";
     let post_send = req.get_header_str("x-fixture-backend").and_then(|value| {
@@ -384,15 +381,20 @@ pub fn custom(reuse_sandbox: bool, reuse_app: bool) -> Result<(), Error> {
         return callback_cleanup::run(reuse_sandbox);
     }
     if reuse_sandbox {
-        finish(edgezero_adapter_fastly::lifecycle::serve_custom(
-            serving(),
-            move |req, state| custom_dispatch(req, state, reuse_app),
-        ))
+        finish(edgezero_adapter_fastly::lifecycle::serve_custom::<
+            MeasuredApp,
+            _,
+            _,
+            _,
+        >(serving(), move |req, state| {
+            custom_dispatch(req, state, reuse_app)
+        }))
     } else {
         fastly::init();
-        edgezero_adapter_fastly::lifecycle::run_custom(Request::from_client(), |req, state| {
-            custom_dispatch(req, state, false)
-        })
+        edgezero_adapter_fastly::lifecycle::run_custom::<MeasuredApp, _, _, _>(
+            Request::from_client(),
+            |req, state| custom_dispatch(req, state, false),
+        )
     }
 }
 
@@ -496,7 +498,7 @@ impl Hooks for MeasuredApp {
 /// Controlled fixture inputs exercise real adapter boundaries, not provider outages.
 pub fn faults() -> Result<(), Error> {
     use edgezero_adapter_fastly::request::FastlyService;
-    finish(serve_custom(
+    finish(serve_custom::<MeasuredApp, _, _, _>(
         serving(),
         |mut req: Request, retained: &mut Sandbox<App>| {
             let obs = observation(&req);

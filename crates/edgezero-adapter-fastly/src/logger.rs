@@ -1,30 +1,37 @@
-use edgezero_core::logging::{BOOT_LOG_LEVEL, BOOT_LOG_TARGET};
+#[cfg(feature = "fastly")]
+use crate::{FastlyLogging, config_store::logging_level_override};
+#[cfg(feature = "fastly")]
+use edgezero_core::app::Hooks;
+use edgezero_core::env_config::EnvConfig;
+use edgezero_core::logging::{
+    BOOT_LOG_LEVEL, BOOT_LOG_TARGET, ManagedLoggerError, ManagedLoggerInstallation,
+};
 use log::LevelFilter;
+#[cfg(feature = "fastly")]
+use std::sync::OnceLock;
 
-/// Errors that can occur when initialising the Fastly logger.
-#[derive(Debug, thiserror::Error)]
-pub enum InitLoggerError {
-    /// The `log_fastly::Logger::builder()` rejected its inputs (e.g. the
-    /// endpoint string is empty).
-    #[error("failed to build Fastly logger: {0}")]
-    Build(String),
-    /// `log::set_boxed_logger` (via `fern`) failed because a global logger
-    /// was already installed.
-    #[error(transparent)]
-    SetLogger(#[from] log::SetLoggerError),
+static INSTALLATION: ManagedLoggerInstallation<Configuration> = ManagedLoggerInstallation::new();
+#[cfg(feature = "fastly")]
+static OVERRIDE: OnceLock<Result<Option<LevelFilter>, ManagedLoggerError>> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Configuration {
+    echo_stdout: bool,
+    endpoint: String,
+    level: LevelFilter,
 }
 
 fn build_backend(
     endpoint: &str,
     level: LevelFilter,
     echo_stdout: bool,
-) -> Result<log_fastly::Logger, InitLoggerError> {
+) -> Result<log_fastly::Logger, ManagedLoggerError> {
     log_fastly::Logger::builder()
         .default_endpoint(endpoint)
         .echo_stdout(echo_stdout)
         .max_level(level.max(BOOT_LOG_LEVEL))
         .build()
-        .map_err(|err| InitLoggerError::Build(err.to_string()))
+        .map_err(|_error| ManagedLoggerError::InvalidConfiguration)
 }
 
 fn build_dispatch(logger: Box<dyn log::Log>, level: LevelFilter) -> fern::Dispatch {
@@ -33,9 +40,10 @@ fn build_dispatch(logger: Box<dyn log::Log>, level: LevelFilter) -> fern::Dispat
         .level_for(BOOT_LOG_TARGET, BOOT_LOG_LEVEL)
         .format(|out, message, record| {
             out.finish(format_args!(
-                "{} {} {}",
+                "{} {} {} {}",
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
                 record.level(),
+                record.target(),
                 message
             ));
         })
@@ -47,26 +55,152 @@ fn build_dispatch(logger: Box<dyn log::Log>, level: LevelFilter) -> fern::Dispat
 /// the ordinary runtime level, including `Off`.
 ///
 /// # Errors
-/// Returns [`InitLoggerError::Build`] if the underlying logger builder
-/// rejects its inputs (e.g. an empty endpoint), or
-/// [`InitLoggerError::SetLogger`] if a global logger is already installed.
+/// Returns a fixed typed error for invalid settings, a foreign logger, or
+/// settings that differ from this instance's managed installation.
 #[inline]
 pub fn init_logger(
     endpoint: &str,
     level: LevelFilter,
     echo_stdout: bool,
-) -> Result<(), InitLoggerError> {
-    let logger = build_backend(endpoint, level, echo_stdout)?;
-    build_dispatch(Box::new(logger), level).apply()?;
-    Ok(())
+) -> Result<(), ManagedLoggerError> {
+    INSTALLATION.initialize(
+        &Configuration {
+            echo_stdout,
+            endpoint: endpoint.to_owned(),
+            level,
+        },
+        || {
+            let logger = build_backend(endpoint, level, echo_stdout)?;
+            build_dispatch(Box::new(logger), level)
+                .apply()
+                .map_err(|_error| ManagedLoggerError::AlreadyInstalled)
+        },
+    )
+}
+
+fn resolve_level(baked: LevelFilter, value: Option<&str>) -> LevelFilter {
+    value.map_or(baked, |raw| {
+        edgezero_core::resolve_logging_level(&EnvConfig::from_vars([(
+            "EDGEZERO__LOGGING__LEVEL",
+            raw,
+        )]))
+    })
+}
+
+#[cfg(feature = "fastly")]
+pub(crate) fn initialize_for_app<A>() -> Result<(), ManagedLoggerError>
+where
+    A: Hooks,
+{
+    if A::owns_logging() {
+        return Ok(());
+    }
+    configure::<A>(&FastlyLogging::from(A::logging_for("fastly")))
+}
+
+#[cfg(feature = "fastly")]
+pub(crate) fn configure<A>(logging: &FastlyLogging) -> Result<(), ManagedLoggerError>
+where
+    A: Hooks,
+{
+    if A::owns_logging() || !logging.use_fastly_logger {
+        return Ok(());
+    }
+    // A bounded instance snapshot avoids repeated host reads during sandbox reuse.
+    let override_level = *OVERRIDE.get_or_init(|| {
+        logging_level_override().map(|value| {
+            value
+                .as_deref()
+                .map(|raw| resolve_level(LevelFilter::Info, Some(raw)))
+        })
+    });
+    init_logger(
+        logging.endpoint.as_deref().unwrap_or("stdout"),
+        override_level?.unwrap_or(logging.level),
+        logging.echo_stdout,
+    )
 }
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use crate::context::tests::init_registration_logger;
-    use edgezero_core::logging::{BOOT_LOG_LEVEL, BOOT_LOG_TARGET};
+    use edgezero_core::logging::{BOOT_LOG_LEVEL, BOOT_LOG_TARGET, ManagedLoggerError};
     use log::{Level, LevelFilter, Log as _, Metadata, Record};
+    use std::env;
+    use std::process::{Command, Stdio};
+
+    struct Foreign;
+    impl log::Log for Foreign {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+        fn flush(&self) {}
+        fn log(&self, _record: &Record<'_>) {}
+    }
+
+    #[test]
+    fn managed_logger_preserves_foreign_backend_and_complete_settings() {
+        const CHILD: &str = "EDGEZERO_FASTLY_LOGGER_CHILD";
+        if let Some(mode) = env::var_os(CHILD) {
+            if mode == "foreign" {
+                log::set_logger(&Foreign).unwrap();
+                log::set_max_level(LevelFilter::Error);
+                assert_eq!(
+                    super::init_logger("test-endpoint", LevelFilter::Info, false),
+                    Err(ManagedLoggerError::AlreadyInstalled)
+                );
+                assert_eq!(log::max_level(), LevelFilter::Error);
+            } else {
+                super::init_logger("test-endpoint", LevelFilter::Info, false).unwrap();
+                super::init_logger("test-endpoint", LevelFilter::Info, false).unwrap();
+                for (endpoint, level, echo) in [
+                    ("changed", LevelFilter::Info, false),
+                    ("test-endpoint", LevelFilter::Debug, false),
+                    ("test-endpoint", LevelFilter::Info, true),
+                ] {
+                    assert_eq!(
+                        super::init_logger(endpoint, level, echo),
+                        Err(ManagedLoggerError::ConfigurationChanged)
+                    );
+                    assert_eq!(log::max_level(), LevelFilter::Info);
+                }
+            }
+            return;
+        }
+        for mode in ["managed", "foreign"] {
+            let result = Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "logger::tests::managed_logger_preserves_foreign_backend_and_complete_settings",
+                ])
+                .env(CHILD, mode)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "{result:?}");
+        }
+    }
+
+    #[test]
+    fn runtime_override_preserves_baked_default_and_uses_shared_invalid_fallback() {
+        for baked in [
+            LevelFilter::Off,
+            LevelFilter::Warn,
+            LevelFilter::Info,
+            LevelFilter::Trace,
+        ] {
+            assert_eq!(super::resolve_level(baked, None), baked);
+            for (value, expected) in [
+                ("DeBuG", LevelFilter::Debug),
+                ("off", LevelFilter::Off),
+                ("", LevelFilter::Info),
+                ("invalid", LevelFilter::Info),
+            ] {
+                assert_eq!(super::resolve_level(baked, Some(value)), expected);
+            }
+        }
+    }
 
     #[test]
     fn backend_rejects_records_even_when_facade_allows_them() {
@@ -140,6 +274,10 @@ mod tests {
                     .build(),
             );
             guard.assert_contains("logging-test", &preserved_warning);
+            guard.assert_contains(
+                "logging-test",
+                &format!("WARN {BOOT_LOG_TARGET} {preserved_warning}"),
+            );
 
             logger.log(
                 &Record::builder()
