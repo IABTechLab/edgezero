@@ -347,8 +347,7 @@ proxy_set_header X-JA4 $http_ssl_ja4;
 :::
 
 In code, build the setting with `TrustedJa4Header::parse(header, cidrs)` and
-pass it to `AxumDevServer::with_trusted_ja4_header` or
-`EdgeZeroAxumService::with_trusted_ja4_header`.
+pass it to `AxumDevServer::with_trusted_ja4_header`.
 
 ## Next Steps
 
