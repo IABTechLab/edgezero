@@ -46,7 +46,7 @@ pub(super) fn run(name: &str, parent: &Path, records: &mut Records) -> Result<()
         json!({"phase":"outbound-overflow"}),
         outcome,
     )?;
-    let persisted = ci::read_events(&records.path)?;
+    let persisted = ci::read_events(&records.path, ci::CI_ARTIFACT_RECORDS)?;
     validate_artifact(
         persisted
             .get(first_record..)

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::outbound_executor::AxumOutboundExecutor;
 use anyhow::Context as _;
 use futures_util::FutureExt as _;
 use futures_util::StreamExt as _;
@@ -19,7 +20,7 @@ use tokio::net::TcpListener as TokioTcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::signal;
 use tokio::sync::oneshot::{Receiver as ShutdownReceiver, Sender as ShutdownSender, channel};
-use tokio::task::{LocalSet, spawn_blocking};
+use tokio::task::spawn_blocking;
 use tokio::time::sleep;
 
 use edgezero_core::addr;
@@ -370,7 +371,12 @@ fn serve_local(
     {
         log::warn!(target: BOOT_LOG_TARGET, "application head limits exceed Axum raw ingress limits; the parser rejects first");
     }
-    let mut service = AxumServiceState::from_app(app);
+    let runtime = RuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build axum connection runtime")?;
+    let mut executor = AxumOutboundExecutor::new();
+    let mut service = AxumServiceState::from_app(app, executor.handle());
     if let Some(registry) = stores.config_registry {
         service = service.with_config_registry(registry);
     }
@@ -390,11 +396,6 @@ fn serve_local(
         service = service.with_secret_handle(handle);
     }
 
-    let runtime = RuntimeBuilder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to build axum connection runtime")?;
-    let local = LocalSet::new();
     #[expect(
         clippy::integer_division_remainder_used,
         reason = "tokio::select! expands to internal randomized branch selection arithmetic"
@@ -445,7 +446,7 @@ fn serve_local(
         drop(connections);
         Ok(())
     };
-    runtime.block_on(local.run_until(serve))
+    runtime.block_on(executor.run_until(serve))
 }
 
 async fn accept_with_retry<Accepted, AcceptFuture>(

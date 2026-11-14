@@ -9,6 +9,7 @@ qualification = ["fixture-core/qualification"]
 progress = ["fixture-core/qualification", "fixture-core/native-body-witness", "edgezero-adapter-cloudflare/test-utils", "dep:futures"]
 
 [dependencies]
+log.workspace = true
 serde_json.workspace = true
 fixture-core.workspace = true
 edgezero-core.workspace = true

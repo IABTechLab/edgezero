@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # spin_version_guard.sh — shared Spin CLI floor check.
 #
-# `spin-sdk` ~7 imports `wasi:http/types@0.3.0`, which Spin 4.0.x does
+# `spin-sdk` 8 imports WASI HTTP 0.3, which Spin 4.0.x does
 # not provide. The failure is late and opaque: the component builds,
 # the wasip2 contract tests pass under wasmtime, and only `spin up`
 # reports
@@ -42,12 +42,12 @@ spin_meets_floor() {
   # linker error this guard exists to pre-empt.
   if ! printf '%s' "$encoded" | grep -qE '^[0-9]+$'; then
     echo "Could not read a Spin CLI version from \`spin --version\` (got: ${version:-<empty>})." >&2
-    echo "spin-sdk 7 needs >= ${SPIN_MIN_DISPLAY}; install from ${SPIN_INSTALL_URL} or set SKIP_SPIN=1." >&2
+    echo "spin-sdk 8 needs >= ${SPIN_MIN_DISPLAY}; install from ${SPIN_INSTALL_URL} or set SKIP_SPIN=1." >&2
     return 1
   fi
 
   if [ "$encoded" -lt "$SPIN_MIN_ENCODED" ]; then
-    echo "Spin CLI ${version} is too old: spin-sdk 7 needs >= ${SPIN_MIN_DISPLAY} for wasi:http/types@0.3.0." >&2
+    echo "Spin CLI ${version} is too old: spin-sdk 8 needs >= ${SPIN_MIN_DISPLAY} for WASI HTTP 0.3." >&2
     echo "Install a newer CLI from ${SPIN_INSTALL_URL} and re-run." >&2
     return 1
   fi

@@ -9,9 +9,10 @@ use std::future::Future;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 pub use super::spin_impl::test_support::{
     cooperate_after_response_read, deadline_stream, empty_request_trailers, ensure_p3_context,
-    map_spin_preparation_header, native_time, race_deadline, request_body_resources,
-    request_fields, request_options, request_target_errors, request_timeout_settings,
-    response_head, schedule_exchange, schedule_prepared_batch, set_timeout_option,
+    map_spin_preparation_header, native_time, pump_request_body, race_deadline,
+    request_body_resources, request_fields, request_options, request_target_errors,
+    request_timeout_settings, response_head, schedule_exchange, schedule_prepared_batch,
+    set_timeout_option,
 };
 
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]

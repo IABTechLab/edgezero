@@ -103,11 +103,11 @@ syn = { version = "3", features = ["full", "extra-traits", "visit"] }
 subtle = "2"
 # The Spin outbound classifier exhaustively matches this SDK's WASI HTTP
 # snapshot, so both dependencies move only through an explicit review.
-# This immutable fork also supplies the eager spawn_local executor repair:
+# SDK 8 includes the eager spawn_local executor repair:
 # https://github.com/spinframework/spin-rust-sdk/pull/169
-# Return to a released upstream SDK only after that repair and the coordinated
-# source/classifier/progress checks pass; see docs/audits/2026-10-27-spin-sdk-eager-progress.md.
-spin-sdk = { version = "=7.0.0", git = "https://github.com/stackpop/spin-rust-sdk.git", rev = "6c59ed5b4fcb377072763aee0b27a3abdd8edb72", default-features = false, features = ["http", "key-value", "variables"] }
+# Source/classifier/progress checks are recorded in
+# docs/audits/2026-10-27-spin-sdk-eager-progress.md.
+spin-sdk = { version = "=8.0.0", default-features = false, features = ["http", "key-value", "variables"] }
 tempfile = "3"
 toml_edit = "0.25"
 thiserror = "2"

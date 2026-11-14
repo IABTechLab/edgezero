@@ -11,6 +11,7 @@ pub mod config_store;
 pub mod context;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 pub mod key_value_store;
+mod logger;
 #[cfg(any(
     test,
     feature = "test-utils",
@@ -39,12 +40,14 @@ use edgezero_core::context::RuntimeVariables;
 use edgezero_core::env_config::EnvConfig;
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
 use edgezero_core::error::EdgeError;
+use edgezero_core::logging::ManagedLoggerError;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 use edgezero_core::manifest::BakedManifest;
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
 use edgezero_core::manifest::ResolvedEnvironmentBinding;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 use edgezero_core::time::MonotonicClock;
+use log::LevelFilter;
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 use worker::{Context, Env, Error as WorkerError, Request, Response};
 
@@ -77,22 +80,14 @@ where
     App::build::<A>(CLOUDFLARE_PLATFORM)
 }
 
+/// Install the Workers console backend with an immutable level and independent boot warnings.
+///
 /// # Errors
-/// Never; this is a no-op. Workers console logging does not install a Rust
-/// `log` backend. Applications needing facade output must install a backend
-/// and its filters before [`run_app`] and set `Hooks::owns_logging()` to `true`.
-#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+/// Returns `UnsupportedTarget` outside Workers, a foreign-logger conflict, or changed
+/// configuration on a reused isolate.
 #[inline]
-pub fn init_logger() -> Result<(), log::SetLoggerError> {
-    Ok(())
-}
-
-/// # Errors
-/// Never; this is a no-op stub on non-wasm targets.
-#[cfg(not(all(feature = "cloudflare", target_arch = "wasm32")))]
-#[inline]
-pub fn init_logger() -> Result<(), log::SetLoggerError> {
-    Ok(())
+pub fn init_logger(level: LevelFilter) -> Result<(), ManagedLoggerError> {
+    logger::initialize(level)
 }
 
 /// Build an [`EnvConfig`] from a Cloudflare `Env`. Workers have no
@@ -163,8 +158,13 @@ where
     let callback = OutboundScopeOwner::callback();
     callback
         .run(async move {
+            let env_config = env_config_from_worker(&env, A::stores());
             if !A::owns_logging() {
-                drop(init_logger());
+                init_logger(edgezero_core::resolve_logging_level(&env_config)).map_err(
+                    |_error| {
+                        WorkerError::RustError("managed logger initialization failed".to_owned())
+                    },
+                )?;
             }
             let clock = MonotonicClock::default();
             let request_start = clock.now();
@@ -175,7 +175,7 @@ where
                     return request::send_assembly_error(req, error, ctx, request_start, clock);
                 }
             };
-            dispatch_scoped_app::<A>(&app, req, env, ctx).await
+            dispatch_scoped_app::<A>(&app, req, env, ctx, env_config).await
         })
         .await
 }
@@ -199,7 +199,8 @@ pub async fn dispatch_app<A>(
 where
     A: Hooks,
 {
-    request::with_callback_scope(dispatch_scoped_app::<A>(app, req, env, ctx)).await
+    let env_config = env_config_from_worker(&env, A::stores());
+    request::with_callback_scope(dispatch_scoped_app::<A>(app, req, env, ctx, env_config)).await
 }
 
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
@@ -208,12 +209,12 @@ async fn dispatch_scoped_app<A>(
     req: Request,
     env: Env,
     ctx: Context,
+    env_config: EnvConfig,
 ) -> Result<Response, WorkerError>
 where
     A: Hooks,
 {
     let stores = A::stores();
-    let env_config = env_config_from_worker(&env, stores);
     let runtime_variables = match A::manifest() {
         BakedManifest::Absent => RuntimeVariables::default(),
         BakedManifest::Present(manifest) => {

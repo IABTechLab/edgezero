@@ -23,6 +23,7 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use bytes::Bytes;
 use edgezero_adapter_axum::outbound::AxumOutboundClient;
+use edgezero_adapter_axum::outbound_executor::AxumOutboundExecutor;
 use edgezero_core::body::Body as CoreBody;
 use edgezero_core::error::{BadGatewayReason, BudgetSource, EdgeError, ResponseLimitReason};
 use edgezero_core::http::{HeaderMap, Method, StatusCode};
@@ -40,7 +41,7 @@ use futures_util::stream;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
-use tokio::task::{JoinSet, LocalSet};
+use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 
 fn resolved_slot(slot: &OutboundCollectedSlot) -> &OutboundSlotResult {
@@ -105,6 +106,8 @@ async fn start_origin(router: Router) -> String {
 
 #[tokio::test]
 async fn redirect_following_uses_two_origins_and_discards_pending_bodies() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let final_origin = start_origin(Router::new().route("/final", get(|| async { "final" }))).await;
     let target = format!("{final_origin}/final");
     let ordinary_location = target.clone();
@@ -143,7 +146,9 @@ async fn redirect_following_uses_two_origins_and_discards_pending_bodies() {
             ),
     )
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     let plain = client
         .send(OutboundRequest::get(format!("{first_origin}/ordinary")).expect("request"))
         .await
@@ -175,6 +180,8 @@ async fn redirect_following_uses_two_origins_and_discards_pending_bodies() {
 
 #[tokio::test]
 async fn follow_without_redirect_preserves_adapter_coding_and_limit_results() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let origin = start_origin(Router::new().route(
         "/{coding}/{length}",
         get(|Path((coding, length)): Path<(String, usize)>| async move {
@@ -194,7 +201,9 @@ async fn follow_without_redirect_preserves_adapter_coding_and_limit_results() {
         }),
     ))
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     for coding in ["identity", "gzip", "deflate", "unsupported"] {
         for length in [10_usize, 11] {
             let make_request = || {
@@ -239,7 +248,9 @@ async fn follow_without_redirect_preserves_adapter_coding_and_limit_results() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn unpolled_batch_dispatches_all_slots() {
-    LocalSet::new()
+    let mut executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    executor_owner
         .run_until(async {
             let arrivals = Arc::new(AtomicUsize::new(0));
             let observed = Arc::clone(&arrivals);
@@ -251,7 +262,9 @@ async fn unpolled_batch_dispatches_all_slots() {
                 }),
             ))
             .await;
-            let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+            let client = HttpClient::with_client(
+                AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+            );
             let batch = client.start_batch_until(
                 vec![
                     OutboundRequest::get(&origin).expect("first request"),
@@ -273,7 +286,9 @@ async fn unpolled_batch_dispatches_all_slots() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn begin_dispatches_without_collection() {
-    LocalSet::new()
+    let mut executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    executor_owner
         .run_until(async {
             let arrived = Arc::new(Notify::new());
             let observed = Arc::clone(&arrived);
@@ -285,7 +300,9 @@ async fn begin_dispatches_without_collection() {
                 }),
             ))
             .await;
-            let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+            let client = HttpClient::with_client(
+                AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+            );
             let pending = client
                 .begin(OutboundRequest::get(&origin).expect("request"))
                 .await
@@ -300,13 +317,17 @@ async fn begin_dispatches_without_collection() {
 
 #[tokio::test]
 async fn begin_streamed_upload_rejection_precedes_scheduler_and_body_polling() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let polls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&polls);
     let source = stream::poll_fn(move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Poll::Pending
     });
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     let error = client
         .begin(
             OutboundRequest::post("http://127.0.0.1:9/upload")
@@ -322,9 +343,14 @@ async fn begin_streamed_upload_rejection_precedes_scheduler_and_body_polling() {
 #[tokio::test]
 async fn missing_local_scheduler_returns_internal_before_transport_io() {
     use futures_util::FutureExt as _;
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    drop(executor_owner);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("origin");
     let target = format!("http://{}/", listener.local_addr().expect("address"));
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     let error = client
         .begin(
             OutboundRequest::post(target)
@@ -332,7 +358,7 @@ async fn missing_local_scheduler_returns_internal_before_transport_io() {
                 .body("buffered"),
         )
         .await
-        .expect_err("missing LocalSet");
+        .expect_err("dropped executor");
     assert!(matches!(error, EdgeError::Internal { .. }));
     assert!(
         listener.accept().now_or_never().is_none(),
@@ -342,13 +368,17 @@ async fn missing_local_scheduler_returns_internal_before_transport_io() {
 
 #[tokio::test]
 async fn settlement_timer_wakes_without_body_data() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let polls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&polls);
     let source = stream::poll_fn(move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Poll::Pending
     });
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     let error = timeout(
         Duration::from_secs(1),
         client.send(
@@ -373,7 +403,9 @@ async fn settlement_timer_wakes_without_body_data() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn collected_begin_stream_stays_live() {
-    LocalSet::new()
+    let mut executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    executor_owner
         .run_until(async {
             let origin = start_origin(Router::new().route(
                 "/",
@@ -387,7 +419,9 @@ async fn collected_begin_stream_stays_live() {
                 }),
             ))
             .await;
-            let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+            let client = HttpClient::with_client(
+                AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+            );
             let pending = client
                 .begin(
                     OutboundRequest::get(origin)
@@ -410,6 +444,8 @@ async fn collected_begin_stream_stays_live() {
 
 #[tokio::test]
 async fn configured_connect_timeout_reuses_shared_keep_alive_transport() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("origin");
     let target = format!("http://{}/", listener.local_addr().expect("address"));
     let accepts = Arc::new(AtomicUsize::new(0));
@@ -440,7 +476,9 @@ async fn configured_connect_timeout_reuses_shared_keep_alive_transport() {
             });
         }
     });
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     for connect in [
         Duration::from_millis(1),
         Duration::from_millis(1),
@@ -468,7 +506,11 @@ async fn configured_connect_timeout_reuses_shared_keep_alive_transport() {
 
 #[tokio::test]
 async fn connect_timeout_acceptance_preserves_governing_deadline_without_emulation() {
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     for (connect, total, cause) in [
         (
             Duration::from_millis(1),
@@ -532,7 +574,9 @@ async fn start_coding_origin(coding: &'static str, origin_body: Vec<u8>) -> Stri
 
 #[tokio::test]
 async fn marker_policy_reaches_transport_bodyless_redirect_and_batch_paths() {
-    LocalSet::new()
+    let mut executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    executor_owner
         .run_until(async {
             let origin = start_origin(Router::new().route(
                 "/{status}",
@@ -547,8 +591,10 @@ async fn marker_policy_reaches_transport_bodyless_redirect_and_batch_paths() {
                 }),
             ))
             .await;
-            let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"))
-                .with_proxy_marker(false);
+            let client = HttpClient::with_client(
+                AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+            )
+            .with_proxy_marker(false);
             for (method, status) in [
                 (Method::GET, StatusCode::OK),
                 (Method::GET, StatusCode::NO_CONTENT),
@@ -626,6 +672,8 @@ async fn marker_policy_reaches_transport_bodyless_redirect_and_batch_paths() {
 
 #[tokio::test]
 async fn redirect_response_is_not_followed() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let origin = start_origin(
         Router::new()
             .route("/target", get(|| async { "followed" }))
@@ -635,7 +683,9 @@ async fn redirect_response_is_not_followed() {
             ),
     )
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     let request = OutboundRequest::get(format!("{origin}/redirect")).expect("request");
 
     let response = client.send(request).await.expect("response");
@@ -652,10 +702,14 @@ async fn redirect_response_is_not_followed() {
 
 #[tokio::test]
 async fn batch_collection_reports_per_slot_elapsed() {
-    LocalSet::new()
+    let mut executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    executor_owner
         .run_until(async {
             let origin = start_origin(Router::new().route("/", get(|| async { "ok" }))).await;
-            let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+            let client = HttpClient::with_client(
+                AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+            );
             let requests = vec![
                 OutboundRequest::get(format!("{origin}/")).expect("reachable request"),
                 OutboundRequest::new(
@@ -692,8 +746,10 @@ async fn batch_collection_reports_per_slot_elapsed() {
 
 #[tokio::test]
 async fn batch_preflight_precedence_and_indices() {
-    LocalSet::new().run_until(async {
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let mut executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    executor_owner.run_until(async {
+    let client = HttpClient::with_client(AxumOutboundClient::try_new(executor_handle.clone()).expect("client"));
     let streamed_upload = OutboundRequest::post("https://example.com/upload")
         .expect("upload request")
         .body(CoreBody::stream(stream::iter([bytes::Bytes::from_static(
@@ -743,6 +799,8 @@ async fn batch_preflight_precedence_and_indices() {
 async fn oversized_uploads_never_contact_origin_and_upstream_413_remains_a_response() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
 
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
@@ -761,7 +819,9 @@ async fn oversized_uploads_never_contact_origin_and_upstream_413_remains_a_respo
         }),
     ))
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     for streamed in [false, true] {
         let bytes = Bytes::from_static(b"123456789");
         let body = if streamed {
@@ -798,6 +858,8 @@ async fn oversized_uploads_never_contact_origin_and_upstream_413_remains_a_respo
 
 #[tokio::test]
 async fn buffered_response_deadline_covers_body_completion() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let origin = start_origin(Router::new().route(
         "/",
         get(|| async {
@@ -810,7 +872,9 @@ async fn buffered_response_deadline_covers_body_completion() {
         }),
     ))
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     let request = OutboundRequest::get(format!("{origin}/"))
         .expect("request")
         .timeout(Duration::from_millis(10));
@@ -831,7 +895,9 @@ async fn buffered_response_deadline_covers_body_completion() {
 
 #[tokio::test]
 async fn batch_preserves_request_deadline_provenance() {
-    LocalSet::new()
+    let mut executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    executor_owner
         .run_until(async {
             let origin = start_origin(Router::new().route(
                 "/",
@@ -841,7 +907,9 @@ async fn batch_preserves_request_deadline_provenance() {
                 }),
             ))
             .await;
-            let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+            let client = HttpClient::with_client(
+                AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+            );
             let request = OutboundRequest::get(format!("{origin}/"))
                 .expect("request")
                 .deadline(Deadline::after(Duration::from_millis(10)));
@@ -867,7 +935,9 @@ async fn batch_preserves_request_deadline_provenance() {
 
 #[tokio::test]
 async fn batch_yields_complete_exchanges_in_completion_order() {
-    LocalSet::new()
+    let mut executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    executor_owner
         .run_until(async {
             let origin = start_origin(
                 Router::new()
@@ -881,7 +951,9 @@ async fn batch_yields_complete_exchanges_in_completion_order() {
                     .route("/fast", get(|| async { "fast" })),
             )
             .await;
-            let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+            let client = HttpClient::with_client(
+                AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+            );
             let requests = vec![
                 OutboundRequest::get(format!("{origin}/slow")).expect("slow request"),
                 OutboundRequest::get(format!("{origin}/fast")).expect("fast request"),
@@ -914,8 +986,10 @@ async fn cutoff_releases_an_observed_pending_sdk_body_read() {
     use edgezero_core::MonotonicInstant;
     use edgezero_core::outbound::test_support::NativeBodyWitness;
     use futures_util::future::poll_fn;
+    let mut executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
 
-    LocalSet::new()
+    executor_owner
         .run_until(async {
             let origin = start_origin(Router::new().route(
                 "/pending",
@@ -939,8 +1013,9 @@ async fn cutoff_releases_an_observed_pending_sdk_body_read() {
                 Arc::clone(&advancement),
                 Arc::new(AtomicUsize::new(0)),
             );
-            let client =
-                HttpClient::with_client(AxumOutboundClient::try_with_time(time).expect("client"));
+            let client = HttpClient::with_client(
+                AxumOutboundClient::try_with_time(executor_handle.clone(), time).expect("client"),
+            );
             let mut request = OutboundRequest::get(format!("{origin}/pending")).expect("request");
             let witness = NativeBodyWitness::new();
             witness.attach(&mut request).expect("attach");
@@ -987,8 +1062,14 @@ async fn cutoff_releases_an_observed_pending_sdk_body_read() {
 }
 
 #[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep the complete cutoff ownership proof together with explicit executor setup"
+)]
 async fn early_observation_cutoff_preserves_completed_slots_and_leaves_pending_none() {
-    LocalSet::new()
+    let mut executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    executor_owner
         .run_until(async {
             use edgezero_core::MonotonicInstant;
             use futures_util::future::poll_fn;
@@ -1022,8 +1103,9 @@ async fn early_observation_cutoff_preserves_completed_slots_and_leaves_pending_n
             let timer_wakes = Arc::new(AtomicUsize::new(0));
             let time =
                 paired_cutoff_time(clock, Arc::clone(&clock_advanced), Arc::clone(&timer_wakes));
-            let client =
-                HttpClient::with_client(AxumOutboundClient::try_with_time(time).expect("client"));
+            let client = HttpClient::with_client(
+                AxumOutboundClient::try_with_time(executor_handle.clone(), time).expect("client"),
+            );
             let mut batch = client.start_batch_until(
                 vec![
                     OutboundRequest::get(format!("{origin}/fast")).expect("fast request"),
@@ -1094,6 +1176,8 @@ async fn early_observation_cutoff_preserves_completed_slots_and_leaves_pending_n
 
 #[tokio::test]
 async fn authority_override_changes_host_only_and_cache_bypass_adds_no_origin_header() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let origin = start_origin(Router::new().route(
         "/",
         get(|headers: HeaderMap| async move {
@@ -1109,7 +1193,9 @@ async fn authority_override_changes_host_only_and_cache_bypass_adds_no_origin_he
         }),
     ))
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     let request = OutboundRequest::get(format!("{origin}/"))
         .expect("request")
         .host_authority_override("virtual.example:8443")
@@ -1129,6 +1215,8 @@ async fn authority_override_changes_host_only_and_cache_bypass_adds_no_origin_he
 
 #[tokio::test]
 async fn streamed_response_deadline_preserves_timeout_provenance() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let origin = start_origin(Router::new().route(
         "/",
         get(|| async {
@@ -1140,7 +1228,9 @@ async fn streamed_response_deadline_preserves_timeout_provenance() {
         }),
     ))
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     let request = OutboundRequest::get(format!("{origin}/"))
         .expect("request")
         .stream_response()
@@ -1164,6 +1254,8 @@ async fn streamed_response_deadline_preserves_timeout_provenance() {
 
 #[tokio::test]
 async fn encoded_and_decoded_limits_report_independent_origins() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let decoded = vec![b'x'; 4_096];
     let encoded = gzip(&decoded);
     let origin_body = encoded.clone();
@@ -1180,7 +1272,9 @@ async fn encoded_and_decoded_limits_report_independent_origins() {
         }),
     ))
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
 
     let decoded_error = client
         .send(
@@ -1223,6 +1317,8 @@ async fn encoded_and_decoded_limits_report_independent_origins() {
 
 #[tokio::test]
 async fn deflate_response_is_decoded_stripped_and_bounded() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let decoded = vec![b'd'; 4_096];
     let encoded = zlib(&decoded);
     let origin_body = encoded.clone();
@@ -1240,7 +1336,9 @@ async fn deflate_response_is_decoded_stripped_and_bounded() {
         }),
     ))
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
 
     let response = client
         .send(
@@ -1281,6 +1379,8 @@ async fn deflate_response_is_decoded_stripped_and_bounded() {
 
 #[tokio::test]
 async fn original_chunked_response_obeys_observed_buffer_cap() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let origin = start_origin(Router::new().route(
         "/",
         get(|| async {
@@ -1293,7 +1393,9 @@ async fn original_chunked_response_obeys_observed_buffer_cap() {
         }),
     ))
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     let error = client
         .send(
             OutboundRequest::get(origin)
@@ -1317,13 +1419,16 @@ async fn original_chunked_response_obeys_observed_buffer_cap() {
 
 #[tokio::test]
 async fn original_and_partial_coding_survive_actual_transport_and_mixed_batch() {
-    LocalSet::new()
+    let mut executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
+    executor_owner
         .run_until(async {
             let plain = b"original compressed representation";
             for (coding, encoded) in [("gzip", gzip(plain)), ("deflate", zlib(plain))] {
                 let origin = start_coding_origin(coding, encoded.clone()).await;
-                let client =
-                    HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+                let client = HttpClient::with_client(
+                    AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+                );
                 let length = u64::try_from(encoded.len()).expect("encoded length");
                 for (choice, status) in [
                     (ResponseDecoding::Original, 200_u16),
@@ -1410,6 +1515,8 @@ async fn original_and_partial_coding_survive_actual_transport_and_mixed_batch() 
 
 #[tokio::test]
 async fn passthrough_coding_is_not_charged_to_decoded_limit() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let origin = start_origin(Router::new().route(
         "/",
         get(|| async {
@@ -1420,7 +1527,9 @@ async fn passthrough_coding_is_not_charged_to_decoded_limit() {
         }),
     ))
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
     let request = OutboundRequest::get(format!("{origin}/"))
         .expect("request")
         .max_encoded_response_bytes(6)
@@ -1434,6 +1543,8 @@ async fn passthrough_coding_is_not_charged_to_decoded_limit() {
 
 #[tokio::test]
 async fn repeated_response_headers_are_preserved() {
+    let executor_owner = AxumOutboundExecutor::new();
+    let executor_handle = executor_owner.handle();
     let origin = start_origin(Router::new().route(
         "/",
         get(|| async {
@@ -1448,7 +1559,9 @@ async fn repeated_response_headers_are_preserved() {
         }),
     ))
     .await;
-    let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+    let client = HttpClient::with_client(
+        AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+    );
 
     let response = client
         .send(OutboundRequest::get(format!("{origin}/")).expect("request"))

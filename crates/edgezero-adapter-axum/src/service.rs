@@ -36,6 +36,7 @@ use crate::connection::{ConnectionExit, serve_http1};
 #[cfg(test)]
 use crate::ingress_config::AxumIngressConfig;
 use crate::outbound::{AxumOutboundClient, native_time};
+use crate::outbound_executor::AxumOutboundExecutorHandle;
 use crate::request::{HttpTransport, into_core_request_parts};
 use crate::response::{AxumEgressBody, EgressConnection, prepare_egress_response};
 
@@ -50,6 +51,7 @@ pub(crate) struct AxumServiceState {
     app: Arc<App>,
     config_registry: Option<ConfigRegistry>,
     config_store_handle: Option<ConfigStoreHandle>,
+    executor: AxumOutboundExecutorHandle,
     kv_handle: Option<KvHandle>,
     kv_registry: Option<KvRegistry>,
     outbound_client: Option<HttpClient>,
@@ -65,9 +67,9 @@ impl AxumServiceState {
     /// Creates a service that preserves all policies configured on `App`.
     #[must_use]
     #[inline]
-    pub fn from_app(app: App) -> Self {
-        Self::from_app_with_client_factory(app, |clock| {
-            AxumOutboundClient::try_with_time(native_time(clock))
+    pub fn from_app(app: App, executor: AxumOutboundExecutorHandle) -> Self {
+        Self::from_app_with_client_factory(app, executor.clone(), |clock| {
+            AxumOutboundClient::try_with_time(executor, native_time(clock))
                 .ok()
                 .map(HttpClient::with_client)
         })
@@ -75,6 +77,7 @@ impl AxumServiceState {
 
     fn from_app_with_client_factory(
         app: App,
+        executor: AxumOutboundExecutorHandle,
         initialize: impl FnOnce(MonotonicClock) -> Option<HttpClient>,
     ) -> Self {
         let outbound_client = app
@@ -83,6 +86,7 @@ impl AxumServiceState {
             .or_else(|| initialize(app.monotonic_clock()));
         Self {
             app: Arc::new(app),
+            executor,
             config_registry: None,
             config_store_handle: None,
             kv_handle: None,
@@ -96,8 +100,8 @@ impl AxumServiceState {
     #[must_use]
     #[inline]
     #[cfg(test)]
-    pub fn new(router: RouterService) -> Self {
-        Self::from_app(App::new(router))
+    pub fn new(router: RouterService, executor: AxumOutboundExecutorHandle) -> Self {
+        Self::from_app(App::new(router), executor)
     }
 
     /// Attach an id-keyed config-store registry to this service.
@@ -249,7 +253,8 @@ impl AxumServiceState {
         let app = Arc::clone(&self.app);
         let configured_client = self.outbound_client.clone();
         let (config_registry, kv_registry, secret_registry) = self.resolved_store_registries();
-        let (parts, native_body) = request.into_parts();
+        let (mut parts, native_body) = request.into_parts();
+        parts.extensions.insert(self.executor.clone());
         let request_method = parts.method.clone();
         if let Err(error) = validate_normalized_ingress_parts(&parts, app.ingress_head_limits()) {
             return prepare_detached_ingress_error(
@@ -396,6 +401,7 @@ mod tests {
     )]
 
     use super::*;
+    use crate::outbound_executor::AxumOutboundExecutor;
     use async_stream::stream;
     use bytes::{Bytes, BytesMut};
     use edgezero_core::body::Body;
@@ -442,7 +448,7 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::oneshot;
-    use tokio::task::{JoinHandle, JoinSet, LocalSet, yield_now};
+    use tokio::task::{JoinHandle, JoinSet, yield_now};
     use tokio::time::{Instant as TokioInstant, sleep, sleep_until, timeout};
     use tower::ServiceExt as _;
 
@@ -598,7 +604,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn attached_progress_closes_before_retained_handles_on_terminal_egress() {
-        LocalSet::new().run_until(async {
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner.run_until(async {
             for (mode,expected) in [("eof",ResponseEgressOutcome::HostHandoff),("source",ResponseEgressOutcome::SourceError),
                 ("deadline",ResponseEgressOutcome::DeadlineExceeded),("transport",ResponseEgressOutcome::TransportError)] {
                 let (target,receipts,server)=waiting_outbound_origin().await;
@@ -635,7 +643,7 @@ mod tests {
                 let mut app=App::new(router);
                 app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&reports)));
                 let connection=EgressConnection::default();
-                let response=AxumServiceState::from_app(app).dispatch_request(Request::new(AxumBody::empty()),&connection,None)
+                let response=AxumServiceState::from_app(app, executor_handle.clone()).dispatch_request(Request::new(AxumBody::empty()),&connection,None)
                     .await.expect("response handoff");
                 let mut body=response.into_body();
                 assert_eq!(poll_future(|cx|Pin::new(&mut body).poll_frame(cx)).await.expect("prefix").expect("prefix frame").into_data().expect("data"),"live");
@@ -686,7 +694,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn callback_handoff_cancels_native_begin_and_batch_while_handles_are_retained() {
-        LocalSet::new()
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner
             .run_until(async {
                 let (target, received, server) = waiting_outbound_origin().await;
                 let router = RouterService::builder()
@@ -704,7 +714,7 @@ mod tests {
                         }
                     })
                     .build();
-                let response = AxumServiceState::new(router)
+                let response = AxumServiceState::new(router, executor_handle.clone())
                     .oneshot(Request::new(AxumBody::empty()))
                     .await
                     .expect("native handoff");
@@ -717,7 +727,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn attached_body_owner_keeps_pre_head_jobs_live_without_changing_framing() {
-        LocalSet::new()
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner
             .run_until(async {
                 for streamed in [false, true] {
                     let (target, received, server) = waiting_outbound_origin().await;
@@ -746,7 +758,7 @@ mod tests {
                             }
                         })
                         .build();
-                    let response = AxumServiceState::new(router)
+                    let response = AxumServiceState::new(router, executor_handle.clone())
                         .oneshot(Request::new(AxumBody::empty()))
                         .await
                         .expect("native handoff before origin heads");
@@ -784,7 +796,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn response_body_scope_keeps_native_work_live_until_eof_or_drop() {
-        LocalSet::new()
+        let mut executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        executor_owner
             .run_until(async {
                 for clean_eof in [false, true] {
                     let (target, received, server) = waiting_outbound_origin().await;
@@ -816,7 +830,7 @@ mod tests {
                     let reports = Arc::new(Mutex::new(Vec::new()));
                     let mut app = App::new(router);
                     app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&reports)));
-                    let response = AxumServiceState::from_app(app)
+                    let response = AxumServiceState::from_app(app, executor_handle.clone())
                         .oneshot(Request::new(AxumBody::empty()))
                         .await
                         .expect("native streaming handoff");
@@ -852,6 +866,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn callback_handoff_releases_retained_unpolled_send_without_polling_upload() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let drops = Arc::new(AtomicUsize::new(0));
         let polls = Arc::new(AtomicUsize::new(0));
         let observed_drops = Arc::clone(&drops);
@@ -877,7 +893,7 @@ mod tests {
                 }
             })
             .build();
-        let response = AxumServiceState::new(router)
+        let response = AxumServiceState::new(router, executor_handle.clone())
             .oneshot(Request::new(AxumBody::empty()))
             .await
             .expect("native handoff");
@@ -913,10 +929,14 @@ mod tests {
 
     #[test]
     fn state_client_skips_real_transport_initialization_factory() {
-        let supplied = HttpClient::with_client(AxumOutboundClient::try_new().expect("test client"))
-            .with_proxy_marker(false);
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        let supplied = HttpClient::with_client(
+            AxumOutboundClient::try_new(executor_handle.clone()).expect("test client"),
+        )
+        .with_proxy_marker(false);
         let app = App::new(RouterService::builder().with_state(supplied).build());
-        let service = AxumServiceState::from_app_with_client_factory(app, |_| {
+        let service = AxumServiceState::from_app_with_client_factory(app, executor_handle, |_| {
             panic!("supplied client must avoid transport initialization")
         });
         assert!(
@@ -994,6 +1014,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn forwards_request_to_router() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let router = RouterService::builder()
             .get("/", |_ctx: RequestContext| async move {
                 let response = response_builder()
@@ -1003,7 +1025,7 @@ mod tests {
                 Ok::<_, EdgeError>(response)
             })
             .build();
-        let mut service = AxumServiceState::new(router);
+        let mut service = AxumServiceState::new(router, executor_handle.clone());
 
         let request = Request::builder().uri("/").body(AxumBody::empty()).unwrap();
         let response = service.ready().await.unwrap().call(request).await.unwrap();
@@ -1012,6 +1034,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admission_abort_skips_body_handler_middleware_and_egress() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let body_polls = Arc::new(AtomicUsize::new(0));
         let observed_body_polls = Arc::clone(&body_polls);
         let native_body = AxumBody::from_stream(poll_fn(move |_cx| {
@@ -1041,7 +1065,9 @@ mod tests {
             .body(native_body)
             .expect("request");
 
-        let result = AxumServiceState::from_app(app).oneshot(request).await;
+        let result = AxumServiceState::from_app(app, executor_handle.clone())
+            .oneshot(request)
+            .await;
 
         assert!(result.is_err());
         assert_eq!(body_polls.load(Ordering::SeqCst), 0);
@@ -1052,13 +1078,15 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn admission_abort_closes_http1_without_response_bytes() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
         let address = listener.local_addr().expect("listener address");
         let mut app = App::new(RouterService::builder().build());
         app.set_ingress_admission_policy(|_| AdmissionDecision::Abort);
-        let state = AxumServiceState::from_app(app);
+        let state = AxumServiceState::from_app(app, executor_handle.clone());
 
         let server = async move {
             let (stream, remote_addr) = listener.accept().await.expect("accept client");
@@ -1113,6 +1141,8 @@ mod tests {
             Ok(slot.elapsed.as_millis().to_string())
         }
 
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let start = MonotonicInstant::now();
         let completed = start
             .checked_add(Duration::from_millis(7))
@@ -1133,7 +1163,7 @@ mod tests {
             .body(AxumBody::empty())
             .expect("request");
 
-        let response = AxumServiceState::from_app(app)
+        let response = AxumServiceState::from_app(app, executor_handle.clone())
             .oneshot(request)
             .await
             .expect("response");
@@ -1147,6 +1177,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn configured_admission_refuses_before_native_body_poll() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let body_polls = Arc::new(AtomicUsize::new(0));
         let observed_polls = Arc::clone(&body_polls);
         let native_body = AxumBody::from_stream(poll_fn(move |_cx| {
@@ -1178,7 +1210,7 @@ mod tests {
                     .expect("refusal"),
             }
         });
-        let mut service = AxumServiceState::from_app(app);
+        let mut service = AxumServiceState::from_app(app, executor_handle.clone());
         let request = Request::builder()
             .method("POST")
             .uri("/upload")
@@ -1193,6 +1225,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn normalized_ingress_error_returns_typed_response_without_application_observation() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let reports = Arc::new(Mutex::new(Vec::new()));
         let completion_reports = Arc::new(Mutex::new(Vec::new()));
         let clock_samples = Arc::new(AtomicUsize::new(0));
@@ -1234,7 +1268,7 @@ mod tests {
             .body(AxumBody::empty())
             .expect("request");
 
-        let response = AxumServiceState::from_app(app)
+        let response = AxumServiceState::from_app(app, executor_handle.clone())
             .oneshot(request)
             .await
             .expect("typed response");
@@ -1261,6 +1295,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn normalized_ingress_error_decision_abort_closes_without_response() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
@@ -1277,7 +1313,7 @@ mod tests {
             observed_factory_calls.fetch_add(1, Ordering::SeqCst);
             DetachedResponseEgressDecision::Abort
         });
-        let state = AxumServiceState::from_app(app);
+        let state = AxumServiceState::from_app(app, executor_handle.clone());
 
         let server = async move {
             let (stream, remote_addr) = listener.accept().await.expect("accept client");
@@ -1316,6 +1352,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admission_policy_error_decision_send_uses_detached_completion() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let body_polls = Arc::new(AtomicUsize::new(0));
         let observed_body_polls = Arc::clone(&body_polls);
         let native_body = AxumBody::from_stream(poll_fn(move |_cx| {
@@ -1385,7 +1423,7 @@ mod tests {
             .body(native_body)
             .expect("request");
 
-        let response = AxumServiceState::from_app(app)
+        let response = AxumServiceState::from_app(app, executor_handle.clone())
             .oneshot(request)
             .await
             .expect("typed policy error response");
@@ -1407,6 +1445,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admission_policy_error_decision_abort_skips_response_and_application_work() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let body_polls = Arc::new(AtomicUsize::new(0));
         let observed_body_polls = Arc::clone(&body_polls);
         let native_body = AxumBody::from_stream(poll_fn(move |_cx| {
@@ -1455,7 +1495,9 @@ mod tests {
             .body(native_body)
             .expect("request");
 
-        let outcome = AxumServiceState::from_app(app).oneshot(request).await;
+        let outcome = AxumServiceState::from_app(app, executor_handle.clone())
+            .oneshot(request)
+            .await;
 
         assert!(outcome.is_err());
         assert_eq!(body_polls.load(Ordering::SeqCst), 0);
@@ -1469,6 +1511,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn post_admission_failure_uses_owned_error_egress() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let reports = Arc::new(Mutex::new(Vec::new()));
         let grant_drops = Arc::new(AtomicUsize::new(0));
         let observed_grant_drops = Arc::clone(&grant_drops);
@@ -1484,7 +1528,7 @@ mod tests {
             read_deadline: head.read_deadline_after(Duration::from_secs(1)),
         });
         app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&reports)));
-        let mut service = AxumServiceState::from_app(app);
+        let mut service = AxumServiceState::from_app(app, executor_handle.clone());
         service.outbound_client = None;
         let request = Request::builder()
             .uri("/owned")
@@ -1633,6 +1677,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bounded_fallback_preserves_404_and_405_at_exact_cap() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         for (path, expected) in [
             ("/missing", StatusCode::NOT_FOUND),
             ("/known", StatusCode::METHOD_NOT_ALLOWED),
@@ -1649,7 +1695,7 @@ mod tests {
                 &source_drops,
                 &body_polls,
             );
-            let response = AxumServiceState::from_app(app)
+            let response = AxumServiceState::from_app(app, executor_handle.clone())
                 .ready()
                 .await
                 .expect("ready")
@@ -1672,6 +1718,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bounded_fallback_overflow_precedes_404_and_405() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         for path in ["/missing", "/known"] {
             let grant_drops = Arc::new(AtomicUsize::new(0));
             let source_drops = Arc::new(AtomicUsize::new(0));
@@ -1685,7 +1733,7 @@ mod tests {
                 &source_drops,
                 &body_polls,
             );
-            let response = AxumServiceState::from_app(app)
+            let response = AxumServiceState::from_app(app, executor_handle.clone())
                 .ready()
                 .await
                 .expect("ready")
@@ -1708,6 +1756,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bounded_fallback_deadline_interrupts_pending_native_body() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let body_polls = Arc::new(AtomicUsize::new(0));
         let observed_polls = Arc::clone(&body_polls);
         let grant_drops = Arc::new(AtomicUsize::new(0));
@@ -1722,7 +1772,7 @@ mod tests {
         }));
         let (app, handler_calls, middleware_calls) =
             fallback_body_app(4_096, Duration::from_millis(500), &grant_drops);
-        let mut service = AxumServiceState::from_app(app);
+        let mut service = AxumServiceState::from_app(app, executor_handle.clone());
         let request = Request::builder()
             .method("POST")
             .uri("/missing")
@@ -1754,6 +1804,8 @@ mod tests {
         reason = "tokio::select! expands to internal randomized branch selection arithmetic"
     )]
     async fn cancelled_service_releases_pending_fallback_drain_and_grant() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let body_polls = Arc::new(AtomicUsize::new(0));
         let observed_polls = Arc::clone(&body_polls);
         let grant_drops = Arc::new(AtomicUsize::new(0));
@@ -1768,7 +1820,7 @@ mod tests {
         }));
         let (app, handler_calls, middleware_calls) =
             fallback_body_app(4_096, Duration::from_secs(5), &grant_drops);
-        let mut service = AxumServiceState::from_app(app);
+        let mut service = AxumServiceState::from_app(app, executor_handle.clone());
         let request = Request::builder()
             .method("POST")
             .uri("/missing")
@@ -1792,6 +1844,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fallback_refusal_returns_503_without_polling_native_body() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         for path in ["/missing", "/known"] {
             let body_polls = Arc::new(AtomicUsize::new(0));
             let observed_polls = Arc::clone(&body_polls);
@@ -1822,7 +1876,7 @@ mod tests {
                 .body(native_body)
                 .expect("request");
 
-            let response = AxumServiceState::from_app(app)
+            let response = AxumServiceState::from_app(app, executor_handle.clone())
                 .ready()
                 .await
                 .expect("ready")
@@ -1845,6 +1899,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consumed_response_reports_one_host_handoff_with_accepted_bytes() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let router = RouterService::builder()
             .get("/observed", |_ctx: RequestContext| async move {
                 Ok::<_, EdgeError>("ok")
@@ -1853,7 +1909,7 @@ mod tests {
         let reports = Arc::new(Mutex::new(Vec::new()));
         let mut app = App::new(router);
         app.set_response_egress_observer(RecordingEgressObserver(Arc::clone(&reports)));
-        let mut service = AxumServiceState::from_app(app);
+        let mut service = AxumServiceState::from_app(app, executor_handle.clone());
         let request = Request::builder()
             .method("GET")
             .uri("/observed")
@@ -1879,6 +1935,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn injected_clock_controls_response_write_deadline() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let router = RouterService::builder()
             .get("/deadline", |_ctx: RequestContext| async move {
                 Ok::<_, EdgeError>("too late")
@@ -1909,7 +1967,7 @@ mod tests {
             .body(AxumBody::empty())
             .expect("request");
 
-        let response = AxumServiceState::from_app(app)
+        let response = AxumServiceState::from_app(app, executor_handle.clone())
             .ready()
             .await
             .expect("ready")
@@ -1934,6 +1992,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn admitted_deadline_reaches_body_cell_as_request_timeout() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let router = RouterService::builder()
             .post("/upload", |ctx: RequestContext| async move {
                 let _bytes = ctx.body_bytes(1024).await?;
@@ -1951,7 +2011,7 @@ mod tests {
                 read_deadline: Deadline::at_instant(head.request_start()),
             }
         });
-        let mut service = AxumServiceState::from_app(app);
+        let mut service = AxumServiceState::from_app(app, executor_handle.clone());
         let request = Request::builder()
             .method("POST")
             .uri("/upload")
@@ -1982,13 +2042,15 @@ mod tests {
             Err(error)
         }
 
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let mut app = App::new(RouterService::builder().get("/", read_empty).build());
         app.set_ingress_admission_policy(|head| AdmissionDecision::Admit {
             completion: ResponseEgressCompletion::empty(),
             grant: IngressGrant::empty(),
             read_deadline: Deadline::at_instant(head.request_start()),
         });
-        let mut service = AxumServiceState::from_app(app);
+        let mut service = AxumServiceState::from_app(app, executor_handle.clone());
         let response = service
             .ready()
             .await
@@ -2001,6 +2063,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn with_config_store_handle_injects_into_request() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         // Hard-cutoff: legacy `ctx.config_handle()` is
         // gone. The service synthesises a one-id `ConfigRegistry`
         // from the wired handle at the dispatch boundary, so
@@ -2024,7 +2088,8 @@ mod tests {
                 Ok::<_, EdgeError>(response)
             })
             .build();
-        let mut service = AxumServiceState::new(router).with_config_store_handle(handle);
+        let mut service =
+            AxumServiceState::new(router, executor_handle.clone()).with_config_store_handle(handle);
 
         let request = Request::builder()
             .uri("/check")
@@ -2040,6 +2105,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn with_kv_handle_injects_into_request() {
         use crate::key_value_store::PersistentKvStore;
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
 
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("test.redb");
@@ -2060,7 +2127,8 @@ mod tests {
                 Ok::<_, EdgeError>(response)
             })
             .build();
-        let mut service = AxumServiceState::new(router).with_kv_handle(handle);
+        let mut service =
+            AxumServiceState::new(router, executor_handle.clone()).with_kv_handle(handle);
 
         let request = Request::builder()
             .uri("/check")
@@ -2086,6 +2154,8 @@ mod tests {
         use edgezero_core::store_registry::{KvRegistry, StoreRegistry};
         use std::collections::BTreeMap;
 
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let temp_dir = tempfile::tempdir().unwrap();
         let registry_store: Arc<dyn KvStore> =
             Arc::new(PersistentKvStore::new(temp_dir.path().join("registry.redb")).unwrap());
@@ -2133,7 +2203,7 @@ mod tests {
         // Wire BOTH: registry first, then a bare handle. The bare
         // handle would synthesise a "default" id under the legacy
         // path; the dispatcher's `or_else` precedence must skip it.
-        let mut service = AxumServiceState::new(router)
+        let mut service = AxumServiceState::new(router, executor_handle.clone())
             .with_kv_registry(registry)
             .with_kv_handle(bare_handle);
 
@@ -2166,6 +2236,9 @@ mod tests {
         // or many declared stores.
         use crate::key_value_store::PersistentKvStore;
 
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("test.redb");
         let store: Arc<dyn KvStore> = Arc::new(PersistentKvStore::new(db_path).unwrap());
@@ -2186,7 +2259,8 @@ mod tests {
                 Ok::<_, EdgeError>(response)
             })
             .build();
-        let mut service = AxumServiceState::new(router).with_kv_handle(handle);
+        let mut service =
+            AxumServiceState::new(router, executor_handle.clone()).with_kv_handle(handle);
 
         let request = Request::builder()
             .uri("/probe")
@@ -2204,6 +2278,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn service_without_config_store_handle_still_works() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let router = RouterService::builder()
             .get("/no-config", |ctx: RequestContext| async move {
                 // Hard-cutoff: with no handle and no
@@ -2218,7 +2294,7 @@ mod tests {
                 Ok::<_, EdgeError>(response)
             })
             .build();
-        let mut service = AxumServiceState::new(router);
+        let mut service = AxumServiceState::new(router, executor_handle.clone());
 
         let request = Request::builder()
             .uri("/no-config")
@@ -2236,6 +2312,8 @@ mod tests {
         use bytes::Bytes;
         use edgezero_core::secret_store::{InMemorySecretStore, SecretHandle};
         use std::sync::Arc;
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
 
         // Hard-cutoff: the service synthesises a one-id
         // `SecretRegistry` from `with_secret_handle`, binding the
@@ -2267,7 +2345,8 @@ mod tests {
                 Ok::<_, EdgeError>(response)
             })
             .build();
-        let mut service = AxumServiceState::new(router).with_secret_handle(handle);
+        let mut service =
+            AxumServiceState::new(router, executor_handle.clone()).with_secret_handle(handle);
 
         let request = Request::builder()
             .uri("/check")
@@ -2281,6 +2360,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn service_without_kv_handle_still_works() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let router = RouterService::builder()
             .get("/no-kv", |ctx: RequestContext| async move {
                 // Hard-cutoff: see
@@ -2293,7 +2374,7 @@ mod tests {
                 Ok::<_, EdgeError>(response)
             })
             .build();
-        let mut service = AxumServiceState::new(router);
+        let mut service = AxumServiceState::new(router, executor_handle.clone());
 
         let request = Request::builder()
             .uri("/no-kv")
@@ -2314,6 +2395,8 @@ mod tests {
         use crate::key_value_store::PersistentKvStore;
         use edgezero_core::store_registry::{KvRegistry, StoreRegistry};
         use std::collections::BTreeMap;
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
 
         let temp_dir = tempfile::tempdir().unwrap();
 
@@ -2370,7 +2453,8 @@ mod tests {
                 Ok::<_, EdgeError>(response)
             })
             .build();
-        let service = AxumServiceState::new(router).with_kv_registry(registry);
+        let service =
+            AxumServiceState::new(router, executor_handle.clone()).with_kv_registry(registry);
 
         assert_eq!(
             body_at(&service, "/named/sessions").await,
@@ -2387,6 +2471,8 @@ mod tests {
         use crate::key_value_store::PersistentKvStore;
         use edgezero_core::store_registry::{KvRegistry, StoreRegistry};
         use std::collections::BTreeMap;
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
 
         let temp_dir = tempfile::tempdir().unwrap();
         let only_store: Arc<dyn KvStore> =
@@ -2412,7 +2498,8 @@ mod tests {
                 Ok::<_, EdgeError>(response)
             })
             .build();
-        let service = AxumServiceState::new(router).with_kv_registry(registry);
+        let service =
+            AxumServiceState::new(router, executor_handle.clone()).with_kv_registry(registry);
 
         assert_eq!(body_at(&service, "/lookup/only").await, "present=true");
         assert_eq!(body_at(&service, "/lookup/missing").await, "present=false");
