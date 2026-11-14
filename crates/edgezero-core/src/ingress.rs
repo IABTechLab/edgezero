@@ -1,620 +1,1179 @@
-//! Confidential adapter-owned ingress facts and explicit preservation limits.
-//!
-//! Metadata describes what a runtime exposes; it cannot recover information
-//! erased before conversion. Captured values are not serialized, and Debug
-//! implementations omit targets and authorities because they can contain private data.
+#![expect(
+    clippy::self_named_module_files,
+    reason = "the workspace denies both contradictory module-file conventions; retain its self-named-file convention"
+)]
 
+//! Route-aware admission, owned ingress lifetimes and conservative request facts.
+
+mod fidelity;
+
+pub use fidelity::{
+    CapturedTarget, CompleteTarget, HeaderFidelity, InboundOrigin, MAX_AUTHORITY_BYTES,
+    MAX_TARGET_BYTES, OriginSource, Preservation, RequestIngress, TargetSource, TargetUnavailable,
+};
+
+use std::any::Any;
 use std::fmt;
-use std::io::Error as IoError;
-use std::net::Ipv6Addr;
 use std::sync::Arc;
+use std::time::Duration;
 
-use http::uri::Authority;
+use bytes::Bytes;
 
+use crate::body::Body;
+use crate::config_store::ConfigExtractionLimits;
 use crate::error::EdgeError;
-use crate::http::HeaderName;
+use crate::http::{
+    Extensions, HeaderMap, HeaderValue, Method, Request, RequestParts, Response, StatusCode, Uri,
+    Version,
+    header::{CONTENT_LENGTH, CONTENT_TYPE, TRANSFER_ENCODING},
+};
+use crate::response_egress::{ResponseEgressCompletion, ResponseEgressEnvelope};
+use crate::router::{ResolvedDispatch, RouteMetadata, RouteResolution};
+use crate::time::{DEADLINE_FAR_FUTURE, Deadline, MonotonicClock, MonotonicInstant};
 
-/// Maximum complete target metadata, measured in UTF-8 bytes.
-pub const MAX_TARGET_BYTES: usize = 16 * 1024;
+pub const DEFAULT_INBOUND_READ_BUDGET: Duration = Duration::from_secs(30);
+pub const DEFAULT_MAX_REQUEST_HEADER_BYTES: u64 = 0x0001_0000;
+pub const DEFAULT_MAX_REQUEST_HEADER_COUNT: u64 = 100;
+pub const DEFAULT_MAX_REQUEST_TARGET_BYTES: u64 = 8_192;
 
-/// Maximum inbound authority metadata, measured in UTF-8 bytes.
-pub const MAX_AUTHORITY_BYTES: usize = 1024;
-
-/// A complete bounded target or an explicit acquisition failure.
-#[derive(Clone)]
-pub enum CapturedTarget {
-    /// A complete value created only by the bounded capture constructor.
-    Complete(CompleteTarget),
-    /// No complete target is available.
-    Unavailable(TargetUnavailable),
+/// Opaque application-owned lease transferred to one admitted request.
+pub struct IngressGrant {
+    value: Option<Box<dyn Any + Send + Sync>>,
 }
 
-impl CapturedTarget {
-    /// Capture a whole runtime target without retaining an oversized prefix.
-    #[inline]
-    #[must_use]
-    pub fn capture(value: &str, source: TargetSource, fidelity: Preservation) -> Self {
-        if value.len() > MAX_TARGET_BYTES {
-            return Self::Unavailable(TargetUnavailable::TooLarge);
-        }
-        Self::Complete(CompleteTarget {
-            fidelity,
-            source,
-            value: Arc::from(value),
-        })
-    }
-}
-
-/// A complete bounded target with explicit provenance.
-///
-/// Fields remain private so callers cannot bypass the capture bound.
-///
-/// ```compile_fail
-/// use edgezero_core::ingress::{CompleteTarget, Preservation, TargetSource};
-/// let target = CompleteTarget {
-///     value: std::sync::Arc::from("http://example.com/"),
-///     source: TargetSource::RuntimeUrl,
-///     fidelity: Preservation::Unknown,
-/// };
-/// ```
-#[derive(Clone)]
-pub struct CompleteTarget {
-    fidelity: Preservation,
-    source: TargetSource,
-    value: Arc<str>,
-}
-
-impl CompleteTarget {
-    /// Return the established target preservation guarantee.
-    #[inline]
-    #[must_use]
-    pub const fn fidelity(&self) -> Preservation {
-        self.fidelity
-    }
-
-    /// Return the runtime acquisition source.
-    #[inline]
-    #[must_use]
-    pub const fn source(&self) -> TargetSource {
-        self.source
-    }
-
-    /// Borrow the complete captured target.
-    #[inline]
-    #[must_use]
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-}
-
-/// Independent original-field preservation facts.
-///
-/// These axes compare original HTTP field values with core headers; successful
-/// runtime-to-core copying alone does not establish original-wire preservation.
-/// `Default` leaves all axes unknown; `RUNTIME_HEADER_MAP` additionally states
-/// that the converted map cannot supply global field order.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct HeaderFidelity {
-    field_multiplicity: Preservation,
-    global_field_order: Preservation,
-    octets: Preservation,
-    same_name_order: Preservation,
-}
-
-impl HeaderFidelity {
-    /// Conservative baseline for copied runtime headers: original octets,
-    /// multiplicity and same-name order are unknown; global order is unavailable.
-    pub const RUNTIME_HEADER_MAP: Self = Self::new(
-        Preservation::Unknown,
-        Preservation::Unknown,
-        Preservation::Unknown,
-        Preservation::Unavailable,
-    );
-
-    /// Return original field-count preservation for this header.
-    #[inline]
-    #[must_use]
-    pub const fn field_multiplicity(&self) -> Preservation {
-        self.field_multiplicity
-    }
-
-    /// Return original ordering across different field names.
-    #[inline]
-    #[must_use]
-    pub const fn global_field_order(&self) -> Preservation {
-        self.global_field_order
-    }
-
-    /// Construct four independent fidelity guarantees.
-    #[inline]
-    #[must_use]
-    pub const fn new(
-        octets: Preservation,
-        field_multiplicity: Preservation,
-        same_name_order: Preservation,
-        global_field_order: Preservation,
-    ) -> Self {
-        Self {
-            field_multiplicity,
-            global_field_order,
-            octets,
-            same_name_order,
-        }
-    }
-
-    /// Return original field-value byte preservation.
-    #[inline]
-    #[must_use]
-    pub const fn octets(&self) -> Preservation {
-        self.octets
-    }
-
-    /// Return original value ordering within a single field name.
-    #[inline]
-    #[must_use]
-    pub const fn same_name_order(&self) -> Preservation {
-        self.same_name_order
-    }
-}
-
-/// Bounded validated origin facts established by the adapter.
-///
-/// Syntax validation does not make a forwarded header trustworthy. Adapters
-/// must establish provenance before calling the constructor.
-#[derive(Clone)]
-pub struct InboundOrigin {
-    authority: Authority,
-    scheme: &'static str,
-    source: OriginSource,
-}
-
-impl InboundOrigin {
-    /// Borrow the validated authority in its source-provided spelling.
-    ///
-    /// Host case and explicit default ports are retained when the source exposes
-    /// them, including leading zeros in explicit ports. Port zero is accepted
-    /// syntactically; this does not make it a usable destination. Consumers must
-    /// normalize authorities before comparing origins.
-    #[inline]
-    #[must_use]
-    pub fn authority(&self) -> &str {
-        self.authority.as_str()
-    }
-
-    /// Validate a bounded HTTP(S) scheme and authority.
+impl IngressGrant {
+    /// Extracts the application-owned value without exposing its type metadata.
     ///
     /// # Errors
-    ///
-    /// Returns a bounded validation error for invalid or oversized input.
+    /// Returns the unchanged grant when it is empty or stores a different type.
     #[inline]
-    pub fn parse(scheme: &str, authority: &str, source: OriginSource) -> Result<Self, EdgeError> {
-        let normalized_scheme = if scheme.eq_ignore_ascii_case("http") {
-            "http"
-        } else if scheme.eq_ignore_ascii_case("https") {
-            "https"
-        } else {
-            return Err(EdgeError::bad_request("invalid ingress origin"));
+    pub fn downcast<T>(mut self) -> Result<T, Self>
+    where
+        T: Send + Sync + 'static,
+    {
+        let Some(boxed) = self.value.take() else {
+            return Err(self);
         };
-        if authority.is_empty()
-            || authority.len() > MAX_AUTHORITY_BYTES
-            || authority
-                .chars()
-                .any(|character| matches!(character, '@' | '/' | '?' | '#' | '\\'))
-        {
-            return Err(EdgeError::bad_request("invalid ingress origin"));
+        match boxed.downcast::<T>() {
+            Ok(typed) => Ok(*typed),
+            Err(original) => {
+                self.value = Some(original);
+                Err(self)
+            }
         }
-        let parsed: Authority = authority
-            .parse()
-            .map_err(|_error| EdgeError::bad_request("invalid ingress origin"))?;
-        let host = parsed.host();
-        if host.chars().any(|character| matches!(character, '[' | ']'))
-            && host
-                .strip_prefix('[')
-                .and_then(|inner| inner.strip_suffix(']'))
-                .is_none_or(|inner| inner.parse::<Ipv6Addr>().is_err())
-        {
-            return Err(EdgeError::bad_request("invalid ingress origin"));
-        }
-        let suffix = authority
-            .strip_prefix(parsed.host())
-            .ok_or_else(|| EdgeError::bad_request("invalid ingress origin"))?;
-        if parsed.host().is_empty()
-            || (!suffix.is_empty()
-                && suffix.strip_prefix(':').is_none_or(|port| {
-                    port.is_empty()
-                        || !port.bytes().all(|byte| byte.is_ascii_digit())
-                        || port.parse::<u16>().is_err()
-                }))
-        {
-            return Err(EdgeError::bad_request("invalid ingress origin"));
-        }
-        Ok(Self {
-            authority: parsed,
-            scheme: normalized_scheme,
-            source,
-        })
     }
 
-    /// Compare hosts case-insensitively and ports using each scheme's default.
-    ///
-    /// This compares authorities, not full origins: the schemes may differ.
-    #[inline]
     #[must_use]
-    pub fn same_authority(&self, other: &Self) -> bool {
-        let port = |origin: &Self| {
-            origin
-                .authority
-                .port_u16()
-                .unwrap_or(if origin.scheme == "https" { 443 } else { 80 })
-        };
-        self.authority
-            .host()
-            .eq_ignore_ascii_case(other.authority.host())
-            && port(self) == port(other)
+    #[inline]
+    pub fn empty() -> Self {
+        Self { value: None }
     }
 
-    /// Return the normalized HTTP(S) scheme.
-    #[inline]
     #[must_use]
-    pub const fn scheme(&self) -> &str {
-        self.scheme
-    }
-
-    /// Return the adapter-owned origin acquisition source.
     #[inline]
-    #[must_use]
-    pub const fn source(&self) -> OriginSource {
-        self.source
+    pub fn new<T>(value: T) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
+        Self {
+            value: Some(Box::new(value)),
+        }
     }
 }
 
-/// Provenance of a validated inbound origin.
+impl fmt::Debug for IngressGrant {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IngressGrant")
+            .field("occupied", &self.value.is_some())
+            .finish()
+    }
+}
+
+/// Cloneable application response restricted to finite buffered body bytes.
+#[derive(Clone, Debug)]
+pub struct BufferedIngressResponse {
+    body: Bytes,
+    headers: HeaderMap,
+    status: StatusCode,
+}
+
+impl BufferedIngressResponse {
+    /// Returns the finite buffered response bytes.
+    #[must_use]
+    #[inline]
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// Returns the application-selected response headers.
+    #[must_use]
+    #[inline]
+    pub fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+
+    pub(crate) fn into_response(self) -> Response {
+        let mut response = Response::new(Body::from_bytes(self.body));
+        *response.status_mut() = self.status;
+        *response.headers_mut() = self.headers;
+        response
+    }
+
+    /// Constructs an exact buffered response from application-selected parts.
+    #[must_use]
+    #[inline]
+    pub fn new<B>(status: StatusCode, headers: HeaderMap, body: B) -> Self
+    where
+        B: Into<Bytes>,
+    {
+        Self {
+            body: body.into(),
+            headers,
+            status,
+        }
+    }
+
+    /// Returns the application-selected response status.
+    #[must_use]
+    #[inline]
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// Constructs a buffered UTF-8 plain-text response with an exact content length.
+    #[must_use]
+    #[inline]
+    pub fn text<S>(status: StatusCode, text: S) -> Self
+    where
+        S: Into<String>,
+    {
+        let body = Bytes::from(text.into());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+        headers.insert(CONTENT_LENGTH, HeaderValue::from(body.len()));
+        Self::new(status, headers, body)
+    }
+}
+
+/// Application decision made before an inbound body can be consumed.
+#[non_exhaustive]
+pub enum AdmissionDecision {
+    /// Closes or resets the native request without producing an HTTP response.
+    Abort,
+    Admit {
+        completion: ResponseEgressCompletion,
+        grant: IngressGrant,
+        read_deadline: Deadline,
+    },
+    /// Drains an unmatched or wrong-method request body before returning the canonical
+    /// pre-resolved 404/405 response.
+    ReadBodyBeforeFallback {
+        completion: ResponseEgressCompletion,
+        grant: IngressGrant,
+        max_body_bytes: usize,
+        read_deadline: Deadline,
+        on_exceeded: BufferedIngressResponse,
+        on_timeout: BufferedIngressResponse,
+    },
+    Refuse {
+        completion: ResponseEgressCompletion,
+        response: Response,
+    },
+}
+
+struct FallbackDispatch {
+    max_body_bytes: usize,
+    on_exceeded: BufferedIngressResponse,
+    on_timeout: BufferedIngressResponse,
+}
+
+enum IngressDispatchDisposition {
+    Dispatch,
+    ReadBodyBeforeFallback(Box<FallbackDispatch>),
+}
+
+/// Validated policy outcome consumed by an adapter before native body ownership moves.
+///
+/// `Admitted` includes both normal routed dispatch and an opt-in bounded fallback drain.
+#[non_exhaustive]
+pub enum IngressAdmissionOutcome {
+    Aborted,
+    Admitted {
+        completion: ResponseEgressCompletion,
+        ingress: AdmittedIngress,
+    },
+    Refused {
+        completion: ResponseEgressCompletion,
+        response: Response,
+    },
+}
+
+/// Result of route resolution plus application admission before native body ownership moves.
+#[non_exhaustive]
+pub enum IngressBeginOutcome {
+    Aborted,
+    Admitted(PreparedIngress),
+    Refused(ResponseEgressEnvelope),
+}
+
+/// Result of complete ingress dispatch, preserving abort as a non-response outcome.
+#[non_exhaustive]
+pub enum IngressDispatchOutcome {
+    Aborted,
+    Response(Box<ResponseEgressEnvelope>),
+}
+
+/// Proof that the application selected one request disposition with a finite read deadline.
+pub struct AdmittedIngress {
+    config_extraction_limits: ConfigExtractionLimits,
+    dispatch_disposition: IngressDispatchDisposition,
+    grant: IngressGrant,
+    head_limits: IngressHeadLimits,
+    monotonic_clock: MonotonicClock,
+    read_deadline: Deadline,
+    request_start: MonotonicInstant,
+}
+
+impl AdmittedIngress {
+    pub(crate) fn fallback_max_body_bytes(&self) -> Option<usize> {
+        match &self.dispatch_disposition {
+            IngressDispatchDisposition::Dispatch => None,
+            IngressDispatchDisposition::ReadBodyBeforeFallback(dispatch) => {
+                Some(dispatch.max_body_bytes)
+            }
+        }
+    }
+
+    pub(crate) fn head_limits(&self) -> IngressHeadLimits {
+        self.head_limits
+    }
+
+    pub(crate) fn into_fallback(
+        self,
+    ) -> Option<(
+        IngressGrant,
+        BufferedIngressResponse,
+        BufferedIngressResponse,
+    )> {
+        let Self {
+            dispatch_disposition,
+            grant,
+            ..
+        } = self;
+        let IngressDispatchDisposition::ReadBodyBeforeFallback(dispatch) = dispatch_disposition
+        else {
+            return None;
+        };
+        Some((grant, dispatch.on_exceeded, dispatch.on_timeout))
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        MonotonicInstant,
+        Deadline,
+        IngressGrant,
+        ConfigExtractionLimits,
+        MonotonicClock,
+    ) {
+        (
+            self.request_start,
+            self.read_deadline,
+            self.grant,
+            self.config_extraction_limits,
+            self.monotonic_clock,
+        )
+    }
+
+    pub(crate) fn is_fallback(&self) -> bool {
+        matches!(
+            self.dispatch_disposition,
+            IngressDispatchDisposition::ReadBodyBeforeFallback(_)
+        )
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn monotonic_clock(&self) -> MonotonicClock {
+        self.monotonic_clock.clone()
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn read_deadline(&self) -> Deadline {
+        self.read_deadline
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn request_start(&self) -> MonotonicInstant {
+        self.request_start
+    }
+
+    pub(crate) fn with_config_extraction_limits(mut self, limits: ConfigExtractionLimits) -> Self {
+        self.config_extraction_limits = limits;
+        self
+    }
+
+    pub(crate) fn with_head_limits(mut self, limits: IngressHeadLimits) -> Self {
+        self.head_limits = limits;
+        self
+    }
+}
+
+/// Whether request-head accounting was enforced before normalized request construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum OriginSource {
-    /// Scheme and authority supplied by the runtime request URI.
-    ///
-    /// Runtimes typically derive authority from the client's Host or :authority.
-    /// It identifies the requested origin; it does not establish that an operator
-    /// approves or owns that host.
-    RuntimeUri,
-    /// A transport scheme established by the adapter's listener, combined with
-    /// one validated inbound request authority.
-    ///
-    /// The authority identifies the requested origin; it does not establish
-    /// that an operator approves or owns that host.
-    TransportBinding,
+pub enum IngressHeadAccounting {
+    HostManaged,
+    RawValidated {
+        request_header_bytes: u64,
+        request_header_count: u64,
+        request_target_bytes: u64,
+    },
 }
 
-/// Degree of preservation established for a particular fact.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Trusted framing result, or an explicit marker that the host owns validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum Preservation {
-    /// Pinned source and transport evidence establish equality.
-    Preserved,
-    /// A known transformation changed the original information.
-    Transformed,
-    /// The runtime does not expose the required information.
-    Unavailable,
-    /// Preservation has not been established.
-    #[default]
-    Unknown,
+pub enum IngressFraming {
+    Chunked,
+    ContentLength(u64),
+    HostManaged,
+    NoBody,
+    ProtocolManaged,
 }
 
-/// Confidential adapter-owned metadata stored in request extensions.
-///
-/// Absence means unknown capability, not complete preservation. Existing
-/// headers remain in the request `HeaderMap` and are never duplicated here.
-#[derive(Clone)]
-pub struct RequestIngress {
-    common_header_fidelity: HeaderFidelity,
-    origin: Option<InboundOrigin>,
-    overrides: Vec<(HeaderName, HeaderFidelity)>,
-    target: CapturedTarget,
+/// Finite request-head limits installed before an adapter begins serving.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct IngressHeadLimits {
+    header_bytes: u64,
+    header_count: u64,
+    target_bytes: u64,
 }
 
-impl RequestIngress {
-    /// Return a header-specific guarantee or the common conservative default.
-    #[inline]
+impl IngressHeadLimits {
     #[must_use]
-    pub fn header_fidelity(&self, name: &HeaderName) -> HeaderFidelity {
-        self.overrides
-            .iter()
-            .find_map(|(candidate, fidelity)| (candidate == name).then_some(*fidelity))
-            .unwrap_or(self.common_header_fidelity)
+    #[inline]
+    pub fn max_request_header_bytes(&self) -> u64 {
+        self.header_bytes
     }
 
-    /// Construct metadata without header-specific overrides.
-    ///
-    /// Sources and preservation guarantees are caller assertions, not validated
-    /// provenance or fidelity of captured facts.
-    #[inline]
     #[must_use]
-    pub fn new(
-        target: CapturedTarget,
-        origin: Option<InboundOrigin>,
-        common_header_fidelity: HeaderFidelity,
-    ) -> Self {
-        Self {
-            common_header_fidelity,
-            origin,
-            overrides: Vec::new(),
-            target,
-        }
+    #[inline]
+    pub fn max_request_header_count(&self) -> u64 {
+        self.header_count
     }
 
-    /// Borrow the validated origin, when an adapter-established source is available.
-    #[inline]
     #[must_use]
-    pub const fn origin(&self) -> Option<&InboundOrigin> {
-        self.origin.as_ref()
+    #[inline]
+    pub fn max_request_target_bytes(&self) -> u64 {
+        self.target_bytes
     }
 
-    /// Borrow complete target metadata or its explicit unavailability reason.
-    #[inline]
-    #[must_use]
-    pub const fn target(&self) -> &CapturedTarget {
-        &self.target
-    }
-
-    /// Set unambiguous per-header fidelity overrides.
-    ///
     /// # Errors
-    /// Returns an internal error for duplicate override names, a caller mistake.
+    /// Returns an internal startup-policy error when `max` is zero.
     #[inline]
-    pub fn with_header_overrides(
-        mut self,
-        mut overrides: Vec<(HeaderName, HeaderFidelity)>,
-    ) -> Result<Self, EdgeError> {
-        overrides.sort_unstable_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
-        if overrides
-            .windows(2)
-            .any(|pair| matches!(pair, [left, right] if left.0 == right.0))
-        {
-            return Err(EdgeError::internal(IoError::other(
-                "duplicate ingress header override",
-            )));
-        }
-        self.overrides = overrides;
+    pub fn with_max_request_header_bytes(mut self, max: u64) -> Result<Self, EdgeError> {
+        require_nonzero("max_request_header_bytes", max)?;
+        self.header_bytes = max;
+        Ok(self)
+    }
+
+    /// # Errors
+    /// Returns an internal startup-policy error when `max` is zero.
+    #[inline]
+    pub fn with_max_request_header_count(mut self, max: u64) -> Result<Self, EdgeError> {
+        require_nonzero("max_request_header_count", max)?;
+        self.header_count = max;
+        Ok(self)
+    }
+
+    /// # Errors
+    /// Returns an internal startup-policy error when `max` is zero.
+    #[inline]
+    pub fn with_max_request_target_bytes(mut self, max: u64) -> Result<Self, EdgeError> {
+        require_nonzero("max_request_target_bytes", max)?;
+        self.target_bytes = max;
         Ok(self)
     }
 }
 
-impl fmt::Debug for CapturedTarget {
+impl Default for IngressHeadLimits {
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Complete(target) => f.debug_tuple("Complete").field(target).finish(),
-            Self::Unavailable(reason) => f.debug_tuple("Unavailable").field(reason).finish(),
+    fn default() -> Self {
+        Self {
+            header_bytes: DEFAULT_MAX_REQUEST_HEADER_BYTES,
+            header_count: DEFAULT_MAX_REQUEST_HEADER_COUNT,
+            target_bytes: DEFAULT_MAX_REQUEST_TARGET_BYTES,
         }
     }
 }
 
-impl fmt::Debug for CompleteTarget {
+/// Normalized, body-free request metadata supplied by an adapter before admission.
+pub struct IngressHeadParts {
+    extensions: Extensions,
+    framing: IngressFraming,
+    head_accounting: IngressHeadAccounting,
+    headers: HeaderMap,
+    method: Method,
+    target: Uri,
+    version: Version,
+}
+
+impl IngressHeadParts {
+    /// Copies normalized metadata from body-free request parts.
+    #[must_use]
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CompleteTarget")
-            .field("source", &self.source)
-            .field("fidelity", &self.fidelity)
-            .finish_non_exhaustive()
+    pub fn from_parts(
+        parts: &RequestParts,
+        head_accounting: IngressHeadAccounting,
+        framing: IngressFraming,
+    ) -> Self {
+        Self {
+            extensions: parts.extensions.clone(),
+            framing,
+            head_accounting,
+            headers: parts.headers.clone(),
+            method: parts.method.clone(),
+            target: parts.uri.clone(),
+            version: parts.version,
+        }
+    }
+
+    /// Copies normalized metadata from a core request without inspecting its body.
+    #[must_use]
+    #[inline]
+    pub fn from_request(
+        request: &Request,
+        head_accounting: IngressHeadAccounting,
+        framing: IngressFraming,
+    ) -> Self {
+        Self {
+            extensions: request.extensions().clone(),
+            framing,
+            head_accounting,
+            headers: request.headers().clone(),
+            method: request.method().clone(),
+            target: request.uri().clone(),
+            version: request.version(),
+        }
+    }
+
+    pub(crate) fn into_head(
+        self,
+        request_start: MonotonicInstant,
+        route_resolution: RouteResolution,
+    ) -> IngressHead {
+        IngressHead {
+            extensions: self.extensions,
+            framing: self.framing,
+            head_accounting: self.head_accounting,
+            headers: self.headers,
+            method: self.method,
+            request_start,
+            route_resolution,
+            target: self.target,
+            version: self.version,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn method(&self) -> &Method {
+        &self.method
+    }
+
+    /// Creates host-managed request-head metadata. Adapters with a raw parser boundary replace
+    /// the accounting and framing markers through the builder methods below.
+    #[must_use]
+    #[inline]
+    pub fn new(method: Method, target: Uri, version: Version, headers: HeaderMap) -> Self {
+        Self {
+            extensions: Extensions::new(),
+            framing: IngressFraming::HostManaged,
+            head_accounting: IngressHeadAccounting::HostManaged,
+            headers,
+            method,
+            target,
+            version,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn target(&self) -> &Uri {
+        &self.target
+    }
+
+    /// Applies normalized defense-in-depth checks without making a raw-boundary claim.
+    ///
+    /// # Errors
+    /// Returns 414/431 for normalized head overages and 400 for visible ambiguous framing.
+    #[inline]
+    pub fn validate_normalized(&self, limits: IngressHeadLimits) -> Result<(), EdgeError> {
+        validate_normalized_head(&self.target, self.version, &self.headers, limits)
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn with_extension<T>(mut self, value: T) -> Self
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.extensions.insert(value);
+        self
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn with_framing(mut self, framing: IngressFraming) -> Self {
+        self.framing = framing;
+        self
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn with_head_accounting(mut self, head_accounting: IngressHeadAccounting) -> Self {
+        self.head_accounting = head_accounting;
+        self
     }
 }
 
-impl fmt::Debug for InboundOrigin {
+/// Immutable request-head view supplied to the application admission policy.
+pub struct IngressHead {
+    extensions: Extensions,
+    framing: IngressFraming,
+    head_accounting: IngressHeadAccounting,
+    headers: HeaderMap,
+    method: Method,
+    request_start: MonotonicInstant,
+    route_resolution: RouteResolution,
+    target: Uri,
+    version: Version,
+}
+
+impl IngressHead {
+    #[must_use]
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("InboundOrigin")
-            .field("source", &self.source)
-            .finish_non_exhaustive()
+    pub fn extension<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.extensions.get::<T>()
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn framing(&self) -> IngressFraming {
+        self.framing
+    }
+
+    /// Builds the body-blind admission view from a normalized core request.
+    #[must_use]
+    #[inline]
+    pub fn from_request(
+        request: &Request,
+        request_start: MonotonicInstant,
+        route_resolution: RouteResolution,
+        head_accounting: IngressHeadAccounting,
+        framing: IngressFraming,
+    ) -> Self {
+        IngressHeadParts::from_request(request, head_accounting, framing)
+            .into_head(request_start, route_resolution)
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn head_accounting(&self) -> IngressHeadAccounting {
+        self.head_accounting
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn method(&self) -> &Method {
+        &self.method
+    }
+
+    /// Builds a finite deadline relative to this head's captured request start.
+    ///
+    /// The duration is clamped to the configured far-future bound. Arithmetic
+    /// overflow fails closed by returning a deadline at the request start.
+    #[must_use]
+    #[inline]
+    pub fn read_deadline_after(&self, duration: Duration) -> Deadline {
+        let bounded = duration.min(DEADLINE_FAR_FUTURE);
+        Deadline::at_instant(
+            self.request_start
+                .checked_add(bounded)
+                .unwrap_or(self.request_start),
+        )
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn request_start(&self) -> MonotonicInstant {
+        self.request_start
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn route_resolution(&self) -> &RouteResolution {
+        &self.route_resolution
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn target(&self) -> &Uri {
+        &self.target
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn version(&self) -> Version {
+        self.version
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn with_extension<T>(mut self, value: T) -> Self
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.extensions.insert(value);
+        self
     }
 }
 
-impl fmt::Debug for RequestIngress {
+/// Opaque, single-use admission proof paired with the exact resolved dispatch token.
+pub struct PreparedIngress {
+    admitted: AdmittedIngress,
+    completion: ResponseEgressCompletion,
+    resolved: ResolvedDispatch,
+}
+
+impl PreparedIngress {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (ResolvedDispatch, AdmittedIngress, ResponseEgressCompletion) {
+        (self.resolved, self.admitted, self.completion)
+    }
+
+    #[must_use]
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RequestIngress")
-            .field("common_header_fidelity", &self.common_header_fidelity)
-            .finish_non_exhaustive()
+    pub fn monotonic_clock(&self) -> MonotonicClock {
+        self.admitted.monotonic_clock()
+    }
+
+    pub(crate) fn new(
+        resolved: ResolvedDispatch,
+        admitted: AdmittedIngress,
+        completion: ResponseEgressCompletion,
+    ) -> Self {
+        Self {
+            admitted,
+            completion,
+            resolved,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn read_deadline(&self) -> Deadline {
+        self.admitted.read_deadline()
+    }
+
+    /// Canonical request method captured before admission.
+    #[must_use]
+    #[inline]
+    pub fn request_method(&self) -> &Method {
+        self.resolved.method()
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn request_start(&self) -> MonotonicInstant {
+        self.admitted.request_start()
+    }
+
+    /// Canonical metadata for the admitted matched route, if any.
+    #[must_use]
+    #[inline]
+    pub fn route_metadata(&self) -> Option<&RouteMetadata> {
+        match self.resolved.resolution() {
+            RouteResolution::Matched(route) => Some(route),
+            RouteResolution::MethodNotAllowed { .. } | RouteResolution::NotFound => None,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn route_resolution(&self) -> &RouteResolution {
+        self.resolved.resolution()
     }
 }
 
-/// Source of captured target information, independent of fidelity.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum TargetSource {
-    /// A runtime path/query before additional `EdgeZero` parsing.
-    RuntimePathAndQuery,
-    /// A runtime-exposed URL; earlier normalization may have occurred.
-    RuntimeUrl,
-    /// A transport-exposed request target with evidence of its provenance.
-    TransportRequestTarget,
+pub(crate) type IngressAdmissionPolicy =
+    Arc<dyn Fn(&IngressHead) -> AdmissionDecision + Send + Sync>;
+
+pub(crate) fn default_admission_policy() -> IngressAdmissionPolicy {
+    Arc::new(|head| AdmissionDecision::Admit {
+        completion: ResponseEgressCompletion::empty(),
+        grant: IngressGrant::empty(),
+        read_deadline: head.read_deadline_after(DEFAULT_INBOUND_READ_BUDGET),
+    })
 }
 
-/// Why no complete target was retained.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum TargetUnavailable {
-    /// The runtime offers no safe acquisition API.
-    NotExposed,
-    /// Acquisition failed without retaining error text.
-    ReadFailed,
-    /// The target exceeded the metadata bound.
-    TooLarge,
+pub(crate) fn apply_admission_policy(
+    policy: &IngressAdmissionPolicy,
+    head: &IngressHead,
+    monotonic_clock: MonotonicClock,
+) -> Result<IngressAdmissionOutcome, EdgeError> {
+    let (completion, grant, read_deadline, dispatch_disposition) = match policy(head) {
+        AdmissionDecision::Refuse {
+            completion,
+            response,
+        } => {
+            return Ok(IngressAdmissionOutcome::Refused {
+                completion,
+                response,
+            });
+        }
+        AdmissionDecision::Abort => return Ok(IngressAdmissionOutcome::Aborted),
+        AdmissionDecision::Admit {
+            completion,
+            grant,
+            read_deadline,
+        } => (
+            completion,
+            grant,
+            read_deadline,
+            IngressDispatchDisposition::Dispatch,
+        ),
+        AdmissionDecision::ReadBodyBeforeFallback {
+            completion,
+            grant,
+            max_body_bytes,
+            read_deadline,
+            on_exceeded,
+            on_timeout,
+        } => {
+            match head.route_resolution() {
+                RouteResolution::MethodNotAllowed { .. } | RouteResolution::NotFound => {}
+                RouteResolution::Matched(_) => {
+                    return Err(EdgeError::internal(anyhow::anyhow!(
+                        "fallback body policy requires an unmatched or wrong-method route"
+                    )));
+                }
+            }
+            (
+                completion,
+                grant,
+                read_deadline,
+                IngressDispatchDisposition::ReadBodyBeforeFallback(Box::new(FallbackDispatch {
+                    max_body_bytes,
+                    on_exceeded,
+                    on_timeout,
+                })),
+            )
+        }
+    };
+    let maximum = head
+        .request_start()
+        .checked_add(DEADLINE_FAR_FUTURE)
+        .ok_or_else(|| {
+            EdgeError::internal(anyhow::anyhow!(
+                "ingress admission deadline arithmetic overflow"
+            ))
+        })?;
+    let deadline = Deadline::at_instant(read_deadline.instant().min(maximum));
+    Ok(IngressAdmissionOutcome::Admitted {
+        completion,
+        ingress: AdmittedIngress {
+            config_extraction_limits: ConfigExtractionLimits::default(),
+            dispatch_disposition,
+            grant,
+            head_limits: IngressHeadLimits::default(),
+            monotonic_clock,
+            read_deadline: deadline,
+            request_start: head.request_start(),
+        },
+    })
+}
+
+fn require_nonzero(name: &str, value: u64) -> Result<(), EdgeError> {
+    if value == 0 {
+        return Err(EdgeError::internal(anyhow::anyhow!(
+            "ingress head limit `{name}` must be nonzero"
+        )));
+    }
+    Ok(())
+}
+
+/// Applies finite defense-in-depth limits and framing checks to a normalized head.
+///
+/// This cannot recover raw HTTP field-line or request-target octets and therefore never
+/// upgrades [`IngressHeadAccounting::HostManaged`] or [`IngressFraming::HostManaged`].
+///
+/// # Errors
+/// Returns 414/431 for normalized head overages and 400 for visible ambiguous framing.
+#[inline]
+pub fn validate_normalized_ingress_parts(
+    parts: &RequestParts,
+    limits: IngressHeadLimits,
+) -> Result<(), EdgeError> {
+    validate_normalized_head(&parts.uri, parts.version, &parts.headers, limits)
+}
+
+fn validate_normalized_head(
+    target: &Uri,
+    version: Version,
+    headers: &HeaderMap,
+    limits: IngressHeadLimits,
+) -> Result<(), EdgeError> {
+    let target_bytes = u64::try_from(target.to_string().len()).map_err(|_length_error| {
+        EdgeError::uri_too_long("normalized request target is too large")
+    })?;
+    if target_bytes > limits.max_request_target_bytes() {
+        return Err(EdgeError::uri_too_long(
+            "normalized request target exceeds configured limit",
+        ));
+    }
+
+    let header_count = u64::try_from(headers.len()).map_err(|_length_error| {
+        EdgeError::request_header_fields_too_large("normalized request has too many headers")
+    })?;
+    if header_count > limits.max_request_header_count() {
+        return Err(EdgeError::request_header_fields_too_large(
+            "normalized request header count exceeds configured limit",
+        ));
+    }
+
+    let mut header_bytes = 2_u64;
+    for (name, value) in headers {
+        let line_bytes = name
+            .as_str()
+            .len()
+            .checked_add(value.as_bytes().len())
+            .and_then(|bytes| bytes.checked_add(4))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| {
+                EdgeError::request_header_fields_too_large(
+                    "normalized request header size accounting overflow",
+                )
+            })?;
+        header_bytes = header_bytes.checked_add(line_bytes).ok_or_else(|| {
+            EdgeError::request_header_fields_too_large(
+                "normalized request header size accounting overflow",
+            )
+        })?;
+        if header_bytes > limits.max_request_header_bytes() {
+            return Err(EdgeError::request_header_fields_too_large(
+                "normalized request headers exceed configured limit",
+            ));
+        }
+    }
+
+    validate_normalized_framing(version, headers)
+}
+
+fn validate_normalized_framing(version: Version, headers: &HeaderMap) -> Result<(), EdgeError> {
+    let content_lengths = headers.get_all(CONTENT_LENGTH).iter().collect::<Vec<_>>();
+    let transfer_encodings = headers
+        .get_all(TRANSFER_ENCODING)
+        .iter()
+        .collect::<Vec<_>>();
+
+    if !content_lengths.is_empty() && !transfer_encodings.is_empty() {
+        return Err(EdgeError::bad_request(
+            "ambiguous request framing is not accepted",
+        ));
+    }
+    if content_lengths.len() > 1 {
+        return Err(EdgeError::bad_request(
+            "duplicate content-length is not accepted",
+        ));
+    }
+    if let Some(value) = content_lengths.first() {
+        let raw = value
+            .to_str()
+            .map_err(|_utf8_error| EdgeError::bad_request("malformed content-length"))?
+            .trim();
+        if raw.is_empty()
+            || raw.contains(',')
+            || raw.starts_with(['+', '-'])
+            || raw.parse::<u64>().is_err()
+        {
+            return Err(EdgeError::bad_request("malformed content-length"));
+        }
+    }
+
+    if transfer_encodings.len() > 1 {
+        return Err(EdgeError::bad_request(
+            "duplicate transfer-encoding is not accepted",
+        ));
+    }
+    if let Some(value) = transfer_encodings.first() {
+        if version != Version::HTTP_11 {
+            return Err(EdgeError::bad_request(
+                "transfer-encoding is not accepted for this HTTP version",
+            ));
+        }
+        let raw = value
+            .to_str()
+            .map_err(|_utf8_error| EdgeError::bad_request("malformed transfer-encoding"))?;
+        if raw.contains(',') || !raw.trim().eq_ignore_ascii_case("chunked") {
+            return Err(EdgeError::bad_request(
+                "unsupported or malformed transfer-encoding",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::http::StatusCode;
-    use crate::http::header::{CONTENT_LENGTH, COOKIE};
-    use crate::ingress::{
-        CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
-        TargetSource, TargetUnavailable,
-    };
+    use super::*;
+    use crate::body::Body;
+    use crate::http::{HeaderName, HeaderValue, StatusCode, request_builder, response_builder};
 
-    #[test]
-    fn ingress_fidelity_defaults_are_unknown() {
-        let fidelity = HeaderFidelity::default();
-        assert_eq!(fidelity.octets(), Preservation::Unknown);
-        assert_eq!(fidelity.field_multiplicity(), Preservation::Unknown);
-        assert_eq!(fidelity.same_name_order(), Preservation::Unknown);
-        assert_eq!(fidelity.global_field_order(), Preservation::Unknown);
-    }
-
-    #[test]
-    fn ingress_header_override_is_field_specific() {
-        let common = HeaderFidelity::default();
-        let folded = HeaderFidelity::new(
-            Preservation::Unknown,
-            Preservation::Transformed,
-            Preservation::Unknown,
-            Preservation::Unavailable,
-        );
-        let metadata = RequestIngress::new(
-            CapturedTarget::Unavailable(TargetUnavailable::NotExposed),
-            None,
-            common,
-        )
-        .with_header_overrides(vec![(CONTENT_LENGTH, folded)])
-        .expect("should accept distinct header overrides");
-        assert_eq!(metadata.header_fidelity(&CONTENT_LENGTH), folded);
-        assert_eq!(metadata.header_fidelity(&COOKIE), common);
-        assert!(metadata.origin().is_none());
-    }
-
-    #[test]
-    fn ingress_origin_accepts_bounded_http_authorities() {
-        for (scheme, authority) in [
-            ("HTTP", "example.com"),
-            ("https", "example.com:443"),
-            ("http", "[::1]:8787"),
-        ] {
-            let origin = InboundOrigin::parse(scheme, authority, OriginSource::TransportBinding)
-                .expect("should accept a validated HTTP origin");
-            assert_eq!(origin.scheme(), scheme.to_ascii_lowercase());
-            assert_eq!(origin.authority(), authority);
-            assert_eq!(origin.source(), OriginSource::TransportBinding);
-        }
-    }
-
-    #[test]
-    fn ingress_origin_rejects_untrusted_or_invalid_input() {
-        for (scheme, authority) in [
-            ("ftp", "example.com"),
-            ("https", "user@example.com"),
-            ("https", "example.com/path"),
-            ("https", "example.com?secret=1"),
-            ("https", "example.com#fragment"),
-            ("https", "example.com:invalid"),
-            ("https", "example.com:65536"),
-            ("https", "example.com:+443"),
-            ("https", "[::1]:+443"),
-            ("https", "[]"),
-            ("https", "[not-an-ip]"),
-            ("https", "example[bad]"),
-            ("https", ""),
-            ("https", "example.com\\evil"),
-        ] {
-            assert!(
-                InboundOrigin::parse(scheme, authority, OriginSource::RuntimeUri)
-                    .err()
-                    .is_some(),
-                "should reject malformed authority without retaining it",
+    fn parts_with_headers(version: Version, headers: &[(&str, &str)]) -> RequestParts {
+        let mut request = request_builder()
+            .uri("/")
+            .version(version)
+            .body(Body::empty())
+            .expect("request");
+        for (name, value) in headers {
+            request.headers_mut().append(
+                name.parse::<HeaderName>().expect("header name"),
+                HeaderValue::from_str(value).expect("header value"),
             );
         }
-        assert!(
-            InboundOrigin::parse("https", &"a".repeat(1025), OriginSource::RuntimeUri)
-                .err()
-                .is_some(),
-            "should bound origin metadata",
-        );
+        request.into_parts().0
     }
 
     #[test]
-    fn ingress_rejects_duplicate_overrides() {
-        let result = RequestIngress::new(
-            CapturedTarget::Unavailable(TargetUnavailable::ReadFailed),
-            None,
-            HeaderFidelity::default(),
-        )
-        .with_header_overrides(vec![
-            (COOKIE, HeaderFidelity::default()),
-            (COOKIE, HeaderFidelity::default()),
-        ]);
+    fn ingress_grant_downcasts_once_without_exposing_type_metadata() {
+        let string_grant = IngressGrant::new(String::from("lease"));
+        let retained_grant = string_grant.downcast::<u64>().expect_err("wrong type");
         assert_eq!(
-            result
-                .expect_err("should reject ambiguous overrides")
+            retained_grant.downcast::<String>().expect("right type"),
+            "lease"
+        );
+        IngressGrant::empty()
+            .downcast::<String>()
+            .expect_err("empty grant");
+    }
+
+    #[test]
+    fn buffered_ingress_response_is_cloneable_and_builds_exact_plain_text() {
+        let response =
+            BufferedIngressResponse::text(StatusCode::PAYLOAD_TOO_LARGE, "fallback body exceeded");
+        let cloned = response.clone();
+
+        assert_eq!(cloned.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            cloned.headers().get("content-type").expect("content type"),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(
+            cloned
+                .headers()
+                .get("content-length")
+                .expect("content length"),
+            "22"
+        );
+        assert_eq!(cloned.body(), b"fallback body exceeded");
+    }
+
+    #[test]
+    fn ingress_head_limits_are_finite_nonzero_and_independently_configurable() {
+        let limits = IngressHeadLimits::default();
+        assert_eq!(limits.max_request_header_bytes(), 0x0001_0000);
+        assert_eq!(limits.max_request_header_count(), 100);
+        assert_eq!(limits.max_request_target_bytes(), 8_192);
+        limits
+            .with_max_request_header_bytes(0)
+            .expect_err("zero header bytes");
+        limits
+            .with_max_request_header_count(0)
+            .expect_err("zero header count");
+        limits
+            .with_max_request_target_bytes(0)
+            .expect_err("zero target bytes");
+    }
+
+    #[test]
+    fn normalized_head_limits_reject_before_admission_without_raw_claims() {
+        let target_request = request_builder()
+            .uri("/1234")
+            .body(Body::empty())
+            .expect("request");
+        let target_parts = target_request.into_parts().0;
+        let target_limits = IngressHeadLimits::default()
+            .with_max_request_target_bytes(4)
+            .expect("target limit");
+        assert_eq!(
+            validate_normalized_ingress_parts(&target_parts, target_limits)
+                .expect_err("target over limit")
                 .status(),
-            StatusCode::INTERNAL_SERVER_ERROR
+            StatusCode::URI_TOO_LONG
+        );
+
+        let count_parts = parts_with_headers(Version::HTTP_11, &[("x-a", "1"), ("x-b", "2")]);
+        let count_limits = IngressHeadLimits::default()
+            .with_max_request_header_count(1)
+            .expect("count limit");
+        assert_eq!(
+            validate_normalized_ingress_parts(&count_parts, count_limits)
+                .expect_err("header count over limit")
+                .status(),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+        );
+
+        let bytes_parts = parts_with_headers(Version::HTTP_11, &[("x", "1")]);
+        let bytes_limits = IngressHeadLimits::default()
+            .with_max_request_header_bytes(7)
+            .expect("bytes limit");
+        assert_eq!(
+            validate_normalized_ingress_parts(&bytes_parts, bytes_limits)
+                .expect_err("header bytes over limit")
+                .status(),
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
         );
     }
 
     #[test]
-    fn ingress_debug_never_prints_captured_values() {
-        let target = CapturedTarget::capture(
-            "/private-target?secret=1",
-            TargetSource::RuntimeUrl,
-            Preservation::Unknown,
-        );
-        let CapturedTarget::Complete(complete) = &target else {
-            panic!("should capture target")
-        };
-        let origin =
-            InboundOrigin::parse("https", "private-host.example", OriginSource::RuntimeUri)
-                .expect("should parse origin");
-        let values_output = format!("{target:?} {complete:?} {origin:?}");
-        let ingress = RequestIngress::new(target, Some(origin), HeaderFidelity::default());
-        let output = format!("{values_output} {ingress:?}");
-        assert!(!output.contains("private-target"));
-        assert!(!output.contains("secret=1"));
-        assert!(!output.contains("private-host"));
-    }
+    fn normalized_framing_defense_rejects_visible_ambiguous_shapes() {
+        let cases = [
+            parts_with_headers(
+                Version::HTTP_11,
+                &[("content-length", "1"), ("transfer-encoding", "chunked")],
+            ),
+            parts_with_headers(
+                Version::HTTP_11,
+                &[("content-length", "1"), ("content-length", "1")],
+            ),
+            parts_with_headers(Version::HTTP_11, &[("content-length", "1, 1")]),
+            parts_with_headers(Version::HTTP_11, &[("content-length", "+1")]),
+            parts_with_headers(
+                Version::HTTP_11,
+                &[("content-length", "18446744073709551616")],
+            ),
+            parts_with_headers(Version::HTTP_11, &[("transfer-encoding", "gzip, chunked")]),
+            parts_with_headers(Version::HTTP_2, &[("transfer-encoding", "chunked")]),
+        ];
+        for parts in cases {
+            assert_eq!(
+                validate_normalized_ingress_parts(&parts, IngressHeadLimits::default())
+                    .expect_err("ambiguous framing")
+                    .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
 
-    #[test]
-    fn ingress_authorities_compare_host_and_effective_port() {
-        for (scheme, left, right, same) in [
-            ("http", "Example.COM", "example.com:00080", true),
-            ("https", "Example.COM", "example.com:443", true),
-            ("https", "example.com", "example.com:80", false),
-            ("http", "[::1]", "[::1]:80", true),
-            ("http", "example.com", "other.example", false),
-            ("http", "example.com:0", "example.com:80", false),
+        for parts in [
+            parts_with_headers(Version::HTTP_11, &[("content-length", "1")]),
+            parts_with_headers(Version::HTTP_11, &[("transfer-encoding", "chunked")]),
         ] {
-            let left_origin = InboundOrigin::parse(scheme, left, OriginSource::RuntimeUri)
-                .expect("should parse origin");
-            let right_origin = InboundOrigin::parse(scheme, right, OriginSource::TransportBinding)
-                .expect("should parse origin");
-            assert_eq!(left_origin.same_authority(&right_origin), same);
+            validate_normalized_ingress_parts(&parts, IngressHeadLimits::default())
+                .expect("unambiguous visible framing");
         }
     }
 
     #[test]
-    fn ingress_target_bound_is_atomic() {
-        let mut value = "a".repeat(16 * 1024);
-        let target =
-            CapturedTarget::capture(&value, TargetSource::RuntimeUrl, Preservation::Transformed);
-        assert!(
-            matches!(&target, CapturedTarget::Complete(complete) if complete.value() == value),
-            "should preserve the entire value at the bound",
+    fn admission_clamps_deadline_and_preserves_refusal() {
+        let start = MonotonicInstant::now();
+        let request = request_builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .expect("request");
+        let head = IngressHead::from_request(
+            &request,
+            start,
+            RouteResolution::NotFound,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
         );
-        value.push('b');
-        assert!(
-            matches!(
-                CapturedTarget::capture(&value, TargetSource::RuntimeUrl, Preservation::Unknown,),
-                CapturedTarget::Unavailable(TargetUnavailable::TooLarge),
-            ),
-            "should retain no truncated prefix",
+        let too_late = Deadline::at_instant(
+            start
+                .checked_add(DEADLINE_FAR_FUTURE + Duration::from_secs(1))
+                .expect("deadline"),
         );
+        let admit_policy: IngressAdmissionPolicy = Arc::new(move |_| AdmissionDecision::Admit {
+            completion: ResponseEgressCompletion::empty(),
+            grant: IngressGrant::empty(),
+            read_deadline: too_late,
+        });
+        let IngressAdmissionOutcome::Admitted {
+            completion,
+            ingress: admitted,
+        } = apply_admission_policy(&admit_policy, &head, MonotonicClock::default())
+            .expect("admission")
+        else {
+            panic!("expected admission");
+        };
+        drop(completion);
+        assert_eq!(
+            admitted.read_deadline().instant(),
+            start.checked_add(DEADLINE_FAR_FUTURE).expect("maximum")
+        );
+
+        let refuse_policy: IngressAdmissionPolicy = Arc::new(|_| AdmissionDecision::Refuse {
+            completion: ResponseEgressCompletion::empty(),
+            response: response_builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .body(Body::empty())
+                .expect("response"),
+        });
+        let IngressAdmissionOutcome::Refused {
+            completion: refusal_completion,
+            response,
+        } = apply_admission_policy(&refuse_policy, &head, MonotonicClock::default())
+            .expect("refusal")
+        else {
+            panic!("expected refusal");
+        };
+        drop(refusal_completion);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]
-    fn ingress_target_counts_utf8_bytes() {
-        let value = "\u{e9}".repeat(8193);
-        assert!(
-            matches!(
-                CapturedTarget::capture(&value, TargetSource::RuntimeUrl, Preservation::Unknown,),
-                CapturedTarget::Unavailable(TargetUnavailable::TooLarge),
-            ),
-            "should bound bytes rather than Unicode characters",
+    fn ingress_head_builds_relative_deadlines_in_its_start_clock_domain() {
+        let global = MonotonicInstant::now();
+        let request_start = global
+            .checked_add(Duration::from_hours(24))
+            .expect("offset request start");
+        let request = request_builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .expect("request");
+        let head = IngressHead::from_request(
+            &request,
+            request_start,
+            RouteResolution::NotFound,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+
+        assert_eq!(
+            head.read_deadline_after(Duration::from_secs(2)).instant(),
+            request_start
+                .checked_add(Duration::from_secs(2))
+                .expect("relative deadline")
         );
     }
 }

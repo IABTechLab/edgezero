@@ -1,0 +1,309 @@
+{
+  "schema": 1,
+  "qualification": false,
+  "scope": "Local raw Spin SDK responses without Content-Length; not delivery, cancellation or hosted qualification.",
+  "source": {
+    "parent_revision": "cd21436243535a3631aab385a789c2ff023c3f3c",
+    "source_state": "working-tree-characterization",
+    "crate_diff_sha256": "135f362c962a3182015986b31c3898288e10f0f24f6bae59effc5b9596c3db4f",
+    "fixture_build_id": "83484e52d10de0c7c635489ec60411531419e65809b42b7a64d1fa6769009393",
+    "frozen_candidate": false
+  },
+  "reproduction": {
+    "command": "scripts/test_integration.sh --adapter spin --suite outbound-progress --output /private/tmp/pr275-spin-result-two-boundaries-native",
+    "suite_exit_code": 0,
+    "additional_timers": 0,
+    "additional_body_write_callsites": 0,
+    "pinned_native_future_instances": 1,
+    "maximum_pre_eof_polls": 2,
+    "canonical_terminal_source": "fixture_stderr.txt"
+  },
+  "findings": {
+    "ready_control": "One Pending sample is inconclusive.",
+    "timer_control": "Pending then Ready(Ok) observed across the existing 100 ms wait, before stream EOF or body-result publication.",
+    "readiness_timestamp": "Not measured; the second boundary is an observation time, not the native completion instant.",
+    "cancellation": "Original ordinary-close and reset results remain unchanged. Early Ok is not cancellation or client-delivery proof.",
+    "teardown": "No worker panic before controlled shutdown; worker panic text after controlled shutdown is retained separately.",
+    "windows": "The timer control retains its original wait. A completed future is never repolled; still-Pending work uses the original post-EOF await."
+  },
+  "hashes": {
+    "component": {
+      "path": "/private/tmp/pr275-spin-result-two-boundaries-native/progress-spin/artifacts/fixture_spin.wasm",
+      "bytes": 4207838,
+      "sha256": "b362ea02ee600493e5a13ec58ec1f00a741e14f61f65b33eb7d65d30b37f23df"
+    },
+    "stderr": {
+      "path": "/private/tmp/pr275-spin-result-two-boundaries-native/progress-spin/.spin/logs/fixture_stderr.txt",
+      "bytes": 13868,
+      "sha256": "d83bce3551afb9c2f915edcf231fbae6c4927c3a2cea861262fe2205758090e0"
+    },
+    "runtime": {
+      "path": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+      "bytes": 116793168,
+      "sha256": "0efe71a81495a75e81624186d457afa5398117e685567ba2cf90bd01a269128a"
+    }
+  },
+  "records": {
+    "context": [
+      {
+        "construction_rounds": 0,
+        "event": "run",
+        "fixture_build_id": "83484e52d10de0c7c635489ec60411531419e65809b42b7a64d1fa6769009393",
+        "max_requests": 10,
+        "seed": 856,
+        "suite": "outbound-progress"
+      },
+      {
+        "event": "build_environment",
+        "harness_lockfile": {
+          "bytes": 12798,
+          "fnv1a64": "d52b3edeb51ed476",
+          "path": "/private/tmp/pr275-spin-result-two-boundaries-native/harness-Cargo.lock",
+          "purpose": "non-security build identity"
+        },
+        "host_arch": "aarch64",
+        "host_os": "macos",
+        "lockfile": {
+          "bytes": 83697,
+          "fnv1a64": "4fa81aa58ab9df98",
+          "path": "/private/tmp/pr275-spin-result-two-boundaries-native/Cargo.lock",
+          "purpose": "non-security build identity"
+        },
+        "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"
+      },
+      {
+        "adapter": "spin",
+        "event": "progress-runtime",
+        "executable": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+        "revision": "cd21436243535a3631aab385a789c2ff023c3f3c",
+        "source_state": "working-tree-characterization",
+        "version": "spin 4.1.0 (c0b3726 2026-08-25)"
+      },
+      {
+        "adapter": "spin",
+        "artifact": {
+          "bytes": 4207838,
+          "fnv1a64": "a2d3de816d12025d",
+          "path": "/private/tmp/pr275-spin-result-two-boundaries-native/progress-spin/artifacts/fixture_spin.wasm",
+          "purpose": "non-security build identity"
+        },
+        "event": "build",
+        "revision": "cd21436243535a3631aab385a789c2ff023c3f3c",
+        "variant": "spin-outbound-progress"
+      },
+      {
+        "error": null,
+        "event": "spin-before-shutdown",
+        "qualification": false,
+        "sdk_terminal_evidence": "pass",
+        "worker_panic": false
+      },
+      {
+        "event": "spin-shutdown-observation",
+        "qualification": false,
+        "worker_panic_after_controlled_shutdown": true,
+        "worker_panic_before_shutdown": false
+      }
+    ],
+    "controls": [
+      {
+        "adapter": "spin",
+        "case": "response-owned-ready",
+        "event": "response-stream-control",
+        "observation": {
+          "client": {
+            "body": " {\"adapter\":\"spin\",\"case\":\"response-owned-ready\",\"dispatch_returned\":true,\"dispatch_returned_at_first_poll\":true,\"handler_returned\":true,\"handler_returned_at_first_poll\":true,\"pause_ns\":375,\"qualification\":false,\"revision\":\"cd21436243535a3631aab385a789c2ff023c3f3c\",\"token\":\"18e4b76343190ec8-1261a-64\"}",
+            "complete_ns": 969667,
+            "event": "client_completed",
+            "first_byte_ns": 951375,
+            "header_ns": 949459,
+            "headers": [
+              ["content-type", "application/json"],
+              [
+                "x-edgezero-fixture-launch",
+                "v1;18e4b762e06386c8-1261a-0;83484e52d10de0c7c635489ec60411531419e65809b42b7a64d1fa6769009393;fixture-spin-retained"
+              ],
+              ["connection", "close"],
+              ["transfer-encoding", "chunked"],
+              ["date", "Wed, 04 Nov 2026 02:43:08 GMT"]
+            ],
+            "response_identity": "matched-launch",
+            "status": 200,
+            "token": "18e4b76343190ec8-1261a-64"
+          },
+          "probe": {
+            "adapter": "spin",
+            "case": "response-owned-ready",
+            "dispatch_returned": true,
+            "dispatch_returned_at_first_poll": true,
+            "handler_returned": true,
+            "handler_returned_at_first_poll": true,
+            "pause_ns": 375,
+            "qualification": false,
+            "revision": "cd21436243535a3631aab385a789c2ff023c3f3c",
+            "token": "18e4b76343190ec8-1261a-64"
+          }
+        },
+        "qualification": false,
+        "status": "pass"
+      },
+      {
+        "adapter": "spin",
+        "case": "response-owned-timer-only",
+        "event": "response-stream-control",
+        "observation": {
+          "client": {
+            "body": " {\"adapter\":\"spin\",\"case\":\"response-owned-timer-only\",\"dispatch_returned\":true,\"dispatch_returned_at_first_poll\":true,\"handler_returned\":true,\"handler_returned_at_first_poll\":true,\"pause_ns\":101158625,\"qualification\":false,\"revision\":\"cd21436243535a3631aab385a789c2ff023c3f3c\",\"token\":\"18e4b76343362800-1261a-65\"}",
+            "complete_ns": 101917833,
+            "event": "client_completed",
+            "first_byte_ns": 617042,
+            "header_ns": 615458,
+            "headers": [
+              ["content-type", "application/json"],
+              [
+                "x-edgezero-fixture-launch",
+                "v1;18e4b762e06386c8-1261a-0;83484e52d10de0c7c635489ec60411531419e65809b42b7a64d1fa6769009393;fixture-spin-retained"
+              ],
+              ["connection", "close"],
+              ["transfer-encoding", "chunked"],
+              ["date", "Wed, 04 Nov 2026 02:43:08 GMT"]
+            ],
+            "response_identity": "matched-launch",
+            "status": 200,
+            "token": "18e4b76343362800-1261a-65"
+          },
+          "probe": {
+            "adapter": "spin",
+            "case": "response-owned-timer-only",
+            "dispatch_returned": true,
+            "dispatch_returned_at_first_poll": true,
+            "handler_returned": true,
+            "handler_returned_at_first_poll": true,
+            "pause_ns": 101158625,
+            "qualification": false,
+            "revision": "cd21436243535a3631aab385a789c2ff023c3f3c",
+            "token": "18e4b76343362800-1261a-65"
+          }
+        },
+        "qualification": false,
+        "status": "pass"
+      },
+      {
+        "adapter": "spin",
+        "case": "sdk-stream-ready",
+        "event": "response-stream-control",
+        "observation": {
+          "client": {
+            "body": " {\"adapter\":\"spin\",\"case\":\"sdk-stream-ready\",\"native_result_poll\":{\"body_result_sent\":false,\"phase\":\"before-response-eof\",\"polls\":1,\"states\":[\"pending\"],\"stream_writer_owned\":true},\"pause_ns\":917,\"qualification\":false,\"revision\":\"cd21436243535a3631aab385a789c2ff023c3f3c\",\"sdk_native\":true,\"token\":\"18e4b763496aa840-1261a-66\"}",
+            "complete_ns": 2716334,
+            "event": "client_completed",
+            "first_byte_ns": 2701875,
+            "header_ns": 2697000,
+            "headers": [
+              ["content-type", "application/json"],
+              ["connection", "close"],
+              ["transfer-encoding", "chunked"],
+              ["date", "Wed, 04 Nov 2026 02:43:08 GMT"]
+            ],
+            "response_identity": "unattested",
+            "status": 200,
+            "token": "18e4b763496aa840-1261a-66"
+          },
+          "probe": {
+            "adapter": "spin",
+            "case": "sdk-stream-ready",
+            "native_result_poll": {
+              "body_result_sent": false,
+              "phase": "before-response-eof",
+              "polls": 1,
+              "states": ["pending"],
+              "stream_writer_owned": true
+            },
+            "pause_ns": 917,
+            "qualification": false,
+            "revision": "cd21436243535a3631aab385a789c2ff023c3f3c",
+            "sdk_native": true,
+            "token": "18e4b763496aa840-1261a-66"
+          }
+        },
+        "qualification": false,
+        "status": "pass"
+      },
+      {
+        "adapter": "spin",
+        "case": "sdk-stream-timer-only",
+        "event": "response-stream-control",
+        "observation": {
+          "client": {
+            "body": " {\"adapter\":\"spin\",\"case\":\"sdk-stream-timer-only\",\"native_result_poll\":{\"body_result_sent\":false,\"phase\":\"before-response-eof\",\"polls\":2,\"states\":[\"pending\",\"ready-ok\"],\"stream_writer_owned\":true},\"pause_ns\":102121500,\"qualification\":false,\"revision\":\"cd21436243535a3631aab385a789c2ff023c3f3c\",\"sdk_native\":true,\"token\":\"18e4b76349bd0248-1261a-67\"}",
+            "complete_ns": 103273667,
+            "event": "client_completed",
+            "first_byte_ns": 543125,
+            "header_ns": 539542,
+            "headers": [
+              ["content-type", "application/json"],
+              ["connection", "close"],
+              ["transfer-encoding", "chunked"],
+              ["date", "Wed, 04 Nov 2026 02:43:08 GMT"]
+            ],
+            "response_identity": "unattested",
+            "status": 200,
+            "token": "18e4b76349bd0248-1261a-67"
+          },
+          "probe": {
+            "adapter": "spin",
+            "case": "sdk-stream-timer-only",
+            "native_result_poll": {
+              "body_result_sent": false,
+              "phase": "before-response-eof",
+              "polls": 2,
+              "states": ["pending", "ready-ok"],
+              "stream_writer_owned": true
+            },
+            "pause_ns": 102121500,
+            "qualification": false,
+            "revision": "cd21436243535a3631aab385a789c2ff023c3f3c",
+            "sdk_native": true,
+            "token": "18e4b76349bd0248-1261a-67"
+          }
+        },
+        "qualification": false,
+        "status": "pass"
+      }
+    ],
+    "terminals": [
+      {
+        "adapter": "spin",
+        "case": "sdk-stream-ready",
+        "coordinator_ok": true,
+        "diagnostic_source": "fixture_stderr.txt",
+        "event": "sdk-stream-coordinator-terminal",
+        "native_result_poll": {
+          "body_result_sent": false,
+          "phase": "before-response-eof",
+          "polls": 1,
+          "states": ["pending"],
+          "stream_writer_owned": true
+        },
+        "qualification": false,
+        "token": "18e4b763496aa840-1261a-66"
+      },
+      {
+        "adapter": "spin",
+        "case": "sdk-stream-timer-only",
+        "coordinator_ok": true,
+        "diagnostic_source": "fixture_stderr.txt",
+        "event": "sdk-stream-coordinator-terminal",
+        "native_result_poll": {
+          "body_result_sent": false,
+          "phase": "before-response-eof",
+          "polls": 2,
+          "states": ["pending", "ready-ok"],
+          "stream_writer_owned": true
+        },
+        "qualification": false,
+        "token": "18e4b76349bd0248-1261a-67"
+      }
+    ]
+  }
+}

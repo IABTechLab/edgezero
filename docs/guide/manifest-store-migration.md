@@ -171,7 +171,10 @@ the request reaches the router — so the registry-aware
 accessors and the `Kv` / `Config` / `Secrets` extractors
 resolve uniformly regardless of which constructor wired the
 store. Fastly additionally exposes a public
-`request::dispatch_with_registries` for custom entry points.
+`request::send_with_registries_and_hooks` and
+`request::send_request_with_registries_and_hooks` for custom entry points.
+Both retain `StoresMetadata` and the closed `FastlyRequestDelivery` outcome;
+handle the delivery result rather than sending a second response.
 
 ## What about local config-store seeding?
 

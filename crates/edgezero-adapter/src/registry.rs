@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, PoisonError, RwLock};
 
+use edgezero_core::{Capability, CapabilitySupport, PlatformMetadata};
+
 static REGISTRY: LazyLock<RwLock<HashMap<String, &'static dyn Adapter>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -39,6 +41,71 @@ pub enum AdapterAction {
     /// adapters return "unsupported".
     Rollback,
     Serve,
+}
+
+/// Canonical application target selected by the CLI before adapter dispatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct AdapterExecutionTarget {
+    app_root: PathBuf,
+    component: Option<String>,
+    environment_defaults: Vec<(String, String)>,
+    platform_manifest: Option<PathBuf>,
+}
+
+impl AdapterExecutionTarget {
+    /// Canonical application root used for this action.
+    #[must_use]
+    #[inline]
+    pub fn app_root(&self) -> &Path {
+        &self.app_root
+    }
+
+    /// Optional platform component selected by the manifest.
+    #[must_use]
+    #[inline]
+    pub fn component(&self) -> Option<&str> {
+        self.component.as_deref()
+    }
+
+    /// Selected-manifest defaults not already supplied by the parent environment.
+    /// Declaration order is retained; child commands apply the last applicable value.
+    #[must_use]
+    #[inline]
+    pub fn environment_defaults(&self) -> &[(String, String)] {
+        &self.environment_defaults
+    }
+
+    /// Construct a target after the caller has canonicalized and validated it.
+    #[must_use]
+    #[inline]
+    pub fn new(
+        app_root: PathBuf,
+        component: Option<String>,
+        platform_manifest: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            app_root,
+            component,
+            environment_defaults: Vec::new(),
+            platform_manifest,
+        }
+    }
+
+    /// Canonical platform manifest selected for this action, when applicable.
+    #[must_use]
+    #[inline]
+    pub fn platform_manifest(&self) -> Option<&Path> {
+        self.platform_manifest.as_deref()
+    }
+
+    /// Carry filtered runtime defaults to the adapter without mutating process state.
+    #[must_use]
+    #[inline]
+    pub fn with_environment_defaults(mut self, defaults: Vec<(String, String)>) -> Self {
+        self.environment_defaults = defaults;
+        self
+    }
 }
 
 /// Logical store ids declared by the application manifest for a deploy.
@@ -79,6 +146,8 @@ pub struct AdapterDeployContext {
     pub application_manifest_path: Option<PathBuf>,
     /// Canonical root of an extracted immutable application release.
     pub application_release_root: Option<PathBuf>,
+    /// Pinned runtime target; deployment must not rediscover source from cwd.
+    pub execution_target: Option<AdapterExecutionTarget>,
     pub service_id: Option<String>,
     pub staging: bool,
     pub stores: DeployStoreIds,
@@ -300,7 +369,7 @@ pub enum ReadConfigEntry {
     /// or pushed under a different key).
     MissingKey,
     /// The store itself is absent — wrangler.toml has no matching binding,
-    /// fastly.toml has no setup table, axum's local-config-<id>.json file
+    /// fastly.toml has no setup table, axum's `local-config-<id>.json` file
     /// doesn't exist yet.
     MissingStore,
     /// The remote held the key; the body is the serialised envelope JSON.
@@ -314,33 +383,23 @@ pub enum ReadConfigEntry {
 /// Interface implemented by adapter crates to integrate with the `EdgeZero` CLI.
 ///
 /// The non-`execute` methods carry the adapter's `config validate`
-/// rules. They take primitive parameters (no `Manifest` /
-/// `SecretField` from `edgezero-core`) so this crate stays dep-free
-/// of `edgezero-core`. Defaults are no-ops; adapters override what
-/// they actually need.
-#[expect(
-    clippy::arbitrary_source_item_ordering,
-    reason = "deploy lifecycle hooks read in invocation order: preflight before deploy"
-)]
+/// rules. Defaults are no-ops; adapters override what they actually need.
 pub trait Adapter: Sync + Send {
-    /// Decide whether the manifest command or adapter owns this deployment.
+    /// Report this adapter's support for an application capability.
     ///
-    /// # Errors
-    /// Returns an error string when the adapter cannot safely select a deploy path.
+    /// The fail-closed default prevents an adapter from accidentally claiming
+    /// support merely because a new capability was added to core.
+    #[must_use]
     #[inline]
-    fn preflight_deploy(
-        &self,
-        _context: &AdapterDeployContext,
-        _args: &[String],
-    ) -> Result<DeployOwnership, String> {
-        Ok(DeployOwnership::ManifestCommand)
+    fn capability(&self, _capability: Capability) -> CapabilitySupport {
+        CapabilitySupport::Unsupported
     }
 
     /// Deploy with EdgeZero-owned inputs carried as typed context and only
     /// provider-native passthrough in `args`.
     ///
     /// Adapters that do not need structured deploy data can use the default
-    /// dispatch to their existing `execute` implementation.
+    /// dispatch to their pinned `execute_target` implementation.
     ///
     /// # Errors
     /// Returns an error string when the adapter deploy fails.
@@ -351,7 +410,11 @@ pub trait Adapter: Sync + Send {
         } else {
             AdapterAction::Deploy
         };
-        self.execute(action, args)
+        let target = context
+            .execution_target
+            .as_ref()
+            .ok_or_else(|| "adapter deployment requires a pinned execution target".to_owned())?;
+        self.execute_target(action, target, args)
     }
 
     /// Execute the requested action with optional adapter-specific args.
@@ -369,6 +432,27 @@ pub trait Adapter: Sync + Send {
     /// # Errors
     /// Returns an error string if the requested adapter action fails.
     fn execute(&self, action: AdapterAction, args: &[String]) -> Result<(), String>;
+
+    /// Execute against a target already selected and validated by the CLI.
+    ///
+    /// The default refuses rather than falling back to [`Self::execute`], which
+    /// could rediscover a different project from the process working directory.
+    ///
+    /// # Errors
+    /// Returns an explicit unsupported error unless the adapter implements
+    /// pinned-target dispatch.
+    #[inline]
+    fn execute_target(
+        &self,
+        _action: AdapterAction,
+        _target: &AdapterExecutionTarget,
+        _args: &[String],
+    ) -> Result<(), String> {
+        Err(format!(
+            "adapter `{}` does not support pinned execution targets",
+            self.name()
+        ))
+    }
 
     /// Finish a successful deploy.
     ///
@@ -452,6 +536,15 @@ pub trait Adapter: Sync + Send {
     /// Name used to reference the adapter (case-insensitive).
     fn name(&self) -> &'static str;
 
+    /// Report the target's resource metadata.
+    ///
+    /// The default leaves every fact unknown.
+    #[must_use]
+    #[inline]
+    fn platform_metadata(&self) -> PlatformMetadata {
+        PlatformMetadata::default()
+    }
+
     /// Reject a config `(key, body)` that this adapter cannot store, BEFORE any
     /// provider I/O. Called by `config push` ahead of the remote read, so an
     /// infeasible push fails offline instead of after a `list`/`describe`
@@ -472,27 +565,17 @@ pub trait Adapter: Sync + Send {
         Ok(())
     }
 
-    /// Validate the final config key selected by CLI and environment precedence
-    /// before config push or diff performs provider I/O.
-    ///
-    /// `logical_store_id` is the portable manifest ID. `key` is the final key
-    /// the operation would read or write. `staging` identifies the requested
-    /// deployment target, and `local` identifies an emulator operation.
-    /// Adapters whose runtimes use fixed keys can reject a divergent selection;
-    /// the default preserves configurable keys.
+    /// Decide whether the manifest command or adapter owns this deployment.
     ///
     /// # Errors
-    /// Returns a human-readable error when the selected key cannot be read by
-    /// this adapter's runtime for the requested target.
+    /// Returns an error string when the adapter cannot safely select a deploy path.
     #[inline]
-    fn validate_config_key_for_target(
+    fn preflight_deploy(
         &self,
-        _logical_store_id: &str,
-        _key: &str,
-        _staging: bool,
-        _local: bool,
-    ) -> Result<(), String> {
-        Ok(())
+        _context: &AdapterDeployContext,
+        _args: &[String],
+    ) -> Result<DeployOwnership, String> {
+        Ok(DeployOwnership::ManifestCommand)
     }
 
     /// Provision the platform resources backing each store id the
@@ -710,6 +793,29 @@ pub trait Adapter: Sync + Send {
         Ok(())
     }
 
+    /// Validate the final config key selected by CLI and environment precedence
+    /// before config push or diff performs provider I/O.
+    ///
+    /// `logical_store_id` is the portable manifest ID. `key` is the final key
+    /// the operation would read or write. `staging` identifies the requested
+    /// deployment target, and `local` identifies an emulator operation.
+    /// Adapters whose runtimes use fixed keys can reject a divergent selection;
+    /// the default preserves configurable keys.
+    ///
+    /// # Errors
+    /// Returns a human-readable error when the selected key cannot be read by
+    /// this adapter's runtime for the requested target.
+    #[inline]
+    fn validate_config_key_for_target(
+        &self,
+        _logical_store_id: &str,
+        _key: &str,
+        _staging: bool,
+        _local: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Typed-only check that needs `#[secret]` field values — the
     /// CLI calls this only from the typed validation flow.
     /// `entries` carries both `KeyInDefault` and `KeyInNamedStore`
@@ -786,6 +892,35 @@ mod tests {
         name: &'static str,
     }
 
+    struct CapabilityAdapter;
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "fixture overrides only the behavior under test"
+    )]
+    impl Adapter for CapabilityAdapter {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "Capability is non-exhaustive and this fixture defaults all untested capabilities to unsupported"
+        )]
+        fn capability(&self, capability: Capability) -> CapabilitySupport {
+            match capability {
+                Capability::LazyStreamedResponsePassthrough => CapabilitySupport::BestEffort,
+                Capability::OutboundDeadlines => CapabilitySupport::BoundedCooperative,
+                Capability::OutboundHttp => CapabilitySupport::Native,
+                _ => CapabilitySupport::Unsupported,
+            }
+        }
+
+        fn execute(&self, _action: AdapterAction, _args: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            "capability-fixture"
+        }
+    }
+
     #[expect(
         clippy::missing_trait_methods,
         reason = "TestAdapter only exercises register / get / execute; the validation methods inherit the trait defaults (no-ops)"
@@ -808,6 +943,66 @@ mod tests {
     }
 
     #[test]
+    fn adapter_capability_default_is_unsupported() {
+        assert_eq!(
+            FIRST.capability(Capability::OutboundHttp),
+            CapabilitySupport::Unsupported
+        );
+    }
+
+    #[test]
+    fn adapter_platform_metadata_default_is_unknown() {
+        let metadata = FIRST.platform_metadata();
+
+        assert_eq!(metadata, edgezero_core::PlatformMetadata::default());
+        assert_eq!(
+            metadata.memory_ceiling(),
+            edgezero_core::PlatformFact::unknown(edgezero_core::PlatformUnknownReason::Unspecified)
+        );
+        assert_eq!(
+            metadata.inbound_request_population_bound(),
+            edgezero_core::PlatformFact::unknown(edgezero_core::PlatformUnknownReason::Unspecified)
+        );
+        assert_eq!(
+            metadata.host_ingress_memory_accounting(),
+            edgezero_core::PlatformFact::unknown(edgezero_core::PlatformUnknownReason::Unspecified)
+        );
+    }
+
+    #[test]
+    fn adapter_capability_reports_each_support_level() {
+        let adapter = CapabilityAdapter;
+        assert_eq!(
+            adapter.capability(Capability::OutboundHttp),
+            CapabilitySupport::Native
+        );
+        assert_eq!(
+            adapter.capability(Capability::OutboundDeadlines),
+            CapabilitySupport::BoundedCooperative
+        );
+        assert_eq!(
+            adapter.capability(Capability::LazyStreamedResponsePassthrough),
+            CapabilitySupport::BestEffort
+        );
+        assert_eq!(
+            adapter.capability(Capability::OutboundCompleteResourceAccounting),
+            CapabilitySupport::Unsupported
+        );
+    }
+
+    #[test]
+    fn adapter_execute_target_default_refuses_rediscovery() {
+        let _guard = TEST_LOCK.lock().expect("lock");
+        reset();
+        let target = AdapterExecutionTarget::new(PathBuf::from("/tmp"), None, None);
+        let error = FIRST
+            .execute_target(AdapterAction::Build, &target, &[])
+            .expect_err("default target execution must fail closed");
+        assert!(error.contains("pinned execution targets"));
+        assert_eq!(HIT.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn default_deploy_preflight_keeps_manifest_command() {
         let context = AdapterDeployContext::default();
         assert_eq!(
@@ -817,6 +1012,29 @@ mod tests {
         assert!(context.application_manifest_path.is_none());
         assert!(context.application_release_root.is_none());
         assert!(context.variable_defaults.is_empty());
+    }
+
+    #[test]
+    fn default_deploy_never_rediscovers_an_unpinned_target() {
+        let _guard = TEST_LOCK.lock().expect("lock");
+        reset();
+        let missing = FIRST
+            .deploy(&AdapterDeployContext::default(), &[])
+            .expect_err("unpinned deploy must fail before execute");
+        assert!(missing.contains("pinned execution target"));
+        let context = AdapterDeployContext {
+            execution_target: Some(AdapterExecutionTarget::new(
+                PathBuf::from("/selected"),
+                None,
+                None,
+            )),
+            ..AdapterDeployContext::default()
+        };
+        let unsupported = FIRST
+            .deploy(&context, &[])
+            .expect_err("default pinned dispatch must not fall back to execute");
+        assert!(unsupported.contains("pinned execution targets"));
+        assert_eq!(HIT.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -940,5 +1158,20 @@ mod tests {
             "should name the adapter: {local_err}"
         );
         assert!(local_err.contains("--local"), "msg: {local_err}");
+    }
+
+    #[test]
+    fn execution_target_retains_ordered_defaults_without_changing_paths() {
+        let empty = AdapterExecutionTarget::new(PathBuf::from("/tmp"), None, None);
+        assert!(empty.environment_defaults().is_empty());
+        let defaults = vec![
+            ("key".to_owned(), "first".to_owned()),
+            ("KEY".to_owned(), "last".to_owned()),
+        ];
+        let selected = empty.with_environment_defaults(defaults.clone());
+        let cloned = selected.clone();
+        assert_eq!(cloned.environment_defaults(), defaults);
+        assert_eq!(cloned.app_root(), Path::new("/tmp"));
+        assert_eq!(cloned, selected);
     }
 }

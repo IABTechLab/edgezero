@@ -23,15 +23,24 @@ exists.
 Update these in your application's workspace `Cargo.toml` at the same
 time as the EdgeZero dependency:
 
-| Crate        | Old    | New    | Applies to                  |
-| ------------ | ------ | ------ | --------------------------- |
-| `fastly`     | `0.12` | `0.13` | Fastly adapter              |
-| `log-fastly` | `0.12` | `0.13` | Fastly adapter              |
-| `spin-sdk`   | `6`    | `7`    | Spin adapter                |
-| `validator`  | `0.20` | `0.21` | Any typed app config        |
-| `rusqlite`   | `0.32` | `0.40` | Only if you use it directly |
+| Crate        | Old    | New                     | Applies to                  |
+| ------------ | ------ | ----------------------- | --------------------------- |
+| `fastly`     | `0.12` | `=0.13.1`               | Fastly adapter              |
+| `log-fastly` | `0.12` | `=0.13.1`               | Fastly adapter              |
+| `spin-sdk`   | `6`    | `=8.0.0` from crates.io | Spin adapter                |
+| `validator`  | `0.20` | `0.21`                  | Any typed app config        |
+| `rusqlite`   | `0.32` | `0.40`                  | Only if you use it directly |
 
-Then refresh the lockfile:
+Keep the audited SDK requirements exact, including
+`worker = { version = "=0.8.5", default-features = false, features = ["http"] }`
+for Cloudflare applications. Spin applications that name the SDK directly must use
+`spin-sdk = "=8.0.0"` from crates.io, not the superseded Git fork.
+The [Spin dependency audit](../audits/2026-10-27-spin-sdk-eager-progress.md) records that source
+and the upstream contribution. Migrate SDK spawn calls to `wasip3::spawn_local`; no compatibility
+alias or second executor is provided. Exact normal dependencies intentionally constrain
+downstream resolution to the source whose error taxonomy and memory charges were audited.
+Applications must coordinate SDK/decoder updates with that audit, including security updates;
+do not loosen pins merely to resolve a conflicting application dependency. Then refresh the lockfile:
 
 ```bash
 cargo update
@@ -40,9 +49,10 @@ cargo test --workspace --all-targets
 
 ## Runtime requirement: Spin 4.1
 
-`spin-sdk` 7 imports `wasi:http/types@0.3.0`, which Spin 4.0.x does not
+`spin-sdk` 8 uses WASI HTTP 0.3.2, which Spin 4.0.x does not
 provide. This one does not fail at build time — the component compiles,
-its tests pass under `wasmtime`, and only `spin up` reports:
+its tests can pass under `wasmtime`, and only `spin up` reports a linker mismatch.
+For example, the earlier SDK 7 migration produced this historical diagnostic:
 
 ```
 Error: component imports instance `wasi:http/types@0.3.0`, but a
@@ -61,17 +71,19 @@ toolchain in `.tool-versions`, move it up with the dependencies; the
 A scaffolded app's `.tool-versions` also pins the provider CLIs, and
 those moved too:
 
-| Tool      | Old     | New         | Applies to                  |
-| --------- | ------- | ----------- | --------------------------- |
-| `rust`    | 1.95.0  | **1.98.1**  | every app                   |
-| `fastly`  | 15.1.0  | **16.0.0**  | Fastly adapter              |
-| `viceroy` | 0.17.0  | **0.21.0**  | Fastly local testing        |
-| `nodejs`  | 24.12.0 | **24.20.0** | Cloudflare (wrangler), docs |
+| Tool      | Old         | New         | Applies to                  |
+| --------- | ----------- | ----------- | --------------------------- |
+| `rust`    | 1.95.0      | **1.98.1**  | every app                   |
+| `fastly`  | 15.1.0      | **16.0.0**  | Fastly adapter              |
+| `viceroy` | 0.17.0      | **0.21.0**  | Fastly local testing        |
+| `spin`    | Unspecified | **4.1.0**   | Spin adapter                |
+| `nodejs`  | 24.12.0     | **24.20.0** | Cloudflare (wrangler), docs |
 
-The `fastly` line is operational rather than cosmetic: the deploy
-action's `install-fastly.sh` fails closed when `.tool-versions` and its
-own `versions.json` disagree, so an app that moves the Rust pin and
-leaves the Fastly one behind gets a red deploy rather than a warning.
+The deploy action's `install-fastly.sh` checks its bundled `versions.json` against
+the action repository's `.tool-versions`, not the application's file. An application
+that leaves its own Fastly pin behind is not rejected by that check. Update application
+CLI pins and the selected deploy-action release explicitly; do not rely on the action's
+internal consistency check to validate an application's toolchain.
 
 ## Verifying
 
