@@ -22,7 +22,7 @@ use futures_util::stream::{self, StreamExt as _};
 
 use crate::body::{Body, BodyPayload, BodyStream};
 use crate::error::{BadGatewayDecodeReason, BadGatewayReason, BudgetSource, EdgeError};
-use crate::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use crate::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, request_builder};
 use crate::time::{Deadline, DispatchBudget, MonotonicClock, MonotonicInstant};
 
 use super::redirect::{
@@ -739,6 +739,51 @@ fn streamed_upload_cannot_replay_and_never_consults_policy() {
             result.stop_reason(),
             Some(OutboundRedirectStopReason::BodyNotReplayable)
         );
+    }
+}
+
+#[test]
+fn declared_stream_redirect_rewrites_clear_length_and_preserving_redirects_do_not_replay() {
+    for status in [
+        StatusCode::MOVED_PERMANENTLY,
+        StatusCode::FOUND,
+        StatusCode::SEE_OTHER,
+        StatusCode::TEMPORARY_REDIRECT,
+        StatusCode::PERMANENT_REDIRECT,
+    ] {
+        let replayable = matches!(status.as_u16(), 301..=303);
+        let mut steps = vec![Reply::bytes(status, b"").location("/next").step()];
+        if replayable {
+            steps.push(Reply::bytes(StatusCode::OK, b"").step());
+        }
+        let fixture = Fixture::new(steps);
+        let inbound = request_builder()
+            .method(Method::POST)
+            .header("content-length", "4")
+            .body(Body::from_stream(stream::pending()))
+            .unwrap();
+        let initial =
+            OutboundRequest::from_request(inbound, "https://example.com/start".parse().unwrap())
+                .unwrap();
+        assert_eq!(initial.body.forwarded_content_length(), Some(4));
+        let result = success(block_on(fixture.client.follow(
+            initial,
+            limit(2),
+            move |hop| {
+                assert!(replayable, "stream replay must stop before policy");
+                let prepared = hop.prepared_request().expect("prepared rewrite");
+                assert_eq!(prepared.body.forwarded_content_length(), None);
+                assert_eq!(prepared.body.as_bytes(), Some(b"".as_slice()));
+                Ok::<_, ()>(OutboundRedirectAction::FollowPrepared)
+            },
+        )));
+        assert_eq!(fixture.sent(), if replayable { 2 } else { 1 });
+        if !replayable {
+            assert_eq!(
+                result.stop_reason(),
+                Some(OutboundRedirectStopReason::BodyNotReplayable)
+            );
+        }
     }
 }
 

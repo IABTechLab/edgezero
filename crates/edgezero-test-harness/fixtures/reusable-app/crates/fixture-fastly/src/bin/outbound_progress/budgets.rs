@@ -434,7 +434,7 @@ pub(super) fn run(request: fastly::Request) -> Result<(), fastly::Error> {
             && base.path() == format!("/budget/{token}/{case}")
             && base.query().is_none(),
     )?;
-    run_custom::<(), _, _>(request, |request, _| {
+    run_custom::<fixture_core::FixtureApp, (), _, _>(request, |request, _| {
         let provider = Arc::new(FastlyOutboundClient::default());
         let time = provider.time();
         let client = HttpClient::new(provider);

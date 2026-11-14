@@ -145,9 +145,9 @@ differences.
 
 ### Logging
 
-- Adapter-specific init: `edgezero_adapter_fastly::init_logger()`,
-  `edgezero_adapter_cloudflare::init_logger()`,
-  `edgezero_adapter_spin::init_logger()`.
+- Standard runners initialize managed logging before assembly unless `owns_logging` is true.
+  Cloudflare and Spin manual setup requires `init_logger(level)`; Fastly additionally requires
+  its endpoint and stdout policy. See the adapter guides for exact signatures.
 - Use `simple_logger` for local/Axum builds.
 - Use the `log` / `tracing` facade, not direct dependencies.
 
@@ -194,6 +194,12 @@ Every PR must pass:
 3. `cargo test --workspace --all-targets`
 4. `cargo check --workspace --all-targets --features "fastly cloudflare spin"`
 5. `cargo check -p edgezero-adapter-spin --target wasm32-wasip2 --features spin`
+
+The isolated integration harness has its own workspace and lockfile. Also run
+`cargo test --offline --locked --manifest-path crates/edgezero-test-harness/Cargo.toml`.
+The complete prescribed suite is `scripts/run_tests.sh`; it includes the
+adapter feature matrices, excluded demo/generated projects and harness checks.
+Runtime/hosted qualification is separate; see `crates/edgezero-test-harness/SUITES.md`.
 
 Docs CI additionally runs ESLint + Prettier on the `docs/` directory.
 

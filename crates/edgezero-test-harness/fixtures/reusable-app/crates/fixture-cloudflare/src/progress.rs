@@ -10,7 +10,10 @@ impl ProbeRuntime for Runtime {
     fn adapter(&self) -> &'static str {
         "cloudflare"
     }
-    fn outbound_client(&self) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
+    fn outbound_client(
+        &self,
+        _ctx: &edgezero_core::context::RequestContext,
+    ) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
         Ok(Arc::new(
             edgezero_adapter_cloudflare::outbound::CloudflareOutboundClient::new(),
         ))

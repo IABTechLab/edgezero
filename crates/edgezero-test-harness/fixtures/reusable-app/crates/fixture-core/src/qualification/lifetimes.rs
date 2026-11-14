@@ -1991,7 +1991,10 @@ mod tests {
         fn adapter(&self) -> &'static str {
             "unit"
         }
-        fn outbound_client(&self) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
+        fn outbound_client(
+            &self,
+            _ctx: &edgezero_core::context::RequestContext,
+        ) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
             assert_eq!(
                 self.2.fetch_add(1, Ordering::SeqCst),
                 0,
