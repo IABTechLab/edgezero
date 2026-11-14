@@ -8,13 +8,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const sentinel = "generated_native_consumer_uses_embedded_celld_over_tls";
+const recordSentinel = "generated_native_consumer_uses_embedded_celld_over_tls_records_v2";
 const inherited = [
   "PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "RUSTC", "RUSTDOC",
-  "RUSTFLAGS", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR", "EDGEZERO_GENERATED_TEST_TARGET_DIR",
+  "RUSTFLAGS", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR", "EDGEZERO_GENERATED_TEST_TARGET_DIR", "TMPDIR",
 ];
 
 export function fixtureEnvironment(source, binary) {
-  const env = {};
+  const env = { RUST_TEST_THREADS: "1" };
   for (const name of inherited) {
     if (source[name] !== undefined) env[name] = source[name];
   }
@@ -103,12 +104,17 @@ export async function runIntegration({
   log(`celld executable SHA-256 ${fingerprint}`);
   await command("bash", ["scripts/check_celld_scoped_isolation.sh", binary], { cwd, env: childEnv, timeoutMs: 60_000 });
   await command("scripts/run_test_nonzero.sh", [
-    "--ignored", sentinel,
+    "--ignored", [sentinel, recordSentinel].join("\n"),
     "cargo", "test", "--offline", "--locked", "-p", "edgezero-cli", "--no-default-features",
     "--features", "cli,edgezero-adapter-axum", "--test", "celld_generated_proof", sentinel,
   ], { cwd, env: childEnv, timeoutMs: 600_000 });
+  await command("scripts/run_test_nonzero.sh", [
+    "--ignored", "real_celld_records_v2_public_contract_races_and_lost_acknowledgement",
+    "cargo", "test", "--offline", "--locked", "-p", "edgezero-store-celld", "--no-default-features",
+    "--features", "records-v2", "--test", "records_v2_interop",
+  ], { cwd, env: childEnv, timeoutMs: 600_000 });
   if (await digest(binary) !== fingerprint) throw new Error("celld executable changed during proof");
-  log("Native generated celld TLS and disposable isolation proofs passed. Fleet acceptance remains separate.");
+  log("Native generated celld TLS, v2 records and disposable isolation proofs passed. Fleet acceptance remains separate.");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

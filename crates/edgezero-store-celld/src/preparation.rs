@@ -29,11 +29,15 @@ use crate::config::ConfigSnapshot;
 use crate::kv::CelldKvStore;
 #[cfg(feature = "records")]
 use crate::records::CelldRecordStore;
+#[cfg(feature = "records-v2")]
+use crate::records_v2::CelldRecordKvStore;
 #[cfg(feature = "config")]
 use crate::settings::CelldConfigSettings;
 #[cfg(feature = "kv")]
 use crate::settings::CelldKvSettings;
 use crate::settings::{CelldAccess, CelldAccessToken, CelldPreparationLimits, endpoint};
+#[cfg(feature = "records-v2")]
+use edgezero_core::record_store::RecordLayout;
 
 /// Aggregate counters, not process memory measurements. Metadata counts bounded
 /// identifier storage plus conservative per-record overhead. Staging includes at
@@ -157,6 +161,28 @@ impl CelldPreparation {
     ) -> Result<CelldRecordStore, PreparationError> {
         self.begin()?;
         let result = self.records_inner(settings, token).await;
+        if result.is_ok() {
+            self.poisoned = false;
+        }
+        result
+    }
+
+    /// Prepares an explicitly selected fresh v2 record binding over one dataset.
+    /// A read-only capability handshake establishes pagination and no-expiry support.
+    ///
+    /// # Errors
+    /// Rejects old/incompatible services without writes, downgrade or migration.
+    /// Any failed preparation poisons the session, as with other prepared stores.
+    #[cfg(feature = "records-v2")]
+    #[inline]
+    pub async fn prepare_record_store(
+        &mut self,
+        settings: &CelldKvSettings,
+        layout: &RecordLayout,
+        token: Option<&CelldAccessToken>,
+    ) -> Result<KvHandle, PreparationError> {
+        self.begin()?;
+        let result = self.record_store_inner(settings, layout, token).await;
         if result.is_ok() {
             self.poisoned = false;
         }
@@ -353,6 +379,34 @@ impl CelldPreparation {
         records.probe(self.deadline).await?;
         self.check()?;
         Ok(records)
+    }
+
+    #[cfg(feature = "records-v2")]
+    async fn record_store_inner(
+        &mut self,
+        settings: &CelldKvSettings,
+        layout: &RecordLayout,
+        token: Option<&CelldAccessToken>,
+    ) -> Result<KvHandle, PreparationError> {
+        settings.validate()?;
+        self.charge_mapping(&[
+            settings.endpoint.len(),
+            settings.store.len(),
+            layout.id().len(),
+        ])?;
+        let (_, client) = self.client(&settings.endpoint, &settings.access, token)?;
+        let endpoint = endpoint(&settings.endpoint, &settings.access)?;
+        self.check()?;
+        let store = CelldRecordKvStore::new(
+            client,
+            &endpoint,
+            settings.store.clone(),
+            self.limits,
+            layout,
+        )?;
+        store.probe(self.deadline).await?;
+        self.check()?;
+        Ok(KvHandle::new(Arc::new(store)))
     }
 
     #[cfg(feature = "kv")]

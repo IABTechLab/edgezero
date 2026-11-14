@@ -18,7 +18,7 @@ mod tests {
     use std::io::{self, Read as _, Write as _};
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::process::{self, Child, Command, ExitStatus, Stdio};
     use std::str::from_utf8;
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -959,6 +959,225 @@ region = "us-east-1"
             json!({"present":true, "value":b"permanent".as_slice(), "expires_at_ms":null, "ttl_epoch_s":null}),
             "normal overwrite must clear both expiration fields"
         );
+    }
+
+    const RECORDS_CORE_SOURCE: &str = r#"
+pub mod config;
+mod handlers;
+use edgezero_core::{EdgeError, RecordKeyLayout};
+use edgezero_core::key_value_store::KvError;
+struct Groups;
+impl RecordKeyLayout for Groups {
+    fn id(&self) -> &'static str { "generated-record-groups" }
+    fn version(&self) -> u32 { 1 }
+    fn validate(&self) -> Result<(), KvError> { Ok(()) }
+    fn partition_prefix<'key>(&self, key: &'key str) -> Result<&'key str, KvError> {
+        let end = key.find('/').ok_or_else(|| KvError::Validation("missing group".to_owned()))?;
+        key.get(..=end).ok_or_else(|| KvError::Validation("invalid group".to_owned()))
+    }
+    fn validate_partition(&self, prefix: &str) -> Result<(), KvError> {
+        if prefix.ends_with('/') && prefix.bytes().filter(|byte| *byte == b'/').count() == 1 {
+            Ok(())
+        } else { Err(KvError::Validation("incomplete group".to_owned())) }
+    }
+}
+fn configure_app(app: &mut edgezero_core::app::App) -> Result<(), EdgeError> {
+    app.require_record_store("primary", Groups)?;
+    Ok(())
+}
+edgezero_core::app!("../../edgezero.toml", configure = crate::configure_app);
+"#;
+
+    const RECORDS_HANDLER_SOURCE: &str = r#"
+use edgezero_core::{action, EdgeError};
+use edgezero_core::extractor::Kv;
+use edgezero_core::body::Body;
+use edgezero_core::http::{Response, StatusCode, response_builder};
+use serde_json::json;
+#[action]
+pub async fn proof(kv: Kv) -> Result<Response, EdgeError> {
+    let store = kv.named("primary").ok_or_else(|| EdgeError::service_unavailable("missing record store"))?;
+    edgezero_core::record_store::contract::assert_record_contract(&store, "group/").await;
+    response_builder().status(StatusCode::OK).header("content-type", "application/json")
+        .body(Body::json(&json!({"records": true})).map_err(EdgeError::internal)?)
+        .map_err(EdgeError::internal)
+}
+"#;
+
+    const RECORDS_MAIN_SOURCE: &str = r#"
+use std::time::{Duration, Instant};
+use edgezero_adapter_axum::dev_server::run_production_app_with_initializer;
+use edgezero_core::EdgeError;
+fn main() -> anyhow::Result<()> {
+    run_production_app_with_initializer::<native_aws_probe_core::App, _>(|_app, stores| {
+        Box::pin(async move {
+            stores.kv().and_then(|registry| registry.named_ref("primary"))
+                .ok_or_else(|| EdgeError::service_unavailable("missing prepared KV"))?
+                .require_records()?;
+            let entered = std::env::var("PROOF_ENTERED").map_err(EdgeError::internal)?;
+            std::fs::write(entered, "records-ready").map_err(EdgeError::internal)?;
+            let release = std::path::PathBuf::from(std::env::var("PROOF_RELEASE").map_err(EdgeError::internal)?);
+            let deadline = Instant::now() + Duration::from_secs(45);
+            while !release.is_file() {
+                if Instant::now() >= deadline {
+                    return Err(EdgeError::service_unavailable("initializer gate timed out"));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(())
+        })
+    })?;
+    Ok(())
+}
+"#;
+
+    fn install_record_consumer(project: &Path) {
+        install_consumer(project);
+        let manifest_path = project.join("edgezero.toml");
+        let mut manifest: toml::Value =
+            toml::from_str(&fs::read_to_string(&manifest_path).expect("manifest"))
+                .expect("manifest TOML");
+        manifest["stores"] =
+            toml::Value::try_from(json!({"kv": {"ids": ["primary"], "default": "primary"}}))
+                .expect("record store declaration");
+        manifest["adapters"]["axum"]["build"]["features"] =
+            toml::Value::try_from(vec!["aws-dynamodb-records"])
+                .expect("explicit record provider feature");
+        fs::write(
+            manifest_path,
+            toml::to_string(&manifest).expect("record manifest TOML"),
+        )
+        .expect("write record manifest");
+        let core = project.join("crates/native-aws-probe-core");
+        let core_manifest = core.join("Cargo.toml");
+        let mut dependencies: toml::Value =
+            toml::from_str(&fs::read_to_string(&core_manifest).expect("core Cargo manifest"))
+                .expect("core TOML");
+        dependencies["dependencies"]["edgezero-core"]
+            .as_table_mut()
+            .expect("core dependency table")
+            .entry("features")
+            .or_insert_with(|| toml::Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("core feature array")
+            .push(toml::Value::String("test-utils".to_owned()));
+        let core_toml = toml::to_string(&dependencies).expect("core TOML");
+        assert!(
+            !core_toml.contains("aws-sdk"),
+            "generated portable core must not depend on AWS SDK"
+        );
+        fs::write(core_manifest, core_toml).expect("shared public contract helper feature");
+        fs::write(core.join("src/lib.rs"), RECORDS_CORE_SOURCE)
+            .expect("configure-time record layout");
+        fs::write(core.join("src/handlers.rs"), RECORDS_HANDLER_SOURCE)
+            .expect("generated public record contract handler");
+        fs::write(
+            project.join("crates/native-aws-probe-adapter-axum/src/main.rs"),
+            RECORDS_MAIN_SOURCE,
+        )
+        .expect("prepared record initializer");
+    }
+
+    // The same local dummy authorization shape as native_aws_test_admin.mjs.
+    // DynamoDB Local does not verify the signature or timestamp; no hosted
+    // service can be reached because Services validates a literal loopback URL.
+    fn record_table_admin(services: &Services, operation: &str, input: &Value) -> Value {
+        let address = services
+            .dynamodb
+            .strip_prefix("http://")
+            .expect("validated local endpoint")
+            .parse()
+            .expect("literal Local address");
+        let headers = format!(
+            "Content-Type: application/x-amz-json-1.0\r\nX-Amz-Target: DynamoDB_20120810.{operation}\r\nX-Amz-Date: 20260101T000000Z\r\nAuthorization: AWS4-HMAC-SHA256 Credential=DUMMYLOCAL/20260101/us-east-1/dynamodb/aws4_request, SignedHeaders=host;x-amz-date, Signature={}\r\n",
+            "0".repeat(64)
+        );
+        let (status, body) = http(
+            address,
+            "POST",
+            "/",
+            &headers,
+            &serde_json::to_vec(input).expect("local table JSON"),
+        )
+        .expect("bounded local table request");
+        assert_eq!(
+            status,
+            200,
+            "local table {operation}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        serde_json::from_slice(&body).expect("local table JSON response")
+    }
+
+    #[test]
+    #[ignore = "requires pinned local services; run node scripts/run_native_aws_integration.mjs"]
+    fn generated_native_aws_emulator_contracts_records() {
+        let services = Services::required();
+        phase("AWS records proof: scaffold explicit record-only consumer");
+        let temp = TempDir::new().expect("temporary generated record project");
+        let mut new = Command::new(env!("CARGO_BIN_EXE_edgezero"));
+        new.args(["new", "native-aws-probe", "--dir"])
+            .arg(temp.path());
+        checked(new, WAIT, "real edgezero new for records");
+        let project = temp.path().join("native-aws-probe");
+        install_record_consumer(&project);
+        let target = env::var_os("EDGEZERO_GENERATED_TEST_TARGET_DIR").map_or_else(
+            || project.join("target"),
+            |value| {
+                let path = PathBuf::from(value);
+                if path.is_absolute() {
+                    path
+                } else {
+                    project.join(path)
+                }
+            },
+        );
+        let mut build = Command::new(env!("CARGO_BIN_EXE_edgezero"));
+        build
+            .args(["build", "--adapter", "axum", "--", "--offline"])
+            .current_dir(&project)
+            .env("CARGO_TARGET_DIR", &target);
+        checked(
+            build,
+            BUILD_WAIT,
+            "generated explicit record-provider build",
+        );
+        let binary = target.join("debug/native-aws-probe-adapter-axum");
+        assert!(binary.is_file(), "generated record executable");
+        let table = format!(
+            "edgezero-generated-records-{}-{}",
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        record_table_admin(
+            &services,
+            "CreateTable",
+            &json!({
+                "TableName": table, "BillingMode": "PAY_PER_REQUEST",
+                "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}, {"AttributeName": "sk", "KeyType": "RANGE"}],
+                "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}, {"AttributeName": "sk", "AttributeType": "S"}]
+            }),
+        );
+        let bindings = project.join("record-bindings.toml");
+        fs::write(&bindings, format!("version = 1\n[kv.primary]\nprovider = \"aws-dynamodb-records\"\nregion = \"us-east-1\"\ntable = {}\nnamespace = \"generated-records\"\n", toml_string(&table))).expect("explicit record bindings");
+        phase("AWS records proof: public shared contract through generated HTTP handler");
+        let mut first = App::spawn(&project, &binary, &bindings, &services, &services.token);
+        first.ready("records-ready");
+        assert_eq!(first.call(&json!({})), json!({"records": true}));
+        drop(first);
+        let mut reopened = App::spawn(&project, &binary, &bindings, &services, &services.token);
+        reopened.ready("records-ready");
+        assert_eq!(reopened.call(&json!({})), json!({"records": true}));
+        drop(reopened);
+        assert!(
+            !project.join("must-not-create-data").exists(),
+            "record binding must not fall back to local files"
+        );
+        record_table_admin(&services, "DeleteTable", &json!({"TableName": table}));
+        phase("AWS records proof: generated record consumer passed");
     }
 
     #[test]

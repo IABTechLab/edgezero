@@ -15,9 +15,11 @@ use crate::ingress::{
     IngressDispatchOutcome, IngressFraming, IngressHead, IngressHeadAccounting, IngressHeadLimits,
     IngressHeadParts, PreparedIngress, apply_admission_policy, default_admission_policy,
 };
+use crate::key_value_store::KvError;
 use crate::logging::BOOT_LOG_TARGET;
 use crate::manifest::{BakedManifest, ResolvedLoggingConfig};
 use crate::platform::PlatformMetadata;
+use crate::record_store::{RecordKeyLayout, RecordLayout, RecordStoreRequirements};
 use crate::response_egress::{
     DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision,
     DetachedResponseEgressDecisionFactory, DetachedResponseEgressHead, ResponseEgressCompletion,
@@ -61,6 +63,8 @@ pub struct App {
     monotonic_clock: MonotonicClock,
     name: String,
     platform: PlatformMetadata,
+    record_store_requirements: RecordStoreRequirements,
+    record_store_requirements_sealed: bool,
     response_egress_observer: ResponseEgressObserverHandle,
     response_egress_policy: ResponseEgressPolicyCallback,
     router: RouterService,
@@ -429,6 +433,7 @@ impl App {
                 "application configuration changed adapter-selected platform metadata"
             )));
         }
+        app.record_store_requirements_sealed = true;
         Ok(app)
     }
 
@@ -503,6 +508,13 @@ impl App {
         self.router.prepare_received_head(headers, extensions);
     }
 
+    /// Borrow immutable requirements for store preparation and ready-handle validation.
+    #[must_use]
+    #[inline]
+    pub fn record_store_requirements(&self) -> &RecordStoreRequirements {
+        &self.record_store_requirements
+    }
+
     fn render_error_response(&self, error: EdgeError) -> Response {
         self.render_error_response_with_message(error, None)
     }
@@ -534,6 +546,39 @@ impl App {
         }
         suppress_overflow_retry_after(&mut response);
         response
+    }
+
+    /// Declare a record layout once during configuration, before provider preparation.
+    /// Declarations cannot be replaced or added after hook-based construction finishes.
+    /// Low-level constructors leave configuration open until the caller prepares stores.
+    ///
+    /// # Errors
+    /// Rejects duplicate/empty logical IDs, invalid layouts or post-configuration changes.
+    #[inline]
+    pub fn require_record_store<Id, KeyLayout>(
+        &mut self,
+        id: Id,
+        layout: KeyLayout,
+    ) -> Result<(), KvError>
+    where
+        Id: Into<String>,
+        KeyLayout: RecordKeyLayout + 'static,
+    {
+        if self.record_store_requirements_sealed {
+            return Err(KvError::Validation(
+                "record store declarations are already sealed".to_owned(),
+            ));
+        }
+        let logical_id = id.into();
+        if logical_id.is_empty() || self.record_store_requirements.contains_key(&logical_id) {
+            return Err(KvError::Validation(
+                "record store ID is empty or already declared".to_owned(),
+            ));
+        }
+        let declaration = RecordLayout::new(layout)?;
+        self.record_store_requirements
+            .insert(logical_id, declaration);
+        Ok(())
     }
 
     fn response_egress_envelope(
@@ -741,6 +786,8 @@ impl App {
             monotonic_clock: MonotonicClock::default(),
             name: name.into(),
             platform,
+            record_store_requirements: RecordStoreRequirements::new(),
+            record_store_requirements_sealed: false,
             response_egress_observer: ResponseEgressObserverHandle::default(),
             response_egress_policy: Arc::new(default_response_egress_policy),
             router,

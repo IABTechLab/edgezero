@@ -23,6 +23,8 @@ mod kv;
 mod preparation;
 #[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
 pub mod records;
+#[cfg(all(not(target_arch = "wasm32"), feature = "records-v2"))]
+mod records_v2;
 #[cfg(test)]
 #[cfg(all(not(target_arch = "wasm32"), feature = "_transport"))]
 mod test_support;
@@ -52,7 +54,7 @@ pub enum PreparationError {
     Forbidden,
     #[error("missing resource")]
     Missing,
-    #[cfg(feature = "records")]
+    #[cfg(any(feature = "records", feature = "records-v2"))]
     #[error("write precondition failed")]
     PreconditionFailed,
     #[error("size limit")]
@@ -65,4 +67,7 @@ pub enum PreparationError {
     Unavailable,
     #[error("deadline exceeded")]
     Deadline,
+    #[cfg(feature = "records-v2")]
+    #[error("mutation may have committed")]
+    MutationUncertain,
 }

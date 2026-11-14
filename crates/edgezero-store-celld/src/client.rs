@@ -43,6 +43,16 @@ impl fmt::Debug for ScopedClient {
     }
 }
 
+#[cfg(feature = "records-v2")]
+#[derive(Clone, Copy)]
+pub(crate) enum RecordV2Response {
+    Capabilities,
+    Exists,
+    Mutation,
+    Page,
+    Value,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum ResponseKind {
     #[cfg(feature = "kv")]
@@ -63,11 +73,15 @@ pub(crate) enum ResponseKind {
     RecordMutation,
     #[cfg(feature = "records")]
     RecordPage,
+    #[cfg(feature = "records-v2")]
+    RecordV2(RecordV2Response),
 }
 
 impl ResponseKind {
     fn mutation(self) -> bool {
         match self {
+            #[cfg(feature = "records-v2")]
+            Self::RecordV2(kind) => matches!(kind, RecordV2Response::Mutation),
             #[cfg(feature = "kv")]
             Self::Mutation => true,
             #[cfg(feature = "records")]
@@ -83,6 +97,11 @@ impl ResponseKind {
 
     fn json(self) -> bool {
         match self {
+            #[cfg(feature = "records-v2")]
+            Self::RecordV2(kind) => matches!(
+                kind,
+                RecordV2Response::Capabilities | RecordV2Response::Page | RecordV2Response::Value
+            ),
             #[cfg(feature = "kv")]
             Self::Page => true,
             #[cfg(feature = "records")]
@@ -98,6 +117,8 @@ impl ResponseKind {
 
     fn optional(self) -> bool {
         match self {
+            #[cfg(feature = "records-v2")]
+            Self::RecordV2(kind) => matches!(kind, RecordV2Response::Value),
             #[cfg(feature = "kv")]
             Self::Value => true,
             #[cfg(feature = "records")]
@@ -111,12 +132,17 @@ impl ResponseKind {
         }
     }
 
-    #[cfg(feature = "records")]
-    fn record(self) -> bool {
-        matches!(
-            self,
-            Self::Record | Self::RecordExists | Self::RecordMutation | Self::RecordPage
-        )
+    #[cfg(any(feature = "records", feature = "records-v2"))]
+    fn record_version(self) -> Option<&'static [u8]> {
+        match self {
+            #[cfg(feature = "records")]
+            Self::Record | Self::RecordExists | Self::RecordMutation | Self::RecordPage => {
+                Some(b"1")
+            }
+            #[cfg(feature = "records-v2")]
+            Self::RecordV2(_) => Some(b"2"),
+            _ => None,
+        }
     }
 }
 
@@ -196,6 +222,20 @@ impl ScopedClient {
         Ok(url)
     }
 
+    #[cfg(feature = "records-v2")]
+    pub(crate) fn record_v2_url(
+        &self,
+        store: &str,
+        resource: &str,
+    ) -> Result<Url, PreparationError> {
+        let mut url = self.endpoint.clone();
+        url.path_segments_mut()
+            .map_err(|_error| PreparationError::InvalidEndpoint)?
+            .clear()
+            .extend(["v2", "stores", store, resource]);
+        Ok(url)
+    }
+
     /// Covers sending, streaming and decoding with one real timer and injected
     /// monotonic checks. None means a validated miss, never a protocol failure.
     pub(crate) async fn execute(
@@ -219,23 +259,25 @@ impl ScopedClient {
             request = request.header(AUTHORIZATION, authorization.clone());
         }
         if let Some(payload) = body {
-            #[cfg(feature = "records")]
-            let content_type = if matches!(kind, ResponseKind::RecordMutation) {
+            #[cfg(any(feature = "records", feature = "records-v2"))]
+            let content_type = if kind.record_version().is_some() && kind.mutation() {
                 "application/json"
             } else {
                 "application/octet-stream"
             };
-            #[cfg(not(feature = "records"))]
+            #[cfg(not(any(feature = "records", feature = "records-v2")))]
             let content_type = "application/octet-stream";
             request = request.header(CONTENT_TYPE, content_type).body(payload);
         }
-        let result = timeout(budget, async {
+        #[cfg(feature = "records-v2")]
+        let mut definitive_rejection = false;
+        let exchange = timeout(budget, async {
             let response = request.send().await.map_err(http_error)?;
             let headers = response.headers();
             validate_headers(headers)?;
-            #[cfg(feature = "records")]
-            if kind.record() {
-                validate_record_version(headers)?;
+            #[cfg(any(feature = "records", feature = "records-v2"))]
+            if let Some(version) = kind.record_version() {
+                validate_record_version(headers, version)?;
             }
             let status = response.status();
             let success = status
@@ -282,6 +324,10 @@ impl ScopedClient {
             if parsed.error != expected {
                 return Err(PreparationError::Malformed);
             }
+            #[cfg(feature = "records-v2")]
+            if status.is_client_error() {
+                definitive_rejection = true;
+            }
             if missing && kind.optional() {
                 return Ok(None);
             }
@@ -289,15 +335,25 @@ impl ScopedClient {
         })
         .await
         .map_err(|_elapsed| PreparationError::Deadline);
-        self.check(deadline)?;
-        result?
+        let result = self.check(deadline).and_then(|_remaining| exchange?);
+        #[cfg(feature = "records-v2")]
+        if matches!(kind, ResponseKind::RecordV2(RecordV2Response::Mutation))
+            && !definitive_rejection
+        {
+            return result.map_err(|_error| PreparationError::MutationUncertain);
+        }
+        result
     }
 }
 
-#[cfg(feature = "records")]
-fn validate_record_version(headers: &HeaderMap) -> Result<(), PreparationError> {
+#[cfg(any(feature = "records", feature = "records-v2"))]
+fn validate_record_version(headers: &HeaderMap, expected: &[u8]) -> Result<(), PreparationError> {
     let mut versions = headers.get_all("x-celld-record-version").iter();
-    if versions.next().is_none_or(|value| value.as_bytes() != b"1") || versions.next().is_some() {
+    if versions
+        .next()
+        .is_none_or(|value| value.as_bytes() != expected)
+        || versions.next().is_some()
+    {
         return Err(PreparationError::UnsupportedVersion);
     }
     Ok(())
@@ -383,7 +439,7 @@ fn status_error(status: StatusCode) -> Option<(&'static str, PreparationError)> 
         401 => ("unauthenticated", PreparationError::Unauthenticated),
         403 => ("forbidden", PreparationError::Forbidden),
         404 => ("not_found", PreparationError::Missing),
-        #[cfg(feature = "records")]
+        #[cfg(any(feature = "records", feature = "records-v2"))]
         412 => ("precondition_failed", PreparationError::PreconditionFailed),
         413 => ("limit_exceeded", PreparationError::SizeLimit),
         426 => ("unsupported_version", PreparationError::UnsupportedVersion),
