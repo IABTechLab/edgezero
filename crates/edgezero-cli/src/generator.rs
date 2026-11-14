@@ -281,12 +281,7 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
     deps.insert("tracing".to_owned(), "tracing = \"0.1\"".to_owned());
     deps.insert(
         "spin-sdk".to_owned(),
-        concat!(
-            "spin-sdk = { version = \"=7.0.0\", ",
-            "git = \"https://github.com/stackpop/spin-rust-sdk.git\", ",
-            "rev = \"6c59ed5b4fcb377072763aee0b27a3abdd8edb72\", default-features = false }",
-        )
-        .to_owned(),
+        "spin-sdk = { version = \"=8.0.0\", default-features = false }".to_owned(),
     );
     // Core depends on `validator` for `#[derive(Validate)]` on the
     // generated `<Name>Config` struct. Pinned to the same
@@ -901,6 +896,14 @@ mod tests {
     }
 
     #[test]
+    fn spin_seed_uses_the_published_executor_repair() {
+        let seeds = seed_workspace_dependencies();
+        let seed: toml::Value = toml::from_str(&seeds["spin-sdk"]).unwrap();
+        assert_eq!(dependency_requirement(&seed, "spin-sdk"), Some("=8.0.0"));
+        assert_eq!(dependency_git_source(&seed, "spin-sdk"), (None, None));
+    }
+
+    #[test]
     fn independent_dependencies_track_the_edgezero_workspace() {
         let root = workspace_dependencies(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1150,14 +1153,17 @@ unpinned = { path = "somewhere" }
     }
 
     #[test]
-    fn request_fidelity_dependency_contract_rejects_missing_metadata_and_sources() {
+    fn request_fidelity_dependency_contract_rejects_missing_metadata_and_foreign_sources() {
         let (root, root_lock, fixture, fixture_lock) = fidelity_contract_inputs();
         for key in ["git", "rev"] {
             let mut changed = fixture.clone();
             changed["dependencies"]["spin-sdk"]
                 .as_table_mut()
                 .unwrap()
-                .remove(key);
+                .insert(
+                    key.to_owned(),
+                    toml::Value::String("foreign-source".to_owned()),
+                );
             assert!(
                 fidelity_dependency_contract(&root, &root_lock, &changed, &fixture_lock).is_err()
             );
@@ -1191,7 +1197,7 @@ unpinned = { path = "somewhere" }
     fn dependency_git_source_detects_drift_without_changing_version_checks() {
         let pinned: toml::Value = toml::from_str(
             r#"
-spin-sdk = { version = "=7.0.0", git = "https://github.com/stackpop/spin-rust-sdk", rev = "0123456789abcdef0123456789abcdef01234567" }
+spin-sdk = { version = "=8.0.0", git = "https://example.invalid/spin-sdk-test", rev = "0123456789abcdef0123456789abcdef01234567" }
 "#,
         )
         .expect("valid pinned dependency");
@@ -1204,8 +1210,8 @@ spin-sdk = { version = "=7.0.0", git = "https://github.com/stackpop/spin-rust-sd
             r#"
 [spin-sdk]
 rev = "0123456789abcdef0123456789abcdef01234567"
-version = "=7.0.0"
-git = "https://github.com/stackpop/spin-rust-sdk"
+version = "=8.0.0"
+git = "https://example.invalid/spin-sdk-test"
 "#,
         )
         .expect("valid reordered dependency");
@@ -1239,7 +1245,7 @@ git = "https://github.com/stackpop/spin-rust-sdk"
                 "{field}"
             );
         }
-        let registry: toml::Value = toml::from_str("spin-sdk = \"=7.0.0\"").unwrap();
+        let registry: toml::Value = toml::from_str("spin-sdk = \"=8.0.0\"").unwrap();
         assert_eq!(
             dependency_requirement(&registry, "spin-sdk"),
             dependency_requirement(&pinned, "spin-sdk")

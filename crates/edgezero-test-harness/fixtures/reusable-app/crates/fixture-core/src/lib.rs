@@ -1,6 +1,7 @@
 pub mod assembly;
 pub mod batch_recovery;
 pub mod launch;
+pub mod managed_logging;
 pub mod marker;
 #[cfg(test)]
 mod outbound_test_support;
@@ -191,6 +192,10 @@ impl Hooks for DeclaredKvApp {
     }
 }
 impl Hooks for OtherApp {
+    fn owns_logging() -> bool {
+        true
+    }
+
     fn routes() -> Result<RouterService, EdgeError> {
         Ok(RouterService::builder().get("/other", other).build())
     }

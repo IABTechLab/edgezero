@@ -46,14 +46,26 @@ struct State {
 }
 
 pub fn validate_forward_capture(receipt: &Value) -> Result<()> {
+    validate_forward_capture_bounded(receipt, 8, 256)
+}
+
+pub fn validate_forward_length_capture(receipt: &Value) -> Result<()> {
+    validate_forward_capture_bounded(receipt, 4096, 16384)
+}
+
+fn validate_forward_capture_bounded(
+    receipt: &Value,
+    payload_cap: usize,
+    hex_cap: usize,
+) -> Result<()> {
     let payload = receipt["payload"]
         .as_str()
-        .filter(|value| value.len() <= 8)
+        .filter(|value| value.len() <= payload_cap)
         .ok_or("invalid forwarding payload")?;
     let encoded = receipt["encoded_body_hex"]
         .as_str()
         .filter(|value| {
-            value.len() <= 256
+            value.len() <= hex_cap
                 && value.len() % 2 == 0
                 && value.bytes().all(|b| b.is_ascii_hexdigit())
         })
@@ -84,7 +96,9 @@ pub fn validate_forward_capture(receipt: &Value) -> Result<()> {
     }
     let mut reader = BufReader::new(std::io::Cursor::new(wire));
     let head = read_head(&mut reader, &mut 0, Profile::Wire).map_err(|error| error.name())?;
-    let (decoded, _) = capture_wire_body(&mut reader, &head).map_err(|error| error.name())?;
+    let (decoded, _) =
+        super::overflow::capture_wire_body_bounded(&mut reader, &head, payload_cap, hex_cap / 2)
+            .map_err(|error| error.name())?;
     require(
         decoded == payload.as_bytes() && reader.read(&mut [0])? == 0,
         "forwarding capture bytes disagree with framing",
@@ -482,8 +496,10 @@ fn serve(mut socket: TcpStream, port: u16, second: u16, shared: &Shared) -> Resu
     if let Some(tail) = target.strip_prefix("/forward/") {
         let (operation, token) = tail.split_once('/').ok_or("invalid forwarding target")?;
         require(
-            matches!(operation, "send" | "begin" | "confirm" | "follow" | "final")
-                && !token.is_empty()
+            matches!(
+                operation,
+                "send" | "begin" | "confirm" | "follow" | "final" | "large"
+            ) && !token.is_empty()
                 && token.len() <= 64
                 && token
                     .bytes()
@@ -497,11 +513,15 @@ fn serve(mut socket: TcpStream, port: u16, second: u16, shared: &Shared) -> Resu
             .map(|(_, value)| value.as_str())
             .collect();
         require(tokens == [token], "forwarding token changed")?;
-        let (body, encoded) =
-            capture_wire_body(&mut reader, &head).map_err(|error| error.name())?;
+        let (body, encoded) = if operation == "large" {
+            super::overflow::capture_wire_body_bounded(&mut reader, &head, 4096, 8192)
+        } else {
+            capture_wire_body(&mut reader, &head)
+        }
+        .map_err(|error| error.name())?;
         no_trailing_bytes(&mut reader)?;
         require(
-            body.len() <= 8 && body.is_ascii(),
+            body.len() <= if operation == "large" { 4096 } else { 8 } && body.is_ascii(),
             "forwarding origin body exceeds bound",
         )?;
         let fields = |field| {

@@ -209,9 +209,10 @@ impl Records {
     }
 }
 pub fn logs(path: &Path) -> Vec<Value> {
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
+    parse_logs(&fs::read_to_string(path).unwrap_or_default())
+}
+pub fn parse_logs(text: &str) -> Vec<Value> {
+    text.lines()
         .filter(|l| l.starts_with('{'))
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect()
@@ -426,9 +427,25 @@ impl Process {
         Ok(p)
     }
     pub fn start(command: &mut Command, log: &Path, port: u16) -> Result<Self> {
+        Self::start_logged(command, log, None, port)
+    }
+    pub fn start_with_stdout(
+        command: &mut Command,
+        log: &Path,
+        stdout: &Path,
+        port: u16,
+    ) -> Result<Self> {
+        Self::start_logged(command, log, Some(stdout), port)
+    }
+    fn start_logged(
+        command: &mut Command,
+        log: &Path,
+        stdout: Option<&Path>,
+        port: u16,
+    ) -> Result<Self> {
         let deadline = Instant::now() + Duration::from_secs(45);
         startup::require_configured(command)?;
-        let mut p = Self::spawn(command, log)?;
+        let mut p = Self::spawn_logged(command, log, stdout)?;
         p.1.launch = Some(startup::register(command, p.0.clone(), log, port, deadline));
         loop {
             p.check_running()?;
