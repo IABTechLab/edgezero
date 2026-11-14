@@ -27,6 +27,8 @@ pub mod native_stores;
 #[cfg(feature = "axum")]
 pub mod outbound;
 #[cfg(feature = "axum")]
+pub mod outbound_executor;
+#[cfg(feature = "axum")]
 pub mod request;
 #[cfg(feature = "axum")]
 mod response;

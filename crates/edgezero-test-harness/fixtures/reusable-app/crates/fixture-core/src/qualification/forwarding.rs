@@ -136,13 +136,17 @@ async fn forward(ctx: RequestContext, State(signal): State<Value>) -> Result<Res
         "late",
         "outbound-deadline",
         "inbound-deadline",
+        "declared-length",
+        "unknown-length",
     ]
     .contains(&case.as_str())
         || target.query().is_some()
         || target.path()
             != format!(
                 "/forward/{}/{token}",
-                if matches!(case.as_str(), "begin" | "follow") {
+                if matches!(case.as_str(), "declared-length" | "unknown-length") {
+                    "large"
+                } else if matches!(case.as_str(), "begin" | "follow") {
                     case.as_str()
                 } else {
                     "send"
@@ -182,7 +186,13 @@ async fn forward(ctx: RequestContext, State(signal): State<Value>) -> Result<Res
                 Duration::from_secs(3)
             },
         )
-        .max_request_body_bytes(8)
+        .max_request_body_bytes(
+            if matches!(case.as_str(), "declared-length" | "unknown-length") {
+                4096
+            } else {
+                8
+            },
+        )
         .max_encoded_response_bytes(64)
         .max_decoded_response_bytes(64)
         .max_response_bytes(64);

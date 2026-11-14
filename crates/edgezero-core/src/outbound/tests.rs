@@ -268,6 +268,116 @@ impl BatchFixture {
     }
 }
 
+fn forwarded_length_fixture(headers: &[(&str, &str)]) -> OutboundRequest {
+    let mut input = request_builder().method(Method::POST);
+    for (name, value) in headers {
+        input = input.header(*name, *value);
+    }
+    let input = input
+        .body(Body::from_stream(stream::iter([Ok(Bytes::from_static(
+            b"data",
+        ))])))
+        .unwrap();
+    OutboundRequest::from_request(input, "https://example.com/upload".parse().unwrap()).unwrap()
+}
+
+#[test]
+fn forwarded_stream_length_is_body_owned_and_never_recaptured_from_raw_headers() {
+    for (headers, expected) in [
+        (vec![], None),
+        (vec![("content-length", "4")], Some(4)),
+        (vec![("content-length", " \t4\t ")], Some(4)),
+        (vec![("content-length", "0")], Some(0)),
+        (
+            vec![("content-length", "18446744073709551615")],
+            Some(u64::MAX),
+        ),
+        (vec![("content-length", "4"), ("content-length", "4")], None),
+        (vec![("content-length", "4"), ("content-length", "5")], None),
+        (vec![("content-length", "4, 4")], None),
+        (vec![("content-length", "+4")], None),
+        (vec![("content-length", "18446744073709551616")], None),
+        (
+            vec![("content-length", "4"), ("transfer-encoding", "chunked")],
+            None,
+        ),
+        (
+            vec![("content-length", "4"), ("connection", "content-length")],
+            None,
+        ),
+    ] {
+        let mut request = forwarded_length_fixture(&headers);
+        assert!(!request.headers().contains_key("content-length"));
+        assert!(!request.headers().contains_key("transfer-encoding"));
+        assert_eq!(
+            request.body.forwarded_content_length(),
+            expected,
+            "{headers:?}"
+        );
+        normalize_for_dispatch(&mut request).unwrap();
+        assert_eq!(request.body.forwarded_content_length(), expected);
+        let unchanged = OutboundRequest::from_parts(request.into_parts()).unwrap();
+        assert_eq!(unchanged.body.forwarded_content_length(), expected);
+    }
+    let mut request = OutboundRequest::post("https://example.com")
+        .unwrap()
+        .body(Body::from_stream(stream::pending()))
+        .header("content-length", "4")
+        .unwrap();
+    normalize_for_dispatch(&mut request).unwrap();
+    assert_eq!(request.body.forwarded_content_length(), None);
+    let mut input = request_builder()
+        .method(Method::POST)
+        .body(Body::from_stream(stream::pending()))
+        .unwrap();
+    input
+        .headers_mut()
+        .insert("content-length", HeaderValue::from_bytes(b"\xff").unwrap());
+    let request =
+        OutboundRequest::from_request(input, "https://example.com/upload".parse().unwrap())
+            .unwrap();
+    assert_eq!(request.body.forwarded_content_length(), None);
+}
+
+#[test]
+fn forwarded_stream_length_cannot_survive_body_replacement_or_late_nominations() {
+    for header in ["connection", "transfer-encoding"] {
+        let mut request = forwarded_length_fixture(&[("content-length", "4")]);
+        request.headers_mut().insert(
+            header,
+            HeaderValue::from_static(if header == "connection" {
+                "content-length"
+            } else {
+                "chunked"
+            }),
+        );
+        normalize_for_dispatch(&mut request).unwrap();
+        normalize_for_dispatch(&mut request).unwrap();
+        assert_eq!(request.body.forwarded_content_length(), None);
+    }
+    let replaced = forwarded_length_fixture(&[("content-length", "4")])
+        .body(Body::from_stream(stream::pending()));
+    assert_eq!(replaced.body.forwarded_content_length(), None);
+    let json = forwarded_length_fixture(&[("content-length", "4")])
+        .json(&serde_json::json!({"changed":true}))
+        .unwrap();
+    assert_eq!(json.body.forwarded_content_length(), None);
+    let mut parts = forwarded_length_fixture(&[("content-length", "4")]).into_parts();
+    parts.body = Body::from_stream(stream::pending());
+    let replaced = OutboundRequest::from_parts(parts).unwrap();
+    assert_eq!(replaced.body.forwarded_content_length(), None);
+    let mut parts = forwarded_length_fixture(&[("content-length", "4")]).into_parts();
+    let raw = parts.body.into_stream().unwrap();
+    parts.body = Body::from_stream(raw);
+    assert_eq!(
+        OutboundRequest::from_parts(parts)
+            .unwrap()
+            .body
+            .forwarded_content_length(),
+        None
+    );
+}
+
 fn marker_head(request: OutboundDispatchRequest) -> Result<OutboundHead, EdgeError> {
     if request.request().proxy_marker_setting() == OutboundProxyMarker::Inherit {
         return Err(EdgeError::internal(anyhow::anyhow!(
