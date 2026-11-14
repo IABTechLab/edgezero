@@ -125,6 +125,10 @@ impl SpinKvStore {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "Spin implements ordinary KV and inherits unsupported record defaults"
+)]
 #[async_trait(?Send)]
 impl KvStore for SpinKvStore {
     #[inline]

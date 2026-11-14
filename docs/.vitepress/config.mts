@@ -40,6 +40,7 @@ export default defineConfig({
           { text: 'Streaming', link: '/guide/streaming' },
           { text: 'Outbound HTTP', link: '/guide/proxying' },
           { text: 'KV Storage', link: '/guide/kv' },
+          { text: 'Conditional records', link: '/guide/kv-records' },
         ],
       },
       {

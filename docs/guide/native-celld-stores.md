@@ -2,11 +2,11 @@
 
 The native provider reads complete configuration documents at startup and exposes live KV operations through a scoped listener **inside celld**. There is no gateway, sidecar, Worker bridge or celld HTTP adapter.
 
-This is an unreleased integration. It requires the modified celld revision `f72ae21a515859570622ac9d6ca9c19cf6870b81`. Upstream celld v0.6.2 does not have this API. Local tests do not establish fleet failover, deployment security or production readiness.
+This is an unreleased integration. The original config/raw KV API requires the modified celld revision `f72ae21a515859570622ac9d6ca9c19cf6870b81`. Legacy record clients need the matching record service extension. The new [record-capable KV binding](./kv-records) requires the matching v2 service extension instead; that older revision cannot supply it. Upstream celld v0.6.2 does not have these scoped APIs. Local tests do not establish fleet failover, deployment security or production readiness.
 
 ## Build only the providers you use
 
-Generated Axum targets forward two independent, default-off features:
+The config/raw KV provider features remain independent and off by default:
 
 ```toml
 [adapters.axum.build]

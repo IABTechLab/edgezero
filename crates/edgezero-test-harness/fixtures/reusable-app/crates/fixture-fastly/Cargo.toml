@@ -8,6 +8,7 @@ publish.workspace = true
 qualification = ["progress"]
 progress = ["fixture-core/qualification", "fixture-core/native-body-witness", "edgezero-adapter-fastly/test-utils"]
 readiness = ["dep:fastly-sys"]
+records = ["edgezero-core/test-utils"]
 
 [dependencies]
 edgezero-core.workspace = true
@@ -82,6 +83,11 @@ path = "src/bin/limit_memory.rs"
 [[bin]]
 name = "fixture-fastly-faults"
 path = "src/bin/faults.rs"
+
+[[bin]]
+name = "fixture-fastly-record-contract"
+path = "src/bin/record_contract.rs"
+required-features = ["records"]
 
 [lints]
 workspace = true

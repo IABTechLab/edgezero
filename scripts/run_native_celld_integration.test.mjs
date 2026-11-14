@@ -25,9 +25,9 @@ function fixture(extra = {}) {
 
 test("fixture environment excludes deployment credentials, proxies and inherited trust inputs", () => {
   assert.deepEqual(fixtureEnvironment({
-    PATH: "path", HOME: "home", CARGO_HOME: "cargo", RUSTUP_TOOLCHAIN: "1.95.0", CELLD_BIN: "ignored",
+    PATH: "path", HOME: "home", CARGO_HOME: "cargo", RUSTUP_TOOLCHAIN: "1.95.0", CELLD_BIN: "ignored", TMPDIR: "/fixture/tmp", RUST_TEST_THREADS: "8",
     AWS_ACCESS_KEY_ID: "secret", CELLD_APP_TOKEN: "secret", ALL_PROXY: "proxy", SSL_CERT_FILE: "ca",
-  }, binary), { PATH: "path", HOME: "home", CARGO_HOME: "cargo", RUSTUP_TOOLCHAIN: "1.95.0", CELLD_BIN: binary });
+  }, binary), { RUST_TEST_THREADS: "1", PATH: "path", HOME: "home", CARGO_HOME: "cargo", RUSTUP_TOOLCHAIN: "1.95.0", TMPDIR: "/fixture/tmp", CELLD_BIN: binary });
 });
 
 test("missing binary is a failed prerequisite, never a passing skip", async () => {
@@ -50,19 +50,23 @@ test("vanilla celld cannot masquerade as embedded API acceptance", async () => {
 test("isolation precedes the exact nonzero generated TLS proof", async () => {
   const { calls, options } = fixture();
   await runIntegration(options);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.equal(calls[0].command, binary);
   assert.deepEqual(calls[1].args, ["scripts/check_celld_scoped_isolation.sh", binary]);
   assert.equal(calls[2].command, "scripts/run_test_nonzero.sh");
   assert.equal(calls[2].args[0], "--ignored");
   const sentinel = "generated_native_consumer_uses_embedded_celld_over_tls";
-  assert.equal(calls[2].args[1], sentinel);
+  assert.equal(calls[2].args[1], [sentinel, `${sentinel}_records_v2`].join("\n"), "both exact test sentinels are mandatory");
   assert.equal(calls[2].args.at(-1), sentinel, "test filter must exclude the independent deterministic suite");
   assert.ok(calls[2].args.includes("--offline"));
+  assert.equal(calls[3].command, "scripts/run_test_nonzero.sh");
+  assert.equal(calls[3].args[1], "real_celld_records_v2_public_contract_races_and_lost_acknowledgement");
+  assert.ok(calls[3].args.includes("records_v2_interop"), "native commit/lost-reply proof is mandatory");
   for (const call of calls) {
     assert.equal(call.options.env.AWS_SECRET_ACCESS_KEY, undefined);
     assert.equal(call.options.env.HTTP_PROXY, undefined);
     assert.equal(call.options.env.SSL_CERT_FILE, undefined);
+    assert.equal(call.options.env.RUST_TEST_THREADS, "1", "generated builds and fixture state are serialized");
   }
 });
 

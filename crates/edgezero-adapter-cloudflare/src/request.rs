@@ -840,6 +840,22 @@ where
         core_request.extensions_mut().insert(variables);
     }
     let (config_registry, kv_registry, secret_registry) = synthesise_store_registries(stores);
+    if !app.record_store_requirements().is_empty() {
+        let validation = kv_registry
+            .as_ref()
+            .ok_or_else(|| {
+                edgezero_core::key_value_store::KvError::Validation(
+                    "required record registry missing".to_owned(),
+                )
+            })
+            .and_then(|registry| {
+                registry.validate_record_requirements(app.record_store_requirements())
+            });
+        if let Err(error) = validation {
+            return deliver(app.admitted_error_egress(prepared, error.into()))
+                .map_err(|error| edge_error_to_worker(&error));
+        }
+    }
     if let Some(registry) = config_registry {
         core_request.extensions_mut().insert(registry);
     }

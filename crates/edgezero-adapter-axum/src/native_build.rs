@@ -191,6 +191,30 @@ mod tests {
     }
 
     #[test]
+    fn record_provider_features_are_explicit_and_preserve_native_cargo_controls() {
+        let defaults = NativeCargoSelection::normalize_args(&[], &[]).unwrap();
+        assert!(defaults.requested_features.is_empty());
+        let selected = NativeCargoSelection::normalize_args(
+            &strings(&["aws-dynamodb-records"]),
+            &strings(&["--no-default-features", "--features", "celld-records"]),
+        )
+        .unwrap();
+        assert_eq!(
+            selected.requested_features,
+            strings(&["aws-dynamodb-records", "celld-records"])
+        );
+        assert!(selected.no_default_features);
+        assert_eq!(
+            selected.cargo_args(),
+            strings(&[
+                "--no-default-features",
+                "--features",
+                "aws-dynamodb-records,celld-records"
+            ])
+        );
+    }
+
+    #[test]
     fn controls_after_separator_are_runtime_args() {
         let selection = NativeCargoSelection::normalize_args(
             &[],

@@ -455,6 +455,21 @@ where
     // legacy bare handles are synthesised into a one-id registry
     // at the dispatch boundary.
     let (config_registry, kv_registry, secret_registry) = synthesise_store_registries(stores);
+    if !app.record_store_requirements().is_empty() {
+        let validation = kv_registry
+            .as_ref()
+            .ok_or_else(|| {
+                edgezero_core::key_value_store::KvError::Validation(
+                    "required record registry missing".to_owned(),
+                )
+            })
+            .and_then(|registry| {
+                registry.validate_record_requirements(app.record_store_requirements())
+            });
+        if let Err(error) = validation {
+            return Ok(deliver(app.admitted_error_egress(prepared, error.into()))?);
+        }
+    }
     if let Some(registry) = config_registry {
         core_request.extensions_mut().insert(registry);
     }

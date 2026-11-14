@@ -35,8 +35,10 @@ aws-appconfig-agent = ["axum", "edgezero-store-aws/appconfig-agent"]
 aws-secrets-manager = ["axum", "edgezero-store-aws/secrets-manager"]
 aws-stores = ["aws-appconfig-agent", "aws-secrets-manager"]
 aws-dynamodb = ["axum", "edgezero-store-aws/dynamodb-kv"]
+aws-dynamodb-records = ["aws-dynamodb", "edgezero-store-aws/dynamodb-records"]
 celld-config = ["axum", "edgezero-store-celld/config"]
 celld-kv = ["axum", "edgezero-store-celld/kv"]
+celld-records = ["celld-kv", "edgezero-store-celld/records-v2"]
 geo-cloudfront = ["axum"]
 cli = [
     "native-bindings",

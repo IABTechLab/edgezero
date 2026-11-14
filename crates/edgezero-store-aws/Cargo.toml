@@ -16,6 +16,7 @@ snapshot-stores = ["dep:edgezero-core", "dep:bytes", "dep:async-trait", "dep:tok
 appconfig-agent = ["snapshot-stores", "dep:reqwest", "dep:futures-util"]
 secrets-manager = ["snapshot-stores", "dep:aws-config", "dep:aws-sdk-secretsmanager", "dep:aws-smithy-runtime-api", "dep:aws-types"]
 dynamodb-kv = ["snapshot-stores", "dep:aws-config", "dep:aws-sdk-dynamodb", "dep:aws-smithy-runtime-api", "dep:aws-types", "dep:serde_json"]
+dynamodb-records = ["dynamodb-kv"]
 
 [dependencies]
 percent-encoding = { workspace = true }
@@ -39,6 +40,7 @@ tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
+edgezero-core = { workspace = true, features = ["test-utils"] }
 futures = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
