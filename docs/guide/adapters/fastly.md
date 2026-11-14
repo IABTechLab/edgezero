@@ -87,9 +87,9 @@ For fully manual wiring, build `FastlyService`, attach stores as needed, and cal
 Fastly store `__NAME` selectors are deployment inputs. The runtime opens logical
 aliases directly, and Config Stores use the logical ID as the entry key. Remove
 runtime selector-store reads and Fastly `__KEY` overrides when migrating a custom
-entrypoint; use the canonical send-owning helper below. Logging endpoint, level
-and stdout behavior come from `Hooks::logging_for("fastly")` and cannot vary
-between staging and production for the same immutable application release.
+entrypoint; use the canonical send-owning helper below. Logging endpoint and stdout
+behavior come from `Hooks::logging_for("fastly")`. Its level is the default;
+the logging-only override described below can change it without rebuilding.
 
 ### Capturing raw-request signals (JA4, H2 fingerprint)
 
@@ -144,7 +144,7 @@ edgezero_core::app!("edgezero.toml", owns_logging = true);
 
 or on a hand-written `Hooks` impl (`fn owns_logging() -> bool { true }`). Every
 adapter's `run_app` honors it. The app must install its backend **before** entering the runner,
-apply `Hooks::logging_for("fastly").level`, and set both backend and facade filters. Raising only
+apply its chosen logging policy, and set both backend and facade filters. Raising only
 `log::set_max_level` does not override `log_fastly`'s internal filter.
 
 ## Building
@@ -273,6 +273,46 @@ the configured level. Both the SDK and facade allow boot warnings even at ordina
 raising the facade maximum alone is insufficient. `edgezero::boot` is a logical target, not a
 Fastly endpoint name. Initialize logging before application configuration.
 
+Standard and custom app-aware runners install the same managed backend before application
+assembly or the custom callback. Log lines contain timestamp, level, target and message.
+Repeated identical setup succeeds without reinstalling. A changed endpoint, level or stdout
+policy returns `ManagedLoggerError::ConfigurationChanged` without changing the installed filters.
+Foreign loggers return `AlreadyInstalled`; use `owns_logging = true` to own installation.
+
+### Runtime Level Overrides And Local Debugging
+
+The manifest level applies unless a Config Store linked as `edgezero_logging` contains
+`EDGEZERO__LOGGING__LEVEL`. Values are case-insensitive `off`, `error`, `warn`, `info`,
+`debug` or `trace`. An absent store/key preserves the manifest default; invalid or oversized
+values select Info, matching the shared resolver. One bounded host lookup accepts at most
+16 bytes, snapshotted once per instance without growing SDK buffers or chunk reassembly.
+Reused callbacks do not repeat this host lookup. Unexpected host failures return
+`ManagedLoggerError::ConfigurationUnavailable`. The override changes neither endpoint nor
+stdout policy, and it is not a general runtime selector store.
+
+To debug the **same production wasm** locally, put this in a separate local Fastly/Viceroy
+configuration file, alongside the other local resource declarations:
+
+```toml
+[local_server.config_stores.edgezero_logging]
+format = "inline-toml"
+[local_server.config_stores.edgezero_logging.contents]
+EDGEZERO__LOGGING__LEVEL = "debug"
+```
+
+```sh
+viceroy --config fastly.local.toml bin/main.wasm
+```
+
+`fastly compute serve` uses the same `local_server` Config Store declaration from its selected
+Fastly configuration file. This is runtime configuration, not a change to `edgezero.toml` or
+the wasm. Restart the local instance after changing it: managed settings are immutable within
+an instance; override changes affect new instances only. Explicit initialization with changed
+endpoint/level/stdout settings is rejected. Do not infer Debug from a hostname.
+On deployed Fastly, leave the optional resource alias unlinked to keep the manifest level,
+or explicitly link a logging Config Store with the override. Local evidence does not qualify
+hosted log delivery.
+
 To initialize logging manually, call `init_logger` with a provisioned endpoint:
 
 ```rust
@@ -285,7 +325,7 @@ fn main() {
 ```
 
 ::: tip Logging status
-Fastly logging is wired when you call `init_logger`, or when `run_app` finds an `endpoint` in the baked `[adapters.fastly.logging]` table and `owns_logging()` is `false`; otherwise no logger is installed.
+Fastly logging is wired when you call `init_logger`, or when a standard/custom app-aware runner finds an `endpoint` in the baked `[adapters.fastly.logging]` table and `owns_logging()` is `false`; otherwise no logger is installed or override read.
 :::
 
 ## Store selection and deployment
@@ -486,10 +526,10 @@ The helper never invokes preparation/finalization, configured rendering, headers
 app observer. A terminal delivery failure retains the ordinary stop/error behavior; it does
 not authorize an automatic native resend.
 
-Logging uses the immutable baked settings, unless the app owns logging. Setup
-completes once per sandbox and does not reconfigure filters on later callbacks.
-Applications requiring another initialization policy should use
-`lifecycle::serve_custom` and `setup_once`. Store-open diagnostics use the bounded
+Logging uses immutable managed settings resolved from the manifest and optional logging-only
+override, unless the app owns logging. Standard and custom lifecycles share setup and never
+reconfigure filters on later callbacks. Use `setup_once` for other application-owned setup,
+not a second managed logger. Store-open diagnostics use the bounded
 boot channel after logger setup; an absent warning is not proof of a healthy binding.
 
 SDK 0.13.1 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
@@ -598,10 +638,9 @@ response-returning conversion or whole-body compatibility path.
 Follow this order inside a callback:
 
 1. Explicitly send lightweight health responses before expensive initialization.
-2. Resolve baked logging with `FastlyLogging::from(MyApp::logging_for("fastly"))`.
-   Use `sandbox.setup_once` to guard successful logger setup independently from
-   app construction. Failed setup leaves the guard unset; partial side effects
-   are not rolled back, so retries must be safe. The closed send helper installs fresh,
+2. Logging has already been initialized by `serve_custom::<MyApp, _, _, _>` unless
+   the app owns logging. Do not initialize or reconstruct the managed settings in
+   the callback. The closed send helper installs fresh,
    request-local logical KV bindings after logger setup, without opening unused stores.
    First use opens once per request; failed declarations retain a typed handle rather than
    failing KV-free routes. Explicit `FastlyService::require_kv()` remains fail-before-dispatch.
@@ -628,8 +667,8 @@ Follow this order inside a callback:
 For example, after health checks, this policy permits an in-sandbox setup retry:
 
 ```rust
-if let Err(error) = sandbox.setup_once(|| install_application_logger()) {
-    eprintln!("logger setup failed: {error}");
+if let Err(error) = sandbox.setup_once(|| initialize_application_resource()) {
+    eprintln!("application setup failed: {error}");
     fastly::Response::from_status(503).send_to_client();
     return Ok(());
 }
@@ -646,13 +685,13 @@ installs `FASTLY_PLATFORM` before application configuration:
 use edgezero_adapter_fastly::lifecycle::{self, Sandbox};
 use edgezero_adapter_fastly::delivery::{FastlyRequestDelivery, FastlyResponseCommitState};
 use edgezero_adapter_fastly::{
-    FASTLY_PLATFORM, FastlyLogging, Serve, init_logger, request,
+    FASTLY_PLATFORM, Serve, request,
 };
 use edgezero_core::app::{App, Hooks};
 use my_app_core::App as MyApp;
 
 fn main() -> Result<(), fastly::Error> {
-    lifecycle::serve_custom(Serve::new().with_max_requests(10), handle).into_result()
+    lifecycle::serve_custom::<MyApp, _, _, _>(Serve::new().with_max_requests(10), handle).into_result()
 }
 
 fn handle(req: fastly::Request, sandbox: &mut Sandbox<App>) -> Result<(), fastly::Error> {
@@ -661,17 +700,6 @@ fn handle(req: fastly::Request, sandbox: &mut Sandbox<App>) -> Result<(), fastly
         return Ok(());
     }
     let stores = MyApp::stores();
-    sandbox.setup_once(|| {
-        let logging = FastlyLogging::from(MyApp::logging_for("fastly"));
-        if logging.use_fastly_logger && !MyApp::owns_logging() {
-            init_logger(
-                logging.endpoint.as_deref().expect("configured endpoint"),
-                logging.level,
-                logging.echo_stdout,
-            )?;
-        }
-        Ok::<(), fastly::Error>(())
-    })?;
     sandbox.initialize(|| App::build::<MyApp>(FASTLY_PLATFORM).map_err(fastly::Error::from))?;
     let app = sandbox.state().expect("initialized above");
     let result = request::send_request_with_registries_and_hooks(
@@ -727,7 +755,7 @@ For the single-request branch, initialize the ABI before evaluating the request 
 
 ```rust,ignore
 fastly::init();
-lifecycle::run_custom(fastly::Request::from_client(), callback)
+lifecycle::run_custom::<MyApp, _, _, _>(fastly::Request::from_client(), callback)
 ```
 
 This fragment assumes an application-provided `callback`. `run_custom` cannot initialize the
