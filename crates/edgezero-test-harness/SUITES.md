@@ -112,6 +112,22 @@ scripts/test_integration.sh --adapter cloudflare --suite assembly
 scripts/test_integration.sh --adapter spin --suite assembly
 ```
 
+The Cloudflare/Spin assembly suite also checks managed logging through actual `wrangler dev`
+and `spin up` stderr: absent/invalid/mixed-case levels, all six filters, boot Warn/Error under
+ordinary Off, immutable repeated initialization and the application-owned negative control.
+It compares records before/after rejected configuration changes. Cloudflare starts the Off case
+with an assembly failure; Spin records the failure without assuming instance reuse. Spin first
+attests its general assembly guest with a healthy request because canonical detached failures
+intentionally have no application headers. No startup-identity gate is bypassed.
+
+Fastly's assembly build also checks standard, custom-retained and custom-single managed
+logging. It stages one production-Info wasm and changes only local Config Stores for
+absent/missing-key/Info/Debug/mixed/Off/invalid/oversized/owned controls. Bounded named-endpoint
+receipts must preserve record targets and boot filtering. Reused cases require the same
+instance; explicit reinitialization checks level, endpoint and stdout conflicts without
+changing filters. The negative benchmark now deliberately changes settings, because identical
+managed initialization is idempotent. These are local runtime observations, not hosted evidence.
+
 This local-only suite exercises the standard entrypoints and the same app-free canonical
 error delivery used by custom retention recipes. It checks typed JSON/status/retry headers,
 HEAD suppression, internal redaction and one full boot log per failed attempt. Retained
@@ -124,6 +140,12 @@ Use the explicit Cloudflare tool overrides documented below. Runtime processes, 
 artifacts and JSONL evidence are scoped to the run directory. Results are working-tree
 characterization, not hosted qualification; this suite neither changes capability levels
 nor closes the separate Fastly readiness/scheduling gate.
+
+Persisted CI artifacts are capped at 4 MiB. The shared JSONL reader also rejects
+more than 512 records for general CI evidence, or 1,024 for the expanded wire
+inventory. It rejects an excess record before deserializing it and never truncates
+an artifact to obtain a passing result. Framing receipts are serialized together
+with their newline before writing; this does not assert provider-level atomic I/O.
 
 ### Qualification Inventory
 
@@ -194,7 +216,8 @@ matrices. Spin combines its adapter-visible shared-head boundary with SDK dispos
 Axum EZ-1 criteria 09/10/11/12/14 bind actual ingress through Send, Begin, Follow and batches:
 exact POST bytes and framing, bodyless OPTIONS/DELETE, dispatch before collection, one streamed
 inbound settlement across redirects, cached-empty batching and unread unsupported-option refusal.
-There are 72 ready legs and 439 planned. EZ-6 criterion 22's four adapter legs require both
+The inventory is authoritative for current planned/ready totals. EZ-6 criterion 22's four
+adapter legs require both
 the six-case native batch-recovery matrix and `EZ-6/acceptance/22@unit/core` as a same-candidate
 companion. Core retains the five private identity/duplicate/conflict tests; no receipt constructor
 or identity mutator is added for testing. The release checker rejects missing, failed,
@@ -204,11 +227,25 @@ EZ-23 criterion 13 remains planned for consumer-owned gaps. G1/Q3 must reconcile
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
 do not promote it solely from a checkpoint test count or green CI.
 
-The EZ-23 ready legs share one full Axum suite command, including ignored tests:
+The ordinary Axum ready legs share one full correctness suite command:
 
 ```sh
-scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
+scripts/run_test_nonzero.sh --inventory axum/native-tcp,unit/axum,axum/http1,axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
 ```
+
+The pending-upload correctness test keeps original deadlines, typed 408/504 results,
+no-early terminal/client ordering, no-origin/Pending witnesses and exactly-once cleanup,
+with finite 50 ms scheduling headroom. It cannot certify the +5 ms timing target.
+`EZ-1/acceptance/06@axum/http1-chunked` remains bound only to the original strict sentinel:
+
+```sh
+scripts/run_test_nonzero.sh --include-ignored --inventory axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib connection::tests::
+```
+
+Run that explicit qualification command with `EDGEZERO_TEST_HARNESS_BIN` set to the built
+harness and retain `outbound/redirect/axum/qualification-tests.log`. It still requires 205/105 ms.
+Ordinary CI leaves strict timing unverified; a missed +5 ms window remains a failure. A passed
+correctness-only log, ignored strict test or missing strict pass is rejected as qualification.
 
 The guard selects the exact declared command as well as the environment. This keeps Rust test
 names separate from wire-report markers sharing an environment. A missing command/group match
@@ -289,6 +326,18 @@ counts, requiring zero setup for rejected requests. Each group reuses the bounde
 existing capture/deadline limits, joins cleanup, then reopens its persisted evidence before
 printing acceptance sentinels. Parent validation requires the group; mutations reject omission,
 duplication, reassociation, impossible source reports, unframed/trailing bytes and cleanup failure.
+
+Spin additionally forwards separately bounded 4096-byte declared/unknown streams. The origin
+requires exactly CL=4096 without TE, or unknown-length chunking respectively; raw-byte replay,
+both records and exactly two cleaned-up origin exchanges are required in saved artifacts.
+The original eight-byte controls and validators retain their bounds. Five active-P3 pump probes
+gate a second chunk on first-prefix receipt and check short EOF, overrun before its chunk is
+written, simultaneous cap/length overflow, typed source error and reader abandonment. Short/long
+keep the completion peer live but unpolled until local failure; they cannot pass by awaiting
+abort acknowledgment. Post-error source polls trap. The runtime forbids intra-component reads
+of the resource-bearing completion future, so these local probes do not read that future or
+claim full HTTP completion; the two real origin exchanges establish the actual HTTP boundary.
+All new records remain local supporting evidence with `qualification:false`.
 Chunk boundaries are not prescribed. Existing redirect, batch, marker and normalization counts
 stay unchanged. The separate co-located Axum pending-body TCP proof covers criterion 06's
 unchanged 200/205 ms and 100/105 ms windows, including 20 ms of work before forwarding under
@@ -359,6 +408,11 @@ and independent-cap criterion 10 through the real host-wire matrix. A generous r
 tested final-buffer overflow. Fastly's test-only lease witnesses prove release of EdgeZero's
 encoded stream, not host-side interruption or delivery. Provider-inexpressible fields are injected
 only at the explicitly labelled shared-head boundary; they do not establish raw-header fidelity.
+Axum's existing `--suite ci` also builds and stages its executor-ownership binary with
+`-C panic=abort`. It requires live scheduling without an ambient LocalSet, rejects foreign
+and dropped owners in Send/Begin/Batch before body polling, and checks upload release.
+It reuses the existing supervised process runner and does not create another transport.
+
 Cloudflare and Fastly use one inventory-guarded library suite each. Spin has one local/CI entrypoint:
 
 ```sh
@@ -1191,8 +1245,8 @@ shared dependencies, and keep its Fastly SDK requirement aligned with the root.
 
 Select executables with `VICEROY_BIN`, `WORKER_BUILD_BIN`, `WRANGLER_BIN`, and
 `SPIN_BIN`. Install tools explicitly; the runner never deploys or installs them.
-The PR pins Fastly SDK 0.13.1, Viceroy 0.21.0, `worker` 0.8.5, and `spin-sdk` 7.0.0
-from `stackpop/spin-rust-sdk` at `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`, using its
+The PR pins Fastly SDK 0.13.1, Viceroy 0.21.0, `worker` 0.8.5, and registry `spin-sdk` 8.0.0,
+using its
 `wasip3 0.10.0` / `wit-bindgen 0.63.0` re-export and `spawn_local`. See the
 [dependency audit](../../docs/audits/2026-10-27-spin-sdk-eager-progress.md).
 The repository pins Spin CLI 4.1.0. Use a worker-build
@@ -1273,8 +1327,9 @@ delivery, and local Viceroy evidence is not hosted qualification. Synthetic
 `delivery::testing` fixtures exercise the shared finisher, not SDK head conversion
 or host transport.
 
-Callbacks that dispatch the app use baked `Hooks::logging_for("fastly")` settings
-for logger setup and reopen stores under their stable logical aliases per request.
+App-aware lifecycle wrappers initialize managed logging from baked `Hooks::logging_for("fastly")`
+and the bounded logging-only override before the callback. Callbacks reopen stores under
+their stable logical aliases per request and must not install a second managed logger.
 Deployment selectors choose physical links, not runtime configuration. Native request bodies, extensions, store handles,
 and pending work are not retained with the app.
 
@@ -1346,7 +1401,7 @@ that Viceroy 0.21.0 reproduces an older runtime's ceiling. Verify deployed evict
 and long-lived memory behavior separately. The runner checks the Viceroy version against
 `.tool-versions` and reports a mismatch as unverified.
 
-Building with `spin-sdk` 7.0.0 emits the SDK's `wasip3` WASI HTTP interface. A
+Building with `spin-sdk` 8.0.0 emits the SDK's `wasip3` WASI HTTP 0.3.2 interface. A
 successful build does not prove the selected Spin CLI 4.1.0 host can execute that
 component. Retained dispatch also depends on provider-specific runtime support;
 an unavailable host, interface mismatch, or missing HTTP/reuse evidence cannot

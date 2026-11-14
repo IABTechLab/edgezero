@@ -25,7 +25,10 @@ impl ProbeRuntime for Runtime {
     fn adapter(&self) -> &'static str {
         "fastly"
     }
-    fn outbound_client(&self) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
+    fn outbound_client(
+        &self,
+        _ctx: &edgezero_core::context::RequestContext,
+    ) -> Result<Arc<dyn edgezero_core::OutboundHttpClient>, EdgeError> {
         Ok(Arc::new(
             edgezero_adapter_fastly::outbound::FastlyOutboundClient::default(),
         ))
@@ -92,9 +95,10 @@ pub(super) fn main(qualification: bool) -> Result<(), fastly::Error> {
     if request.get_path() == "/progress/lifetimes/post-delivery-batch" {
         return post_delivery::run(request);
     }
-    edgezero_adapter_fastly::lifecycle::run_custom::<(), _, _>(request, |request, _| {
-        dispatch(request, qualification)
-    })
+    edgezero_adapter_fastly::lifecycle::run_custom::<fixture_core::FixtureApp, (), _, _>(
+        request,
+        |request, _| dispatch(request, qualification),
+    )
 }
 
 fn dispatch(mut request: fastly::Request, qualification: bool) -> Result<(), fastly::Error> {

@@ -782,6 +782,40 @@ mod tests {
     }
 
     #[test]
+    fn partially_consumed_batch_is_revoked_without_poisoning_the_next_callback() {
+        let mut previous = None;
+        for _ in 0_u8..2 {
+            let callback = OutboundScopeOwner::callback();
+            let mut retained = callback.with(|| {
+                if let Some(mut stale) = previous.take() {
+                    closed(
+                        &block_on(OutboundBatch::next(&mut stale)).unwrap_err(),
+                        OutboundScopeKind::Callback,
+                    );
+                }
+                batch(2, iter([item(0)]).chain(pending_stream()))
+            });
+            callback.with(|| super::poll_current(&mut Context::from_waker(Waker::noop())));
+            assert!(matches!(
+                block_on(retained.next()).unwrap(),
+                OutboundBatchNext::Item(_)
+            ));
+            assert!(
+                Box::pin(retained.next())
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            callback.close();
+            previous = Some(retained);
+        }
+        closed(
+            &block_on(previous.unwrap().next()).unwrap_err(),
+            OutboundScopeKind::Callback,
+        );
+    }
+
+    #[test]
     fn failed_collection_preserves_results_observed_before_scope_closure() {
         let owner = OutboundScopeOwner::callback();
         let retained = owner.with(|| batch(2, iter([item(0)]).chain(pending_stream())));
