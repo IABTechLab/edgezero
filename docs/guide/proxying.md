@@ -134,6 +134,45 @@ boilerplate. A closed canonical scope never falls back to caller-owned work. Exi
 caps, source errors and provider-side cancellation guarantees are unchanged; hosted qualification
 remains separate.
 
+## Request-local cache metadata
+
+`OutboundCachePolicy::PlatformDefaultWithSurrogateKey(HeaderValue)` preserves Fastly
+surrogate-key purge metadata while leaving origin freshness unchanged. The value can contain
+space-separated keys, such as an all-scope key and a URL-specific key. It is SDK cache metadata,
+not an origin-visible `Surrogate-Key` request header.
+
+```rust
+use edgezero_core::http::HeaderValue;
+use edgezero_core::{OutboundCachePolicy, OutboundRequest};
+
+let request = OutboundRequest::get("https://origin.example.com/article")?
+    .cache_policy(OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+        HeaderValue::from_static("example-all example-reader-0123"),
+    ));
+let policy = request.cache_policy_setting();
+```
+
+Fastly extends origin response surrogate keys without a TTL/stale override. Origin
+`private`/`no-store` remains origin policy; tags are not permission to cache a private response.
+The Fastly adapter discards individual space-delimited keys outside printable ASCII
+`0x21..=0x7e` before calling the SDK, preserving valid neighboring keys. SDK 0.13.1 would
+otherwise discard the whole list when its text conversion fails. This API adds no
+key-size/count or extra ASCII policy. Parse application strings into `HeaderValue` at their
+boundary. A caller whose purge contract requires a tag must fail closed, such as selecting
+`Bypass`, if that conversion fails rather than silently sending an untagged default request.
+
+The enum cannot combine a tag with `Bypass`, because Fastly's tag setter clears pass mode.
+Replacing a cache policy replaces that whole selection. The enum is `Clone`, not `Copy`;
+`cache_policy_setting()` borrows it and parts/redirect replay retain it explicitly.
+Axum and Spin ignore the tag without changing their transport. Cloudflare retains default
+Fetch caching and does not emulate Fastly purge; its `Bypass` mapping remains `NoStore`.
+Existing capability declarations are unchanged.
+
+Image Optimizer still requires exactly `PlatformDefault`. SDK 0.13.1 overrides custom cache
+metadata on that path, so tagged-default plus optimizer is rejected before upload polling or
+provider I/O, not accepted with a silently discarded purge tag. Signed HEAD bypass and a
+separate signed optimized GET retain their independent existing policies.
+
 ## Following Redirects
 
 `HttpClient::follow` is an explicit per-call choice with a mandatory target policy and hop limit.

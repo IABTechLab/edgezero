@@ -2009,8 +2009,10 @@ git = "https://github.com/stackpop/spin-rust-sdk"
             "aws-appconfig-agent",
             "aws-secrets-manager",
             "aws-dynamodb",
+            "aws-dynamodb-records",
             "celld-config",
             "celld-kv",
+            "celld-records",
         ] {
             assert_eq!(
                 features.get(feature),

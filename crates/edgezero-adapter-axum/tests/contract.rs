@@ -1105,26 +1105,33 @@ async fn authority_override_changes_host_only_and_cache_bypass_adds_no_origin_he
                 .get(CACHE_CONTROL)
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or("absent");
-            format!("{host}|{cache_control}")
+            let tag = headers.get("surrogate-key").map_or("absent", |_| "present");
+            format!("{host}|{cache_control}|{tag}")
         }),
     ))
     .await;
     let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
-    let request = OutboundRequest::get(format!("{origin}/"))
-        .expect("request")
-        .host_authority_override("virtual.example:8443")
-        .expect("authority override")
-        .cache_policy(OutboundCachePolicy::Bypass);
-
-    let body = client
-        .send(request)
-        .await
-        .expect("response")
-        .into_bytes_bounded(1_024)
-        .await
-        .expect("response body");
-
-    assert_eq!(body, "virtual.example:8443|absent");
+    for policy in [
+        OutboundCachePolicy::Bypass,
+        OutboundCachePolicy::PlatformDefault,
+        OutboundCachePolicy::PlatformDefaultWithSurrogateKey(HeaderValue::from_static(
+            "example-all example-reader-0123",
+        )),
+    ] {
+        let request = OutboundRequest::get(format!("{origin}/"))
+            .expect("request")
+            .host_authority_override("virtual.example.com:8443")
+            .expect("authority override")
+            .cache_policy(policy);
+        let body = client
+            .send(request)
+            .await
+            .expect("response")
+            .into_bytes_bounded(1_024)
+            .await
+            .expect("response body");
+        assert_eq!(body, "virtual.example.com:8443|absent|absent");
+    }
 }
 
 #[tokio::test]

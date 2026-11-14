@@ -1428,6 +1428,57 @@ fn policy_authorized_cross_origin_credentials_are_not_stripped_again() {
     );
 }
 
+#[test]
+fn redirect_replay_preserves_tagged_default_and_bypass_without_a_wire_tag() {
+    for policy in [
+        OutboundCachePolicy::Bypass,
+        OutboundCachePolicy::PlatformDefaultWithSurrogateKey(HeaderValue::from_static(
+            "example-all example-reader-0123",
+        )),
+    ] {
+        let fixture = Fixture::new([
+            Reply::bytes(StatusCode::FOUND, b"")
+                .location("/next")
+                .step(),
+            Reply::bytes(StatusCode::OK, b"done").step(),
+        ]);
+        let initial = OutboundRequest::get("https://origin.example.com/start?signature=a%2Fb")
+            .expect("request")
+            .header("authorization", "fixture-signature")
+            .expect("signature")
+            .host_authority_override("virtual.example.com:8443")
+            .expect("authority")
+            .cache_policy(policy.clone());
+        success(block_on(fixture.client.follow(
+            initial,
+            limit(2),
+            |context| {
+                Ok::<_, ()>(OutboundRedirectAction::Follow(
+                    context.take_prepared_request().expect("prepared request"),
+                ))
+            },
+        )));
+        let recording = fixture.state.borrow();
+        assert_eq!(recording.records.len(), 2);
+        for record in &recording.records {
+            assert_eq!(record.parts.cache_policy, policy);
+            assert_eq!(record.parts.uri.scheme_str(), Some("https"));
+            assert_eq!(record.parts.uri.host(), Some("origin.example.com"));
+            assert_eq!(record.parts.headers["authorization"], "fixture-signature");
+            assert!(!record.parts.headers.contains_key("surrogate-key"));
+            assert_eq!(
+                record
+                    .parts
+                    .host_authority_override
+                    .as_ref()
+                    .expect("authority")
+                    .as_str(),
+                "virtual.example.com:8443"
+            );
+        }
+    }
+}
+
 fn configured_request(time: &ManualTime) -> OutboundRequest {
     request(Method::GET)
         .timeout(Duration::from_millis(120))

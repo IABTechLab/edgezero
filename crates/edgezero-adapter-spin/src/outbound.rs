@@ -1573,6 +1573,27 @@ mod exchange_tests {
         request_timeouts, run_exchange, settle_reset_content, should_emit_response_chunk,
     };
 
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn tagged_default_is_an_accepted_cache_noop() {
+        use edgezero_core::http::HeaderValue;
+        let request = edgezero_core::OutboundRequest::get("https://origin.example.com/resource")
+            .expect("request")
+            .cache_policy(
+                edgezero_core::OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                    HeaderValue::from_static("example-all"),
+                ),
+            );
+        for mode in [
+            edgezero_core::OutboundSendMode::Send,
+            edgezero_core::OutboundSendMode::Begin,
+            edgezero_core::OutboundSendMode::Batch,
+        ] {
+            super::validate_request(&request, mode).expect("metadata ignored on Spin");
+        }
+        assert!(!request.headers().contains_key("surrogate-key"));
+    }
+
     struct ScriptedFuture<Output> {
         drops: Rc<Cell<u32>>,
         polls: Rc<Cell<u32>>,

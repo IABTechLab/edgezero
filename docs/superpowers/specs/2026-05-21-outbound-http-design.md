@@ -596,7 +596,7 @@ impl RequestContext {
 ```rust
 pub struct OutboundRequest {
     body: Body,                          // buffered or streamed
-    cache_policy: OutboundCachePolicy,  // PlatformDefault (default) | Bypass
+    cache_policy: OutboundCachePolicy,  // PlatformDefault (default) | Bypass | PlatformDefaultWithSurrogateKey
     deadline: Option<Deadline>,          // shared absolute cap; copy one value into every target request, do not recompute per request (see §3.3.2)
     headers: HeaderMap,
     host_authority_override: Option<Authority>, // validated wire authority only
@@ -614,11 +614,12 @@ pub struct OutboundRequest {
     uri: Uri,                            // validated + canonicalized; see below
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum OutboundCachePolicy {
+    Bypass,
     #[default]
     PlatformDefault,
-    Bypass,
+    PlatformDefaultWithSurrogateKey(HeaderValue),
 }
 
 // **All OUTBOUND public byte caps and byte-accounting counters are `u64`, NOT `usize`.**
@@ -813,6 +814,7 @@ impl OutboundRequest {
     pub fn timeout(self, duration: Duration) -> Self;
     pub fn deadline(self, deadline: Deadline) -> Self;
     pub fn cache_policy(self, policy: OutboundCachePolicy) -> Self;
+    pub fn cache_policy_setting(&self) -> &OutboundCachePolicy;
     /// Sets a validated DNS name, IPv4 address, or bracketed IPv6 literal with an optional
     /// port. Schemes, userinfo, paths, queries, fragments, whitespace, controls, malformed
     /// brackets, and invalid ports are rejected as `bad_request`.
@@ -1157,7 +1159,20 @@ adapter-managed intermediary response cache. It does not synthesize `cache-contr
 origin-visible request header. Fastly maps it to request pass; Cloudflare maps it to Fetch
 `NoStore`; Axum and Spin have no adapter-managed intermediary response cache, so the requested
 semantics are already satisfied without transport mutation. Redirect hops are new requests and
-must copy the policy deliberately.
+must clone the policy deliberately.
+
+`PlatformDefaultWithSurrogateKey(HeaderValue)` adds request-local Fastly SDK cache metadata,
+not an outbound request header or TTL/freshness override. It extends origin response surrogate
+keys without making private/no-store responses cacheable. The typed enum cannot also select
+Bypass, whose pass mode would be cleared by Fastly's tag setter. Space-separated keys are
+permitted; the Fastly adapter discards invalid individual space-delimited keys outside
+printable ASCII 0x21..=0x7e before calling SDK 0.13.1, whose whole-value text conversion
+would otherwise discard valid neighboring keys too. No extra key-size/count/ASCII restriction
+is added. Callers preserve their own fail-closed policy if a string cannot become HeaderValue. Axum/Spin ignore this metadata and Cloudflare
+keeps platform-default caching without purge emulation; other capabilities remain unchanged.
+Image Optimizer still requires exactly PlatformDefault because the pinned SDK overrides tags
+on its optimizer path. Tagged+optimizer fails preflight before body polling/provider I/O.
+The enum loses Copy; the borrow-returning cache_policy_setting getter avoids readback clones.
 
 **Authority separation.** The canonical URI remains the only source for DNS/backend target, TLS
 SNI, and certificate verification. `host_authority_override` controls only HTTP `Host` or
