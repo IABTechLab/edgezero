@@ -11,6 +11,7 @@ use crate::chunked_config::{
 };
 use async_trait::async_trait;
 use edgezero_core::config_store::{BoundedStoreRead, ConfigStore, ConfigStoreError};
+use edgezero_core::logging::ManagedLoggerError;
 use edgezero_core::{Deadline, MonotonicClock};
 use fastly_shared::FastlyStatus;
 use fastly_sys::fastly_config_store;
@@ -80,24 +81,32 @@ impl FastlyConfigStore {
     /// # Errors
     /// Returns a redacted typed failure if the host cannot open the store.
     #[inline]
+    pub fn try_open(name: &str) -> Result<Self, ConfigStoreError> {
+        Self::try_open_optional(name)?
+            .ok_or_else(|| ConfigStoreError::unavailable("config store could not be opened"))
+    }
+
     #[expect(
         unsafe_code,
         reason = "the pinned host ABI writes only the supplied handle out-parameter"
     )]
-    pub fn try_open(name: &str) -> Result<Self, ConfigStoreError> {
+    fn try_open_optional(name: &str) -> Result<Option<Self>, ConfigStoreError> {
         let mut handle = fastly_shared::INVALID_CONFIG_STORE_HANDLE;
         // SAFETY: the UTF-8 name slice and initialized out-parameter remain live
         // for this synchronous call. Config Store exposes no close operation.
         let status =
             unsafe { fastly_config_store::open(name.as_ptr(), name.len(), &raw mut handle) };
+        if status == FastlyStatus::BADF {
+            return Ok(None);
+        }
         if status != FastlyStatus::OK || handle == fastly_shared::INVALID_CONFIG_STORE_HANDLE {
             return Err(ConfigStoreError::unavailable(
                 "config store could not be opened",
             ));
         }
-        Ok(Self {
+        Ok(Some(Self {
             inner: FastlyConfigStoreBackend::Fastly(handle),
-        })
+        }))
     }
 }
 
@@ -228,6 +237,19 @@ impl ConfigStore for FastlyConfigStore {
             }
             Err(BoundedResolveFailure::ValueTooLarge) => Err(ConfigStoreError::ValueTooLarge),
         }
+    }
+}
+
+pub(crate) fn logging_level_override() -> Result<Option<String>, ManagedLoggerError> {
+    let binding = FastlyConfigStore::try_open_optional("edgezero_logging")
+        .map_err(|_error| ManagedLoggerError::ConfigurationUnavailable)?;
+    let Some(store) = binding else {
+        return Ok(None);
+    };
+    match store.read_entry("EDGEZERO__LOGGING__LEVEL", 16) {
+        Ok(value) => Ok(value),
+        Err(ConfigStoreError::ValueTooLarge) => Ok(Some(String::new())),
+        Err(_) => Err(ManagedLoggerError::ConfigurationUnavailable),
     }
 }
 

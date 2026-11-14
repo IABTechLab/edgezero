@@ -209,9 +209,10 @@ impl Records {
     }
 }
 pub fn logs(path: &Path) -> Vec<Value> {
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
+    parse_logs(&fs::read_to_string(path).unwrap_or_default())
+}
+pub fn parse_logs(text: &str) -> Vec<Value> {
+    text.lines()
         .filter(|l| l.starts_with('{'))
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect()

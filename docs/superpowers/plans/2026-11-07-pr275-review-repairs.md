@@ -555,3 +555,135 @@ the `*-publication.log` final checks. The full-suite supporting runtime captures
 These remain local supporting evidence with `qualification:false`, not deployment,
 hosted delivery certification or independent review acceptance. Publication and replies
 are the remaining steps at this checkpoint; their actual SHA belongs in the PR handoff.
+
+## Approved Fastly Logging And Timing Review Repairs (2026-11-13)
+
+AG approved this scoped plan in conversation after reviewing comments `6869073346`,
+`6869468283` and inline thread `4570088506`, starting from `737f8452`. Preserve
+all outbound deadlines, error provenance, suppression and resource ownership. Do not
+restore general runtime selector stores or introduce compatibility wrappers.
+
+- [x] Add failing co-located regressions for target-bearing Fastly records, immutable
+      complete configuration identity and bounded runtime level resolution. Run
+      `cargo test --offline --locked -p edgezero-adapter-fastly --lib logger` and
+      `cargo test --offline --locked -p edgezero-core logging::tests` (expected red
+      before implementation, green afterward).
+- [x] Generalize core's existing managed installation guard to compare an immutable
+      configuration value. Migrate Cloudflare/Spin callers explicitly. Use it in
+      Fastly with endpoint/level/stdout identity and the shared typed errors. Add a
+      bounded logging-only optional Config Store lookup as specified in the logging
+      design. Never buffer arbitrary values or call the growing SDK lookup helper.
+- [x] Hard-cut Fastly custom lifecycle signatures to name the app Hooks type; share
+      managed setup with standard entrypoints, before user callbacks/assembly, while
+      leaving `owns_logging` completely untouched. Migrate all native/WASM contracts,
+      fixtures, demo, templates and documentation without alternative entrypoints.
+- [ ] Extend the existing Rust assembly runner with actual Viceroy endpoint receipts:
+      one immutable production-Info wasm, multiple runtime-only overrides, target
+      formatting, boot filtering, application ownership, retained-instance identity,
+      repeated setup and rejected configuration changes. Keep capture sizes bounded.
+      Run `scripts/test_integration.sh --adapter fastly --suite assembly`.
+- [x] Share the existing Axum pending-forward TCP exercise. Keep exact status,
+      original deadline/lower bounds, no-origin and exactly-once cleanup assertions.
+      Separate a functional CI test with finite scheduling headroom from the unchanged
+      strict +5 ms qualification sentinel. Correct the criterion's binding so a
+      functional pass cannot certify 205/105 ms, retain measured failures, and do not
+      mark the entire correctness proof ignored. Update requirements/approval records
+      only within this approved separation.
+- [x] Run focused tests after coherent changes, the five primary Rust gates, strict
+      harness/fixture and provider WASM Clippy, `RUST_TEST_THREADS=2 bash scripts/run_tests.sh`,
+      and docs format/lint/build. Independent read-only review must check ownership,
+      reused-instance policy, bounded lookup and qualification separation.
+- [ ] Commit and push normally to PR #275, reply separately to each original finding
+      with exact executed evidence, and request current-head re-review. Reviewer
+      acceptance, formal approval/one-account exception and manual hosted qualification
+      remain separate. Never resolve reviewer threads or merge prematurely.
+
+### Review And Partial Verification Checkpoint
+
+Two read-only investigation/proposal lanes compared an explicit policy argument with
+an app Hooks generic. Choose the generic: it preserves direct ownership/manifest provenance
+without another policy object, while retained `T` and convertible callback errors remain
+independent. One worker implemented only the disjoint Axum test/inventory slice; the
+coordinator implemented logging and integrated the combined changes.
+
+The new target regression failed with exit 101 and showed a Fastly line missing the target.
+The full-settings guard regression also failed before its API change; both repaired groups
+pass. Fastly native logger, bounded fixture logging validation, configuration identity and
+foreign-backend tests pass. The qualification-fixture logger test exposed global sink
+interference with a different telemetry protocol; isolate that test in a subprocess rather
+than filtering its assertions or changing production telemetry. Its complete fixture suite
+then passes. Retain all failed attempts.
+
+Independent read-only logging and evidence reviewers checked the changed source. The evidence
+review found missing settled-output revalidation, incomplete stdout/facade conflict checks and
+an unbounded settlement reread. Corrections use one shared settlement algorithm with bounded
+parsed logging events on success/failure, validate all tokens/owners after shutdown, reject
+unexpected stdout echoes and sample facade state after every conflict. Mutation/oversize tests
+pass; re-review found no remaining concrete issue. These reviews did not run validation.
+
+The explicit strict Axum qualification command was executed with `RUST_TEST_NOCAPTURE=1`:
+exit 0, `28 passed; 0 failed; 0 ignored`. Both original 5 ms and functional 50 ms tests pass
+in that run; raw 504/408 observations remain in `axum-strict-qualification.log`. This does
+not establish a scheduler guarantee or a frozen/hosted qualification record.
+
+The final full-suite run found the shell guard's existing JavaScript regression matrix still
+selected the old combined Axum command. Split that matrix into the actual ordinary and strict
+commands and assert each has nonempty required sentinels, preventing vacuous missing-test loops.
+The corrected guard suite exits 0: `135 tests`, `135 pass`, `0 fail`. An interactive-stdin
+full-suite attempt then correctly failed the CLI's non-interactive consent tests and poisoned
+their shared test mutex; retain that attempt and rerun with stdin closed, matching CI. Neither
+failure is hidden by skipping an assertion or broadening the test selection.
+
+The non-interactive full run passed Axum CI and Fastly SDK/runtime/feature/ingress checks,
+then exposed the older negative-logger validator still matching the removed facade-error
+message. The fixture correctly rejected changed complete settings. Update its co-located
+test first: the old message must fail and the exact fixed configuration-change message must
+pass. That test failed with exit 101 against the old validator; migrate the validator without
+accepting both protocols. Retain that smoke failure. Narrow CLI/no-feature Clippy also caught
+an off-target doc-markdown error; add its missing backticks without a lint suppression.
+
+The new actual Viceroy logging controls pass all 27 cases, using one wasm and runtime-only
+changes. However, the complete Fastly assembly suite exits 1 on seven older cases: canonical
+assembly-failure responses intentionally lack application headers, while the first prescribed
+response must attest its launch identity. Running the identical assembly command against exact
+unchanged `737f8452` also exits 1 on those same seven cases. Its temporary base worktree was
+removed only after ownership verification; the failed logs are retained. Do not call the
+combined assembly suite passing or weaken startup identity to hide the incompatibility.
+A supported bootstrap-attestation design retaining exact standard-entrypoint coverage is a
+separate unresolved fixture/harness boundary, not a demonstrated logging regression.
+
+Retain captures and logs in the local run directory `pr275-fastly-logging-67jhji/`, including
+`fastly-assembly`, `fastly-assembly-final`, `fastly-assembly-baseline` and the explicit timing
+log. An intermediate full-suite attempt was interrupted to incorporate evidence-review fixes;
+it is not a pass. Two later chat interruptions also stopped validation; neither is counted
+as completed evidence. No deployment, reviewer acceptance or merge has occurred.
+
+### Final Local Validation Checkpoint
+
+The uninterrupted `RUST_TEST_THREADS=2 bash scripts/run_tests.sh < /dev/null` run exits 0:
+`All tests completed successfully.` Workspace results total 2,725 passed, zero failed and
+two ignored across 33 result records; the standalone harness has `667 passed; 0 failed;
+3 ignored`. The ignored strict Axum test retains its separately executed 28-test qualification
+run above. The shell contracts have 140 passing tests, zero failures. All four adapter CI
+integration suites, the fresh generated all-adapter application, the demo tests and three
+demo WASM checks, dependency audits and outbound documentation contracts pass.
+
+Fourteen final checks have exit 0 in `final-checks.tsv`: the complete suite; root, harness
+and fixture formatting; workspace, harness and native-fixture strict Clippy; workspace feature
+and Spin WASM compilation; Fastly CLI-only and no-feature strict Clippy; docs format, lint and
+build. The provider WASM feature Clippy runs and Fastly progress-fixture strict Clippy also pass.
+No dependency lock or SDK/runtime pin changes. Existing dependency audit/future-compatibility
+notices remain unsuppressed.
+
+The exact negative-logger validator test passes after its red run, and Fastly smoke now passes
+that real runtime case. Final read-only review of the selector split, exact negative protocol
+and doc correction found no concrete regression or weakened check. The authoritative inventory
+still has 514 legs (299 ready, 215 planned); the suite guide no longer copies a stale total.
+
+Supporting CI captures are `18e7d11e28174e00-8c44-0` (Axum),
+`18e7d12b2d29c8c0-964a-0` (Fastly), `18e7d1502e4a4098-b597-0` (Cloudflare)
+and `18e7d1fec7eb0e68-ce54-0` (Spin). These are local functional evidence, not hosted or
+frozen-candidate qualification. The separate seven-case Fastly assembly-attestation blocker
+above remains open despite all 27 new logging cases passing. Publication records the actual
+commit and per-finding replies in the PR handoff; it does not grant merge approval or resolve
+reviewer-owned threads.

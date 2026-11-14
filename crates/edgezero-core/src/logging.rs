@@ -19,20 +19,24 @@ pub enum ManagedLoggerError {
     AlreadyInstalled,
     #[error("managed logging configuration changed within an instance")]
     ConfigurationChanged,
+    #[error("managed logging configuration is unavailable")]
+    ConfigurationUnavailable,
+    #[error("managed logging configuration is invalid")]
+    InvalidConfiguration,
     #[error("the platform logging backend is unavailable on this target")]
     UnsupportedTarget,
 }
 
 /// One immutable managed-backend installation per runtime instance.
 ///
-/// Repeated setup must use the same resolved level. Failed global installation
+/// Repeated setup must use the same complete settings. Failed global installation
 /// is retained because the log facade cannot replace an installed backend.
 #[derive(Default)]
-pub struct ManagedLoggerInstallation {
-    installed: OnceLock<Result<LevelFilter, ManagedLoggerError>>,
+pub struct ManagedLoggerInstallation<Configuration> {
+    installed: OnceLock<Result<Configuration, ManagedLoggerError>>,
 }
 
-impl ManagedLoggerInstallation {
+impl<Configuration: Clone + Eq> ManagedLoggerInstallation<Configuration> {
     /// Run the provider's registration exactly once, without reconfiguring live work.
     ///
     /// # Errors
@@ -40,14 +44,17 @@ impl ManagedLoggerInstallation {
     #[inline]
     pub fn initialize<Install>(
         &self,
-        level: LevelFilter,
+        configuration: &Configuration,
         install: Install,
     ) -> Result<(), ManagedLoggerError>
     where
         Install: FnOnce() -> Result<(), ManagedLoggerError>,
     {
-        match self.installed.get_or_init(|| install().map(|()| level)) {
-            Ok(installed) if *installed == level => Ok(()),
+        match self
+            .installed
+            .get_or_init(|| install().map(|()| configuration.clone()))
+        {
+            Ok(installed) if installed == configuration => Ok(()),
             Ok(_) => Err(ManagedLoggerError::ConfigurationChanged),
             Err(error) => Err(*error),
         }
@@ -96,11 +103,15 @@ mod tests {
             attempts.set(attempts.get() + 1);
             Ok(())
         };
-        installation.initialize(LevelFilter::Info, install).unwrap();
-        installation.initialize(LevelFilter::Info, install).unwrap();
+        installation
+            .initialize(&LevelFilter::Info, install)
+            .unwrap();
+        installation
+            .initialize(&LevelFilter::Info, install)
+            .unwrap();
         assert_eq!(attempts.get(), 1);
         assert_eq!(
-            installation.initialize(LevelFilter::Off, install),
+            installation.initialize(&LevelFilter::Off, install),
             Err(super::ManagedLoggerError::ConfigurationChanged)
         );
         assert_eq!(attempts.get(), 1);
@@ -111,13 +122,33 @@ mod tests {
         let installation = super::ManagedLoggerInstallation::new();
         let failure = super::ManagedLoggerError::AlreadyInstalled;
         assert_eq!(
-            installation.initialize(LevelFilter::Info, || Err(failure)),
+            installation.initialize(&LevelFilter::Info, || Err(failure)),
             Err(failure)
         );
         assert_eq!(
-            installation.initialize(LevelFilter::Trace, || panic!("must not reinstall")),
+            installation.initialize(&LevelFilter::Trace, || panic!("must not reinstall")),
             Err(failure)
         );
+    }
+
+    #[test]
+    fn managed_installation_compares_complete_settings_without_reinstallation() {
+        let installation = super::ManagedLoggerInstallation::new();
+        let settings = ("endpoint".to_owned(), LevelFilter::Info, false);
+        installation.initialize(&settings, || Ok(())).unwrap();
+        installation
+            .initialize(&settings, || panic!("must not reinstall"))
+            .unwrap();
+        for changed in [
+            ("different".to_owned(), LevelFilter::Info, false),
+            ("endpoint".to_owned(), LevelFilter::Debug, false),
+            ("endpoint".to_owned(), LevelFilter::Info, true),
+        ] {
+            assert_eq!(
+                installation.initialize(&changed, || panic!("must not reinstall")),
+                Err(super::ManagedLoggerError::ConfigurationChanged),
+            );
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -138,7 +169,7 @@ mod tests {
             thread::spawn(move || {
                 start.wait();
                 shared
-                    .initialize(LevelFilter::Info, || {
+                    .initialize(&LevelFilter::Info, || {
                         count.fetch_add(1, Ordering::SeqCst);
                         Ok(())
                     })

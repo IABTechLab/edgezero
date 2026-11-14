@@ -6,7 +6,7 @@ use edgezero_core::logging::{BOOT_LOG_LEVEL, BOOT_LOG_TARGET};
 use log::LevelFilter;
 
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
-static INSTALLATION: ManagedLoggerInstallation = ManagedLoggerInstallation::new();
+static INSTALLATION: ManagedLoggerInstallation<LevelFilter> = ManagedLoggerInstallation::new();
 
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 struct Console;
@@ -47,7 +47,7 @@ fn build_dispatch(logger: Box<dyn log::Log>, level: LevelFilter) -> fern::Dispat
 
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 pub(crate) fn initialize(level: LevelFilter) -> Result<(), ManagedLoggerError> {
-    INSTALLATION.initialize(level, || {
+    INSTALLATION.initialize(&level, || {
         build_dispatch(Box::new(Console), level)
             .apply()
             .map_err(|_error| ManagedLoggerError::AlreadyInstalled)

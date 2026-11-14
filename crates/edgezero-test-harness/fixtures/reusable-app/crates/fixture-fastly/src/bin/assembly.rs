@@ -12,10 +12,17 @@ use fixture_core::assembly::{ConfigurationFailureApp, InternalFailureApp, RetryA
 fn main() -> Result<(), fastly::Error> {
     fixture_fastly::initialize_launch(env!("CARGO_BIN_NAME"));
     fastly::init();
-    fixture_core::init_fixture_logging(|line| println!("{line}"))?;
     let case = fastly::ConfigStore::open("assembly")
         .get("case")
         .ok_or_else(|| fastly::Error::msg("missing assembly case"))?;
+    if case.starts_with("managed-logging-") {
+        let level = fastly::ConfigStore::open("assembly")
+            .get("expected_level")
+            .ok_or_else(|| fastly::Error::msg("missing logging expectation"))?
+            .parse()?;
+        return fixture_fastly::managed_logging::run(&case, level);
+    }
+    fixture_core::init_fixture_logging(|line| println!("{line}"))?;
     let serve = Serve::new()
         .with_max_requests(4)
         .with_timeout(Duration::from_secs(5));
@@ -23,8 +30,9 @@ fn main() -> Result<(), fastly::Error> {
         "standard-retained" => {
             fixture_fastly::finish(edgezero_adapter_fastly::serve_app::<RetryApp<false>>(serve))
         }
-        "custom-retained" => {
-            fixture_fastly::finish(serve_custom(serve, |req, retained: &mut Sandbox<App>| {
+        "custom-retained" => fixture_fastly::finish(serve_custom::<RetryApp<true>, _, _, _>(
+            serve,
+            |req, retained: &mut Sandbox<App>| {
                 let token = req
                     .get_header_str("x-request-token")
                     .filter(|value| {
@@ -64,8 +72,8 @@ fn main() -> Result<(), fastly::Error> {
                     );
                 }
                 fixture_fastly::strict_delivery(delivered)
-            }))
-        }
+            },
+        )),
         "single-routes" => edgezero_adapter_fastly::run_app::<RetryApp<false>>(),
         "single-config" => edgezero_adapter_fastly::run_app::<ConfigurationFailureApp>(),
         "single-internal" => edgezero_adapter_fastly::run_app::<InternalFailureApp>(),

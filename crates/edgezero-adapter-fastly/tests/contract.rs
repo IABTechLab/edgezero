@@ -521,11 +521,14 @@ mod tests {
                 assert_eq!(scope.check().is_ok(), wrapped);
                 assert_ne!(timers_started.load(Ordering::SeqCst), 0);
                 assert_eq!(released.load(Ordering::SeqCst), usize::from(!wrapped));
-                Ok::<(), ()>(())
+                Ok::<(), fastly::Error>(())
             };
             let request = fastly_request(FastlyMethod::GET, "/uri", None);
             if wrapped {
-                run_custom::<(), (), _>(request, |raw, _state| invoke(raw)).unwrap();
+                run_custom::<FailingConfiguration, (), fastly::Error, _>(request, |raw, _state| {
+                    invoke(raw)
+                })
+                .unwrap();
             } else {
                 invoke(request).unwrap();
             }

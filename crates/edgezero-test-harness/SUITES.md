@@ -120,6 +120,14 @@ with an assembly failure; Spin records the failure without assuming instance reu
 attests its general assembly guest with a healthy request because canonical detached failures
 intentionally have no application headers. No startup-identity gate is bypassed.
 
+Fastly's assembly build also checks standard, custom-retained and custom-single managed
+logging. It stages one production-Info wasm and changes only local Config Stores for
+absent/missing-key/Info/Debug/mixed/Off/invalid/oversized/owned controls. Bounded named-endpoint
+receipts must preserve record targets and boot filtering. Reused cases require the same
+instance; explicit reinitialization checks level, endpoint and stdout conflicts without
+changing filters. The negative benchmark now deliberately changes settings, because identical
+managed initialization is idempotent. These are local runtime observations, not hosted evidence.
+
 This local-only suite exercises the standard entrypoints and the same app-free canonical
 error delivery used by custom retention recipes. It checks typed JSON/status/retry headers,
 HEAD suppression, internal redaction and one full boot log per failed attempt. Retained
@@ -208,7 +216,8 @@ matrices. Spin combines its adapter-visible shared-head boundary with SDK dispos
 Axum EZ-1 criteria 09/10/11/12/14 bind actual ingress through Send, Begin, Follow and batches:
 exact POST bytes and framing, bodyless OPTIONS/DELETE, dispatch before collection, one streamed
 inbound settlement across redirects, cached-empty batching and unread unsupported-option refusal.
-There are 72 ready legs and 439 planned. EZ-6 criterion 22's four adapter legs require both
+The inventory is authoritative for current planned/ready totals. EZ-6 criterion 22's four
+adapter legs require both
 the six-case native batch-recovery matrix and `EZ-6/acceptance/22@unit/core` as a same-candidate
 companion. Core retains the five private identity/duplicate/conflict tests; no receipt constructor
 or identity mutator is added for testing. The release checker rejects missing, failed,
@@ -218,11 +227,25 @@ EZ-23 criterion 13 remains planned for consumer-owned gaps. G1/Q3 must reconcile
 A `ready` leg also needs applicable, passing exact-candidate evidence before release credit;
 do not promote it solely from a checkpoint test count or green CI.
 
-The EZ-23 ready legs share one full Axum suite command, including ignored tests:
+The ordinary Axum ready legs share one full correctness suite command:
 
 ```sh
-scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
+scripts/run_test_nonzero.sh --inventory axum/native-tcp,unit/axum,axum/http1,axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets
 ```
+
+The pending-upload correctness test keeps original deadlines, typed 408/504 results,
+no-early terminal/client ordering, no-origin/Pending witnesses and exactly-once cleanup,
+with finite 50 ms scheduling headroom. It cannot certify the +5 ms timing target.
+`EZ-1/acceptance/06@axum/http1-chunked` remains bound only to the original strict sentinel:
+
+```sh
+scripts/run_test_nonzero.sh --include-ignored --inventory axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib connection::tests::
+```
+
+Run that explicit qualification command with `EDGEZERO_TEST_HARNESS_BIN` set to the built
+harness and retain `outbound/redirect/axum/qualification-tests.log`. It still requires 205/105 ms.
+Ordinary CI leaves strict timing unverified; a missed +5 ms window remains a failure. A passed
+correctness-only log, ignored strict test or missing strict pass is rejected as qualification.
 
 The guard selects the exact declared command as well as the environment. This keeps Rust test
 names separate from wire-report markers sharing an environment. A missing command/group match
@@ -1304,8 +1327,9 @@ delivery, and local Viceroy evidence is not hosted qualification. Synthetic
 `delivery::testing` fixtures exercise the shared finisher, not SDK head conversion
 or host transport.
 
-Callbacks that dispatch the app use baked `Hooks::logging_for("fastly")` settings
-for logger setup and reopen stores under their stable logical aliases per request.
+App-aware lifecycle wrappers initialize managed logging from baked `Hooks::logging_for("fastly")`
+and the bounded logging-only override before the callback. Callbacks reopen stores under
+their stable logical aliases per request and must not install a second managed logger.
 Deployment selectors choose physical links, not runtime configuration. Native request bodies, extensions, store handles,
 and pending work are not retained with the app.
 

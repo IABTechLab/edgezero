@@ -297,6 +297,8 @@ serve = "fastly compute serve -C crates/app-demo-adapter-fastly"
 
 
 [adapters.fastly.logging]
+# The optional edgezero_logging Config Store can override only the level without rebuilding.
+# Leave it unlinked in production to keep this default; entrypoints use the shared runner.
 endpoint = "app_demo_log"
 level = "info"
 echo_stdout = true

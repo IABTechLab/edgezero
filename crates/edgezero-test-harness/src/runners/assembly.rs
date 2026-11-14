@@ -509,7 +509,9 @@ pub(super) fn fastly(exe: &Path, run: &Path, records: &mut Records) -> Result<()
         );
         failed += usize::from(result.is_err());
     }
-    require(failed == 0, "one or more Fastly assembly cases failed")
+    let logging = managed_logging::fastly(exe, run, records);
+    require(failed == 0, "one or more Fastly assembly cases failed")?;
+    logging
 }
 
 pub(super) fn provider(name: &str, run: &Path, records: &mut Records) -> Result<()> {

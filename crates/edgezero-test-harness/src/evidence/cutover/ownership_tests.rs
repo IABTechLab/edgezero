@@ -129,6 +129,178 @@ fn guarded_commands(source: &str) -> Result<Vec<String>> {
         .collect())
 }
 
+pub(super) const AXUM_NATIVE: &str = "scripts/run_test_nonzero.sh --inventory axum/native-tcp,unit/axum,axum/http1,axum cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets";
+pub(super) const AXUM_QUALIFICATION: &str = "scripts/run_test_nonzero.sh --include-ignored --inventory axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --lib connection::tests::";
+pub(super) const AXUM_CORRECTNESS: &str =
+    "connection::tests::pending_chunked_forward_correctness_over_tcp";
+
+fn explicit_qualification_owner(row: &Value) -> bool {
+    row["case_id"] == "EZ-1/acceptance/06"
+        && row["environment"] == "axum/http1-chunked"
+        && row["command"] == AXUM_QUALIFICATION
+        && row["artifact_path"] == "outbound/redirect/axum/qualification-tests.log"
+        && row["sentinel"]
+            == "connection::tests::pending_chunked_forward_preserves_original_deadlines_over_tcp"
+}
+
+#[test]
+fn axum_explicit_qualification_owner_rejects_other_commands_and_bindings() {
+    let root = crate::repository_root();
+    let inventory = io::read_json(&root.join(INVENTORY)).unwrap();
+    let row = inventory["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| key(row) == "EZ-1/acceptance/06@axum/http1-chunked")
+        .unwrap();
+    assert!(explicit_qualification_owner(row));
+    for command in [
+        AXUM_NATIVE.to_owned(),
+        AXUM_QUALIFICATION.replace("--include-ignored ", ""),
+        AXUM_QUALIFICATION.replace("connection::tests::", AXUM_CORRECTNESS),
+        format!("{AXUM_QUALIFICATION} -- --skip strict"),
+    ] {
+        let mut changed = row.clone();
+        changed["command"] = json!(command);
+        assert!(!explicit_qualification_owner(&changed));
+    }
+    for field in ["case_id", "environment", "artifact_path", "sentinel"] {
+        let mut changed = row.clone();
+        changed[field] = json!("other");
+        assert!(!explicit_qualification_owner(&changed));
+    }
+}
+
+#[test]
+fn axum_timing_qualification_is_separate_from_required_native_correctness() {
+    let root = crate::repository_root();
+    let inventory = io::read_json(&root.join(INVENTORY)).unwrap();
+    let row = inventory["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| key(row) == "EZ-1/acceptance/06@axum/http1-chunked")
+        .unwrap();
+    assert_eq!(row["command"], AXUM_QUALIFICATION);
+    assert_eq!(
+        row["artifact_path"],
+        "outbound/redirect/axum/qualification-tests.log"
+    );
+    assert_eq!(row["source_id"], "EZ-1/acceptance/06");
+    assert_eq!(
+        row["source_digest"],
+        "c5cb36d9fd126f56051dad7a2ab8a87c64d728db1782bb9ba8ad31b6b8bddac8"
+    );
+    assert_eq!(row["applicability"], "blocking");
+    assert!(text(&row["expected"]).contains("within 205 ms"));
+    assert!(text(&row["expected"]).contains("within 105 ms"));
+    let qualification =
+        catalog::sentinels(&inventory, "axum/http1-chunked", Some(AXUM_QUALIFICATION)).unwrap();
+    assert_eq!(
+        qualification,
+        json!([
+            "connection::tests::pending_chunked_forward_preserves_original_deadlines_over_tcp",
+            "connection::tests::forwarding_pending_witness_does_not_count_ready_source_errors",
+            "connection::tests::timed_error_reader_rejects_oversized_heads_and_trailing_bytes"
+        ])
+    );
+    let native = catalog::sentinels(
+        &inventory,
+        "axum/native-tcp,unit/axum,axum/http1,axum",
+        Some(AXUM_NATIVE),
+    )
+    .unwrap();
+    assert!(
+        native
+            .as_array()
+            .unwrap()
+            .contains(&json!(AXUM_CORRECTNESS))
+    );
+    assert!(!native.as_array().unwrap().contains(&row["sentinel"]));
+    let source =
+        fs::read_to_string(root.join("crates/edgezero-test-harness/src/runners/ci/platforms.rs"))
+            .unwrap();
+    let commands = guarded_commands(&source).unwrap();
+    assert!(commands.iter().any(|command| command == AXUM_NATIVE));
+    assert!(!commands.iter().any(|command| command == AXUM_QUALIFICATION));
+    let source =
+        fs::read_to_string(root.join("crates/edgezero-adapter-axum/src/connection.rs")).unwrap();
+    let correctness = function(&source, "pending_chunked_forward_correctness_over_tcp").unwrap();
+    assert!(!correctness.contains("ignore"));
+    assert!(
+        correctness.contains("pending_chunked_forward_over_tcp (Duration :: from_millis (50))")
+    );
+    let strict = function(
+        &source,
+        "pending_chunked_forward_preserves_original_deadlines_over_tcp",
+    )
+    .unwrap();
+    assert!(strict.contains("ignore = \"explicit timing qualification\""));
+    assert!(strict.contains("pending_chunked_forward_over_tcp (Duration :: from_millis (5))"));
+}
+
+#[test]
+fn axum_qualification_guard_rejects_correctness_only_and_missing_strict_passes() {
+    let root = crate::repository_root();
+    let inventory = io::read_json(&root.join(INVENTORY)).unwrap();
+    let names =
+        catalog::sentinels(&inventory, "axum/http1-chunked", Some(AXUM_QUALIFICATION)).unwrap();
+    let names = names
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|name| text(name).to_owned())
+        .collect::<Vec<_>>();
+    let listed = names
+        .iter()
+        .map(|name| format!("{name}: test"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let strict = &names[0];
+    let all_passes = names
+        .iter()
+        .map(|name| format!("test {name} ... ok\n"))
+        .collect::<String>();
+    for (passes, success) in [
+        (all_passes.clone(), true),
+        (format!("test {AXUM_CORRECTNESS} ... ok\n"), false),
+        (
+            all_passes.replace(&format!("test {strict} ... ok\n"), ""),
+            false,
+        ),
+        (
+            all_passes.replace(
+                &format!("test {strict} ... ok"),
+                &format!("test {strict} ... ignored"),
+            ),
+            false,
+        ),
+    ] {
+        let output = std::process::Command::new("bash")
+            .current_dir(&root)
+            .arg("scripts/run_test_nonzero.sh")
+            .arg("--include-ignored")
+            .arg(names.join("\n"))
+            .args(["bash", "-c", "if [[ \"$*\" == *--list* ]]; then printf '%s\\n' \"$LISTED_TESTS\"; else printf '%s\\n' \"$TEST_OUTPUT\"; fi", "synthetic-tests"])
+            .env("LISTED_TESTS", &listed)
+            .env("TEST_OUTPUT", format!("{passes}test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !success {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains(&format!("required sentinel test not passed: {strict}"))
+            );
+        }
+    }
+}
+
 fn workflow(source: &str) -> Result<Value> {
     let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(source)?;
     let value = serde_json::to_value(parsed)?;
@@ -490,7 +662,8 @@ fn canonical_ci_and_qualification_owners_cover_every_ready_command_without_scope
             assert!(
                 direct.contains(&command)
                     || guarded.iter().any(|value| value == command)
-                    || macro_proof,
+                    || macro_proof
+                    || explicit_qualification_owner(row),
                 "unowned {}: {command}",
                 key(row)
             );

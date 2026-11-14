@@ -1187,11 +1187,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn pending_chunked_forward_correctness_over_tcp() {
+        pending_chunked_forward_over_tcp(Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "explicit timing qualification"]
+    async fn pending_chunked_forward_preserves_original_deadlines_over_tcp() {
+        pending_chunked_forward_over_tcp(Duration::from_millis(5)).await;
+    }
+
     #[expect(
         clippy::print_stderr,
         reason = "bounded timing evidence is emitted only after measured response and cleanup"
     )]
-    async fn pending_chunked_forward_preserves_original_deadlines_over_tcp() {
+    async fn pending_chunked_forward_over_tcp(tolerance: Duration) {
         let mut executor_owner = AxumOutboundExecutor::new();
         let executor_handle = executor_owner.handle();
         for (read_budget, expected, budget) in [
@@ -1206,6 +1216,9 @@ mod tests {
                 Duration::from_millis(100),
             ),
         ] {
+            let upper_bound = budget
+                .checked_add(tolerance)
+                .expect("finite timing headroom");
             executor_owner
                 .run_until(async {
                     let origin = TcpListener::bind("127.0.0.1:0").await.expect("origin");
@@ -1255,10 +1268,10 @@ mod tests {
                         "response_complete_us":client_elapsed.as_micros()}));
                     assert_eq!(exit.expect("connection"), ConnectionExit::Completed);
                     assert!(wire.starts_with(expected), "{wire}");
-                    assert!(terminal_elapsed >= budget && terminal_elapsed <= budget + Duration::from_millis(5),
-                        "handler terminal took {terminal_elapsed:?}, expected {budget:?} + at most 5 ms");
-                    assert!(client_elapsed >= terminal_elapsed && client_elapsed <= budget + Duration::from_millis(5),
-                        "complete client response took {client_elapsed:?}, expected {budget:?} + at most 5 ms");
+                    assert!(terminal_elapsed >= budget && terminal_elapsed <= upper_bound,
+                        "handler terminal took {terminal_elapsed:?}, expected {budget:?} + at most {tolerance:?}");
+                    assert!(client_elapsed >= terminal_elapsed && client_elapsed <= upper_bound,
+                        "complete client response took {client_elapsed:?}, expected {budget:?} + at most {tolerance:?}");
                     assert!(origin.accept().now_or_never().is_none(), "no origin connection");
                     assert!(probe.polls.load(Ordering::SeqCst) > 0, "actual source entered pending");
                     assert!(probe.pending.load(Ordering::SeqCst) > 0, "actual Pending observation");

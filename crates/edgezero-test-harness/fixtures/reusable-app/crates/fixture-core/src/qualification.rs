@@ -301,9 +301,20 @@ async fn response_probe(ctx: RequestContext) -> Result<Response, EdgeError> {
 mod tests {
     use super::*;
     use futures::StreamExt as _;
+    use std::env;
+    use std::process::{Command, Stdio};
 
     #[test]
     fn fixture_logging_emits_raw_lifecycle_events_but_filters_ordinary_info() {
+        // The facade and sink are process-global; other tests emit different telemetry protocols.
+        const CHILD: &str = "EDGEZERO_FIXTURE_LOGGING_CHILD";
+        if env::var_os(CHILD).is_none() {
+            let result = Command::new(env::current_exe().unwrap())
+                .args(["--exact", "qualification::tests::fixture_logging_emits_raw_lifecycle_events_but_filters_ordinary_info"])
+                .env(CHILD, "1").stdin(Stdio::null()).output().unwrap();
+            assert!(result.status.success(), "{result:?}");
+            return;
+        }
         static EVENTS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
         fn sink(line: &str) {
             EVENTS

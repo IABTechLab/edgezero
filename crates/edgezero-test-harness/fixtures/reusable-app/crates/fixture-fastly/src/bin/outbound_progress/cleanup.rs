@@ -393,7 +393,7 @@ pub(super) fn run(request: fastly::Request) -> Result<(), fastly::Error> {
     let probe = Probe::parse(&request, time)?;
     let reports = Arc::new(AtomicUsize::new(0));
     let mut callback_scope = None;
-    let result = run_custom::<(), _, _>(request, |request, _| {
+    let result = run_custom::<fixture_core::FixtureApp, (), _, _>(request, |request, _| {
         let scope = OutboundScope::capture(Rc::new(IndependentOutboundProgress));
         callback_scope = Some(scope.clone());
         deliver(request, &probe, &client, &scope, Arc::clone(&reports)).map_err(fastly::Error::from)

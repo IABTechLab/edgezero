@@ -155,10 +155,10 @@ pub fn validate_negative_logging(replies: &[Value], starts: &[Value]) -> Result<
         )?;
         if repeated {
             require(
-                reply["body"]
-                    .as_str()
-                    .is_some_and(|body| body.contains("already initialized")),
-                "missing repeated logger initialization error",
+                reply["body"].as_str().is_some_and(|body| {
+                    body == "managed logging configuration changed within an instance"
+                }),
+                "missing managed logger configuration-change error",
             )?;
         }
         reused |= repeated;
@@ -761,6 +761,8 @@ mod tests {
         replies[1]["body"] = json!("unrelated KV registry failure");
         assert!(validate_negative_logging(&replies, &starts).is_err());
         replies[1]["body"] = json!("logging system was already initialized");
+        assert!(validate_negative_logging(&replies, &starts).is_err());
+        replies[1]["body"] = json!("managed logging configuration changed within an instance");
         assert_eq!(
             validate_negative_logging(&replies, &starts).unwrap(),
             "pass"

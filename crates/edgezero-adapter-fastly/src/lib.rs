@@ -42,6 +42,7 @@ use edgezero_core::app::{App, Hooks};
 use edgezero_core::error::EdgeError;
 #[cfg(feature = "fastly")]
 use edgezero_core::http::{Extensions, Response};
+use edgezero_core::logging::ManagedLoggerError;
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::manifest::ResolvedLoggingConfig;
 #[cfg(feature = "fastly")]
@@ -113,30 +114,28 @@ fn init_fastly_abi() {
 }
 
 /// # Errors
-/// Returns [`logger::InitLoggerError::Build`] if the underlying logger
-/// builder rejects its inputs (e.g. an empty endpoint), or
-/// [`logger::InitLoggerError::SetLogger`] if a global logger is already
-/// installed.
+/// Returns a fixed managed-logger error for invalid settings, a foreign backend,
+/// or changed instance settings. Identical repeated initialization succeeds.
 #[cfg(feature = "fastly")]
 #[inline]
 pub fn init_logger(
     endpoint: &str,
     level: log::LevelFilter,
     echo_stdout: bool,
-) -> Result<(), logger::InitLoggerError> {
+) -> Result<(), ManagedLoggerError> {
     logger::init_logger(endpoint, level, echo_stdout)
 }
 
 /// # Errors
-/// Never; this is a no-op stub on builds without the `fastly` feature.
+/// Returns `UnsupportedTarget` without changing logger state.
 #[cfg(not(feature = "fastly"))]
 #[inline]
 pub fn init_logger(
     _endpoint: &str,
     _level: log::LevelFilter,
     _echo_stdout: bool,
-) -> Result<(), log::SetLoggerError> {
-    Ok(())
+) -> Result<(), ManagedLoggerError> {
+    Err(ManagedLoggerError::UnsupportedTarget)
 }
 
 /// Entry point for a Fastly Compute application.
@@ -180,11 +179,7 @@ where
 {
     init_fastly_abi();
     let stores = A::stores();
-    let logging = FastlyLogging::from(A::logging_for("fastly"));
-    if logging.use_fastly_logger && !A::owns_logging() {
-        let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");
-        init_logger(endpoint, logging.level, logging.echo_stdout)?;
-    }
+    logger::initialize_for_app::<A>()?;
     let req = fastly::Request::from_client();
     let clock = MonotonicClock::default();
     let request_start = clock.now();
@@ -234,38 +229,30 @@ where
 {
     init_fastly_abi();
     let stores = A::stores();
-    let logging = FastlyLogging::from(A::logging_for("fastly"));
-    lifecycle::serve_custom(serve, move |req, retained: &mut lifecycle::Sandbox<App>| {
-        retained.setup_once(|| {
-            if logging.use_fastly_logger && !A::owns_logging() {
-                init_logger(
-                    logging.endpoint.as_deref().unwrap_or("stdout"),
-                    logging.level,
-                    logging.echo_stdout,
-                )?;
+    lifecycle::serve_custom::<A, _, _, _>(
+        serve,
+        move |req, retained: &mut lifecycle::Sandbox<App>| {
+            let clock = MonotonicClock::default();
+            let request_start = clock.now();
+            if let Err(error) = retained.initialize(build_target_app::<A>) {
+                return request::send_assembly_error(req, error, request_start, clock)
+                    .into_standard_result()
+                    .map(|_state| ());
             }
-            Ok::<(), fastly::Error>(())
-        })?;
-        let clock = MonotonicClock::default();
-        let request_start = clock.now();
-        if let Err(error) = retained.initialize(build_target_app::<A>) {
-            return request::send_assembly_error(req, error, request_start, clock)
-                .into_standard_result()
-                .map(|_state| ());
-        }
-        let app = retained.state().ok_or_else(|| {
-            fastly::Error::msg("application initialization did not retain an app")
-        })?;
-        request::send_request_with_registries_and_hooks(
-            app,
-            stores,
-            req,
-            &mut prepare,
-            &mut finalize,
-        )
-        .into_standard_result()
-        .map(|_state| ())
-    })
+            let app = retained.state().ok_or_else(|| {
+                fastly::Error::msg("application initialization did not retain an app")
+            })?;
+            request::send_request_with_registries_and_hooks(
+                app,
+                stores,
+                req,
+                &mut prepare,
+                &mut finalize,
+            )
+            .into_standard_result()
+            .map(|_state| ())
+        },
+    )
 }
 
 /// Dispatch with an explicitly wired config store. Its name comes from the caller,
@@ -285,10 +272,7 @@ where
     A: Hooks,
 {
     init_fastly_abi();
-    if logging.use_fastly_logger && !A::owns_logging() {
-        let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");
-        init_logger(endpoint, logging.level, logging.echo_stdout)?;
-    }
+    logger::configure::<A>(logging)?;
     let req = fastly::Request::from_client();
     let clock = MonotonicClock::default();
     let request_start = clock.now();

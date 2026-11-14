@@ -4,10 +4,10 @@ use edgezero_core::logging::{
 use log::LevelFilter;
 use std::io;
 
-static INSTALLATION: ManagedLoggerInstallation = ManagedLoggerInstallation::new();
+static INSTALLATION: ManagedLoggerInstallation<LevelFilter> = ManagedLoggerInstallation::new();
 
 pub(crate) fn initialize(level: LevelFilter) -> Result<(), ManagedLoggerError> {
-    INSTALLATION.initialize(level, || {
+    INSTALLATION.initialize(&level, || {
         fern::Dispatch::new()
             .level(level)
             .level_for(BOOT_LOG_TARGET, BOOT_LOG_LEVEL)

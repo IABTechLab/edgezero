@@ -549,6 +549,10 @@ Logging can be configured per adapter under `[adapters.<name>.logging]` or via a
 Manifest logging settings and runtime `EDGEZERO__LOGGING__*` overrides are separate; consult
 the adapter guide for which source its runner consumes. Cloudflare resolves the runtime level
 from Worker bindings; Spin reads the runtime environment, not the manifest logging table.
+Fastly keeps the manifest endpoint/stdout settings and default level; its optional
+`edgezero_logging` Config Store overrides only `EDGEZERO__LOGGING__LEVEL`, including in
+Viceroy without rebuilding the wasm. See the Fastly guide for the bounded lookup and
+instance-immutable policy. No general runtime-selector store is involved.
 `owns_logging = true` transfers installation **and filter configuration**
 to the application, before entering the runner. The pure
 `edgezero_core::resolve_logging_level(&EnvConfig)` helper resolves runtime levels without

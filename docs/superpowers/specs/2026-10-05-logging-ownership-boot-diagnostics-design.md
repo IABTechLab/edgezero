@@ -19,12 +19,25 @@ maximum of the ordinary and boot levels, while the outer target-aware filter
 continues to suppress ordinary records above their configured level. The boot
 target is a category, not a new Fastly log endpoint.
 
-Fastly `runtime_env_config` returns `FastlyRuntimeConfig { env, ... }`, hard-cutting
-the former direct `EnvConfig` return. An unavailable optional runtime store sets
-one boolean diagnostic flag. `emit_boot_diagnostics()` consumes its fixed warning
-once after backend installation; missing backends do not gain implicit output.
-`run_app` and `run_app_with_hooks` emit it even when application assembly returns
-an error. The explicit-config runner does not read that runtime store.
+Fastly standard and custom lifecycles use one app-aware managed initializer before
+assembly or the custom callback. `owns_logging()` bypasses both configuration lookup
+and installation. Custom lifecycles take the Hooks type explicitly; no old signature
+or compatibility wrapper remains. Manual prebuilt dispatch still owns its setup.
+
+Endpoint and stdout policy remain manifest-owned. An optional logging-only Config Store
+linked as `edgezero_logging` may supply `EDGEZERO__LOGGING__LEVEL`. Missing store/key
+preserves the manifest level; invalid or oversized values use the shared Info fallback.
+Read at most 16 bytes, without retries, chunk reassembly or general runtime selectors.
+Snapshot the parsed override once per instance; reused callbacks do not repeat host reads.
+Store changes affect new instances, not an installed filter.
+Unexpected host failures are fixed typed configuration errors, never echoed values.
+The same wasm can use Debug locally and its manifest level when no override is linked.
+
+Managed initialization is immutable per instance and compares the complete endpoint,
+level and stdout policy. Identical setup succeeds without reinstalling; changed settings
+return `ManagedLoggerError::ConfigurationChanged`. A foreign logger remains untouched.
+Fastly records include timestamp, level, target and message, retaining the target's
+relative position shared with the Workers and Spin formats.
 
 Install adapter-owned logging before application configuration. Diagnostics
 generated while resolving logger configuration must be retained as bounded

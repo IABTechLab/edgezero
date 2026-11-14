@@ -942,3 +942,36 @@ forces a validation drain; equality is limited to observed chunks and clean EOF.
 This scoped amendment supersedes the former blanket statement that every streamed upload
 omits CL. No second transport, reader, buffer, executor, compatibility path, runtime pin,
 capability promotion or deployment authorization is introduced. Existing hosted gates remain open.
+
+## Scoped Fastly Logging And Timing-Test Separation (2026-11-13)
+
+AG answered "Approve scoped repair plan" to the review-repair proposal for comments
+`6869073346`, `6869468283` and thread `4570088506`, starting from `737f8452`.
+
+Fastly custom lifecycles now name `A: Hooks` alongside their independently retained `T`:
+`serve_custom<A, T, F, E>(Serve, F)` and `run_custom<A, T, E, F>(Request, F)`.
+Callback errors must implement `From<ManagedLoggerError>`. This makes manifest/ownership
+provenance explicit without another policy type or compatibility entrypoint. Standard and
+custom setup share one implementation. `ManagedLoggerInstallation<Configuration>` compares
+borrowed complete settings, cloned only on first successful installation. Fastly uses
+endpoint/level/stdout identity; Cloudflare and Spin use their explicit LevelFilter identity.
+
+The optional logging-only `edgezero_logging` Config Store supplies at most 16 bytes for
+`EDGEZERO__LOGGING__LEVEL`: absent store/key preserves the manifest, invalid/oversized strings
+select Info, unexpected host failures yield a fixed typed error. There is no automatic
+hostname-based Debug mode, general runtime selector store, growing read or live filter reload.
+`owns_logging` skips lookup and installation. The override is snapshotted once per instance,
+not reread on reused callbacks; changes apply to new instances. Explicit initialization
+with different complete settings is rejected without filter mutation.
+
+The Axum functional TCP regression keeps its original absolute deadlines, typed 408/504,
+no-early terminal/client ordering, source Pending/no-origin and exactly-once cleanup checks,
+with a finite 50 ms CI scheduling allowance. This allowance is not production budget or
+qualification credit. The existing strict +5 ms sentinel and 205/105 ms criterion remain
+unchanged and require a separate explicit timing run/artifact. Ordinary CI excludes only
+that strict timing run, not the functional proof. Missing execution remains unverified;
+strict overruns remain failed evidence. No source digest, criterion identity or expected
+timing is rewritten to claim a pass. Historical failed captures remain retained.
+
+This approval permits implementation, full validation and normal publication in PR #275;
+it grants neither reviewer-thread acceptance, a merge exception nor hosted qualification.

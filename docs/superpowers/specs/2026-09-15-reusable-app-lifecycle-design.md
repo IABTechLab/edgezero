@@ -14,6 +14,11 @@ The original private-helper design in §§8/9.1 is superseded by
 [the custom serving lifecycle plan](../plans/2026-09-17-custom-serving-lifecycle.md).
 The implemented `lifecycle::{Sandbox, serve_custom, run_custom}` surface, including
 its observation counters, is public. No provider-independent scheduler is added.
+The later [logging repair](2026-10-05-logging-ownership-boot-diagnostics-design.md)
+hard-cuts custom wrappers to an explicit app Hooks type and shared managed setup. It
+supersedes callback-local manual logger setup below; `Sandbox<T>` remains arbitrary
+application state. Identical setup is idempotent, and the negative control now changes
+configuration rather than expecting repeated identical initialization to fail.
 
 PR #275 supersedes the original assembly, raw-conversion, response-returning, and
 buffered-delivery choices below. The

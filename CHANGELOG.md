@@ -13,6 +13,16 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Require the application Hooks type on Fastly `serve_custom` and `run_custom`, with
+  callback errors convertible from `ManagedLoggerError`. Standard/custom lifecycles
+  now share managed setup. Fastly lines include targets; complete endpoint/level/stdout
+  settings are idempotent and immutable. Manual initialization uses shared typed errors
+  and off-target calls return UnsupportedTarget rather than silently succeeding.
+  The optional logging-only `edgezero_logging` Config Store accepts a 16-byte level
+  override, allowing local Debug from the same production wasm. Absent overrides keep
+  the manifest level; invalid values use Info. No compatibility signature remains.
+- Generalize `ManagedLoggerInstallation<Configuration>` to compare complete settings;
+  Cloudflare and Spin explicitly use their level as the identity.
 - Replace Cloudflare/Spin no-op log initializers with fallible `init_logger(level)`: Workers
   console and Spin stderr backends apply the resolved runtime filter and independent Warn boot
   filter before assembly. Same-level initialization is idempotent; changed instance configuration

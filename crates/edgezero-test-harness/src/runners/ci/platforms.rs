@@ -191,11 +191,7 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
                 adapter,
                 "native-tests",
                 &mut guarded(
-                    &[
-                        "--include-ignored",
-                        "--inventory",
-                        "axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked",
-                    ],
+                    &["--inventory", "axum/native-tcp,unit/axum,axum/http1,axum"],
                     &[
                         "test",
                         "--offline",

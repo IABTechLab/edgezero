@@ -5,10 +5,14 @@
 
 #[cfg(any(feature = "fastly", test))]
 use crate::context::observation::Guard as ObservationGuard;
+#[cfg(feature = "fastly")]
+use crate::logger::initialize_for_app;
 #[cfg(any(feature = "fastly", test))]
 use crate::outbound::scope;
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::OutboundScopeOwner;
+#[cfg(feature = "fastly")]
+use edgezero_core::{app::Hooks, logging::ManagedLoggerError};
 #[cfg(feature = "fastly")]
 use fastly::http::serve::{HandlerResult, Serve, ServeSummary};
 
@@ -146,18 +150,27 @@ pub(crate) fn with_callback<R>(action: impl FnOnce() -> R) -> R {
 /// Batches created while polling a response body have an independent delivery lifetime.
 ///
 /// SDK limits are upper bounds, not a guarantee of reuse. This function does not
-/// read configuration or enable reuse in existing entry points.
+/// enable reuse in existing entry points. `A` supplies the managed logging policy,
+/// initialized before the callback unless `A::owns_logging()` is true. `E` must
+/// accept its fixed typed setup error; changed settings terminate without resending.
 #[cfg(feature = "fastly")]
 #[must_use = "inspect the serving summary or call into_result() to handle terminal errors"]
 #[inline]
-pub fn serve_custom<T, F, E>(serve: Serve, mut handler: F) -> ServeSummary<E>
+pub fn serve_custom<A, T, F, E>(serve: Serve, mut handler: F) -> ServeSummary<E>
 where
+    A: Hooks,
+    E: From<ManagedLoggerError>,
     F: FnMut(fastly::Request, &mut Sandbox<T>) -> Result<(), E>,
 {
     crate::init_fastly_abi();
     let mut sandbox = Sandbox::default();
     serve.run_with_context(
-        |request, context: &mut Sandbox<T>| DeliveryResult(context.handle(request, &mut handler)),
+        |incoming, retained: &mut Sandbox<T>| {
+            DeliveryResult(retained.handle(incoming, |request, context| {
+                initialize_for_app::<A>()?;
+                handler(request, context)
+            }))
+        },
         &mut sandbox,
     )
 }
@@ -166,18 +179,25 @@ where
 ///
 /// Takes a request already received by the caller. Sending remains owned by the
 /// callback; this function never asks the SDK to render an error. Use an ordinary `main`.
+/// `A` supplies the same managed logging policy as standard serving. Install an
+/// application-owned logger before entry when `A::owns_logging()` is true.
 /// Callback exit releases its batch drivers without waiting for retained handles to drop.
 ///
 /// # Errors
 /// Returns the callback error unchanged without another response attempt.
 #[cfg(feature = "fastly")]
 #[inline]
-pub fn run_custom<T, E, F>(request: fastly::Request, handler: F) -> Result<(), E>
+pub fn run_custom<A, T, E, F>(incoming: fastly::Request, handler: F) -> Result<(), E>
 where
+    A: Hooks,
+    E: From<ManagedLoggerError>,
     F: FnOnce(fastly::Request, &mut Sandbox<T>) -> Result<(), E>,
 {
     crate::init_fastly_abi();
-    Sandbox::default().handle(request, handler)
+    Sandbox::default().handle(incoming, |request, context| {
+        initialize_for_app::<A>()?;
+        handler(request, context)
+    })
 }
 
 #[cfg(test)]

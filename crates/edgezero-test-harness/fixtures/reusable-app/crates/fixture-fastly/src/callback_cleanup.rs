@@ -293,20 +293,28 @@ pub(super) fn run(serving: bool) -> Result<(), fastly::Error> {
     };
     let mut invoke =
         |request: fastly::Request, state: &mut edgezero_adapter_fastly::lifecycle::Sandbox<()>| {
-            callback(request, wrapper, state, &mut saved).unwrap_or(Err("fixture-error"))
+            callback(request, wrapper, state, &mut saved)
+                .unwrap_or(Err("fixture-error"))
+                .map_err(fastly::Error::msg)
         };
     let result = if serving {
-        let summary = serve_custom(Serve::new().with_max_requests(1), &mut invoke);
+        let summary = serve_custom::<fixture_core::FixtureApp, _, _, _>(
+            Serve::new().with_max_requests(1),
+            &mut invoke,
+        );
         check(summary.requests() == 1)?;
         summary.into_result()
     } else {
         fastly::init();
-        run_custom(fastly::Request::from_client(), invoke)
+        run_custom::<fixture_core::FixtureApp, _, _, _>(fastly::Request::from_client(), invoke)
     };
     let saved = saved.ok_or_else(failed)?;
-    check(result == saved.probe.mode.result())?;
+    check(
+        result.as_ref().map(|_| ()).map_err(ToString::to_string)
+            == saved.probe.mode.result().map_err(str::to_owned),
+    )?;
     verify(saved)?;
-    result.map_err(fastly::Error::msg)
+    result
 }
 
 fn callback(

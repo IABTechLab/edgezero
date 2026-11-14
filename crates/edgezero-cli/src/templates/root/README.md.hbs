@@ -58,7 +58,8 @@ limit failures retain their original typed error classification.
 
 All adapter entrypoints delegate logging to the reusable adapter runners;
 do not initialize a second CLI logger before a runtime runner. Ordinary levels
-come from `EDGEZERO__LOGGING__LEVEL` (Fastly reads its runtime Config Store), with
+come from `EDGEZERO__LOGGING__LEVEL` (Fastly uses the manifest default unless its
+optional logging-only `edgezero_logging` Config Store provides that key), with
 `Info` as the absent/invalid fallback. Managed boot warnings use `edgezero::boot`
 at `Warn`, independently of ordinary `Error` or `Off`.
 

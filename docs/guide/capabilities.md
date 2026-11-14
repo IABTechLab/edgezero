@@ -34,18 +34,21 @@ Support levels mean:
 These are runner behaviors, not manifest capability flags. Standard runners initialize before
 assembly unless `Hooks::owns_logging()` is true; prebuilt dispatch retains caller-owned setup.
 
-| Target     | Managed sink                                            | Ordinary runtime level                           | Boot target |
-| ---------- | ------------------------------------------------------- | ------------------------------------------------ | ----------- |
-| Axum       | `simple_logger`                                         | Environment                                      | Warn        |
-| Cloudflare | Workers console                                         | Worker bindings                                  | Warn        |
-| Fastly     | Provisioned `log_fastly` endpoint, optional stdout echo | Runtime Config Store / explicit logging settings | Warn        |
-| Spin       | stderr                                                  | Environment                                      | Warn        |
+| Target     | Managed sink                                            | Ordinary runtime level                                | Boot target |
+| ---------- | ------------------------------------------------------- | ----------------------------------------------------- | ----------- |
+| Axum       | `simple_logger`                                         | Environment                                           | Warn        |
+| Cloudflare | Workers console                                         | Worker bindings                                       | Warn        |
+| Fastly     | Provisioned `log_fastly` endpoint, optional stdout echo | Manifest default / logging-only Config Store override | Warn        |
+| Spin       | stderr                                                  | Environment                                           | Warn        |
 
 The shared runtime resolver defaults absent/invalid levels to Info. Boot Error/Warn remain
 visible with ordinary Off. Cloudflare/Spin manual setup is `init_logger(level)` and is immutable
 per isolate/instance: repeated identical setup succeeds; changed policy or a foreign logger
 returns an error. Application-owned logging changes neither backend nor facade state.
-Local Wrangler/Spin sink tests are not hosted delivery or retention certification.
+Fastly standard and custom lifecycles also compare endpoint and stdout policy, and
+include record targets. The optional `edgezero_logging` store supplies only a bounded
+level override; it does not restore runtime store selectors. Local Wrangler/Spin/Viceroy
+sink tests are not hosted delivery or retention certification.
 
 ## Platform Memory Ceilings
 

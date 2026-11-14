@@ -1,6 +1,32 @@
 use super::*;
 use std::io::Read;
 
+fn pre_separation_inventory(mut inventory: Value) -> Value {
+    use super::ownership_tests::{AXUM_CORRECTNESS, AXUM_NATIVE, AXUM_QUALIFICATION};
+
+    let previous = "scripts/run_test_nonzero.sh --include-ignored --inventory axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features axum,test-utils --all-targets";
+    let mut counts = (0, 0);
+    for row in inventory["cases"].as_array_mut().unwrap() {
+        if row["command"] == AXUM_NATIVE {
+            row["command"] = json!(previous);
+            counts.0 += 1;
+        } else if row["command"] == AXUM_QUALIFICATION {
+            assert_eq!(key(row), "EZ-1/acceptance/06@axum/http1-chunked");
+            row["command"] = json!(previous);
+            row["artifact_path"] = json!("outbound/redirect/axum/native-tests.log");
+            counts.1 += 1;
+        }
+        if key(row) == "EZ-1/acceptance/04@axum" {
+            assert_eq!(
+                row.as_object_mut().unwrap().remove("additional_sentinels"),
+                Some(json!([AXUM_CORRECTNESS]))
+            );
+        }
+    }
+    assert_eq!(counts, (37, 1));
+    inventory
+}
+
 fn decode(encoded: &Value, inventory: &Value, source: &str) -> Value {
     match text(&encoded[0]) {
         "literal" => encoded[1].clone(),
@@ -48,10 +74,18 @@ fn reviewed_catalog_scenarios_preserve_all_parser_policy_and_selection_outcomes(
     let root = crate::repository_root();
     let source = std::fs::read_to_string(root.join(SPEC)).unwrap();
     let inventory_bytes = std::fs::read(root.join(INVENTORY)).unwrap();
-    let inventory: Value = serde_json::from_slice(&inventory_bytes).unwrap();
+    // Keep the frozen replay on its original selectors; ownership_tests checks the live separation.
+    let inventory = pre_separation_inventory(serde_json::from_slice(&inventory_bytes).unwrap());
     assert_eq!(reviewed["schema"], 1);
     assert_eq!(reviewed["source_sha256"], hash(&source));
-    assert_eq!(reviewed["inventory_sha256"], hash(&inventory_bytes));
+    assert_eq!(
+        reviewed["inventory_sha256"],
+        "88018adef3dfd1b7342bbf465faf0826920ec8208243dd51bca8c451c54cc2cd"
+    );
+    assert_eq!(
+        hash(&inventory_bytes),
+        "60d761748e28de9bd1a4d69d43a36c3cbd45ebb1d94cf68ee87b5c95a6810a58"
+    );
     assert_eq!(
         reviewed["original_test_titles"].as_array().unwrap().len(),
         140

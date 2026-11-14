@@ -90,7 +90,7 @@ pub(super) fn run(request: fastly::Request) -> Result<(), fastly::Error> {
     let witnesses = std::array::from_fn::<_, 3, _>(|_| NativeBodyWitness::new());
     let mut callback = None;
     let mut evidence = Value::Null;
-    let result = run_custom::<(), _, _>(request, |request, _| {
+    let result = run_custom::<fixture_core::FixtureApp, (), _, _>(request, |request, _| {
         let scope = OutboundScope::capture(provider.progress());
         callback = Some(scope.clone());
         let mut app = App::with_name_and_platform(
