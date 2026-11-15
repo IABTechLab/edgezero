@@ -500,7 +500,22 @@ fn route_for_method(
 #[cfg(test)]
 mod tests {
     use super::{AppArgs, Manifest, build_route_tokens, parse_handler_path};
+    use std::path::Path;
     use syn::parse_str;
+
+    #[test]
+    fn fastly_logging_endpoint_reports_compile_time_manifest_field() {
+        for section in ["adapters.Fastly.logging", "logging.FASTLY"] {
+            let source = format!("[{section}]\nendpoint = \"ts:log\"\n");
+            let error = super::parse_manifest(&source, Path::new("edgezero.toml"))
+                .expect_err("app! must reject the manifest before emitting application code");
+            assert!(
+                error.contains("failed to validate edgezero.toml"),
+                "{error}"
+            );
+            assert!(error.contains(&format!("[{section}].endpoint")), "{error}");
+        }
+    }
 
     #[test]
     fn app_args_parses_app_ident_then_keyword() {

@@ -13,6 +13,13 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Reject invalid effective Fastly logging endpoint names during manifest loading and
+  `app!` expansion, with field-specific, value-free diagnostics. Preserve whole-section
+  logging overrides and other adapters' endpoint formats.
+- Deliver a bounded, redacted 500 when managed Fastly logging fails before a custom
+  callback, suppress HEAD payloads and return the original typed setup error even if
+  delivery fails. Report secondary delivery degradation without relying on that logger.
+  Callback errors never trigger an automatic response or a second send.
 - Require the application Hooks type on Fastly `serve_custom` and `run_custom`, with
   callback errors convertible from `ManagedLoggerError`. Standard/custom lifecycles
   now share managed setup. Fastly lines include targets; complete endpoint/level/stdout

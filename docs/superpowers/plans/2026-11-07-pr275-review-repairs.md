@@ -687,3 +687,129 @@ frozen-candidate qualification. The separate seven-case Fastly assembly-attestat
 above remains open despite all 27 new logging cases passing. Publication records the actual
 commit and per-finding replies in the PR handoff; it does not grant merge approval or resolve
 reviewer-owned threads.
+
+## Approved Issues 506 And 505 Repairs (2026-11-15)
+
+AG answered "Please do it" after the recommendation to fix both issues in PR #275:
+manifest rejection first, then bounded pre-callback failure delivery, preserving
+typed error propagation and the no-second-response rule. Starting head is `e9ffaa8f`,
+fast-forwarded from the prior repair; the merge changes only the docs dependency lock.
+Focused baseline tests pass: 85 core manifest tests and 185 native Fastly tests.
+The prior full-suite evidence and separate seven-case assembly blocker remain retained.
+
+### Task 1: Effective Fastly Endpoint Validation (#506)
+
+Files: `crates/edgezero-core/src/manifest.rs`,
+`crates/edgezero-macros/src/app.rs`,
+`crates/edgezero-cli/tests/generated_project_builds.rs`, and the Fastly CLI blueprint.
+
+- [x] Add co-located regressions for effective global/per-adapter endpoint selection,
+      declared casing, whole-section shadowing, invalid names, unaffected non-Fastly
+      endpoints, exact offending field and accumulation with unrelated validation errors.
+- [x] Run `cargo test --offline --locked -p edgezero-core --lib fastly_logging_endpoint`
+      and macro parser regressions; expect rejection assertions to fail before the fix.
+- [x] Add one independent manifest schema hook with `skip_on_field_errors = false`,
+      using existing adapter lookup and `is_specified()`. Reject empty/LF/colon and
+      exact reserved names without host calls or raw-value diagnostics. Leave
+      `finalize()` and all adapter logging resolution unchanged.
+- [x] Replace only the old URL-shaped Fastly positive fixture with a valid endpoint
+      name. Keep URL-shaped non-Fastly configuration valid.
+- [x] Remove the unused reserved blueprint endpoint; the generator still supplies
+      its existing project-specific name. Cover both facts without a new runner.
+- [x] Reuse the existing generated-workspace test for an actual `app!` compile-failure
+      probe with an invalid Fastly endpoint and a field-specific diagnostic. No new
+      published binary, script, CI job or independent runner.
+- [x] Run the core/macro regressions, compiled app macro coverage and generated project
+      gate; expected result is zero failures, with the negative probe failing compilation
+      for its intended validation diagnostic rather than a missing file or handler.
+
+### Task 2: Pre-Callback Failure Delivery (#505)
+
+Files: `crates/edgezero-adapter-fastly/src/lifecycle.rs`, existing
+`fixtures/reusable-app/crates/fixture-fastly/src/managed_logging.rs` and
+`src/runners/assembly/managed_logging.rs` under `crates/edgezero-test-harness`.
+
+- [x] Add private-gate native regressions before implementation: every logger error,
+      one rejection/zero callback invocations, request release and exact error retention;
+      successful initialization directly preserves callback errors without rejection.
+- [x] Share a private setup/reject/handler function inside the existing `Sandbox::handle`
+      scope. On setup failure call `send_assembly_error` once, inspect its terminal result
+      and fallback report, then report secondary typed degradation with a fallible,
+      non-panicking, bounded stderr write without replacing the logger error. Never
+      classify a callback result as setup failure or request another native send.
+- [x] Add native delivery-diagnostic coverage for failed/unknown/committed and fallback
+      results; all retain original logger error and one terminal delivery attempt.
+- [x] Extend the existing assembly fixture/runner with attested healthy-then-failure
+      GET and HEAD controls for both custom entrypoints and a committed callback-error
+      control. Retained serving must terminate due to the setup error, not request limit.
+      A fixture-only SDK loop may supply received requests to the real `run_custom`;
+      it cannot replace the production helper or render a second response.
+      The healthy retained callback arms changed Hooks settings (`ConfigurationChanged`);
+      the single-request control installs a foreign logger (`AlreadyInstalled`). Require
+      same-instance witnesses, summary count two, maximum requests greater than two and
+      the existing raw wire capture's clean EOF/framing checks, with `qualification:false`.
+      The committed callback control returns the same logger-error type.
+- [x] Run the six new wire controls separately through the co-located opt-in test;
+      before the fix all four setup cases returned an unredacted host-generated 500
+      without JSON Content-Type, while both committed callback-error controls passed.
+      After wiring both runners, all six controls pass in one selected test.
+- [x] Run `cargo test --offline --locked -p edgezero-adapter-fastly --lib lifecycle::tests`
+      and `scripts/test_integration.sh --adapter fastly --suite assembly`. Record new-case
+      results separately from the unchanged seven pre-existing attestation failures.
+
+### Task 3: Documentation, Review And Publication
+
+- [x] Update Fastly logging/custom-serving docs and changelog with static validation,
+      redacted pre-callback response/error precedence and unchanged post-callback behavior.
+      Check the existing demo and generator remain on valid endpoint names.
+- [x] Run focused tests after coherent changes, `RUST_TEST_THREADS=2 bash scripts/run_tests.sh`
+      with non-interactive stdin, all five Rust gates, standalone harness/fixture and
+      provider WASM lint, and docs format/lint/build. Expected passing output is not
+      executed evidence until the commands finish. Preserve all failures and hosted gates.
+- [x] Perform two read-only contract reviews. Publication is recorded in PR #275's
+      current-head handoff and separate evidence-backed issue replies after pushing.
+      Reviewer acceptance, issue closure on merge, hosted qualification and merge
+      approval remain separate.
+
+### Executed Local Results
+
+The core and macro rejection regressions failed before validation was added. The
+actual fresh-unit compiler probe also failed because the invalid endpoint compiled;
+it now passes through the existing nonzero-test guard. The blueprint regression
+failed before its unused reserved default was removed. Native setup-gate tests
+preceded the implementation, and the frozen-source Viceroy red run independently
+exposed host-generated, non-JSON 500 bodies containing WASI execution diagnostics.
+All four pre-callback cases failed that red run; both already-committed callback
+controls retained their application response. All six pass with the shared gate.
+
+Focused results: 88 core manifest tests, 120 macro unit tests, nine app-macro tests,
+189 native Fastly tests, 24 generator tests and the selected blueprint regression
+pass. The fresh generated-workspace gate executes one test and passes both the valid
+and invalid compilation controls. Initial formatting failures, a zero-test selection
+and a source-change/identity mismatch are retained as non-credit attempts; corrected
+runs use the nonzero guard and unchanged sources during wire captures.
+
+`RUST_TEST_THREADS=2 bash scripts/run_tests.sh < /dev/null` exits 0: 2,737 workspace
+tests across 33 binaries, zero failures and two ignored; 670 harness tests, zero
+failures and four opt-in ignored. All four adapter CI suites, the fresh generated
+project, demo tests and three demo WASM checks pass. The 35 additional workflow
+format/lint/build/docs checks all exit 0, including every adapter feature selection,
+provider/ingress fixture lint, standalone harness, demo and documentation. Strict
+workspace Clippy also exits 0. Existing dependency/future-compatibility and syntax
+highlighting notices are not suppressed.
+
+The broader Fastly assembly command still exits 1. Its 27 existing logging controls
+and six new controls pass; all seven separate first-response attestation cases retain
+`missing launch identity on required prescribed response`. No gate was relaxed or
+failure credited. Its local capture is
+`fixtures/reusable-app/.runs/18e84c266f7a83d8-9501-0` under the harness. The four CI
+captures are `18e84b562c580bc8-143ef-0` (Axum), `18e84b7f337a0860-178e5-0` (Fastly),
+`18e84bb2a1fc6bd8-1be5-0` (Cloudflare) and `18e84bcd49a52040-3496-0` (Spin).
+These are local functional captures, not frozen or hosted qualification artifacts.
+
+The two read-only reviews found no remaining concrete functional or security defect
+in this scope. Production changes are confined to early manifest validation, unused
+scaffold metadata and the shared pre-callback rejection gate. Outbound APIs, body
+suppression, limits, deadlines, dependency pins, capabilities and hosted/manual
+qualification gates remain unchanged. The separate assembly blocker and independent
+current-head acceptance still prevent a merge-ready claim.
