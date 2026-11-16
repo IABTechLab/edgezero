@@ -305,8 +305,23 @@ and the separate cloud/downstream acceptance checks.
 
 The Axum adapter uses a `HttpClient` registered in the assembled app's router state when present,
 without initializing its default transport. Otherwise it injects `AxumOutboundClient`, backed by
-`reqwest` and the application clock. Handlers use `RequestContext::http_client()`; direct wiring
-can construct the adapter client with `AxumOutboundClient::try_new()`.
+`reqwest` and the application clock. Handlers use `RequestContext::http_client()`; the standard
+entrypoints own and drive its executor automatically.
+
+Direct wiring requires one explicit `outbound_executor::AxumOutboundExecutor`. Pass its
+`handle()` to `AxumOutboundClient::try_new(handle)` or `try_with_time(handle, time)`, and drive
+that same owner with `run_until`. This replaces the previous zero-argument constructor; an
+ambient Tokio `LocalSet` is not a substitute. The owner does not create another Tokio runtime.
+Use a live runtime with I/O and time enabled; an injected `OutboundTime` must pair its clock
+with a valid cancellable timer factory. Disabled timer-driver misuse is not certified to
+return a typed error in `panic=abort` builds.
+
+Clients remain sendable, but outbound use on another thread or after owner destruction returns
+Internal before polling request work. Dropping the owner cancels its spawned producers; a
+retained direct-send future rejects on its next poll. Queuing eager work while the owner is idle
+is allowed, but progress requires driving it. The request extensions carry the adapter-owned
+`AxumOutboundExecutorHandle` for native factories that need to reuse the existing owner.
+Do not create a second owner in a handler or rebuild the pooled transport per request.
 
 After admission, request conversion preserves a transport-certified empty body
 (`http_body::Body::is_end_stream()`) as buffered empty without polling it. This applies to every
@@ -322,7 +337,7 @@ for an initial buffered-empty body after expiry.
 Unknown GET/HEAD bodies are settled under the original outbound and admitted inbound deadlines.
 Chunked-empty EOF permits dispatch; the first nonempty byte returns 400 before origin contact.
 Unread rejected bytes cannot become the next HTTP/1 request. Other methods keep streamed uploads.
-Eager begin/batch work requires the existing Tokio local scheduling context; missing context
+Eager begin/batch work requires the explicit live executor described above; invalid ownership
 returns a typed setup error before provider I/O. No capability level is promoted by this migration.
 
 Axum provides native total deadlines, completion-order batching, pending-future cancellation,
@@ -365,6 +380,21 @@ simple_logger::SimpleLogger::new()
     .init()?;
 // Then call run_app::<App>() with owns_logging = true.
 ```
+
+Inside a hand-written `Hooks` implementation, obtain the same compile-time logging
+metadata as `app!` without generating routes:
+
+```rust
+fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+    edgezero_core::logging_config!("edgezero.toml", adapter)
+}
+```
+
+The path is relative to the consuming crate's `CARGO_MANIFEST_DIR` (for example,
+`"../../edgezero.toml"` in scaffolded core crates). This lookup performs no runtime
+manifest I/O or parsing. It does not initialize a logger, configure filters, read
+runtime overrides or change `owns_logging`. Existing runner and application-owned
+logging responsibilities remain unchanged.
 
 For custom bind addresses or store wiring, build an assembled application and pass it directly
 to `AxumDevServer::new(app)` or `AxumDevServer::with_config(app, config)`. These constructors no
@@ -478,8 +508,8 @@ With explicit AWS bindings, the runner fetches mapped values before its initiali
 and before it accepts requests. It does not fall back to a local provider when an AWS
 lookup or preparation fails. See the [native AWS stores guide](../native-aws-stores.md)
 for the schema, feature selection, permissions, and lifecycle limits.
-The independent [native celld providers](../native-celld-stores.md) add startup
-configuration snapshots and live KV through a scoped listener inside celld.
+The independent [native celld KV provider](../native-celld-stores.md) adds live KV
+through the EdgeZero store service, which runs on an official celld release.
 
 A declared `[stores.secrets]` id resolves to an `EnvSecretStore`, which reads
 secret key `api_key` from the environment variable `EDGEZERO__SECRETS__API_KEY`,

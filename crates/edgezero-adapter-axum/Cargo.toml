@@ -36,9 +36,8 @@ aws-secrets-manager = ["axum", "edgezero-store-aws/secrets-manager"]
 aws-stores = ["aws-appconfig-agent", "aws-secrets-manager"]
 aws-dynamodb = ["axum", "edgezero-store-aws/dynamodb-kv"]
 aws-dynamodb-records = ["aws-dynamodb", "edgezero-store-aws/dynamodb-records"]
-celld-config = ["axum", "edgezero-store-celld/config"]
 celld-kv = ["axum", "edgezero-store-celld/kv"]
-celld-records = ["celld-kv", "edgezero-store-celld/records-v2"]
+celld-records = ["celld-kv", "edgezero-store-celld/records"]
 geo-cloudfront = ["axum"]
 cli = [
     "native-bindings",
@@ -110,13 +109,13 @@ required-features = ["aws-stores", "test-utils"]
 [[bin]]
 name = "edgezero-native-celld-host"
 path = "tests/fixtures/native_celld_host.rs"
-required-features = ["celld-config", "celld-kv", "test-utils"]
+required-features = ["celld-kv", "test-utils"]
 test = false
 
 [[test]]
 name = "native_celld_startup"
 path = "tests/native_celld_startup.rs"
-required-features = ["celld-config", "celld-kv", "test-utils"]
+required-features = ["celld-kv", "test-utils"]
 
 [dev-dependencies]
 async-trait = { workspace = true }

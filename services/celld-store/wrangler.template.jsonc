@@ -1,0 +1,18 @@
+// Copy to wrangler.jsonc beside src/ and replace the policy before deploying.
+// Keep "name", the binding and the class name exactly as they are: celld derives
+// each Durable Object's identity from the script name and the class name, so a
+// rename reaches new, empty storage.
+{
+  "name": "edgezero-store",
+  "main": "src/index.js",
+  "no_bundle": true,
+  "compatibility_date": "2026-10-01",
+  "durable_objects": {
+    "bindings": [{ "name": "EDGEZERO_STORE", "class_name": "EdgeZeroStore" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["EdgeZeroStore"] }],
+  "vars": {
+    // A JSON string. Contains SHA-256 verifiers only, never application tokens.
+    "EDGEZERO_STORE_POLICY": "{\"version\":1,\"stores\":[{\"alias\":\"identity\",\"namespace\":\"production-identity\"}],\"access\":{\"mode\":\"trusted-network\",\"grants\":[{\"store\":\"identity\",\"operations\":[\"read\",\"write\",\"delete\",\"list\"]}]}}"
+  }
+}

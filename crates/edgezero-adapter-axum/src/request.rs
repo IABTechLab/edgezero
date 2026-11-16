@@ -17,10 +17,11 @@ use edgezero_core::outbound::HttpClient;
 use edgezero_core::time::{Deadline, MonotonicClock};
 use futures_util::{StreamExt as _, stream};
 use http_body::Body as _;
-use tokio::time::timeout;
+use tokio::time::{Instant as TokioInstant, timeout_at};
 
 use crate::context::AxumRequestContext;
 use crate::outbound::AxumOutboundClient;
+use crate::outbound_executor::AxumOutboundExecutorHandle;
 use crate::run_options::JsonBodyLimit;
 
 /// Marks the plain HTTP listener owned by this adapter.
@@ -42,9 +43,13 @@ pub(crate) struct HttpTransport;
         reason = "the public converter retains its established async API while request bodies remain lazy"
     )
 )]
-pub async fn into_core_request(request: Request<AxumBody>) -> Result<CoreRequest, String> {
-    let (parts, axum_body) = request.into_parts();
-    let client = AxumOutboundClient::try_new()
+pub async fn into_core_request(
+    request: Request<AxumBody>,
+    executor: AxumOutboundExecutorHandle,
+) -> Result<CoreRequest, String> {
+    let (mut parts, axum_body) = request.into_parts();
+    parts.extensions.insert(executor.clone());
+    let client = AxumOutboundClient::try_new(executor)
         .map_err(|_error| "failed to build outbound HTTP client".to_owned())?;
     Ok(into_core_request_parts(
         parts,
@@ -171,6 +176,7 @@ fn deadline_body(
             let clock = monotonic_clock.clone();
             async move {
                 let mut state_stream = stream_state?;
+                let anchor = TokioInstant::now();
                 let Some(remaining) = deadline.remaining_at(clock.now()) else {
                     return Some((
                         Err(EdgeError::request_timeout(
@@ -179,7 +185,15 @@ fn deadline_body(
                         None,
                     ));
                 };
-                let item = match timeout(remaining, state_stream.next()).await {
+                let Some(host_deadline) = anchor.checked_add(remaining) else {
+                    return Some((
+                        Err(EdgeError::internal(anyhow::anyhow!(
+                            "inbound body read deadline exceeds native timer range"
+                        ))),
+                        None,
+                    ));
+                };
+                let item = match timeout_at(host_deadline, state_stream.next()).await {
                     Ok(item) => item,
                     Err(_elapsed) => {
                         return Some((
@@ -212,6 +226,7 @@ fn deadline_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::outbound_executor::AxumOutboundExecutor;
     use bytes::Bytes;
     use edgezero_core::http::{Method, StatusCode};
     use edgezero_core::time::MonotonicInstant;
@@ -286,9 +301,52 @@ mod tests {
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn inbound_deadline_does_not_add_clock_sampling_delay() {
+        use futures_util::FutureExt as _;
+        use std::time::Duration;
+        use tokio::time::{Instant, advance};
+
+        let started = Instant::now();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let signal = DropSignal(Arc::clone(&dropped));
+        let source = stream::poll_fn(move |_| {
+            let _keep_alive = &signal;
+            Poll::<Option<Result<Bytes, io::Error>>>::Pending
+        });
+        let clock = MonotonicClock::new(|| {
+            let sampled = Instant::now();
+            assert!(advance(Duration::from_millis(60)).now_or_never().is_none());
+            sampled.into_std()
+        });
+        let deadline = Deadline::at_instant((started + Duration::from_millis(100)).into_std());
+        let mut body = deadline_body(
+            AxumBody::from_stream(source).into_data_stream(),
+            deadline,
+            clock,
+        )
+        .into_stream()
+        .expect("stream");
+        let mut read = Box::pin(body.next());
+        assert!(read.as_mut().now_or_never().is_none());
+        advance(Duration::from_millis(40)).await;
+        let error = read
+            .as_mut()
+            .now_or_never()
+            .expect("original deadline wakes")
+            .expect("timeout item")
+            .expect_err("timeout");
+        assert_eq!(error.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn host_known_empty_body_is_preserved_without_reading() {
-        let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"));
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        let client = HttpClient::with_client(
+            AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+        );
         for (method, admitted) in [
             Method::GET,
             Method::HEAD,
@@ -331,6 +389,8 @@ mod tests {
 
     #[tokio::test]
     async fn zero_size_hint_and_zero_content_length_do_not_certify_empty_body() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let polls = Arc::new(AtomicUsize::new(0));
         let drops = Arc::new(AtomicUsize::new(0));
         let request = Request::builder()
@@ -343,7 +403,9 @@ mod tests {
                 release: DropSignal(Arc::clone(&drops)),
             }))
             .expect("request");
-        let core = into_core_request(request).await.expect("conversion");
+        let core = into_core_request(request, executor_handle.clone())
+            .await
+            .expect("conversion");
         assert!(core.body().is_stream());
         assert_eq!(polls.load(Ordering::SeqCst), 0);
         assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -353,6 +415,8 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_body_preserves_empty_chunks_then_data_and_source_errors() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         for source_error in [false, true] {
             let polls = Arc::new(AtomicUsize::new(0));
             let observed = Arc::clone(&polls);
@@ -378,7 +442,9 @@ mod tests {
                 .header("content-length", "0")
                 .body(AxumBody::from_stream(source))
                 .expect("request");
-            let core = into_core_request(request).await.expect("conversion");
+            let core = into_core_request(request, executor_handle.clone())
+                .await
+                .expect("conversion");
             assert!(core.body().is_stream());
             assert_eq!(polls.load(Ordering::SeqCst), 0);
             let outcome = core.into_body().into_bytes_bounded(4).await;
@@ -397,6 +463,8 @@ mod tests {
 
     #[tokio::test]
     async fn converts_request_and_records_connect_info() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let mut request = Request::builder()
             .method(Method::POST)
             .uri("/demo")
@@ -407,7 +475,7 @@ mod tests {
             .extensions_mut()
             .insert(ConnectInfo::<SocketAddr>("127.0.0.1:4000".parse().unwrap()));
 
-        let core_request = into_core_request(request)
+        let core_request = into_core_request(request, executor_handle.clone())
             .await
             .expect("request conversion");
         assert_eq!(core_request.method(), &Method::POST);
@@ -431,8 +499,12 @@ mod tests {
 
     #[tokio::test]
     async fn supplied_outbound_client_policy_is_retained_by_the_core_request() {
-        let client = HttpClient::with_client(AxumOutboundClient::try_new().expect("client"))
-            .with_proxy_marker(false);
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        let client = HttpClient::with_client(
+            AxumOutboundClient::try_new(executor_handle.clone()).expect("client"),
+        )
+        .with_proxy_marker(false);
         let request = Request::builder()
             .method(Method::GET)
             .uri("/demo")
@@ -453,13 +525,15 @@ mod tests {
 
     #[tokio::test]
     async fn missing_connect_info_is_handled_gracefully() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let request = Request::builder()
             .method(Method::GET)
             .uri("/demo")
             .body(AxumBody::empty())
             .expect("request");
 
-        let core_request = into_core_request(request)
+        let core_request = into_core_request(request, executor_handle.clone())
             .await
             .expect("request conversion");
         assert!(AxumRequestContext::get(&core_request).is_none());
@@ -489,6 +563,8 @@ mod tests {
 
     #[tokio::test]
     async fn json_content_type_stays_streaming() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let json_payload = serde_json::json!({"name": "test"}).to_string();
         let request = Request::builder()
             .method(Method::POST)
@@ -497,7 +573,7 @@ mod tests {
             .body(AxumBody::from(json_payload))
             .expect("request");
 
-        let core_request = into_core_request(request)
+        let core_request = into_core_request(request, executor_handle.clone())
             .await
             .expect("request conversion");
         assert_eq!(core_request.method(), &Method::POST);
@@ -507,6 +583,8 @@ mod tests {
 
     #[tokio::test]
     async fn non_json_content_type_streams_body() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let request = Request::builder()
             .method(Method::POST)
             .uri("/upload")
@@ -514,7 +592,7 @@ mod tests {
             .body(AxumBody::from("binary data"))
             .expect("request");
 
-        let core_request = into_core_request(request)
+        let core_request = into_core_request(request, executor_handle.clone())
             .await
             .expect("request conversion");
 
@@ -525,6 +603,7 @@ mod tests {
 #[cfg(test)]
 mod ingress_tests {
     use super::{HttpTransport, into_core_request};
+    use crate::outbound_executor::AxumOutboundExecutor;
     use axum::body::Body as AxumBody;
     use edgezero_core::http::{HeaderValue, Method, request_builder};
     use edgezero_core::ingress::{
@@ -534,6 +613,8 @@ mod ingress_tests {
 
     #[tokio::test]
     async fn ingress_retains_runtime_parts_without_trusting_headers() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let mut request = request_builder()
             .method(Method::from_bytes(b"EXAMPLE-METHOD").expect("should parse method"))
             .uri("/reserved/%2e//%2F?q=a%2Fb")
@@ -548,7 +629,7 @@ mod ingress_tests {
         request
             .headers_mut()
             .append("cookie", HeaderValue::from_static("b=2"));
-        let core = into_core_request(request)
+        let core = into_core_request(request, executor_handle.clone())
             .await
             .expect("should convert request");
         let ingress = core
@@ -578,6 +659,8 @@ mod ingress_tests {
 
     #[tokio::test]
     async fn ingress_content_length_fidelity_is_unknown_with_or_without_transport() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         for bound in [false, true] {
             for count in 0..=2 {
                 let mut request = request_builder()
@@ -593,7 +676,7 @@ mod ingress_tests {
                 if bound {
                     request.extensions_mut().insert(HttpTransport);
                 }
-                let core = into_core_request(request)
+                let core = into_core_request(request, executor_handle.clone())
                     .await
                     .expect("should convert request");
                 assert_eq!(
@@ -616,6 +699,8 @@ mod ingress_tests {
 
     #[tokio::test]
     async fn ingress_bound_does_not_change_uri_body_or_extensions() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         let path = format!("/{}", "a".repeat(MAX_TARGET_BYTES));
         let mut request = request_builder()
             .uri(&path)
@@ -623,7 +708,7 @@ mod ingress_tests {
             .body(AxumBody::from("{}"))
             .expect("should build request");
         request.extensions_mut().insert(17_u32);
-        let converted = into_core_request(request)
+        let converted = into_core_request(request, executor_handle.clone())
             .await
             .expect("should convert bounded metadata");
         assert_eq!(converted.uri().path(), path);
@@ -650,6 +735,8 @@ mod ingress_tests {
 
     #[tokio::test]
     async fn ingress_transport_origin_requires_consistent_single_authority() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
         for (uri, hosts, expected) in [
             ("/reserved", vec!["example.com"], true),
             ("http://EXAMPLE.com:80/reserved", vec!["example.com"], true),
@@ -674,7 +761,7 @@ mod ingress_tests {
                 );
             }
             request.extensions_mut().insert(HttpTransport);
-            let core = into_core_request(request)
+            let core = into_core_request(request, executor_handle.clone())
                 .await
                 .expect("should convert request");
             let ingress = core

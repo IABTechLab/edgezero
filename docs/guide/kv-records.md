@@ -226,16 +226,20 @@ store = "sessions"
 access = { mode = "trusted-network", allow_remote_http = false }
 ```
 
-The matching service must implement record protocol v2, keyset continuation and
-nullable expiry. Preparation checks that capability with a read-only request;
-old services fail rather than downgrade. All operations use the fresh v2 record
-dataset, never raw `/value`. Existing raw KV and v1 record data stay unchanged.
+Use the EdgeZero-owned store service on official stock celld. Its record API
+version 1 supplies keyset continuation, nullable expiry and the mutation ledger.
+Preparation checks capabilities and captures the store instance without a test
+write. Old or KV-only services fail rather than downgrade. Record and ordinary
+operations share the service's `rows-v1` data; no modified celld build or separate
+record dataset is needed. Each record operation carries the expected instance,
+and the service checks it before mutation.
 See [native celld stores](./native-celld-stores) for access and hosting setup.
 
 Both native record features are off by default. `aws-dynamodb` and `celld-kv`
 remain ordinary-only modes and are not automatically converted when an app
 requires records. The standalone provider features are `dynamodb-records` and
-`records-v2`; legacy celld `records` remains a separate v1 API. Settings-only,
+`records` for the stock celld service. The fork-only v1/v2 clients are not retained
+on this line. Settings-only,
 ordinary-only and WASM builds do not gain native SDK/runtime dependencies.
 
 ## Binding limits
@@ -249,7 +253,7 @@ metadata byte maximum, excluding empty/absent metadata.
 | Fastly native    | 2000 UTF-8 bytes                                                                                                               |
 | redb records     | Existing 25 MiB value ceiling                                                                                                  |
 | DynamoDB records | Configured payload budget, default 384 KiB; body plus metadata must fit together and the complete native item must fit 400 KiB |
-| celld v2         | 1024 UTF-8 bytes                                                                                                               |
+| celld service    | 1024 UTF-8 bytes                                                                                                               |
 
 Generation history survives value overwrite, expiry, deletion/recreation and
 provider reopen. It is not safe to delete allocator state while continuing to

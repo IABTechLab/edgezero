@@ -1,5 +1,5 @@
-//! Explicit v2 public-handle proof against a disposable rebuilt service.
-#![cfg(all(not(target_arch = "wasm32"), feature = "records-v2"))]
+//! Explicit public-handle proof on the owned service and official stock celld.
+#![cfg(all(not(target_arch = "wasm32"), feature = "records"))]
 
 #[cfg(test)]
 mod tests {
@@ -9,13 +9,19 @@ mod tests {
     )]
 
     use std::env;
+    use std::fmt::Write as _;
     use std::fs::{self, File};
-    use std::path::PathBuf;
+    use std::net::TcpListener as StdTcpListener;
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt as _;
+    use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use bytes::Bytes;
     use edgezero_core::key_value_store::{KvError, KvHandle};
     use edgezero_core::record_store::{
@@ -25,7 +31,12 @@ mod tests {
     use edgezero_core::time::MonotonicClock;
     use edgezero_store_celld::CelldPreparation;
     use edgezero_store_celld::settings::{CelldAccess, CelldKvSettings, CelldPreparationLimits};
+    use reqwest::header::{
+        CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, TRANSFER_ENCODING,
+    };
+    use reqwest::{Client, Method};
     use serde_json::json;
+    use sha2::Digest as _;
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
     use tokio::net::TcpListener;
@@ -44,13 +55,38 @@ mod tests {
     )]
     impl Drop for LocalService {
         fn drop(&mut self) {
+            #[cfg(unix)]
+            let _group = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{}", self.child.id())])
+                .status();
             let _killed = self.child.kill();
             let _reaped = self.child.wait();
         }
     }
 
+    fn verify_official_binary(binary: &Path) {
+        assert!(
+            binary.is_absolute() && binary.is_file(),
+            "explicit absolute celld executable required"
+        );
+        let version = Command::new(binary).arg("--version").output().unwrap();
+        assert!(version.status.success());
+        assert_eq!(
+            String::from_utf8(version.stdout).unwrap().trim(),
+            "celld 0.6.3"
+        );
+        let mut digest = String::with_capacity(64);
+        for byte in sha2::Sha256::digest(fs::read(binary).unwrap()) {
+            write!(&mut digest, "{byte:02x}").unwrap();
+        }
+        assert_eq!(
+            digest, "eb0a8158421b69d68dd5d28f2298a7d411dde498295833deeb1cc5ce53b7eb75",
+            "select the verified official release, not a modified binary"
+        );
+    }
+
     async fn service_fixture() -> (String, Option<LocalService>) {
-        if let Some(endpoint) = env::var_os("CELLD_RECORDS_V2_ENDPOINT") {
+        if let Some(endpoint) = env::var_os("EDGEZERO_CELLD_RECORDS_ENDPOINT") {
             return (
                 endpoint
                     .into_string()
@@ -58,59 +94,80 @@ mod tests {
                 None,
             );
         }
-        let binary = env::var_os("CELLD_BIN").map(PathBuf::from).expect(
-        "explicit CELLD_RECORDS_V2_ENDPOINT or rebuilt CELLD_BIN required; never a passing skip",
-    );
-        assert!(
-            binary.is_absolute() && binary.is_file(),
-            "CELLD_BIN must select an absolute executable"
-        );
-        let directory = TempDir::new().expect("disposable celld fixture");
-        let policy = directory.path().join("policy.json");
-        fs::write(&policy, serde_json::to_vec(&json!({
-        "version":1_u8,"listen":"127.0.0.1:0",
-        "stores":[{"alias":"identity","namespace":"edgezero-records-v2-interop"}],
-        "access":{"mode":"trusted-network","grants":[{"store":"identity","operations":["read","write","delete","list"]}]}
-    })).unwrap()).unwrap();
+        let binary = env::var_os("CELLD_BIN").map(PathBuf::from)
+            .expect("explicit official CELLD_BIN or EDGEZERO_CELLD_RECORDS_ENDPOINT required; no passing skip");
+        verify_official_binary(&binary);
+        let source = env::var_os("EDGEZERO_CELLD_STORE_SERVICE")
+            .map(PathBuf::from)
+            .expect("explicit EDGEZERO_CELLD_STORE_SERVICE required");
+        assert!(source.is_absolute());
+        let directory = TempDir::new().expect("disposable stock celld fixture");
+        fs::create_dir_all(directory.path().join("src")).unwrap();
+        fs::copy(
+            source.join("src/index.js"),
+            directory.path().join("src/index.js"),
+        )
+        .unwrap();
+        let policy = json!({
+            "version":1_u8,
+            "stores":[{"alias":"identity","namespace":"stock-record-interop"}],
+            "access":{"mode":"trusted-network","grants":[{"store":"identity","operations":["read","write","delete","list"]}]}
+        });
+        let configuration = json!({
+            "name":"edgezero-store","main":"src/index.js","no_bundle":true,
+            "compatibility_date":"2026-10-01",
+            "durable_objects":{"bindings":[{"name":"EDGEZERO_STORE","class_name":"EdgeZeroStore"}]},
+            "migrations":[{"tag":"v1","new_sqlite_classes":["EdgeZeroStore"]}],
+            "vars":{"EDGEZERO_STORE_POLICY":policy.to_string()}
+        });
+        fs::write(
+            directory.path().join("wrangler.json"),
+            serde_json::to_vec_pretty(&configuration).unwrap(),
+        )
+        .unwrap();
+        let reserved = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
         let log = directory.path().join("celld.log");
         let output = File::create(&log).unwrap();
-        let child = Command::new(binary)
+        let mut command = Command::new(binary);
+        command
             .current_dir(directory.path())
             .env_clear()
+            .env("PATH", env::var_os("PATH").unwrap_or_default())
+            .env("HOME", directory.path().join("home"))
             .env("TMPDIR", env::temp_dir())
-            .env("CELLD_TEST_DATA_DIR", directory.path().join("data"))
+            .env("NO_COLOR", "1")
             .args([
-                "--listen",
-                "127.0.0.1:0",
-                "--internal-listen",
-                "127.0.0.1:0",
-                "--store-api-config",
+                "dev",
+                ".",
+                "--no-watch",
+                "--logs",
+                "--port",
+                &port.to_string(),
             ])
-            .arg(policy)
             .stdout(Stdio::from(output.try_clone().unwrap()))
-            .stderr(Stdio::from(output))
-            .spawn()
-            .expect("start explicit rebuilt celld");
+            .stderr(Stdio::from(output));
+        #[cfg(unix)]
+        command.process_group(0);
         let mut service = LocalService {
-            child,
+            child: command.spawn().expect("start official celld"),
             _directory: directory,
         };
         let end = Instant::now().checked_add(Duration::from_secs(30)).unwrap();
         loop {
             let text = fs::read_to_string(&log).unwrap();
             if let Some(address) = text.lines().find_map(|line| {
-                line.split_once("celld scoped stores listening on ")
-                    .map(|(_, address)| address.trim())
+                let (_, address) = line.split_once("celld listening on ")?;
+                address.split_whitespace().next()
             }) {
+                assert_eq!(address, format!("127.0.0.1:{port}"));
                 return (format!("http://{address}"), Some(service));
             }
             if let Some(status) = service.child.try_wait().unwrap() {
-                panic!("celld startup {status}: {text}");
+                panic!("stock celld startup {status}: {text}");
             }
-            assert!(
-                Instant::now() < end,
-                "celld fixture startup deadline: {text}"
-            );
+            assert!(Instant::now() < end, "stock celld startup deadline: {text}");
             sleep(Duration::from_millis(10)).await;
         }
     }
@@ -118,7 +175,7 @@ mod tests {
     struct Layout;
     impl RecordKeyLayout for Layout {
         fn id(&self) -> &'static str {
-            "celld-v2-interop"
+            "stock-celld-record-interop"
         }
         fn version(&self) -> u32 {
             1
@@ -184,6 +241,23 @@ mod tests {
         }
     }
 
+    async fn recreate_after_delete(client: &Client, destination: &str, mut headers: HeaderMap) {
+        let mut url = Url::parse(destination).unwrap();
+        url.set_path("/v1/stores/identity/record-put");
+        headers.remove("x-edgezero-mutation-id");
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce).unwrap();
+        let recreated = client
+            .post(url)
+            .headers(headers)
+            .header("x-edgezero-mutation-id", URL_SAFE_NO_PAD.encode(nonce))
+            .json(&json!({"body":"cmVjcmVhdGVk","metadata":null,"ttl_ms":null,"mode":"overwrite"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(recreated.status(), 204);
+    }
+
     impl LoseMutationReply {
         async fn start(upstream: &str) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -192,7 +266,7 @@ mod tests {
             let mutations = Arc::new(AtomicUsize::new(0));
             let seen = Arc::clone(&mutations);
             let task = tokio::spawn(async move {
-                let client = reqwest::Client::builder().no_proxy().build().unwrap();
+                let client = Client::builder().no_proxy().build().unwrap();
                 loop {
                     let (stream, _) = listener.accept().await.unwrap();
                     let mut socket = BufReader::new(stream);
@@ -201,58 +275,78 @@ mod tests {
                         continue;
                     }
                     let mut parts = line.split_whitespace();
-                    let method =
-                        reqwest::Method::from_bytes(parts.next().unwrap().as_bytes()).unwrap();
+                    let method = Method::from_bytes(parts.next().unwrap().as_bytes()).unwrap();
                     let target = parts.next().unwrap().to_owned();
                     let mut length = 0;
+                    let mut headers = HeaderMap::new();
                     loop {
                         line.clear();
                         socket.read_line(&mut line).await.unwrap();
                         if line == "\r\n" {
                             break;
                         }
-                        if let Some((name, value)) = line.split_once(':')
-                            && name.eq_ignore_ascii_case("content-length")
-                        {
-                            length = value.trim().parse().unwrap();
+                        if let Some((name, value)) = line.split_once(':') {
+                            if name.eq_ignore_ascii_case("content-length") {
+                                length = value.trim().parse().unwrap();
+                                continue;
+                            }
+                            if !name.eq_ignore_ascii_case("host")
+                                && !name.eq_ignore_ascii_case("connection")
+                            {
+                                headers.insert(
+                                    HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                                    HeaderValue::from_str(value.trim()).unwrap(),
+                                );
+                            }
                         }
                     }
                     let mut body = vec![0; length];
                     socket.read_exact(&mut body).await.unwrap();
                     let reply = client
                         .request(method.clone(), format!("{destination}{target}"))
-                        .header("content-type", "application/json")
+                        .headers(headers.clone())
                         .body(body)
                         .send()
                         .await
                         .unwrap();
-                    if method == reqwest::Method::PUT || method == reqwest::Method::DELETE {
+                    if method == Method::POST {
                         assert_eq!(
                             reply.status(),
                             204,
-                            "upstream must acknowledge commit before dropping response"
+                            "upstream committed before losing acknowledgement"
                         );
                         seen.fetch_add(1, Ordering::SeqCst);
-                        if method == reqwest::Method::DELETE {
-                            // A replayed delete would erase this independently recreated value.
-                            let recreated = client.put(format!("{destination}{target}")).json(&json!({"body":"cmVjcmVhdGVk","metadata":null,"ttl_ms":null,"mode":"overwrite"})).send().await.unwrap();
-                            assert_eq!(recreated.status(), 204);
+                        if target
+                            .split('?')
+                            .next()
+                            .unwrap()
+                            .ends_with("/record-delete")
+                        {
+                            recreate_after_delete(
+                                &client,
+                                &format!("{destination}{target}"),
+                                headers,
+                            )
+                            .await;
                         }
                         continue;
                     }
                     let status = reply.status().as_u16();
-                    let content_type = reply.headers()["content-type"].to_str().unwrap().to_owned();
-                    let store_version = reply.headers()["x-celld-store-version"]
-                        .to_str()
-                        .unwrap()
-                        .to_owned();
-                    let record_version = reply.headers()["x-celld-record-version"]
-                        .to_str()
-                        .unwrap()
-                        .to_owned();
+                    let mut response_headers = String::new();
+                    for (name, value) in reply.headers() {
+                        if name != CONTENT_LENGTH && name != TRANSFER_ENCODING && name != CONNECTION
+                        {
+                            write!(
+                                &mut response_headers,
+                                "{name}: {}\r\n",
+                                value.to_str().unwrap()
+                            )
+                            .unwrap();
+                        }
+                    }
                     let response_body = reply.bytes().await.unwrap();
                     let head = format!(
-                        "HTTP/1.1 {status} Fixture\r\ncontent-type: {content_type}\r\nx-celld-store-version: {store_version}\r\nx-celld-record-version: {record_version}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        "HTTP/1.1 {status} Fixture\r\n{response_headers}content-length: {}\r\nconnection: close\r\n\r\n",
                         response_body.len()
                     );
                     socket.get_mut().write_all(head.as_bytes()).await.unwrap();
@@ -369,8 +463,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    #[ignore = "requires explicit rebuilt CELLD_BIN or fresh CELLD_RECORDS_V2_ENDPOINT, alias identity"]
-    async fn real_celld_records_v2_public_contract_races_and_lost_acknowledgement() {
+    #[ignore = "requires explicit official CELLD_BIN and EDGEZERO_CELLD_STORE_SERVICE, or a disposable EDGEZERO_CELLD_RECORDS_ENDPOINT with alias identity"]
+    async fn stock_celld_public_contract_races_and_lost_acknowledgement() {
         let (endpoint, _service) = service_fixture().await;
         let url = Url::parse(&endpoint).unwrap();
         assert_eq!(url.scheme(), "http");
@@ -432,7 +526,7 @@ mod tests {
         assert_eq!(
             proxy.mutations.load(Ordering::SeqCst),
             2,
-            "one original PUT and one original DELETE, no replay"
+            "one original record-put and one original record-delete, no replay"
         );
         kv.delete("uncertain/key").await.unwrap();
         maximum_length_key_pages(&kv).await;
