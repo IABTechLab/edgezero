@@ -343,6 +343,10 @@ impl ManifestLoader {
 #[derive(Debug, Deserialize, Serialize, Validate)]
 #[serde(deny_unknown_fields)]
 #[validate(schema(function = "validate_manifest_adapter_keys_case_unique"))]
+#[validate(schema(
+    function = "validate_manifest_fastly_logging",
+    skip_on_field_errors = false
+))]
 #[expect(
     clippy::partial_pub_fields,
     reason = "deserialized fields are pub for the public API; internal state is private"
@@ -1513,6 +1517,43 @@ fn validate_manifest_adapter_keys_case_unique(manifest: &Manifest) -> Result<(),
         }
     }
     Ok(())
+}
+
+fn validate_manifest_fastly_logging(manifest: &Manifest) -> Result<(), ValidationError> {
+    let effective = manifest
+        .adapter_entry("fastly")
+        .filter(|(_, adapter)| adapter.logging.is_specified())
+        .map(|(name, adapter)| (name, &adapter.logging, true))
+        .or_else(|| {
+            manifest
+                .logging
+                .adapters
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("fastly"))
+                .map(|(name, config)| (name, config, false))
+        });
+    let Some((name, config, per_adapter)) = effective else {
+        return Ok(());
+    };
+    let Some(endpoint) = config.endpoint.as_deref() else {
+        return Ok(());
+    };
+    let reason = if endpoint.is_empty() || endpoint.contains(['\n', ':']) {
+        "endpoint name is malformed"
+    } else if matches!(endpoint, "stdout" | "stderr") {
+        "endpoint name is reserved"
+    } else {
+        return Ok(());
+    };
+    let field = if per_adapter {
+        format!("adapters.{name}.logging")
+    } else {
+        format!("logging.{name}")
+    };
+    let mut error = ValidationError::new("fastly_logging_endpoint");
+    error.message =
+        Some(format!("[{field}].endpoint: invalid Fastly logging configuration; {reason}").into());
+    Err(error)
 }
 
 /// Validates a single `[stores.<kind>]` declaration against the portable
@@ -2839,6 +2880,101 @@ level = "off"
 
     // Logging configuration tests
     #[test]
+    fn fastly_logging_endpoint_rejects_invalid_effective_names_with_the_declared_field() {
+        for section in ["adapters.Fastly.logging", "logging.FASTLY"] {
+            for endpoint in ["", "ts:log", "line\nbreak", "stdout", "stderr"] {
+                let mut document = toml::Value::Table(toml::Table::new());
+                let mut current = &mut document;
+                for key in section.split('.') {
+                    current = current
+                        .as_table_mut()
+                        .expect("section")
+                        .entry(key.to_owned())
+                        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                }
+                current.as_table_mut().expect("logging section").insert(
+                    "endpoint".to_owned(),
+                    toml::Value::String(endpoint.to_owned()),
+                );
+                let source = toml::to_string(&document).expect("valid TOML");
+                let error = ManifestLoader::try_load_from_str(&source)
+                    .err()
+                    .expect("invalid effective Fastly endpoint must fail");
+                let message = error.to_string();
+                assert!(
+                    message.contains(&format!("[{section}].endpoint")),
+                    "{message}"
+                );
+                if !endpoint.is_empty() {
+                    assert!(
+                        !message.contains(endpoint),
+                        "endpoint must not be echoed: {message}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fastly_logging_endpoint_preserves_whole_section_shadowing_and_other_adapters() {
+        for override_section in [
+            "level = \"off\"",
+            "echo_stdout = false",
+            "endpoint = \"valid_logs\"",
+        ] {
+            let source = format!(
+                "[logging.FASTLY]\nendpoint = \"shadowed:invalid\"\n[adapters.Fastly.logging]\n{override_section}\n"
+            );
+            ManifestLoader::try_load_from_str(&source)
+                .expect("specified section shadows global logging");
+        }
+        for section in ["", "[adapters.Fastly.logging]\n"] {
+            let source = format!("[logging.FASTLY]\nendpoint = \"bad:inherited\"\n{section}");
+            let error = ManifestLoader::try_load_from_str(&source)
+                .err()
+                .expect("global endpoint is effective");
+            assert!(error.to_string().contains("[logging.FASTLY].endpoint"));
+        }
+        for endpoint in ["valid_logs", "STDOUT", "has space", "carriage\rreturn"] {
+            let document = toml::toml! { [logging.fastly] endpoint = endpoint };
+            ManifestLoader::try_load_from_str(&toml::to_string(&document).unwrap())
+                .expect("no speculative name restrictions");
+        }
+        ManifestLoader::try_load_from_str(
+            "[logging.axum]\nendpoint = \"https://logs.example.com\"\n",
+        )
+        .expect("Fastly rules must not affect other adapters");
+    }
+
+    #[test]
+    fn fastly_logging_endpoint_accumulates_independent_manifest_errors() {
+        for other in ["[app]\nname = \"\"\n", "[adapters.Axum]\n[adapters.axum]\n"] {
+            let source = format!("[logging.fastly]\nendpoint = \"bad:logs\"\n{other}");
+            let manifest: Manifest = toml::from_str(&source).expect("valid TOML");
+            let errors = manifest.validate().expect_err("both validations must run");
+            let message = errors.to_string();
+            assert!(message.contains("[logging.fastly].endpoint"), "{message}");
+            if other.starts_with("[app]") {
+                assert!(
+                    matches!(errors.errors().get("app"),
+                        Some(validator::ValidationErrorsKind::Struct(app))
+                            if app.field_errors().contains_key("name")),
+                    "{errors:?}"
+                );
+            } else {
+                assert!(
+                    errors.field_errors().get("__all__").is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|error| error.code == "adapters_case_duplicate")
+                    }),
+                    "{errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn logging_or_default_returns_default_when_missing() {
         let manifest = r#"
 [app]
@@ -2903,16 +3039,13 @@ endpoint = "fastly_logs"
         let manifest = r#"
 [adapters.fastly.logging]
 level = "error"
-endpoint = "https://fastly-logs.example.com"
+endpoint = "fastly_logs"
 "#;
         let loader = ManifestLoader::load_from_str(manifest);
         let mfest = loader.manifest();
         let logging = mfest.logging_for("fastly").unwrap();
         assert_eq!(logging.level, LogLevel::Error);
-        assert_eq!(
-            logging.endpoint.as_deref(),
-            Some("https://fastly-logs.example.com")
-        );
+        assert_eq!(logging.endpoint.as_deref(), Some("fastly_logs"));
     }
 
     #[test]

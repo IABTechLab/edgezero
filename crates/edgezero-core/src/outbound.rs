@@ -20,6 +20,7 @@ mod task;
 pub mod test_support;
 mod upload;
 
+use std::cell::RefCell;
 use std::net::IpAddr;
 use std::num::NonZeroU64;
 use std::rc::Rc;
@@ -159,8 +160,7 @@ pub struct OutboundResponseContext {
     body_policy: ResponseBodyPolicy,
     budget: DispatchBudget,
     entered_at: MonotonicInstant,
-    max_response_header_bytes: Option<u64>,
-    max_response_header_count: Option<u64>,
+    header_limiter: ResponseHeaderLimiter,
     mode: OutboundSendMode,
     #[cfg(feature = "test-utils")]
     native_body_recorder: Option<test_support::NativeBodyRecorder>,
@@ -531,11 +531,18 @@ struct RequestHeadNormalization {
     invalidates_forwarded_length: bool,
 }
 
-pub struct ResponseHeaderLimiter {
+#[derive(Debug)]
+struct ResponseHeaderCounter {
     max_bytes: Option<u64>,
     max_count: Option<u64>,
     observed_bytes: u64,
     observed_count: u64,
+}
+
+/// Local handles retain one cumulative response-field budget, never a reset or per-section allowance.
+#[derive(Clone, Debug)]
+pub struct ResponseHeaderLimiter {
+    counter: Rc<RefCell<ResponseHeaderCounter>>,
 }
 
 impl ResponseHeaderLimiter {
@@ -543,10 +550,12 @@ impl ResponseHeaderLimiter {
     #[inline]
     pub fn new(max_bytes: Option<u64>, max_count: Option<u64>) -> Self {
         Self {
-            max_bytes,
-            max_count,
-            observed_bytes: 0,
-            observed_count: 0,
+            counter: Rc::new(RefCell::new(ResponseHeaderCounter {
+                max_bytes,
+                max_count,
+                observed_bytes: 0,
+                observed_count: 0,
+            })),
         }
     }
 
@@ -564,24 +573,34 @@ impl ResponseHeaderLimiter {
     }
 
     fn observe_field(&mut self, name: &HeaderName, value: &HeaderValue) -> Result<(), EdgeError> {
-        let next_count = self
+        self.observe_raw_field(name.as_str().as_bytes(), value.as_bytes())
+    }
+
+    /// Charges an adapter-visible raw field without constructing another header map.
+    ///
+    /// # Errors
+    /// Returns the cumulative typed count/byte overflow before accepting the field.
+    #[inline]
+    pub fn observe_raw_field(&mut self, name: &[u8], value: &[u8]) -> Result<(), EdgeError> {
+        let mut counter = self.counter.borrow_mut();
+        let next_count = counter
             .observed_count
             .checked_add(1)
             .ok_or_else(|| response_limit_error(ResponseLimitReason::HeaderCount))?;
-        self.observed_count = next_count;
-        if self.max_count.is_some_and(|max| next_count > max) {
+        counter.observed_count = next_count;
+        if counter.max_count.is_some_and(|max| next_count > max) {
             return Err(response_limit_error(ResponseLimitReason::HeaderCount));
         }
 
-        let name_bytes = u64::try_from(name.as_str().len()).unwrap_or(u64::MAX);
-        let value_bytes = u64::try_from(value.as_bytes().len()).unwrap_or(u64::MAX);
-        let next_bytes = self
+        let name_bytes = u64::try_from(name.len()).unwrap_or(u64::MAX);
+        let value_bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
+        let next_bytes = counter
             .observed_bytes
             .checked_add(name_bytes)
             .and_then(|total| total.checked_add(value_bytes))
             .ok_or_else(|| response_limit_error(ResponseLimitReason::HeaderBytes))?;
-        self.observed_bytes = next_bytes;
-        if self.max_bytes.is_some_and(|max| next_bytes > max) {
+        counter.observed_bytes = next_bytes;
+        if counter.max_bytes.is_some_and(|max| next_bytes > max) {
             return Err(response_limit_error(ResponseLimitReason::HeaderBytes));
         }
         Ok(())

@@ -1119,11 +1119,17 @@ pub fn rechunk_stream(stream: BodyStream, max: Option<NonZeroU64>) -> BodyStream
 /// Cumulative adapter-visible upstream field-section accounting retained from the first
 /// exposed informational block through final headers and exposed trailers, before EdgeZero
 /// normalization, plus synthetic fields inserted by EdgeZero after normalization.
-pub struct ResponseHeaderLimiter { /* private checked-u64 counters and limits */ }
+#[derive(Clone)]
+pub struct ResponseHeaderLimiter { /* shared private checked-u64 counters and limits */ }
 impl ResponseHeaderLimiter {
     pub fn new(max_bytes: Option<u64>, max_count: Option<u64>) -> Self;
     pub fn observe(&mut self, headers: &HeaderMap) -> Result<(), EdgeError>;
+    pub fn observe_raw_field(&mut self, name: &[u8], value: &[u8]) -> Result<(), EdgeError>;
 }
+
+// `OutboundResponseContext::header_limiter()` clones this response's captured budget.
+// Adapters retain that handle for exposed trailer sections; cloning never resets totals.
+// Raw-field charging avoids constructing a second HeaderMap for SDK-owned trailer fields.
 
 /// Disassembled form of an `OutboundRequest`. Adapter-facing only.
 #[non_exhaustive]
@@ -3348,6 +3354,10 @@ and host copies can all exist outside it. When an adapter exposes informational 
 trailers to guest code, it applies the configured header count/byte totals cumulatively
 across every exposed field section and final completion; it never claims that this prevents
 an earlier host allocation. When those fields are not exposed, their allocation is opaque.
+The counter is one shared guest allocation per prepared response context. Spin charges exposed
+trailers against that same counter before acknowledging clean response completion. Overflow
+returns the typed count/byte error: buffered calls fail during finalization, while streamed
+calls emit a terminal body error. Trailer fields are not added to the normalized final head.
 The `outbound-complete-resource-accounting` capability is therefore `Unsupported` for every
 current adapter. This is a deliberate fail-closed statement, not a reason to weaken the
 narrower limits below.

@@ -1,0 +1,2 @@
+[logging.fastly]
+echo_stdout = "yes"

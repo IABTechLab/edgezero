@@ -65,10 +65,10 @@ pub async fn run(case: &str) -> anyhow::Result<Value> {
     let budget = dispatch_budget(&request, clock.now(), None)?;
     let time = OutboundTime::new(clock, |_, _| Box::pin(async { Ok(()) }));
     let (writer, reader, completion) = BodyWriter::new();
-    let holds_completion = matches!(case.as_str(), "short" | "long");
+    let holds_completion = case != "closed";
     // This runtime forbids intra-component transfer of resource-bearing future
-    // payloads. Keep this reader unpolled for the local-failure proof, and close
-    // it up front for tests that intentionally publish a typed completion error.
+    // payloads. Every local failure must return while this reader remains live
+    // and unpolled, without waiting for the host to acknowledge its notification.
     let held_completion = if holds_completion {
         Some(completion)
     } else {
