@@ -389,6 +389,9 @@ where
     let addr = resolution.addr;
     // Validate before binding so a partial JA4 config fails without a listener.
     let _validated = TrustedJa4Header::from_env(&env)?;
+    let stores = A::stores();
+    let app = A::build_app();
+    let router = app.router().clone();
 
     log::info!("[edgezero] starting axum server on http://{addr}");
 
@@ -406,21 +409,19 @@ where
         let listener = TokioTcpListener::from_std(std_listener)
             .context("failed to adopt std listener into tokio")?;
 
-        serve_app::<A>(&env, listener, true).await
+        serve_app(router, stores, &env, listener, true).await
     })
 }
 
-/// Serve `A` on `listener` with stores and the trusted JA4 header read from `env`.
-async fn serve_app<A>(
+/// Serve `router` on `listener` with stores and the trusted JA4 header read from `env`.
+async fn serve_app(
+    router: RouterService,
+    stores: StoresMetadata,
     env: &EnvConfig,
     listener: TokioTcpListener,
     enable_ctrl_c: bool,
-) -> anyhow::Result<()>
-where
-    A: Hooks,
-{
+) -> anyhow::Result<()> {
     let trusted_ja4_header = TrustedJa4Header::from_env(env)?;
-    let stores = A::stores();
     let kv_registry = build_kv_registry(stores.kv, env, kv_init_requirement(stores))?;
     let config_registry = build_config_registry(stores.config, env);
     let secret_registry = build_secret_registry(stores.secrets, env);
@@ -430,7 +431,6 @@ where
         secret_registry,
         ..Stores::default()
     };
-    let router = A::build_app().router().clone();
     serve_with_stores(
         router,
         listener,
@@ -1092,26 +1092,16 @@ mod integration_tests {
         use edgezero_core::ja4::{CapturedJa4, Ja4Source};
         use tokio::time::timeout;
 
-        struct Ja4App;
-
-        #[expect(
-            clippy::missing_trait_methods,
-            reason = "test stub — only `routes` is overridden; every other Hooks method uses its trait default"
-        )]
-        impl Hooks for Ja4App {
-            fn routes() -> RouterService {
-                async fn ja4_state(ctx: RequestContext) -> Result<&'static str, EdgeError> {
-                    Ok(match ctx.ja4() {
-                        Some(CapturedJa4::Captured {
-                            source: Ja4Source::TrustedProxyHeader,
-                            ..
-                        }) => "captured",
-                        _ => "unexpected",
-                    })
-                }
-                RouterService::builder().get("/ja4", ja4_state).build()
-            }
+        async fn ja4_state(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+            Ok(match ctx.ja4() {
+                Some(CapturedJa4::Captured {
+                    source: Ja4Source::TrustedProxyHeader,
+                    ..
+                }) => "captured",
+                _ => "unexpected",
+            })
         }
+        let router = || RouterService::builder().get("/ja4", ja4_state).build();
 
         let header = ("EDGEZERO__ADAPTER__JA4_HEADER", "x-ja4");
         let proxies = ("EDGEZERO__ADAPTER__JA4_TRUSTED_PROXY_CIDRS", "127.0.0.0/8");
@@ -1123,7 +1113,13 @@ mod integration_tests {
                 .expect("bind test server");
             let result = timeout(
                 Duration::from_secs(5),
-                serve_app::<Ja4App>(&EnvConfig::from_vars([partial]), listener, false),
+                serve_app(
+                    router(),
+                    StoresMetadata::default(),
+                    &EnvConfig::from_vars([partial]),
+                    listener,
+                    false,
+                ),
             )
             .await
             .expect("partial JA4 env should fail startup, not serve");
@@ -1136,7 +1132,8 @@ mod integration_tests {
         let addr = listener.local_addr().expect("local addr");
         let env = EnvConfig::from_vars([header, proxies]);
         let handle = tokio::spawn(async move {
-            let _result = serve_app::<Ja4App>(&env, listener, false).await;
+            let _result =
+                serve_app(router(), StoresMetadata::default(), &env, listener, false).await;
         });
         let client = reqwest::Client::new();
         let url = format!("http://{addr}/ja4");
