@@ -682,7 +682,7 @@ fn validate_pump_control(event: &Value) -> Result<()> {
             && result["source_steps"] == polls
             && result["source_drops"] == 1
             && result["complete"] == complete
-            && result["held_completion_until_failure"] == matches!(case, "short" | "long")
+            && result["held_completion_until_failure"] == (case != "closed")
             && result["provider_detail"] == false
             && result["qualification"] == false,
         "live upload pump lost incremental delivery, failure precedence or exactly-once release",
@@ -760,7 +760,7 @@ pub(super) mod tests {
             ] {
                 events.push(json!({"event":"forwarded-upload-pump","case":case,"adapter":"spin","status":"pass","qualification":false,
                     "result":{"case":case,"status":status,"prefix":prefix,"source_steps":polls,"source_drops":1,"complete":complete,
-                        "held_completion_until_failure":matches!(case,"short"|"long"),"provider_detail":false,"qualification":false}}));
+                        "held_completion_until_failure":(case != "closed"),"provider_detail":false,"qualification":false}}));
             }
         }
         events

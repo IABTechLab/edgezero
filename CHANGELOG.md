@@ -13,6 +13,20 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Preserve Fastly head failures and their original observation instant when another driver
+  advances the shared family past that exchange's deadline. Keep timer-first arbitration for
+  unfinished work and reject genuinely late results.
+- Share one response-field counter across normalized final headers, the synthetic proxy
+  marker and SDK-exposed Spin trailers. Buffered overflow fails before returning a response;
+  streamed overflow is a terminal body error, without acknowledging successful completion.
+- Return Spin upload source/cap failures immediately, dropping the request writers with their
+  failure defaults instead of awaiting a peer's completion acknowledgment. Successful uploads
+  still follow the existing two-way completion protocol.
+- Anchor Axum inbound and response-egress native timers before sampling the paired clock,
+  including empty-stream validation. Clock sampling cannot extend the absolute native target.
+- Retain authoritative framework `Allow` and config `Retry-After` headers through final egress
+  normalization, even when custom renderers nominate them as hop-by-hop. Invalid framing is
+  still rejected before those fields are restored.
 - Reject invalid effective Fastly logging endpoint names during manifest loading and
   `app!` expansion, with field-specific, value-free diagnostics. Preserve whole-section
   logging overrides and other adapters' endpoint formats.

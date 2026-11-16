@@ -771,7 +771,53 @@ Files: `crates/edgezero-adapter-fastly/src/lifecycle.rs`, existing
       Reviewer acceptance, issue closure on merge, hosted qualification and merge
       approval remain separate.
 
-### Executed Local Results
+## Six-Thread Follow-Up (2026-11-15)
+
+The requester approved this scoped repair in the conversation. Keep the original outbound
+contracts and actual Fastly SDK readback assertions; do not implement issue #504, introduce
+compatibility APIs, promote capabilities, deploy, merge or resolve reviewer-owned threads.
+Three read-only investigations covered core/Axum, Spin and Fastly; minimal proposals were
+compared before central implementation.
+
+- [x] Reproduce Axum clock-sampling deadline extension with paused native time. Anchor
+      inbound, connection-egress and empty-stream timers before paired-clock sampling.
+- [x] Reproduce Spin source/cap failure waiting on a live, unpolled request completion peer
+      in the existing async component. Return the original failure by dropping failed writers;
+      retain successful two-way completion and early-response ownership rules.
+- [x] Restore required framework Allow/config Retry-After fields after successful final
+      normalization. Exercise real 405 fallback draining and config 503 rendering, plus malformed
+      Connection/length/trailer negative controls that must still fail.
+- [x] Reproduce an independently driven Fastly head failing at 5 ms before a sibling advances
+      shared time to 150 ms. Retain one owned failure and its observation instant per exchange;
+      consume it once through the existing deadline arbiter and use its instant for batch/begin
+      receipt timing. Do not make successful heads terminal or accept late results.
+- [x] Prove the pinned Spin host exposes duplicate nonempty trailers before repairing caps.
+      Share the final-head/marker counter with exposed trailer fields and reject before clean
+      completion acknowledgment. Add exact-cap, first-excess and persisted-evidence controls.
+      Review/update only the wire runner's executable-owner binding for the added five-case
+      cohort; preserve all existing selectors, provider ownership and prior inventories.
+- [x] Reproduce timeout getter failure on stock Viceroy and success with the already tracked
+      repair. Preserve SDK assertions and document the explicit repaired-runtime prerequisite;
+      do not silently alter the installed pin or claim hosted parity.
+- [x] Run the focused regressions, complete prescribed suite, adapter/fixture/demo matrices,
+      strict Clippy and documentation checks on the final source tree. Retain every failed run.
+- [ ] Commit/push the verified changes, reply separately in all six original threads with
+      actual fixing SHA/evidence, and request re-review. Reviewer acceptance and hosted evidence
+      remain separate from implementation.
+
+| Original thread | Planned disposition |
+| --- | --- |
+| 4580379395 | Disagree with removing SDK readback. Stock 0.21.0 lacks hostcalls; the explicitly selected tracked repair passes the identical guest assertions. Clarify prerequisite and preserve both results. |
+| 4580597424 | Fix absolute native deadline anchoring; pending-source and early-wake controls retain cleanup assertions. |
+| 4580597430 | Fix local upload failure rendezvous; verify real async peers held open until the original source/cap failure returns. |
+| 4580597433 | Fix required wire headers through final normalization without hiding invalid framing. |
+| 4580597437 | Fix original terminal head error/timestamp across independent family drivers, preserving timeout precedence for unfinished/late work. |
+| 4580597442 | Fix one cumulative trailer/head budget after proving the pinned host exposes trailers; no claim about earlier provider allocation. |
+
+This snapshot precedes publication. The fixing commit, publication readback and final
+per-thread dispositions are recorded in the original threads and PR #275's current checkpoint.
+
+### Earlier Logging Repair Results (Historical)
 
 The core and macro rejection regressions failed before validation was added. The
 actual fresh-unit compiler probe also failed because the invalid endpoint compiled;
@@ -813,3 +859,49 @@ scaffold metadata and the shared pre-callback rejection gate. Outbound APIs, bod
 suppression, limits, deadlines, dependency pins, capabilities and hosted/manual
 qualification gates remain unchanged. The separate assembly blocker and independent
 current-head acceptance still prevent a merge-ready claim.
+
+### Six-Thread Repair Results
+
+The final repair tree passes `RUST_TEST_THREADS=2 bash scripts/run_tests.sh < /dev/null`
+with exit 0: 2,746 workspace tests across 33 binaries, zero failures and two ignored;
+672 standalone harness tests, zero failures and four opt-in ignored. All four runtime
+CI suites, the fresh generated workspace, demo tests and three demo WASM checks pass.
+All 36 additional format/lint/build/docs commands exit 0, including strict workspace
+Clippy, CLI-only Fastly compilation, every provider/fixture WASM selection and the docs
+format/lint/build gates. The diff remained unchanged throughout this run.
+
+The three paused-time Axum regressions fail with the former anchoring and pass with
+the earlier native anchor. The independent public TCP probe's delayed sample 3 changes
+from 170.618 ms to 102.035 ms for the original 100 ms budget; its ten repaired observations
+range from 101.072 to 102.773 ms. These observations do not establish a scheduler bound.
+The renderer nomination regressions also fail before the marker repair; successful final
+normalization now retains canonical headers while malformed framing still fails first.
+
+The live Spin upload control fails with the former awaited failure publication and passes
+when source/cap errors drop the writers while completion readers stay open. The pinned host
+also exposes two real trailer fields totaling 24 name/value bytes. The repaired framework
+accepts cumulative count 4 / bytes 73 exactly, rejects count cap 3 during buffered send and
+byte cap 72 during streamed collection, and releases the source in every case. Core tests
+add filtered-head and synthetic-marker charges to that same budget. The persisted validator
+rejects missing/duplicate/altered trailer evidence and a wholly omitted companion cohort.
+
+The independent Fastly drivers establish A's actual error observation at 5 ms before B
+advances shared time to 150 ms, retaining A's original typed error and 5 ms elapsed value
+through late collection. Disabling capture is a failing negative control. The production
+deadline arbiter separately preserves a consumed receipt and still rejects unfinished success
+at deadline equality. No successful buffered head becomes terminal early.
+
+The unchanged actual SDK getter test aborts with exit 134 under stock Viceroy 0.21.0 and
+passes with exit 0 under the explicitly selected tracked repair. The shared version text
+is not binary identity; the repair implements the missing getters but does not enforce
+network connect timeouts. Compile-only mistakes, an invalid synchronous WASI test placement,
+an omitted direct-test runner, and an incorrect test expectation after a transferred batch
+receipt are retained as failed/non-credit attempts, not weakened contracts or passing evidence.
+
+Local CI captures under the harness are `18e8655911411010-e7a-0` (Axum),
+`18e865845ede0258-3e59-0` (Fastly), `18e865b5de48c2b8-68ec-0` (Cloudflare), and
+`18e865c63e8bd4c0-75dd-0` (Spin). They are functional repair-tree evidence, not frozen or
+hosted qualification. The separate Fastly assembly command still exits 1 with seven
+`missing launch identity on required prescribed response` failures, retained in capture
+`18e864212f89b920-54cb-0`. Their origin is not established by a base/head comparison here.
+No assembly gate, issue #504 behavior, provider capability or hosted/manual checkbox is changed.

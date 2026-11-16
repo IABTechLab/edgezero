@@ -31,6 +31,12 @@ leg; this consolidation does not silently activate or qualify it in CI. Fastly c
 progress must retain its existing unqualified exit and exact 12/23-probe inventories.
 Neither passing a local runtime suite nor green CI establishes hosted qualification.
 
+Fastly CI selects the tracked [Viceroy repair](../../patches/viceroy/README.md) explicitly
+through `VICEROY_BIN` and the WASIp1 Cargo runner. It requires the repair's actual SDK timeout
+setter/getter readback as well as bounded body readiness; stock Viceroy 0.21.0 has the same
+version text but lacks those hostcalls. Keep the SDK assertions and verify the selected binary,
+rather than substituting helper-setting readback or treating stock-runtime failure as a pass.
+
 Fastly's existing wire and lifetime commands execute the single-request qualification binary,
 including its shared progress controllers. The [qualification runbook](acceptance/ts-outbound-qualification-runbook.md)
 documents embedded origin bounds, hosted profiles and direct SDK-only controls. Local profile
@@ -46,6 +52,11 @@ fields, native SDK bodyless/205 disposal, and eight actual HTTP representation c
 existing 68 redirect exchanges and 26 independent-cap cases remain separate inventories. One
 CI invocation checks every required proof in its owning phase; this adds no header-fidelity or
 hosted qualification claim.
+
+Five additional Spin trailer exchanges establish native field exposure, exact cumulative
+count/byte boundaries and first-excess rejection in buffered/streamed modes. Their persisted
+reports retain request identities, raw HTTP observations and source release. These are local
+functional evidence, not a provider-allocation bound or hosted qualification.
 
 Mixed batch recovery runs six shared scenarios on every adapter: check/next followed by
 collection, or fresh collection, each ending in completion, cutoff or an injected typed
