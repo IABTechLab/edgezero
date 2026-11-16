@@ -15,7 +15,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 - Retain Fastly body failures as well as head failures at their original observation time,
   even when another producer advances their shared clock before collection. Later timer
-  observations cannot replace an already-terminal typed error.
+  observations cannot replace an already-terminal typed error. Replace the Fastly-private
+  receipt with core `OutboundExchangeFailure`, lazily shared through
+  `OutboundResponseContext::exchange_failure()` for plain Send, Begin and batches. Preserve
+  scope/clock checks, original-chain deadlines, timeout equality and provider diagnostics.
 - Add `OutboundHead::with_body_checkpoint` for adapters requiring real host-event fairness
   in the shared finalizer. Cloudflare checkpoints decoded output every 64 items and all
   body-terminal/cap decisions under the original timer and clock history, without a second

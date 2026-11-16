@@ -995,3 +995,27 @@ finalizer path. Streamed handoff transfers the factory lazily; discarded heads n
 Supported unwind notification, Fastly retained body failures and persisted evidence replay are
 the other three repairs. No compatibility wrappers, provider capability promotions, deployment,
 hosted qualification, reviewer acceptance or merge exception are authorized by this approval.
+
+AG subsequently answered "Approve shared core receipt" to complete the same Fastly repair
+for plain Send, not only Begin/Batch. The approved additive implementer API is:
+
+```rust,ignore
+#[derive(Clone, Default)]
+pub struct OutboundExchangeFailure { /* private first-observation state */ }
+impl OutboundExchangeFailure {
+    pub fn observed_at(&self) -> Option<MonotonicInstant>;
+    pub fn record(&self, at: MonotonicInstant, error: EdgeError);
+    pub fn take(&self) -> Option<EdgeError>;
+}
+impl OutboundResponseContext {
+    pub fn exchange_failure(&self) -> OutboundExchangeFailure;
+}
+```
+
+One lazy context-owned receipt replaces the adapter-private receipt. First observation wins;
+consumption preserves its timestamp. Core checks it at finalizer entry, before timer/source
+polling and after source polling, under the same scope and monotonic clock checks. Only errors
+strictly before the effective deadline retain their original outcome; equality/later selects
+the governing timeout with provider detail. Other adapters do not allocate a receipt unless
+they request it. This approval changes no transport, compatibility API, resource limit,
+deadline, deployment or qualification gate.

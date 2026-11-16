@@ -102,6 +102,19 @@ impl OutboundHttpClient for Capture {
     }
 }
 
+#[cfg(feature = "fastly")]
+pub(super) fn scripted(
+    time: OutboundTime,
+    dispatch: fn(OutboundDispatchRequest) -> OutboundFuture<OutboundHead>,
+) -> HttpClient {
+    let mut capture = Capture::new(time, CaptureMode::Dispatch);
+    capture.script = Some(HeadScript {
+        dispatch: Box::new(dispatch),
+        validate: super::validate_supported_options,
+    });
+    HttpClient::with_client(capture)
+}
+
 #[cfg(any(feature = "fastly", feature = "test-utils"))]
 pub(super) fn dispatch(request: OutboundRequest, time: OutboundTime) -> OutboundDispatchRequest {
     let mut future =

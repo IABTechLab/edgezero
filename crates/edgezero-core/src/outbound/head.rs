@@ -12,10 +12,10 @@ use futures_util::stream::{empty, once};
 use futures_util::{Stream, StreamExt as _};
 
 use super::{
-    ContentTypeProvenance, OutboundExchangeOwner, OutboundFuture, OutboundHead,
-    OutboundHeaderFidelity, OutboundHeaderInput, OutboundLocationEvidence, OutboundProxyMarker,
-    OutboundResponse, OutboundResponseContext, OutboundScope, OutboundScopeKind,
-    OutboundScopeOwner, OutboundSendMode, OutboundTime, ResponseBodyDisposition,
+    ContentTypeProvenance, OutboundExchangeFailure, OutboundExchangeOwner, OutboundFuture,
+    OutboundHead, OutboundHeaderFidelity, OutboundHeaderInput, OutboundLocationEvidence,
+    OutboundProxyMarker, OutboundResponse, OutboundResponseContext, OutboundScope,
+    OutboundScopeKind, OutboundScopeOwner, OutboundSendMode, OutboundTime, ResponseBodyDisposition,
     ResponseBodyPolicy, ResponseHeadNormalization, ResponseHeaderLimiter, ResponseMode,
     apply_response_body_policy, collect_response_stream_inner, insert_proxy_header,
     normalize_response_headers,
@@ -65,6 +65,7 @@ struct OwnedPayload {
     checkpoint: Option<BodyCheckpoint>,
     deadline: Deadline,
     entered_at: MonotonicInstant,
+    exchange_failure: Option<OutboundExchangeFailure>,
     owner: Option<OutboundExchangeOwner>,
     previous: MonotonicInstant,
     scope: OutboundScope,
@@ -90,6 +91,19 @@ impl OutboundResponseContext {
     #[inline]
     pub fn entered_at(&self) -> MonotonicInstant {
         self.entered_at
+    }
+
+    /// Shares the first provider-observed failure with every finalizer for this exchange.
+    ///
+    /// Initialized only when requested by a provider; adapters that do not retain observations
+    /// allocate no receipt. An early failure wins over a later collection-time expiry, but a
+    /// failure observed at/past the effective deadline remains a typed timeout.
+    #[must_use]
+    #[inline]
+    pub fn exchange_failure(&self) -> OutboundExchangeFailure {
+        self.exchange_failure
+            .get_or_init(OutboundExchangeFailure::default)
+            .clone()
     }
 
     /// Shares the captured field budget with adapter-visible informational or trailer sections.
@@ -297,11 +311,8 @@ impl OutboundHead {
                     ..
                 } = self;
                 let clock = context.clock().clone();
-                let (deadline, cause) = effective_deadline(&context);
                 let mut previous = observed_at;
-                context.scope.check()?;
-                checked_live(&clock, &mut previous, deadline, cause)?;
-                context.scope.check()?;
+                check_context_live(&context, &mut previous)?;
                 let mode = context.body_policy.response_mode;
                 let body = match normalization.body_disposition {
                     ResponseBodyDisposition::FramingBodyless
@@ -365,9 +376,7 @@ impl OutboundHead {
                         }
                     }
                 };
-                context.scope.check()?;
-                checked_live(&clock, &mut previous, deadline, cause)?;
-                context.scope.check()?;
+                check_context_live(&context, &mut previous)?;
                 Ok(OutboundResponse::new(
                     context.request_method,
                     status,
@@ -542,7 +551,12 @@ impl OwnedPayload {
                     "outbound policy failure lost its terminal error"
                 )))
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                drop(owner);
+                let mut observed = previous;
+                check_context_live(context, &mut observed)?;
+                Err(error)
+            }
         }
     }
 
@@ -563,6 +577,7 @@ impl OwnedPayload {
             body_progress: false,
             checkpoint,
             entered_at: context.entered_at,
+            exchange_failure: context.exchange_failure.get().cloned(),
             owner: sole_owner,
             source: Some(shaped_source),
             timer: None,
@@ -581,6 +596,14 @@ impl OwnedPayload {
         self.scope.check()?;
         checked_sample(time.clock(), &mut self.previous)?;
         self.scope.check()?;
+        if let Some(error) = retained_failure(
+            self.exchange_failure.as_ref(),
+            self.previous,
+            self.deadline,
+            self.cause,
+        ) {
+            return Poll::Ready(Some(Err(error)));
+        }
         let timer = self
             .timer
             .get_or_insert_with(|| time.wait_until(self.deadline));
@@ -599,26 +622,41 @@ impl OwnedPayload {
         };
         let next = source.as_mut().poll_next(cx);
         self.scope.check()?;
-        checked_live(time.clock(), &mut self.previous, self.deadline, self.cause).map_err(
-            |mut selected| {
-                if let EdgeError::GatewayTimeout {
-                    provider_detail, ..
-                } = &mut selected
-                {
-                    *provider_detail = self
-                        .checkpoint
-                        .as_ref()
-                        .and_then(BodyCheckpoint::detail)
-                        .or_else(|| match &next {
-                            Poll::Ready(Some(Err(error))) => {
-                                error.provider_failure_detail().copied()
-                            }
-                            Poll::Ready(None | Some(Ok(_))) | Poll::Pending => None,
-                        });
-                }
-                selected
-            },
-        )?;
+        checked_sample(time.clock(), &mut self.previous)?;
+        self.scope.check()?;
+        if let Some(error) = retained_failure(
+            self.exchange_failure.as_ref(),
+            self.previous,
+            self.deadline,
+            self.cause,
+        ) {
+            return Poll::Ready(Some(Err(error)));
+        }
+        if matches!(&next, Poll::Ready(Some(Err(_))))
+            && self
+                .exchange_failure
+                .as_ref()
+                .and_then(OutboundExchangeFailure::observed_at)
+                .is_some_and(|at| !self.deadline.is_expired_at(at))
+        {
+            return next;
+        }
+        live_at(self.previous, self.deadline, self.cause).map_err(|mut selected| {
+            if let EdgeError::GatewayTimeout {
+                provider_detail, ..
+            } = &mut selected
+            {
+                *provider_detail = self
+                    .checkpoint
+                    .as_ref()
+                    .and_then(BodyCheckpoint::detail)
+                    .or_else(|| match &next {
+                        Poll::Ready(Some(Err(error))) => error.provider_failure_detail().copied(),
+                        Poll::Ready(None | Some(Ok(_))) | Poll::Pending => None,
+                    });
+            }
+            selected
+        })?;
         self.scope.check()?;
         next
     }
@@ -637,6 +675,7 @@ impl OwnedPayload {
             self.timer.take(),
             self.time.take(),
             self.checkpoint.take(),
+            self.exchange_failure.take(),
         );
         drop(resources);
     }
@@ -692,11 +731,57 @@ pub(super) fn checked_live(
     cause: BudgetSource,
 ) -> Result<(), EdgeError> {
     let now = checked_sample(clock, previous)?;
+    live_at(now, deadline, cause)
+}
+
+fn check_context_live(
+    context: &OutboundResponseContext,
+    previous: &mut MonotonicInstant,
+) -> Result<(), EdgeError> {
+    let (deadline, cause) = effective_deadline(context);
+    context.scope.check()?;
+    let now = checked_sample(context.clock(), previous)?;
+    context.scope.check()?;
+    if let Some(error) = retained_failure(context.exchange_failure.get(), now, deadline, cause) {
+        return Err(error);
+    }
+    live_at(now, deadline, cause)
+}
+
+fn live_at(
+    now: MonotonicInstant,
+    deadline: Deadline,
+    cause: BudgetSource,
+) -> Result<(), EdgeError> {
     if deadline.is_expired_at(now) {
         Err(timeout_error(cause))
     } else {
         Ok(())
     }
+}
+
+fn retained_failure(
+    receipt: Option<&OutboundExchangeFailure>,
+    now: MonotonicInstant,
+    deadline: Deadline,
+    cause: BudgetSource,
+) -> Option<EdgeError> {
+    let failure = receipt?;
+    let observed_at = failure.observed_at()?;
+    if observed_at > now {
+        return Some(EdgeError::internal(anyhow::anyhow!(
+            "outbound failure observation exceeds current clock"
+        )));
+    }
+    let error = failure.take()?;
+    Some(if deadline.is_expired_at(observed_at) {
+        with_timeout_detail(
+            timeout_error(cause),
+            error.provider_failure_detail().copied(),
+        )
+    } else {
+        error
+    })
 }
 
 pub(super) fn checked_sample(
@@ -813,9 +898,9 @@ fn with_timeout_detail(mut error: EdgeError, detail: Option<ProviderFailureDetai
 
 #[cfg(test)]
 mod tests {
-    use std::cell::{Cell, RefCell};
+    use std::cell::{Cell, OnceCell, RefCell};
     use std::future::Future as _;
-    use std::io::Write as _;
+    use std::io::{ErrorKind, Write as _};
     use std::pin::Pin;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -980,6 +1065,7 @@ mod tests {
     fn context(mode: ResponseMode) -> OutboundResponseContext {
         let clock = MonotonicClock::default();
         OutboundResponseContext {
+            exchange_failure: OnceCell::new(),
             entered_at: clock.now(),
             budget: DispatchBudget {
                 cause: BudgetSource::PerCallTimeout,
@@ -2422,6 +2508,278 @@ mod tests {
             captured.response_body_policy().max_decoded_response_bytes,
             Some(16)
         );
+    }
+
+    #[test]
+    fn exchange_receipt_is_lazy_shared_first_wins_and_redacted() {
+        let captured = context(ResponseMode::Buffered { max_bytes: 16 });
+        assert!(captured.exchange_failure.get().is_none());
+        let receipt = captured.exchange_failure();
+        let same = captured.exchange_failure();
+        let other = context(ResponseMode::Buffered { max_bytes: 16 }).exchange_failure();
+        let observed = captured.entered_at;
+        receipt.record(observed, EdgeError::bad_gateway("secret-query-token"));
+        same.record(
+            observed,
+            EdgeError::internal(anyhow::anyhow!("replacement")),
+        );
+        assert!(!format!("{captured:?} {receipt:?}").contains("secret-query-token"));
+        assert_eq!(same.observed_at(), Some(observed));
+        assert!(matches!(same.take(), Some(EdgeError::BadGateway { .. })));
+        assert!(receipt.take().is_none());
+        receipt.record(
+            observed,
+            EdgeError::bad_gateway("cannot replace consumed error"),
+        );
+        assert!(same.take().is_none());
+        assert_eq!(same.observed_at(), Some(observed));
+        assert!(other.observed_at().is_none());
+        assert!(!format!("{captured:?} {receipt:?}").contains("secret-query-token"));
+    }
+
+    #[test]
+    fn retained_failure_observation_controls_deadline_not_collection_time() {
+        for milliseconds in [4, 5, 6] {
+            let fake = FakeTime::new();
+            let mut captured = fake.response_context();
+            let start = captured.entered_at;
+            captured.original_chain_deadline = Some(crate::Deadline::at_instant(
+                start + Duration::from_millis(5),
+            ));
+            let receipt = captured.exchange_failure();
+            let failure = EdgeError::bad_gateway_with_detail(
+                "source failure",
+                crate::BadGatewayReason::Transport,
+                crate::ProviderFailureDetail::Fastly {
+                    phase: crate::ProviderFailurePhase::ResponseBodyRead,
+                    cause: crate::FastlyFailureCause::IoError {
+                        kind: ErrorKind::UnexpectedEof,
+                    },
+                },
+            );
+            let detail = failure.provider_failure_detail().copied();
+            receipt.record(start + Duration::from_millis(milliseconds), failure);
+            fake.advance(Duration::from_millis(25));
+            let releases = Rc::new(Cell::new(0));
+            let head = OutboundHead::new(
+                StatusCode::OK,
+                input(HeaderMap::new()),
+                stream::poll_fn(|_| panic!("receipt must win before source polling")).boxed_local(),
+                captured,
+                owner(&releases),
+            )
+            .unwrap();
+            let error = block_on(head.finish()).unwrap_err();
+            if milliseconds < 5 {
+                assert!(matches!(
+                    error,
+                    EdgeError::BadGateway {
+                        reason: crate::BadGatewayReason::Transport,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    error,
+                    EdgeError::GatewayTimeout {
+                        cause: BudgetSource::RequestDeadline,
+                        ..
+                    }
+                ));
+            }
+            assert_eq!(error.provider_failure_detail().copied(), detail);
+            assert_eq!(releases.get(), 1);
+            assert_eq!(fake.0.lock().unwrap().registrations, 0);
+        }
+    }
+
+    #[test]
+    fn retained_failure_rejects_future_observation_before_policy_error() {
+        let fake = FakeTime::new();
+        let captured = fake.response_context();
+        let receipt = captured.exchange_failure();
+        receipt.record(
+            captured.entered_at + Duration::from_millis(5),
+            EdgeError::bad_gateway("source failure"),
+        );
+        let releases = Rc::new(Cell::new(0));
+        let head = OutboundHead::new(
+            StatusCode::OK,
+            input(HeaderMap::new()),
+            stream::empty().boxed_local(),
+            captured,
+            owner(&releases),
+        )
+        .unwrap();
+        assert!(matches!(
+            block_on(head.finish()),
+            Err(EdgeError::Internal { .. })
+        ));
+        assert_eq!(releases.get(), 1);
+    }
+
+    #[test]
+    fn retained_failure_recorded_during_source_poll_preserves_identity() {
+        for coding in [
+            None,
+            Some("identity"),
+            Some("gzip"),
+            Some("br"),
+            Some("deflate"),
+        ] {
+            let fake = FakeTime::new();
+            let captured = fake.response_context();
+            let start = captured.entered_at;
+            let receipt = captured.exchange_failure();
+            let identity = Arc::new(());
+            let expected = Arc::clone(&identity);
+            let identity_source = Arc::clone(&identity);
+            let clock = Arc::clone(&fake.0);
+            let body = stream::poll_fn(move |_| {
+                receipt.record(
+                    start + Duration::from_millis(5),
+                    EdgeError::internal(IdentityError(Arc::clone(&identity_source))),
+                );
+                clock.lock().unwrap().now = start + Duration::from_millis(25);
+                if coding.is_some() {
+                    Poll::Ready(Some(Err(receipt.take().unwrap())))
+                } else {
+                    Poll::Pending
+                }
+            })
+            .boxed_local();
+            let mut headers = HeaderMap::new();
+            if let Some(encoding) = coding {
+                headers.insert("content-encoding", HeaderValue::from_static(encoding));
+            }
+            let releases = Rc::new(Cell::new(0));
+            let head = OutboundHead::new(
+                StatusCode::OK,
+                input(headers),
+                body,
+                captured,
+                owner(&releases),
+            )
+            .unwrap();
+            let EdgeError::Internal { source, .. } = block_on(head.finish()).unwrap_err() else {
+                panic!("retained source identity must survive late poll completion");
+            };
+            assert!(Arc::ptr_eq(
+                &source.downcast_ref::<IdentityError>().unwrap().0,
+                &expected
+            ));
+            assert_eq!(releases.get(), 1);
+            let state = fake.0.lock().unwrap();
+            assert_eq!(state.registrations, 1);
+            assert_eq!(state.releases, 1);
+        }
+    }
+
+    #[test]
+    fn retained_failure_recorded_during_eager_policy_cleanup_wins() {
+        let fake = FakeTime::new();
+        let captured = fake.response_context();
+        let receipt = captured.exchange_failure();
+        let start = captured.entered_at;
+        let identity = Arc::new(());
+        let expected = Arc::clone(&identity);
+        let record = OutboundExchangeOwner::new(move || {
+            receipt.record(start, EdgeError::internal(IdentityError(identity)));
+        });
+        let body = stream::poll_fn(move |_| {
+            let _record = &record;
+            panic!("declared cap must not poll the source");
+        })
+        .boxed_local();
+        let mut headers = HeaderMap::new();
+        headers.insert("content-length", HeaderValue::from_static("17"));
+        let releases = Rc::new(Cell::new(0));
+        let head = OutboundHead::new(
+            StatusCode::OK,
+            input(headers),
+            body,
+            captured,
+            owner(&releases),
+        )
+        .unwrap();
+        let EdgeError::Internal { source, .. } = block_on(head.finish()).unwrap_err() else {
+            panic!("the original failure must survive policy cleanup");
+        };
+        assert!(Arc::ptr_eq(
+            &source.downcast_ref::<IdentityError>().unwrap().0,
+            &expected
+        ));
+        assert_eq!(releases.get(), 1);
+    }
+
+    #[test]
+    fn retained_failure_never_bypasses_closed_scope_or_clock_regression() {
+        for close_scope in [false, true] {
+            let callback = OutboundScopeOwner::callback();
+            let fake = FakeTime::new();
+            let captured = callback.with(|| fake.response_context());
+            captured.exchange_failure().record(
+                captured.entered_at,
+                EdgeError::bad_gateway("retained failure"),
+            );
+            let releases = Rc::new(Cell::new(0));
+            let head = OutboundHead::new(
+                StatusCode::OK,
+                input(HeaderMap::new()),
+                stream::poll_fn(|_| panic!("invalid scope/clock must not poll source"))
+                    .boxed_local(),
+                captured,
+                owner(&releases),
+            )
+            .unwrap();
+            let mut finish = head.finish();
+            if close_scope {
+                drop(callback);
+            } else {
+                let mut state = fake.0.lock().unwrap();
+                state.now = state.now.checked_sub(Duration::from_millis(1)).unwrap();
+            }
+            assert!(matches!(
+                block_on(&mut finish),
+                Err(EdgeError::Internal { .. })
+            ));
+            assert_eq!(releases.get(), 1);
+            assert_eq!(fake.0.lock().unwrap().registrations, 0);
+        }
+    }
+
+    #[test]
+    fn retained_failure_recorded_by_owner_on_eager_rejection_wins() {
+        let fake = FakeTime::new();
+        let captured = fake.response_context();
+        let receipt = captured.exchange_failure();
+        let start = captured.entered_at;
+        let identity = Arc::new(());
+        let expected = Arc::clone(&identity);
+        let releases = Rc::new(Cell::new(0_usize));
+        let counted = Rc::clone(&releases);
+        let cleanup = OutboundExchangeOwner::new(move || {
+            counted.set(counted.get() + 1);
+            receipt.record(start, EdgeError::internal(IdentityError(identity)));
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert("content-length", HeaderValue::from_static("17"));
+        let head = OutboundHead::new(
+            StatusCode::OK,
+            input(headers),
+            stream::empty().boxed_local(),
+            captured,
+            cleanup,
+        )
+        .unwrap();
+        let EdgeError::Internal { source, .. } = block_on(head.finish()).unwrap_err() else {
+            panic!("owner-recorded failure must survive policy rejection");
+        };
+        assert!(Arc::ptr_eq(
+            &source.downcast_ref::<IdentityError>().unwrap().0,
+            &expected
+        ));
+        assert_eq!(releases.get(), 1);
     }
 
     #[test]

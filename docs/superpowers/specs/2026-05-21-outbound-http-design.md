@@ -84,9 +84,15 @@ terminal cleanup precedes the event and cancellation drops the checkpoint. Disca
 do not run it, and streamed handoff transfers it without polling the payload. Other adapters
 retain their existing no-hook path. This adds no decoder, executor or alternate transport.
 
-Fastly's existing retained failure receipt covers body errors as well as head errors, including
-the original observation instant across independent producer progress. A failure first observed
-at or after expiry still selects its governing timeout. Supported cleanup unwinding releases
+`OutboundResponseContext::exchange_failure()` lazily shares one core `OutboundExchangeFailure`
+with provider progress and finalization. Fastly uses it for Send, Begin and batches, replacing
+its private receipt. First failure wins, and taking its owned error retains the observation
+instant across independent producer progress. Core checks it before timer/source polling and
+after source polling, without bypassing scope closure or clock-regression checks. A failure
+first observed at or after the effective deadline still selects its governing timeout and
+retains provider detail. Providers record in the captured clock domain; future-dated
+observations are Internal. No receipt is allocated for adapters that do not request one.
+Supported cleanup unwinding releases
 each payload before waking its revoked waiter, including unvisited siblings, and propagates
 the original panic. No panic-abort cleanup guarantee is implied.
 

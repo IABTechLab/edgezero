@@ -20,13 +20,15 @@ transport, compatibility path, timing relaxation or capability promotion.
 
 - [x] Reproduce missing cancellation wakes during unwinding, then retain a wake-on-drop guard
       after every cleanup payload. The 33 scope tests pass with exactly-once wake/release checks.
-- [ ] Complete Fastly's cross-driver body-error repair for every buffered entrypoint. The
-      Begin/Batch receipt and arrival-timestamp fix passes all 339 Fastly WASM library tests;
-      shared-core receipt integration for plain Send awaits the requester's scoped API decision.
+- [x] Complete Fastly's cross-driver body-error repair for every buffered entrypoint. AG approved
+      the shared-core receipt; the private duplicate is removed. Plain Send's 5 ms failure /
+      150 ms collection regression fails with a timeout before the fix and preserves the original
+      error after it. All 341 Fastly WASM library tests pass, including Begin/Batch controls
+      and invalid receipt-time rejection before outer-race entry.
 - [x] Reproduce count-only persisted redirect acceptance, then reuse the ordered matrix replay
       for every adapter. All 20 persisted-artifact regressions pass.
 - [x] Reproduce five Cloudflare frozen-clock terminal failures, then attach one real host-event
-      factory to the shared finalizer. The 140 Cloudflare WASM tests and 43 core finalizer tests
+      factory to the shared finalizer. The 140 Cloudflare WASM tests and 50 core finalizer tests
       pass, including decoded/empty quotas, timer faults, clock regression and cancellation.
 - [ ] Finish current-tree full-suite, formatting, strict lint, target, documentation and final
       independent source verification; publish fixing commits and replies in each original thread.

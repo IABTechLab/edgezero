@@ -17,7 +17,7 @@ use edgezero_core::outbound::test_support::{
 };
 use edgezero_core::{
     BodyStream, Deadline, DispatchBudget, EdgeError, MonotonicClock, MonotonicInstant,
-    OutboundFuture,
+    OutboundExchangeFailure, OutboundFuture,
 };
 use futures_util::StreamExt as _;
 use futures_util::future::poll_fn;
@@ -37,37 +37,6 @@ struct DriverContext {
     parent: Option<Rc<Self>>,
     repoll: Rc<Cell<bool>>,
     waker: Waker,
-}
-
-#[derive(Clone, Default)]
-pub(super) struct ExchangeFailure(Rc<RefCell<Option<ObservedExchangeFailure>>>);
-
-struct ObservedExchangeFailure {
-    at: MonotonicInstant,
-    error: Option<EdgeError>,
-}
-
-impl ExchangeFailure {
-    pub(super) fn observed_at(&self) -> Option<MonotonicInstant> {
-        self.0.borrow().as_ref().map(|failure| failure.at)
-    }
-
-    pub(super) fn record(&self, at: MonotonicInstant, error: EdgeError) {
-        let mut saved = self.0.borrow_mut();
-        if saved.is_none() {
-            *saved = Some(ObservedExchangeFailure {
-                at,
-                error: Some(error),
-            });
-        }
-    }
-
-    pub(super) fn take(&self) -> Option<EdgeError> {
-        self.0
-            .borrow_mut()
-            .as_mut()
-            .and_then(|failure| failure.error.take())
-    }
 }
 
 impl DriverContext {
@@ -168,7 +137,7 @@ struct Slot<T: Transport> {
     budget: DispatchBudget,
     clock: MonotonicClock,
     expired: bool,
-    exchange_failure: Option<ExchangeFailure>,
+    exchange_failure: Option<OutboundExchangeFailure>,
     phase: Phase<T>,
     previous: MonotonicInstant,
     waker: Option<Waker>,
@@ -191,7 +160,7 @@ pub(super) struct Progress<T: Transport> {
     clock: MonotonicClock,
     driving: Rc<Cell<bool>>,
     entered: MonotonicInstant,
-    exchange_failure: Option<ExchangeFailure>,
+    exchange_failure: Option<OutboundExchangeFailure>,
     state: Rc<RefCell<State<T>>>,
     wake_requested: Arc<AtomicBool>,
 }
@@ -373,7 +342,7 @@ impl<T: Transport + 'static> Progress<T> {
     pub(super) fn observed_exchange_failure_at(&self) -> Option<MonotonicInstant> {
         self.exchange_failure
             .as_ref()
-            .and_then(ExchangeFailure::observed_at)
+            .and_then(OutboundExchangeFailure::observed_at)
     }
 
     pub(super) fn poll_once<Output>(
@@ -529,7 +498,7 @@ impl<T: Transport + 'static> Progress<T> {
         operation()
     }
 
-    pub(super) fn with_exchange_failure(&self, failure: ExchangeFailure) -> Self {
+    pub(super) fn with_exchange_failure(&self, failure: OutboundExchangeFailure) -> Self {
         Self {
             exchange_failure: Some(failure),
             ..self.clone()
@@ -556,7 +525,7 @@ impl<T: Transport + 'static> Lease<T> {
         if let Some(error) = slot
             .exchange_failure
             .as_ref()
-            .and_then(ExchangeFailure::take)
+            .and_then(OutboundExchangeFailure::take)
         {
             return Poll::Ready(Err(error));
         }
@@ -585,7 +554,7 @@ impl<T: Transport + 'static> Lease<T> {
             if let Some(error) = slot
                 .exchange_failure
                 .as_ref()
-                .and_then(ExchangeFailure::take)
+                .and_then(OutboundExchangeFailure::take)
             {
                 return Poll::Ready(Err(error));
             }
@@ -1072,7 +1041,7 @@ where
         || slot
             .exchange_failure
             .as_ref()
-            .and_then(ExchangeFailure::observed_at)
+            .and_then(OutboundExchangeFailure::observed_at)
             .is_some()
     {
         return false;
@@ -1194,6 +1163,12 @@ mod tests {
         observations: Rc<RefCell<Observations>>,
     }
 
+    #[cfg(feature = "fastly")]
+    struct SendFixture {
+        progress: Progress<TestTransport>,
+        released: Rc<Cell<usize>>,
+    }
+
     struct WakeCount(AtomicUsize);
 
     #[expect(
@@ -1208,6 +1183,8 @@ mod tests {
 
     std::thread_local! {
         static CANCEL_TIMER: RefCell<Option<OutboundFuture<()>>> = const { RefCell::new(None) };
+        #[cfg(feature = "fastly")]
+        static SEND_FIXTURE: RefCell<Option<SendFixture>> = const { RefCell::new(None) };
     }
 
     struct CancelTimer;
@@ -2031,7 +2008,7 @@ mod tests {
         let mut receivers = Vec::new();
         for id in 1_u32..=2 {
             let millis = if id == 1 { 100 } else { 1000 };
-            let failure = ExchangeFailure::default();
+            let failure = OutboundExchangeFailure::default();
             let head = progress.with_exchange_failure(failure.clone()).head(
                 handle(id, 0, false, &released),
                 budget(&now, millis, BudgetSource::PerCallTimeout),
@@ -2113,6 +2090,120 @@ mod tests {
 
     #[test]
     #[cfg(feature = "fastly")]
+    fn plain_send_preserves_body_failure_before_foreign_clock_advance() {
+        use edgezero_core::{OutboundRequest, OutboundTime};
+
+        let (progress, observed, now) = fixture();
+        let entered = *now.lock().unwrap();
+        let released = Rc::new(Cell::new(0));
+        observed.borrow_mut().blocked_body = Some(1);
+        observed.borrow_mut().spurious_heads = usize::MAX;
+        observed.borrow_mut().source_error = true;
+        SEND_FIXTURE.with(|saved| {
+            saved.replace(Some(SendFixture {
+                progress: progress.clone(),
+                released: Rc::clone(&released),
+            }))
+        });
+        let fixture_owner = edgezero_core::OutboundExchangeOwner::new(|| {
+            SEND_FIXTURE.with(|saved| drop(saved.borrow_mut().take()));
+        });
+        let time = OutboundTime::new(progress.clock(), super::wait_current);
+        let client = super::super::testing::scripted(time, scripted_send_head);
+        let mut first = client.send(
+            OutboundRequest::get("https://fixture.invalid/first")
+                .unwrap()
+                .timeout(Duration::from_millis(100)),
+        );
+        let mut second = client.send(
+            OutboundRequest::get("https://fixture.invalid/second")
+                .unwrap()
+                .timeout(Duration::from_secs(1)),
+        );
+        let mut cx = Context::from_waker(Waker::noop());
+        for future in [&mut first, &mut second] {
+            assert!(matches!(
+                progress.poll_once(&mut cx, &mut |inner| Poll::Ready(
+                    future.as_mut().poll(inner)
+                )),
+                Poll::Ready(Ok(Poll::Pending))
+            ));
+        }
+        assert!(observed.borrow().reads.is_empty());
+        observed.borrow_mut().blocked_body = None;
+        observed.borrow_mut().spurious_heads = 1;
+        observed.borrow_mut().advance_on_head = Some((2, entered + Duration::from_millis(150)));
+        *now.lock().unwrap() = entered + Duration::from_millis(5);
+        progress.state.borrow_mut().cursor = 0;
+        for milliseconds in [5, 150] {
+            assert!(
+                progress
+                    .poll_once(&mut cx, &mut |inner| second.as_mut().poll(inner))
+                    .is_pending()
+            );
+            assert_eq!(
+                *now.lock().unwrap(),
+                entered + Duration::from_millis(milliseconds)
+            );
+        }
+        assert_eq!(*now.lock().unwrap(), entered + Duration::from_millis(150));
+        assert_eq!(
+            observed.borrow().terminal_bodies,
+            [(1, entered + Duration::from_millis(5))]
+        );
+        assert_eq!(
+            observed.borrow().terminal_heads,
+            [(2, entered + Duration::from_millis(150))]
+        );
+        let Poll::Ready(Err(error)) = first.as_mut().poll(&mut cx) else {
+            panic!("the retained source error must resolve plain Send");
+        };
+        assert_body_source_failure(&error);
+        assert_eq!(observed.borrow().reads, [1]);
+        assert_eq!(observed.borrow().waits, [1]);
+        assert_eq!(observed.borrow().domains, [vec![1]]);
+        drop((first, second, fixture_owner));
+        assert_eq!(released.get(), 2);
+    }
+
+    #[cfg(feature = "fastly")]
+    fn scripted_send_head(
+        request: edgezero_core::OutboundDispatchRequest,
+    ) -> OutboundFuture<edgezero_core::OutboundHead> {
+        use edgezero_core::http::{HeaderMap, StatusCode};
+        use edgezero_core::{OutboundHead, OutboundHeaderFidelity, OutboundHeaderInput};
+
+        let (parts, context) = request.into_parts();
+        let (progress, released) = SEND_FIXTURE.with(|saved| {
+            let stored = saved.borrow();
+            let fixture = stored.as_ref().expect("installed Send fixture");
+            (fixture.progress.clone(), Rc::clone(&fixture.released))
+        });
+        let progress = progress.with_exchange_failure(context.exchange_failure());
+        Box::pin(async move {
+            let budget = context.budget();
+            if parts.uri.path() == "/second" {
+                progress
+                    .head(handle(2, 0, true, &released), budget)
+                    .receive()
+                    .await?;
+            }
+            OutboundHead::new(
+                StatusCode::OK,
+                OutboundHeaderInput::new(
+                    "fastly",
+                    HeaderMap::new(),
+                    OutboundHeaderFidelity::AdapterVisibleFields,
+                ),
+                progress.body(handle(1, 1, false, &released), budget),
+                context,
+                super::super::testing::owner(),
+            )
+        })
+    }
+
+    #[test]
+    #[cfg(feature = "fastly")]
     fn independent_driver_preserves_body_failure_before_foreign_clock_advance() {
         use super::super::{fastly_impl::race_deadline, scope::schedule_batch, testing};
         use edgezero_core::{
@@ -2134,7 +2225,7 @@ mod tests {
         let mut receivers = Vec::new();
         for id in 1_u32..=2 {
             let millis = if id == 1 { 100 } else { 1000 };
-            let failure = ExchangeFailure::default();
+            let failure = OutboundExchangeFailure::default();
             let selected = progress.with_exchange_failure(failure.clone());
             let slot_budget = budget(&now, millis, BudgetSource::PerCallTimeout);
             let request = || {
