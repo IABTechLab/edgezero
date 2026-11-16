@@ -2379,6 +2379,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn development_capture_reads_ja4_trusted_proxy_env() {
+        let header = (
+            OsString::from("EDGEZERO__ADAPTER__JA4_HEADER"),
+            OsString::from("x-ja4"),
+        );
+        let proxies = (
+            OsString::from("EDGEZERO__ADAPTER__JA4_TRUSTED_PROXY_CIDRS"),
+            OsString::from("127.0.0.0/8"),
+        );
+        let (_env, _limit, native) =
+            capture_dev_environment([header.clone(), proxies.clone()]).expect("both JA4 variables");
+        assert!(native.ja4.is_some(), "run_app must pick up the JA4 config");
+        let (_, _, unconfigured) =
+            capture_dev_environment(Vec::<(OsString, OsString)>::new()).expect("no JA4 config");
+        assert!(unconfigured.ja4.is_none());
+        for partial in [header, proxies] {
+            assert!(
+                capture_dev_environment([partial]).is_err(),
+                "a partial JA4 config must fail startup"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn development_capture_skips_unrelated_binary_settings_but_rejects_binary_json_limit() {

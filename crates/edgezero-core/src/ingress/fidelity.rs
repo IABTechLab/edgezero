@@ -641,6 +641,7 @@ mod tests {
         let output = format!("{with_ja4:?}");
         assert!(output.contains("RuntimeTls"));
         assert!(!output.contains(FOXIO_EXAMPLE));
+        assert!(!output.contains("t13d1516h2"));
     }
 
     #[test]
