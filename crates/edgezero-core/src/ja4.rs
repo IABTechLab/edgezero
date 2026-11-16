@@ -111,7 +111,8 @@ pub enum CapturedJa4 {
 }
 
 impl CapturedJa4 {
-    /// Map a runtime TLS accessor's result. Invalid values are discarded.
+    /// Map a runtime TLS accessor's result. An empty value is `Missing`;
+    /// invalid values are discarded.
     #[inline]
     #[must_use]
     pub fn from_runtime_tls(value: Option<&str>) -> Self {
@@ -123,7 +124,8 @@ impl CapturedJa4 {
     /// Map the values of a JA4 header from a proxy peer the adapter has
     /// already verified as trusted.
     ///
-    /// No field is `Missing`. Exactly one field must be a valid fingerprint;
+    /// No field, or one empty field, is `Missing`. Exactly one field must be a
+    /// valid fingerprint;
     /// a repeated field, non-UTF-8 bytes or an invalid value is `Malformed`
     /// and discarded. Callers must not pass headers from unverified peers.
     #[inline]
@@ -145,7 +147,13 @@ impl CapturedJa4 {
     }
 
     /// Capture a present provider value, discarding it when invalid.
+    ///
+    /// Providers report an empty value when they have no fingerprint (for
+    /// example Cloudflare on a resumed TLS session), so empty is `Missing`.
     fn validated(value: &str, source: Ja4Source) -> Self {
+        if value.is_empty() {
+            return Self::Unavailable(Ja4Unavailable::Missing);
+        }
         Ja4Fingerprint::parse(value).map_or(
             Self::Unavailable(Ja4Unavailable::Malformed),
             |fingerprint| Self::Captured {
@@ -226,6 +234,11 @@ pub(crate) mod tests {
             "x13d1516h2_8daaf6152771_e5627efa2ab1",
             "t13x1516h2_8daaf6152771_e5627efa2ab1",
             "t13d15a6h2_8daaf6152771_e5627efa2ab1",
+            "t13d1516h__8daaf6152771_e5627efa2ab1",
+            "t13d1516_2_8daaf6152771_e5627efa2ab1",
+            "t_3d1516h2_8daaf6152771_e5627efa2ab1",
+            "t1_d1516h2_8daaf6152771_e5627efa2ab1",
+            "tX3d1516h2_8daaf6152771_e5627efa2ab1",
             "t13d1516h2_8daaf615277g_e5627efa2ab1",
             non_ascii.as_str(),
             "e7d705a3286e19ea42f587b344ee6865",
@@ -252,6 +265,10 @@ pub(crate) mod tests {
             }
         );
         assert_eq!(
+            CapturedJa4::from_runtime_tls(Some("")),
+            CapturedJa4::Unavailable(Ja4Unavailable::Missing)
+        );
+        assert_eq!(
             CapturedJa4::from_runtime_tls(Some("not-a-ja4")),
             CapturedJa4::Unavailable(Ja4Unavailable::Malformed)
         );
@@ -271,10 +288,20 @@ pub(crate) mod tests {
                 source: Ja4Source::TrustedProxyHeader,
             }
         );
+        let empty = HeaderValue::from_static("");
+        assert_eq!(
+            CapturedJa4::from_trusted_proxy_header([&empty]),
+            CapturedJa4::Unavailable(Ja4Unavailable::Missing)
+        );
         let invalid = HeaderValue::from_static("not-a-ja4");
         let non_utf8 = HeaderValue::from_bytes(b"t13d1516h2_8daaf6152771_e5627efa2a\xff\xff")
             .expect("should build opaque value");
-        for fields in [vec![&valid, &valid], vec![&invalid], vec![&non_utf8]] {
+        for fields in [
+            vec![&valid, &valid],
+            vec![&empty, &valid],
+            vec![&invalid],
+            vec![&non_utf8],
+        ] {
             assert_eq!(
                 CapturedJa4::from_trusted_proxy_header(fields),
                 CapturedJa4::Unavailable(Ja4Unavailable::Malformed)
@@ -287,6 +314,7 @@ pub(crate) mod tests {
         let captured = CapturedJa4::from_runtime_tls(Some(FOXIO_EXAMPLE));
         let output = format!("{captured:?}");
         assert!(!output.contains("8daaf6152771"));
+        assert!(!output.contains("t13d1516h2"));
         assert!(output.contains("redacted"));
         let error = Ja4Fingerprint::parse("secret-input").expect_err("should reject");
         assert!(!format!("{error:?} {error}").contains("secret-input"));
