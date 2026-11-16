@@ -1,57 +1,71 @@
 # Native celld stores
 
-The native provider reads complete configuration documents at startup and exposes live KV operations through a scoped listener **inside celld**. There is no gateway, sidecar, Worker bridge or celld HTTP adapter.
+The native `celld-kv` provider gives an Axum application live KV backed by [celld](https://celld.dev). It talks over HTTP to the EdgeZero store service, a small Worker and Durable Object application in [`services/celld-store`](https://github.com/IABTechLab/edgezero/tree/main/services/celld-store) that the official celld release runs unmodified.
 
-This is an unreleased integration. It requires the modified celld revision `f72ae21a515859570622ac9d6ca9c19cf6870b81`. Upstream celld v0.6.2 does not have this API. Local tests do not establish fleet failover, deployment security or production readiness.
+This page targets celld v0.6.3. Local tests do not establish fleet capacity, production bucket durability or deployment security.
 
-## Build only the providers you use
+```mermaid
+flowchart TD
+    App[Native app with celld-kv] --> Net[Private network, or a TLS proxy for authenticated mode]
+    Net --> Listener[celld public listener]
+    Listener --> Worker[Store Worker: token, grant, alias]
+    Worker --> Object[One Durable Object per namespace]
+    Object --> Gate[Reply held until the write is durable]
+    Gate --> Bucket[Fleet followers and the S3-compatible bucket]
+```
 
-Generated Axum targets forward two independent, default-off features:
+There is no celld config provider. Load application config through another provider and use celld for live KV.
+
+## Build only the provider you use
+
+Generated Axum targets forward the default-off feature:
 
 ```toml
 [adapters.axum.build]
-features = ["celld-config", "celld-kv"]
+features = ["celld-kv"]
 ```
 
-The provider crate uses `config` and `kv`. Its separate `records` feature also enables the KV transport and exposes conditional records directly to application-specific adapters. It does not change the generic KV interface or enable a framework binding implicitly. Its settings compile without live transport dependencies. Applications do not depend on the celld runtime or V8. Existing AWS features and the `aws-stores` alias keep their current membership.
+The provider crate's `kv` feature holds the HTTP client. Its settings compile without live transport dependencies, and applications never depend on celld or V8. AWS features and the `aws-stores` alias keep their membership. A deployment file cannot enable a provider the binary was built without; startup checks compiled capabilities first.
 
-A deployment file cannot enable a provider omitted from the application binary. Startup checks the compiled capabilities before preparing any selected store.
-
-## Keep declarations portable
+## Bind a logical store
 
 The application declares logical IDs in `edgezero.toml`:
 
 ```toml
-[stores.config]
-ids = ["application"]
-default = "application"
-
 [stores.kv]
 ids = ["state"]
 default = "state"
 ```
 
-A separate native deployment file selects providers:
+A native deployment file selects the provider:
 
 ```toml
 version = 1
 
-[config.application]
-provider = "celld-config"
-endpoint = "https://stores.example.internal:7780"
-default_key = "settings"
-
-[config.application.access]
-mode = "authenticated"
-token_env = "CHECKOUT_STORE_TOKEN"
-
-[config.application.documents.settings]
-store = "checkout-config"
-key = "application-envelope"
-
 [kv.state]
 provider = "celld-kv"
-endpoint = "https://stores.example.internal:7780"
+endpoint = "http://celld-store.internal:8080"
+store = "checkout-state"
+
+[kv.state.access]
+mode = "trusted-network"
+allow_remote_http = true
+```
+
+`store` is an alias from the service policy, never a physical namespace. The schema rejects unknown fields, malformed endpoints, undeclared IDs and conflicting sources. Endpoints are HTTP or HTTPS origins without userinfo, query, fragment or path. Keys and aliases keep their exact case and UTF-8 bytes.
+
+Select the absolute file path with `EDGEZERO__STORE_BINDINGS_FILE`. Different IDs can select celld, AWS, local providers or supplied handles. Celld-only bindings need no AWS credentials or local roots.
+
+### Access modes
+
+**Trusted network.** Every caller that reaches the service gets the policy's grants. Literal loopback HTTP needs no opt-in; remote HTTP needs `allow_remote_http = true`. That flag permits plaintext. It does not create network isolation. Restrict which workloads reach celld's public listener with your network policy.
+
+**Authenticated.** The binding names a token variable:
+
+```toml
+[kv.state]
+provider = "celld-kv"
+endpoint = "https://celld-store.internal"
 store = "checkout-state"
 
 [kv.state.access]
@@ -59,28 +73,24 @@ mode = "authenticated"
 token_env = "CHECKOUT_STORE_TOKEN"
 ```
 
-These are fictional resource names. `store` is a service-owned alias, never a physical namespace or runtime scope. The schema rejects unknown fields, malformed endpoints, undeclared IDs and conflicting sources. Endpoints are HTTP or HTTPS origins without userinfo, query, fragment or a non-root path. Keys and aliases retain their exact case and UTF-8 bytes.
+Authenticated bindings require HTTPS. celld does not terminate TLS, so put a TLS proxy, ingress or service mesh in front of its public listener. The client verifies the certificate and disables redirects, ambient proxies, retries and decompression. Tokens are 32 to 512 header-safe ASCII graphic bytes. Generate random tokens and inject them through deployment secret management, never TOML or URLs. The environment runner captures each named token once at startup.
 
-Select the absolute file path with `EDGEZERO__STORE_BINDINGS_FILE`. The environment-loading runner captures the selected file and the union of selected config/KV token names once. Explicit `AxumRunOptions` uses supplied bootstrap values, not ambient variables. Tokens are 32 through 512 header-safe ASCII graphic bytes. Generate random application tokens and inject them through deployment secret management. Do not put token values in TOML or URLs.
+## Deploy the store service
 
-Different IDs can select celld, AWS, local providers or supplied handles. Celld-only bindings need no AWS credentials or local roots. An unbound ID retains its existing local default and may require a local root. There is no celld secret provider. A typed celld config document may reference a separately bound AWS secret store.
+Give the service its own celld fleet and bucket. celld runs one application per fleet.
 
-## Configure the listener in celld
+1. Copy `services/celld-store/wrangler.template.jsonc` to `wrangler.jsonc` beside `src/`.
+2. Write the policy into `vars.EDGEZERO_STORE_POLICY` as a JSON string.
+3. Run `celld deploy <dir> --bucket s3://<fleet-bucket>`. Nodes adopt the new version within `CELLD_DEPLOY_POLL_S` (default 30 seconds) without restarting.
 
-Add `--store-api-config /absolute/scoped-stores.json` to the existing celld deployment command. Without this selection, celld opens no scoped socket.
+Keep the template's `name`, binding and class name. celld derives each Durable Object's identity from the script and class names, so a rename reaches new, empty storage. The client notices the changed store instance and fails rather than mixing old and new data.
 
-An authenticated policy has this form:
+The policy lists aliases and grants:
 
 ```json
 {
   "version": 1,
-  "listen": "0.0.0.0:7780",
-  "tls": {
-    "cert": "/etc/celld/server-chain.pem",
-    "key": "/etc/celld/server-key.pem"
-  },
   "stores": [
-    { "alias": "checkout-config", "namespace": "production-checkout-config" },
     { "alias": "checkout-state", "namespace": "production-checkout-state" }
   ],
   "access": {
@@ -88,9 +98,8 @@ An authenticated policy has this form:
     "tokens": [
       {
         "id": "checkout",
-        "sha256": "<lowercase SHA-256 verifier of the application token>",
+        "sha256": "<lowercase SHA-256 of the application token>",
         "grants": [
-          { "store": "checkout-config", "operations": ["read"] },
           {
             "store": "checkout-state",
             "operations": ["read", "write", "delete", "list"]
@@ -102,117 +111,128 @@ An authenticated policy has this form:
 }
 ```
 
-Replace the verifier placeholder through operator-owned provisioning. It is not a usable policy value. The application receives only its own bearer token. Celld owns the TLS key, policy, physical namespaces, fleet discovery and fleet credentials.
+For trusted-network mode, replace `tokens` with a `grants` list. The policy holds verifiers only, because celld `vars` live in the fleet bucket with the deployment. Unknown fields, duplicate aliases or token IDs, and unknown grant targets make every request fail with `unavailable` until a valid policy is deployed.
 
-Celld captures policy and certificates at startup. Restart celld to adopt changed grants, replace certificates or revoke a token. Overlapping credential IDs permit staged token replacement. There is no issuance service or hot reload. Loaded application config snapshots remain available after remote revocation until the application restarts. Live KV calls use current server authorization.
+Replace a token by deploying a policy with both the old and new token IDs, rolling the application, then deploying without the old one. Revocation takes effect when nodes adopt the deployment.
 
-### Trusted-network access
+### Deploy automatically
 
-A binding may instead select:
+Run the deploy step from your manifests so operators have nothing to do by hand. A Kubernetes Job using the official image:
 
-```toml
-[config.application.access]
-mode = "trusted-network"
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: edgezero-store-deploy
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: deploy
+          image: ghcr.io/denoland/celld:0.6.3
+          args:
+            [
+              'deploy',
+              '/service',
+              '--bucket',
+              's3://celld-fleet',
+              '--endpoint',
+              'http://bucket.storage:9000',
+            ]
+          envFrom:
+            - secretRef:
+                name: celld-bucket-credentials
+          volumeMounts:
+            - { name: service, mountPath: /service, readOnly: true }
+      volumes:
+        - name: service
+          configMap:
+            name: edgezero-store-service
+            items:
+              - { key: wrangler.jsonc, path: wrangler.jsonc }
+              - { key: index.js, path: src/index.js }
 ```
 
-Literal loopback HTTP needs no further client opt-in. Remote HTTP requires `allow_remote_http = true`. This flag permits unencrypted transport; it does not establish network isolation. HTTPS still verifies the server certificate.
+Create the ConfigMap from the pinned EdgeZero release. ConfigMap keys cannot contain `/`, so the `items` above put `index.js` back under `src/`:
 
-The corresponding celld policy uses `mode: "trusted-network"` with a `grants` list. Every reachable caller receives those grants. Non-loopback service binding also requires `allow_remote_trusted_network: true`. Trusted-network mode rejects supplied credentials, and authentication failure never falls back to anonymous access.
-
-Restrict the scoped listener to intended workloads. Block application access to celld's internal operator listener and fleet credentials, including filesystem and process views. A private IP or successful TLS request does not prove these restrictions.
-
-```mermaid
-flowchart TD
-    App[Native application with its application token] --> Scoped[celld scoped TLS listener]
-    Scoped --> Policy[Exact alias and operation authorization]
-    Policy --> Owner[Existing in-process owner dispatch]
-    Owner --> KV[Reserved celld KV storage]
-    Operator[Operator-owned policy and fleet credentials] --> Scoped
+```sh
+kubectl create configmap edgezero-store-service \
+  --from-file=wrangler.jsonc=./wrangler.jsonc \
+  --from-file=index.js=services/celld-store/src/index.js
 ```
 
-The diagram has no application route to the internal operator listener. Enforce that boundary in the actual deployment, not just in application code.
+Use the same bucket credentials your celld nodes use, in celld's namespace, never in the application's. Re-running the Job with unchanged content redeploys the same code and keeps all stored data. The bucket names and endpoint are examples. Pin the celld image and EdgeZero release you tested.
 
-## Configuration lifecycle
+The bucket must pass `celld diagnose`. celld's qualified stores are Amazon S3, Cloudflare R2, Tigris, Google Cloud Storage and Azure Blob Storage; test any other S3-compatible store before relying on it. Run at least two celld nodes, or every write waits for a bucket round trip.
 
-Startup validates every source selection, policy, setting and selected credential before provider I/O or deferred preparation. It prepares config snapshots before running the application initializer, publishing readiness or accepting requests. Missing documents, invalid UTF-8, quota failures and remote errors fail startup without local or stale fallback.
+Keep celld's internal listener unreachable from application workloads.
 
-The provider preserves whole UTF-8 documents, including whitespace and empty documents. It does not project JSON fields or resolve secrets. Core validates `BlobEnvelope`, typed configuration and secret references when the application initializer requests them.
+## Live KV behavior
 
-Ordinary and bounded config reads use immutable shared values and perform no network I/O. Publish new complete documents through operator-owned tooling, then restart the app to adopt them. Multiple documents and providers are not an atomic release. `edgezero config push` refuses selected celld config bindings; it does not publish to celld or write a substitute local file.
+KV preparation builds a handle without contacting the service. Startup success does not prove connectivity or grants. Each call has its own deadline.
 
-## Live KV and limits
+| Limit                                     | Default or service ceiling                               |
+| ----------------------------------------- | -------------------------------------------------------- |
+| Value                                     | 1 MiB                                                    |
+| Logical bindings                          | 1,024                                                    |
+| Preparation metadata                      | 1 MiB                                                    |
+| Key page JSON                             | 2 MiB                                                    |
+| Page entries                              | At most 1,000                                            |
+| Service cursor / provider cursor          | 2 KiB / 8 KiB                                            |
+| Key                                       | Nonempty UTF-8, at most 512 bytes, no controls           |
+| Store alias                               | At most 64 ASCII letters, digits, underscores or hyphens |
+| Preparation / operation / connect timeout | 30 / 5 / 1 seconds                                       |
 
-KV preparation builds a handle without probing the service. Startup success alone does not prove connectivity or operation grants. Each live call has a fresh deadline.
+`[limits.celld]` or `with_celld_preparation_limits` selects one celld policy. File and explicit policies do not merge.
 
-| Limit                                            | Default or service ceiling                               |
-| ------------------------------------------------ | -------------------------------------------------------- |
-| Raw value and config document                    | 1 MiB each                                               |
-| Retained config snapshot per preparation session | 8 MiB                                                    |
-| Logical mappings before deduplication            | 1,024, counting each config document and KV binding      |
-| Preparation metadata                             | 1 MiB                                                    |
-| Key page JSON                                    | 2 MiB                                                    |
-| Page entries                                     | At most 1,000                                            |
-| Service cursor / provider cursor                 | 2 KiB / 8 KiB                                            |
-| Remote key                                       | Nonempty UTF-8, at most 512 bytes, no controls           |
-| Store alias                                      | At most 64 ASCII letters, digits, underscores or hyphens |
-| Preparation / operation / connect timeout        | 30 / 5 / 1 seconds                                       |
+Binary and empty values stay distinct from missing keys. Missing delete succeeds. TTL is between 60 and 31,536,000 seconds; fractional durations round up and unsupported ones fail. TTL overwrite renews expiry. Plain put removes it. Reads, existence checks and listings hide a key from the moment it expires.
 
-`[limits.celld]` or `with_celld_preparation_limits` selects one celld policy. File and explicit policies do not merge. AWS has an independent policy and accounting. Client caches hold at most 128 authorization-scoped entries. Accounting describes logical payload and metadata quotas, not process RSS.
+Listing returns one page in byte order, at most the requested size. Keep following the cursor until it is `null`; a short page can still continue. Pages are not a snapshot. Cursors bind the endpoint, alias, prefix and store instance, but never confer authorization.
 
-Binary and empty values remain distinct from missing keys. Missing delete succeeds. TTL is between 60 and 31,536,000 seconds. Fractional valid durations round upward without shortening lifetime; unsupported durations fail rather than clamp. TTL overwrite renews expiry. Plain put removes expiry.
+Every write to a namespace runs on the one node that owns its object. That caps write throughput per namespace. Use separate namespaces for independent write-heavy data.
 
-Listing returns one bounded page, including a short or empty continuing page. It is not a snapshot. Cursors bind endpoint, alias and prefix, but never confer authorization. Preserve a returned continuation rather than scanning repeatedly to fill a page.
+### Failed writes
 
-The client disables redirects, ambient proxies, retries and decompression. It validates the version header and bounds streamed values, pages and error bodies. Celld scoped dispatch also disables ambiguous replay. A failed or timed-out mutation may have applied. The ordinary KV provider does not promise exactly-once operations, CAS or transactions.
+The client sends each mutation once with a fresh `x-edgezero-mutation-id`. It never resends. A failed or timed-out mutation may have applied, and the error says only that.
 
-Provider-owned errors and Debug output redact credentials and omit remote payloads, URLs and source chains. Dependency DEBUG/TRACE logging is outside that promise. Application-owned initializer errors and logs remain the application's responsibility. Review deployment logging before enabling it.
+Inside the fleet, celld can deliver one call twice when a peer connection fails after the owner ran it. Proxies can retry too. The service records each mutation ID in the same transaction as the write and answers a repeat with the first outcome, so a repeat never applies again. A mutation that reaches its object more than 10 seconds after the Worker received it is rejected without applying. The ordinary KV provider still does not promise exactly-once operations from the caller's point of view, CAS or transactions.
 
-## Conditional records
+Provider errors and Debug output redact credentials and omit remote payloads, URLs and source chains.
 
-The additive conditional-record server extension is required for `records`; the original `f72ae21a` listener does not implement it. Existing config and ordinary KV requests keep their version1 contract. Every record response must additionally carry exactly one `x-celld-record-version: 1` header, including errors and HEAD responses.
+## Validation and proofs
 
-`CelldPreparation::prepare_records` accepts the same explicit endpoint, access policy and service alias shape as `CelldKvSettings`. It returns a live `CelldRecordStore` after one bounded read-only prefix-list probe. The probe establishes protocol support and listing authorization, not write/delete permission or fleet durability. A failed or cancelled preparation poisons the session. Returned handles retain no row snapshot and give each live call a fresh operation deadline.
-
-Records use `/v1/stores/{alias}/record` and `/record-keys`. They are separate from ordinary KV, even when a key has identical bytes. A lookup returns opaque body bytes, optional opaque metadata and a positive u64 generation. Null metadata differs from present empty metadata. Generation strings on the wire preserve values above JavaScript's integer precision limit.
-
-Writes select `Add`, `Overwrite` or `IfGenerationMatch`. The server evaluates the condition, allocates a durable generation and writes the row in one transaction. A validated HTTP412 `precondition_failed` becomes `RecordWriteOutcome::PreconditionFailed`, not an infrastructure error. Other failures remain errors and are not automatically replayed. A lost mutation response may follow a committed write; the client never invents a successful acknowledgement.
-
-Record bodies use the configured value ceiling, at most 1MiB. Opaque metadata is at most 1024 bytes. Relative TTL is positive, rounds upward to milliseconds and starts on the server inside the transaction. Record TTL does not inherit the ordinary KV 60-second minimum. The server rejects unrepresentable expiry rather than clamping it. GET and listing hide expired rows; `key_exists` uses exact physical HEAD, conservatively including expired rows awaiting collection. Hard deletion does not reset the generation allocator.
-
-`list_keys_with_prefix` returns at most the requested limit, up to1000, in increasing binary key order. A full page can be incomplete; it is not an exhaustive scan or a cross-call snapshot. Zero returns an empty page without I/O. The client validates ordering, uniqueness, key shape, prefix and response bounds. It never substitutes the generic KV listing interface for a failed authoritative record check.
-
-For operator cleanup, `list_physical_keys_with_prefix` explicitly sends `physical=true` and includes expired rows still held by the server. The default identity-graph listing remains live-only. An older record server that rejects this extension produces an error, never a substituted live page. Revoke writers before destructive enumeration/deletion; neither expiry nor a full page proves all physical data has been removed. The allocator is not listed or reset by these operations.
-
-The application supplies the EC or other domain-specific adapter. EdgeZero does not interpret consent, tombstones or identity records. No provider fallback or generic KV migration is implied by this API.
-
-## Validation and local proofs
-
-Offline validation remains structural-only:
+Offline validation is structural:
 
 ```sh
 edgezero config validate --adapter axum \
   --store-bindings /etc/my-app/native-stores.toml \
-  --target-features celld-config,celld-kv
+  --target-features celld-kv
 ```
 
-Provider availability is always unknown offline. Target controls normalize and forward Cargo arguments; validation does not resolve the application's feature graph, capture tokens, connect to endpoints or verify grants/content.
+It does not resolve features, read tokens, contact endpoints or check grants.
 
-Normal CI uses deterministic loopback client and public-runner fixtures. The generated-consumer proof builds default-off, config-only, KV-only and combined targets. The separate real-service command requires an explicit modified celld executable, Linux namespace tools, curl and OpenSSL:
+Normal CI runs deterministic loopback client, public-runner and generated-consumer tests. Three explicit proofs use real services and fail when a prerequisite is missing.
+
+The service unit tests run against real SQLite:
 
 ```sh
-CELLD_BIN=/absolute/path/to/modified/celld \
+node --test services/celld-store/test/service.test.mjs
+```
+
+The generated consumer proof needs an official celld binary, Node.js and OpenSSL. It runs `celld dev` with the service behind a local TLS proxy, covering authentication, binary values, TTL expiry, restart and a rejected token:
+
+```sh
+CELLD_BIN=/absolute/path/to/official/celld \
 EDGEZERO_GENERATED_TEST_TARGET_DIR=/absolute/path/to/disposable-build-cache \
 node scripts/run_native_celld_integration.mjs
 ```
 
-For the conditional-record client, start a disposable modified celld listener with a trusted-network `identity` alias and read/write/delete/list grants, then run:
+The fleet proof needs the binary, Docker and curl. It starts a disposable bucket container and two nodes, drops one reply between them, and checks that celld's resend applies nothing twice. It then kills the owning node and checks that every acknowledged write survives takeover:
 
 ```sh
-CELLD_RECORDS_ENDPOINT=http://127.0.0.1:7780 \
-  cargo test -p edgezero-store-celld --features records \
-  --test records_interop -- --ignored --nocapture
+CELLD_BIN=/absolute/path/to/official/celld node scripts/run_celld_store_fleet_proof.mjs
 ```
 
-Use the actual loopback port reported by the disposable listener. This explicit test rejects non-loopback/HTTPS endpoints, uses only fictional fixture rows and removes its `interop:` keys. It checks conditional contention, delete/recreate generation safety, expiry, listing and the full value/metadata envelope. It is separate from the authenticated TLS generated-consumer proof.
-
-Missing prerequisites fail the command. The generated-consumer proof uses disposable data and dummy credentials, checks private namespace isolation, and runs a generated native app against the embedded API with certificate verification. It does not access a real fleet or AWS account. The plan records executed results and remaining gates. Multi-node forwarding, reload, production storage/replication, upgrades and stress acceptance remain separate work.
+These are local proofs. Production bucket behavior, network isolation, upgrades under load and sustained throughput need separate acceptance.

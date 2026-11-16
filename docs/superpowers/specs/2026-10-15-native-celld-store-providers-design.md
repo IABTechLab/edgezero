@@ -1,5 +1,7 @@
 # Native celld store providers
 
+> **Superseded (2026-11-16).** The scoped listener inside celld required a modified celld build, which is not acceptable. The celld config provider and the v1 record API were removed. Live KV now goes through the EdgeZero store service on official celld: see [EdgeZero store service on stock celld](2026-11-16-stock-celld-store-service-design.md). This document is kept as the record of the earlier design.
+
 Status: embedded celld and the EdgeZero provider are implemented, including independent config/KV features, native composition and structural-only CLI support. Local provider, startup, verified TLS, generated-consumer and disposable isolation checks have executed. Release, deployment, stress and fleet acceptance remain unfinished. See the [implementation plan](../plans/2026-10-15-native-celld-store-providers.md) for current evidence and remaining gates.
 
 Initial celld implementation checkpoint: `f72ae21a515859570622ac9d6ca9c19cf6870b81` on `feat/scoped-store-api`. This is not a released capability or fleet acceptance claim.

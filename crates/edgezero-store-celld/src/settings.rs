@@ -6,13 +6,12 @@
 )]
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::fmt;
 use url::{Host, Url};
 
 use crate::PreparationError;
 
-/// Explicit listener access policy, not a credential value.
+/// Explicit store service access policy, not a credential value.
 #[derive(Clone, Deserialize, Serialize, Eq, Hash, PartialEq)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum CelldAccess {
@@ -44,63 +43,7 @@ impl fmt::Debug for CelldAccess {
     }
 }
 
-/// One complete remote document selected by a service-side store alias.
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CelldDocument {
-    pub store: String,
-    pub key: String,
-}
-
-impl fmt::Debug for CelldDocument {
-    #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CelldDocument").finish_non_exhaustive()
-    }
-}
-
-/// Explicit local lookup mappings to complete UTF-8 documents.
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CelldConfigSettings {
-    pub endpoint: String,
-    pub access: CelldAccess,
-    pub default_key: String,
-    pub documents: BTreeMap<String, CelldDocument>,
-}
-
-impl CelldConfigSettings {
-    /// Validates every mapping without credentials, runtime or network access.
-    ///
-    /// # Errors
-    /// Rejects invalid endpoint, access policy, default, lookup key or target.
-    #[inline]
-    pub fn validate(&self) -> Result<(), PreparationError> {
-        endpoint(&self.endpoint, &self.access)?;
-        if self.documents.is_empty() || !self.documents.contains_key(&self.default_key) {
-            return Err(PreparationError::InvalidBinding);
-        }
-        for (key, document) in &self.documents {
-            if !valid_key(key, false) || key.trim().is_empty() {
-                return Err(PreparationError::InvalidBinding);
-            }
-            if !valid_alias(&document.store) || !valid_key(&document.key, false) {
-                return Err(PreparationError::InvalidResource);
-            }
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Debug for CelldConfigSettings {
-    #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CelldConfigSettings")
-            .finish_non_exhaustive()
-    }
-}
-
-/// One live scoped store alias. No physical namespace is accepted.
+/// One live store service alias. No physical namespace is accepted.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CelldKvSettings {
@@ -136,7 +79,7 @@ impl fmt::Debug for CelldKvSettings {
 pub struct CelldAccessToken(String);
 
 impl CelldAccessToken {
-    /// Validates explicit bytes against the embedded service's token contract.
+    /// Validates explicit bytes against the store service's token contract.
     ///
     /// # Errors
     /// Rejects tokens outside 32..=512 ASCII graphic bytes.
@@ -169,8 +112,6 @@ impl fmt::Debug for CelldAccessToken {
 #[serde(default, deny_unknown_fields)]
 pub struct CelldPreparationLimits {
     pub max_remote_values: u64,
-    pub max_config_document_bytes: u64,
-    pub max_snapshot_bytes: u64,
     pub max_metadata_bytes: u64,
     pub max_value_bytes: u64,
     pub max_page_bytes: u64,
@@ -184,8 +125,6 @@ impl Default for CelldPreparationLimits {
     fn default() -> Self {
         Self {
             max_remote_values: 1_024,
-            max_config_document_bytes: 0x0010_0000,
-            max_snapshot_bytes: 0x0080_0000,
             max_metadata_bytes: 0x0010_0000,
             max_value_bytes: 0x0010_0000,
             max_page_bytes: 0x0020_0000,
@@ -205,16 +144,12 @@ impl CelldPreparationLimits {
     pub fn validate(&self) -> Result<(), PreparationError> {
         let quotas = [
             self.max_remote_values,
-            self.max_config_document_bytes,
-            self.max_snapshot_bytes,
             self.max_metadata_bytes,
             self.max_value_bytes,
             self.max_page_bytes,
         ];
         if quotas.iter().any(|value| *value == 0 || usize::try_from(*value).is_err())
             || self.max_value_bytes > 0x0010_0000
-            || self.max_config_document_bytes > 0x0010_0000
-            || self.max_config_document_bytes > self.max_snapshot_bytes
             || self.max_page_bytes > 0x0020_0000
             || self.connect_timeout_ms == 0
             || self.connect_timeout_ms > self.operation_timeout_ms
@@ -312,6 +247,7 @@ pub(crate) fn valid_alias(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 pub(crate) fn valid_key(value: &str, empty: bool) -> bool {
     (empty || !value.is_empty()) && value.len() <= 512 && !value.chars().any(char::is_control)
 }
@@ -328,7 +264,6 @@ fn valid_variable(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{CelldAccess, CelldAccessToken, CelldKvSettings, CelldPreparationLimits, endpoint};
-    use crate::PreparationError;
 
     #[test]
     fn live_store_settings_round_trip_locator_and_credential_reference_only() {
@@ -391,26 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn config_and_kv_value_caps_are_independent() {
-        let limits = CelldPreparationLimits {
-            max_value_bytes: 1,
-            ..CelldPreparationLimits::default()
-        };
-        limits
-            .validate()
-            .expect("lower live KV cap does not constrain config snapshots");
-        assert_eq!(
-            CelldPreparationLimits {
-                max_config_document_bytes: 0x0010_0001,
-                ..limits
-            }
-            .validate()
-            .expect_err("config retains its independent service ceiling"),
-            PreparationError::InvalidLimits
-        );
-    }
-
-    #[test]
     fn tokens_match_service_bounds_and_debug_is_fully_redacted() {
         for size in [0, 1, 31, 513] {
             CelldAccessToken::new("x".repeat(size))
@@ -450,10 +365,6 @@ mod tests {
             },
             CelldPreparationLimits {
                 max_value_bytes: 0x0010_0001,
-                ..CelldPreparationLimits::default()
-            },
-            CelldPreparationLimits {
-                max_snapshot_bytes: 1,
                 ..CelldPreparationLimits::default()
             },
             CelldPreparationLimits {
