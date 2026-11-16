@@ -31,6 +31,12 @@ leg; this consolidation does not silently activate or qualify it in CI. Fastly c
 progress must retain its existing unqualified exit and exact 12/23-probe inventories.
 Neither passing a local runtime suite nor green CI establishes hosted qualification.
 
+Fastly CI selects the tracked [Viceroy repair](../../patches/viceroy/README.md) explicitly
+through `VICEROY_BIN` and the WASIp1 Cargo runner. It requires the repair's actual SDK timeout
+setter/getter readback as well as bounded body readiness; stock Viceroy 0.21.0 has the same
+version text but lacks those hostcalls. Keep the SDK assertions and verify the selected binary,
+rather than substituting helper-setting readback or treating stock-runtime failure as a pass.
+
 Fastly's existing wire and lifetime commands execute the single-request qualification binary,
 including its shared progress controllers. The [qualification runbook](acceptance/ts-outbound-qualification-runbook.md)
 documents embedded origin bounds, hosted profiles and direct SDK-only controls. Local profile
@@ -46,6 +52,11 @@ fields, native SDK bodyless/205 disposal, and eight actual HTTP representation c
 existing 68 redirect exchanges and 26 independent-cap cases remain separate inventories. One
 CI invocation checks every required proof in its owning phase; this adds no header-fidelity or
 hosted qualification claim.
+
+Five additional Spin trailer exchanges establish native field exposure, exact cumulative
+count/byte boundaries and first-excess rejection in buffered/streamed modes. Their persisted
+reports retain request identities, raw HTTP observations and source release. These are local
+functional evidence, not a provider-allocation bound or hosted qualification.
 
 Mixed batch recovery runs six shared scenarios on every adapter: check/next followed by
 collection, or fresh collection, each ending in completion, cutoff or an injected typed
@@ -184,6 +195,14 @@ Only explicitly prescribed headerless fault observations may remain pending/no-c
 until the prescribed identity-bearing recovery response. This exception does not allow
 an unstamped recovery response to borrow a later response's identity.
 
+The Fastly assembly binary explicitly enables `assembly-attestation`, using the adapter's
+`test-utils` diagnostic-header scope at its existing commit boundary. This stamps the original
+canonical failure even before an application exists, without running failed-app hooks or
+replacing standard serving entrypoints. Only bounded extension metadata can be added; existing
+fields (including conflicting identities) are never replaced. This is instrumented-fixture
+provenance, not a production response-header feature or hosted qualification. All seven first
+GETs, canonical bodies, partial-app exclusion, recovery, HEAD and teardown checks remain required.
+
 Startup has one 45-second deadline beginning before process creation. HTTP exchanges
 use at most 12 seconds, shortened by the remaining startup budget, across connection,
 write, read and trailer handling. Capture is bounded to a 16 KiB status line, a separate
@@ -199,8 +218,9 @@ without probing the real compiler inside cancellation or readiness timing window
 
 The existing ephemeral-port handoff is not atomic reservation. Identity checks mitigate
 wrong-listener success without port reselection, respawn or retry-until-green. Modes
-without an identity-bearing response, including canonical Fastly assembly failures,
-remain explicitly unverified rather than gaining a test-only production lifecycle API.
+without an identity-bearing response remain explicitly unverified. Canonical Fastly assembly
+failures are covered by the explicit fixture instrumentation above, not a new production
+lifecycle API or a deferred-attestation exception.
 
 Owned Unix processes are signalled directly through safe Nix PID/process-group APIs, not helper
 subprocesses. Targets must be positive IDs greater than one; only `ESRCH` establishes absence.

@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
+assembly-attestation = ["edgezero-adapter-fastly/test-utils"]
 qualification = ["progress"]
 progress = ["fixture-core/qualification", "fixture-core/native-body-witness", "edgezero-adapter-fastly/test-utils"]
 readiness = ["dep:fastly-sys"]
@@ -28,6 +29,7 @@ path = "src/bin/single_request.rs"
 [[bin]]
 name = "fixture-fastly-assembly"
 path = "src/bin/assembly.rs"
+required-features = ["assembly-attestation"]
 
 [[bin]]
 name = "fixture-fastly-outbound-progress"

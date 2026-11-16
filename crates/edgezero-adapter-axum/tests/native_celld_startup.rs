@@ -1,7 +1,8 @@
 //! Deterministic loopback HTTP fixtures through the public native runner.
-//! This is not real celld, TLS, fleet, persistence or generated-consumer acceptance.
+//! This is not real celld, the store service, TLS, fleet, persistence or
+//! generated-consumer acceptance.
 
-#![cfg(all(feature = "celld-config", feature = "celld-kv"))]
+#![cfg(feature = "celld-kv")]
 #![expect(
     clippy::arbitrary_source_item_ordering,
     reason = "fixture helpers precede startup scenarios"
@@ -19,33 +20,29 @@ mod tests {
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
-    use edgezero_core::blob_envelope::BlobEnvelope;
     use serde_json::json;
 
     const WAIT: Duration = Duration::from_secs(12);
 
     struct ScopedFixture {
         address: SocketAddr,
-        config: Arc<Mutex<(u16, Vec<u8>)>>,
-        gate: Arc<AtomicBool>,
+        value: Arc<Mutex<(u16, Vec<u8>)>>,
         requests: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
         worker: Option<JoinHandle<()>>,
     }
 
     impl ScopedFixture {
-        fn new(config_status: u16, document: Vec<u8>, gated: bool) -> Self {
+        fn new(initial_status: u16, initial_value: Vec<u8>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("loopback fixture");
             listener.set_nonblocking(true).expect("nonblocking fixture");
             let address = listener.local_addr().expect("fixture address");
-            let config = Arc::new(Mutex::new((config_status, document)));
+            let value = Arc::new(Mutex::new((initial_status, initial_value)));
             let requests = Arc::new(Mutex::new(Vec::new()));
-            let gate = Arc::new(AtomicBool::new(!gated));
             let stop = Arc::new(AtomicBool::new(false));
             let worker = {
-                let worker_config = Arc::clone(&config);
+                let worker_value = Arc::clone(&value);
                 let worker_requests = Arc::clone(&requests);
-                let worker_gate = Arc::clone(&gate);
                 let worker_stop = Arc::clone(&stop);
                 thread::spawn(move || {
                     let deadline = Instant::now().checked_add(WAIT).expect("fixture deadline");
@@ -66,32 +63,20 @@ mod tests {
                                     .lock()
                                     .expect("request log")
                                     .push(line.clone());
-                                let (status, body) = if line.starts_with(
-                                    "GET /v1/stores/config-fixture/value?key=settings ",
-                                ) {
-                                    while !worker_gate.load(Ordering::Relaxed)
-                                        && !worker_stop.load(Ordering::Relaxed)
-                                        && Instant::now() < deadline
-                                    {
-                                        thread::sleep(Duration::from_millis(5));
-                                    }
-                                    worker_config.lock().expect("document").clone()
-                                } else {
-                                    assert!(
-                                        line.starts_with(
-                                            "GET /v1/stores/state-fixture/value?key=value "
-                                        ),
-                                        "unexpected scoped request"
-                                    );
-                                    (200, b"live-value".to_vec())
-                                };
+                                assert!(
+                                    line.starts_with(
+                                        "GET /v1/stores/state-fixture/value?key=value "
+                                    ),
+                                    "unexpected store request"
+                                );
+                                let (status, body) = worker_value.lock().expect("value").clone();
                                 let content_type = if status == 200 {
                                     "application/octet-stream"
                                 } else {
                                     "application/json"
                                 };
                                 // Failure tests may close early after checking Content-Length.
-                                let _sent = write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nx-celld-store-version: 1\r\nConnection: close\r\n\r\n", body.len())
+                                let _sent = write!(stream, "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nx-edgezero-store-version: 1\r\nx-edgezero-store-instance: AAAAAAAAAAAAAAAAAAAAAA\r\nConnection: close\r\n\r\n", body.len())
                                 .and_then(|()| stream.write_all(&body));
                             }
                             Err(error) if error.kind() == ErrorKind::WouldBlock => {
@@ -104,8 +89,7 @@ mod tests {
             };
             Self {
                 address,
-                config,
-                gate,
+                value,
                 requests,
                 stop,
                 worker: Some(worker),
@@ -119,10 +103,6 @@ mod tests {
         fn count(&self) -> usize {
             self.requests.lock().expect("request log").len()
         }
-
-        fn wait_request(&self) {
-            wait_until(|| self.count() != 0, "scoped request");
-        }
     }
 
     #[expect(
@@ -132,7 +112,6 @@ mod tests {
     impl Drop for ScopedFixture {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
-            self.gate.store(true, Ordering::Relaxed);
             if let Some(worker) = self.worker.take() {
                 worker.join().expect("fixture thread");
             }
@@ -292,107 +271,74 @@ mod tests {
         }
     }
 
-    fn envelope(greeting: &str) -> Vec<u8> {
-        serde_json::to_vec(&BlobEnvelope::new(
-            json!({"greeting": greeting}),
-            "2026-10-15T12:00:00Z".to_owned(),
-        ))
-        .expect("typed config envelope")
-    }
-
     fn bindings(endpoint: &str) -> String {
         format!(
             "version=1
-[config.app]
-provider='celld-config'
-endpoint='{endpoint}'
-default_key='settings'
-[config.app.access]
-mode='trusted-network'
-[config.app.documents.settings]
-store='config-fixture'
-key='settings'
 [kv.state]
 provider='celld-kv'
 endpoint='{endpoint}'
 store='state-fixture'
 [kv.state.access]
 mode='trusted-network'
+[kv.other]
+provider='celld-kv'
+endpoint='{endpoint}'
+store='other-fixture'
+[kv.other.access]
+mode='trusted-network'
 "
         )
     }
 
     #[test]
-    fn public_runner_gates_preparation_and_initializer_then_keeps_snapshot_and_live_kv() {
+    fn public_runner_prepares_without_probe_and_initializer_reads_live_kv() {
         let root = tempfile::tempdir().expect("isolated child root");
-        let fixture = ScopedFixture::new(200, envelope("first-greeting"), true);
+        let fixture = ScopedFixture::new(200, b"first-value".to_vec());
         let path = root.path().join("bindings.toml");
         fs::write(&path, bindings(&fixture.endpoint())).expect("bindings");
         let mut host = Host::spawn(root.path(), &path, true, false);
-        fixture.wait_request();
-        host.no_listener();
-        assert!(!root.path().join("initializer-entered").exists());
-        // File settings were captured before the gated fetch; later edits cannot change sources/defaults.
-        fs::write(&path, "invalid later file contents").expect("replace captured file");
-        fixture.gate.store(true, Ordering::Relaxed);
         wait_until(
             || root.path().join("initializer-entered").is_file(),
             "initializer entry",
         );
+        // File settings were captured before the initializer; later edits cannot change sources.
+        fs::write(&path, "invalid later file contents").expect("replace captured file");
         host.no_listener();
-        assert_eq!(fixture.count(), 1, "KV setup performs no remote probe");
+        assert_eq!(fixture.count(), 0, "KV setup performs no remote probe");
         fs::write(root.path().join("initializer-release"), b"ready").expect("release initializer");
-        assert_eq!(host.get("/snapshot"), "first-greeting");
-        *fixture.config.lock().expect("edit remote document") = (200, envelope("second-greeting"));
-        assert_eq!(host.get("/snapshot"), "first-greeting");
-        assert_eq!(fixture.count(), 1, "snapshot reads never fetch again");
-        assert_eq!(host.get("/kv"), "live-value");
-        assert_eq!(host.get("/kv"), "live-value");
-        assert_eq!(fixture.count(), 3);
-        drop(host);
-        fs::write(&path, bindings(&fixture.endpoint())).expect("fresh process bindings");
-        let mut restarted = Host::spawn(root.path(), &path, false, false);
-        assert_eq!(restarted.get("/snapshot"), "second-greeting");
-        assert_eq!(fixture.count(), 4, "fresh preparation adopts remote edits");
+        assert_eq!(host.get("/startup"), "first-value");
+        assert_eq!(fixture.count(), 1);
+        *fixture.value.lock().expect("edit remote value") = (200, b"second-value".to_vec());
+        assert_eq!(host.get("/kv"), "second-value");
+        assert_eq!(host.get("/startup"), "first-value");
+        assert_eq!(
+            fixture.count(),
+            2,
+            "KV reads are live; state is the app's own"
+        );
     }
 
     #[test]
-    fn config_failures_never_initialize_listen_or_fall_back() {
-        for (status, document, policy, category) in [
-            (
-                404,
-                json!({"error": "not_found"}).to_string().into_bytes(),
-                "",
-                "missing",
-            ),
-            (200, vec![0xff], "", "malformed"),
-            (
-                200,
-                envelope("document-too-large"),
-                "\n[limits.celld]\nmax_config_document_bytes=4\n",
-                "size limit",
-            ),
-        ] {
-            let root = tempfile::tempdir().expect("root");
-            let fixture = ScopedFixture::new(status, document, false);
-            let path = root.path().join("bindings.toml");
-            fs::write(&path, format!("{}{policy}", bindings(&fixture.endpoint())))
-                .expect("bindings");
-            let mut host = Host::spawn(root.path(), &path, false, false);
-            let error = host.failure();
-            host.no_listener();
-            assert!(!root.path().join("initializer-entered").exists());
-            assert_eq!(fixture.count(), 1);
-            assert!(error.contains(category), "closed failure category");
-            assert!(!error.contains("config-fixture"));
-            assert!(!error.contains(&fixture.endpoint()));
-        }
+    fn failed_initializer_read_never_listens_or_falls_back() {
+        let root = tempfile::tempdir().expect("root");
+        let fixture = ScopedFixture::new(
+            503,
+            json!({"error": "unavailable"}).to_string().into_bytes(),
+        );
+        let path = root.path().join("bindings.toml");
+        fs::write(&path, bindings(&fixture.endpoint())).expect("bindings");
+        let mut host = Host::spawn(root.path(), &path, false, false);
+        let error = host.failure();
+        host.no_listener();
+        assert_eq!(fixture.count(), 1);
+        assert!(!error.contains("state-fixture"));
+        assert!(!error.contains(&fixture.endpoint()));
     }
 
     #[test]
     fn supplied_remote_source_conflict_never_polls_or_fetches() {
         let root = tempfile::tempdir().expect("root");
-        let fixture = ScopedFixture::new(200, envelope("unused-greeting"), false);
+        let fixture = ScopedFixture::new(200, b"unused".to_vec());
         let path = root.path().join("bindings.toml");
         fs::write(&path, bindings(&fixture.endpoint())).expect("bindings");
         let mut host = Host::spawn(root.path(), &path, false, true);
@@ -405,22 +351,18 @@ mode='trusted-network'
     }
 
     #[test]
-    fn invalid_later_kv_credentials_fail_before_any_config_request() {
+    fn invalid_later_kv_credentials_fail_before_any_request() {
         let root = tempfile::tempdir().expect("root");
-        let fixture = ScopedFixture::new(200, envelope("unused-greeting"), false);
+        let fixture = ScopedFixture::new(200, b"unused".to_vec());
         let path = root.path().join("bindings.toml");
-        let input = bindings(&fixture.endpoint())
-            .replace(
-                &format!(
-                    "[kv.state]\nprovider='celld-kv'\nendpoint='{}'",
-                    fixture.endpoint()
-                ),
-                "[kv.state]\nprovider='celld-kv'\nendpoint='https://unreachable.invalid'",
-            )
-            .replace(
-                "[kv.state.access]\nmode='trusted-network'",
-                "[kv.state.access]\nmode='authenticated'\ntoken_env='ABSENT_TOKEN'",
-            );
+        let input = bindings(&fixture.endpoint()).replace(
+            &format!(
+                "endpoint='{}'\nstore='other-fixture'\n[kv.other.access]\nmode='trusted-network'",
+                fixture.endpoint()
+            ),
+            "endpoint='https://unreachable.invalid'\nstore='other-fixture'\n[kv.other.access]\nmode='authenticated'\ntoken_env='ABSENT_TOKEN'",
+        );
+        assert!(input.contains("ABSENT_TOKEN"));
         fs::write(&path, input).expect("bindings");
         let mut host = Host::spawn(root.path(), &path, false, false);
         let error = host.failure();

@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { fixtureEnvironment, runCommand, runIntegration } from "./run_native_celld_integration.mjs";
+import { CELLD_VERSION, fixtureEnvironment, runCommand, runIntegration } from "./run_native_celld_integration.mjs";
 
 const binary = resolve("fixture-celld");
 
@@ -15,7 +15,8 @@ function fixture(extra = {}) {
     digest: async () => "f".repeat(64),
     command: async (command, args, options) => {
       calls.push({ command, args, options });
-      return { stdout: "--store-api-config PATH\n", stderr: "" };
+      if (args[0] === "--version") return { stdout: `${CELLD_VERSION}\n`, stderr: "" };
+      return { stdout: "celld — self-hosted, distributed Durable Objects\n", stderr: "" };
     },
     log: () => {},
     ...extra,
@@ -27,7 +28,7 @@ test("fixture environment excludes deployment credentials, proxies and inherited
   assert.deepEqual(fixtureEnvironment({
     PATH: "path", HOME: "home", CARGO_HOME: "cargo", RUSTUP_TOOLCHAIN: "1.95.0", CELLD_BIN: "ignored", TMPDIR: "/fixture/tmp", RUST_TEST_THREADS: "8",
     AWS_ACCESS_KEY_ID: "secret", CELLD_APP_TOKEN: "secret", ALL_PROXY: "proxy", SSL_CERT_FILE: "ca",
-  }, binary), { RUST_TEST_THREADS: "1", PATH: "path", HOME: "home", CARGO_HOME: "cargo", RUSTUP_TOOLCHAIN: "1.95.0", TMPDIR: "/fixture/tmp", CELLD_BIN: binary });
+  }, binary, "/fixture/service"), { PATH: "path", HOME: "home", CARGO_HOME: "cargo", RUSTUP_TOOLCHAIN: "1.95.0", CELLD_BIN: binary, EDGEZERO_CELLD_STORE_SERVICE: "/fixture/service", TMPDIR: "/fixture/tmp", RUST_TEST_THREADS: "1" });
 });
 
 test("missing binary is a failed prerequisite, never a passing skip", async () => {
@@ -42,43 +43,46 @@ test("unavailable executable stops before any command", async () => {
   assert.equal(calls.length, 0);
 });
 
-test("vanilla celld cannot masquerade as embedded API acceptance", async () => {
-  const { options } = fixture({ command: async () => ({ stdout: "unmodified celld help", stderr: "" }) });
-  await assert.rejects(runIntegration(options), /no embedded scoped API/);
+test("a different celld release is not the pinned proof", async () => {
+  const { calls, options } = fixture({ command: async (command, args) => {
+    calls.push({ command, args });
+    return { stdout: "celld 0.6.2\n", stderr: "" };
+  } });
+  await assert.rejects(runIntegration(options), /not the pinned/);
+  assert.equal(calls.length, 1);
 });
 
-test("isolation precedes the exact nonzero generated TLS proof", async () => {
+test("a modified celld cannot masquerade as the official release", async () => {
+  const { options } = fixture({ command: async (command, args) => ({
+    stdout: args[0] === "--version" ? CELLD_VERSION : "--store-api-config PATH",
+    stderr: "",
+  }) });
+  await assert.rejects(runIntegration(options), /modified build/);
+});
+
+test("version and release checks precede the exact nonzero generated proof", async () => {
   const { calls, options } = fixture();
   await runIntegration(options);
   assert.equal(calls.length, 4);
-  assert.equal(calls[0].command, binary);
-  assert.deepEqual(calls[1].args, ["scripts/check_celld_scoped_isolation.sh", binary]);
+  assert.deepEqual(calls[0].args, ["--version"]);
+  assert.deepEqual(calls[1].args, ["--help"]);
   assert.equal(calls[2].command, "scripts/run_test_nonzero.sh");
   assert.equal(calls[2].args[0], "--ignored");
-  const sentinel = "generated_native_consumer_uses_embedded_celld_over_tls";
-  assert.equal(calls[2].args[1], [sentinel, `${sentinel}_records_v2`].join("\n"), "both exact test sentinels are mandatory");
-  assert.equal(calls[2].args.at(-1), sentinel, "test filter must exclude the independent deterministic suite");
+  const sentinel = "generated_native_consumer_uses_stock_celld_store_service";
+  assert.equal(calls[2].args[1], `${sentinel}\ngenerated_native_consumer_uses_stock_celld_store_records`);
+  assert.equal(calls[2].args.at(-1), "generated_native_consumer_uses_stock_celld_store_", "filter includes ordinary and record consumers, not deterministic suite");
+  assert.equal(calls[3].args[1], "stock_celld_public_contract_races_and_lost_acknowledgement");
+  assert.ok(calls[3].args.includes("records"));
+  assert.ok(calls[3].args.includes("stock_records_interop"));
+  assert.ok(!calls[3].args.includes("records-v2"));
   assert.ok(calls[2].args.includes("--offline"));
-  assert.equal(calls[3].command, "scripts/run_test_nonzero.sh");
-  assert.equal(calls[3].args[1], "real_celld_records_v2_public_contract_races_and_lost_acknowledgement");
-  assert.ok(calls[3].args.includes("records_v2_interop"), "native commit/lost-reply proof is mandatory");
+  assert.match(calls[2].options.env.EDGEZERO_CELLD_STORE_SERVICE, /services\/celld-store$/);
   for (const call of calls) {
     assert.equal(call.options.env.AWS_SECRET_ACCESS_KEY, undefined);
     assert.equal(call.options.env.HTTP_PROXY, undefined);
     assert.equal(call.options.env.SSL_CERT_FILE, undefined);
     assert.equal(call.options.env.RUST_TEST_THREADS, "1", "generated builds and fixture state are serialized");
   }
-});
-
-test("an isolation failure prevents generated acceptance", async () => {
-  let count = 0;
-  const { options } = fixture({ command: async () => {
-    count += 1;
-    if (count === 2) throw new Error("isolation unavailable");
-    return { stdout: "--store-api-config", stderr: "" };
-  } });
-  await assert.rejects(runIntegration(options), /isolation unavailable/);
-  assert.equal(count, 2);
 });
 
 test("changing the tested executable invalidates acceptance", async () => {

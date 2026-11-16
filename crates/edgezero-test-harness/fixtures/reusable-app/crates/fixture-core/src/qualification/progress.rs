@@ -17,7 +17,6 @@ use futures::{
     task::AtomicWaker,
 };
 use serde_json::{Value, json};
-use std::io::Write as _;
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -28,7 +27,10 @@ pub type Job = LocalBoxFuture<'static, Result<u64, EdgeError>>;
 
 pub trait ProbeRuntime: Send + Sync {
     fn adapter(&self) -> &'static str;
-    fn outbound_client(&self) -> Result<Arc<dyn OutboundHttpClient>, EdgeError>;
+    fn outbound_client(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<Arc<dyn OutboundHttpClient>, EdgeError>;
     fn perform(&self, target: String) -> Job;
     fn start(&self, target: String) -> Result<Job, EdgeError>;
     fn pause(&self, duration: Duration) -> LocalBoxFuture<'static, ()>;
@@ -87,7 +89,7 @@ pub(super) fn outbound_client(
         .get::<Arc<State>>()
         .ok_or_else(probe_failure)?
         .runtime
-        .outbound_client()
+        .outbound_client(ctx)
 }
 
 pub(super) fn pause(
@@ -114,7 +116,7 @@ async fn batch_recovery(ctx: RequestContext) -> Result<Response, EdgeError> {
         .get::<Arc<State>>()
         .ok_or_else(probe_failure)?;
     let runtime = Arc::clone(&state.runtime);
-    let native = runtime.outbound_client()?;
+    let native = runtime.outbound_client(&ctx)?;
     let case = ctx.path_params().get("case").ok_or_else(probe_failure)?;
     let base: Uri = ctx
         .headers()
@@ -134,19 +136,23 @@ struct HandlerReturned(Arc<AtomicBool>);
 
 struct FramingObserver;
 
+fn write_framing_receipt(writer: &mut impl std::io::Write, receipt: &Value) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec(receipt)?;
+    bytes.push(b'\n');
+    writer.write_all(&bytes)
+}
+
 impl ResponseEgressObserver for FramingObserver {
     fn complete(&self, report: &ResponseEgressReport) {
         if report.framing_failures.application().is_some()
             || report.framing_failures.fallback().is_some()
         {
-            let record = json!({"event":"framing-terminal", "application":report.framing_failures.application().map(|reason|format!("{reason:?}")),
+            let receipt = json!({"event":"framing-terminal", "application":report.framing_failures.application().map(|reason|format!("{reason:?}")),
                 "fallback":report.framing_failures.fallback().map(|reason|format!("{reason:?}")),
                 "outcome":format!("{:?}",report.outcome),"body_kind":format!("{:?}",report.body_kind),
                 "bytes_written":report.bytes_written,"disposition":report.fallback_disposition.map(|value|format!("{value:?}")),"qualification":false});
             // One complete line prevents host logs from splitting JSON formatter writes.
-            let line = format!("{record}\n");
-            std::io::stderr()
-                .write_all(line.as_bytes())
+            write_framing_receipt(&mut std::io::stderr().lock(), &receipt)
                 .expect("should write framing receipt");
         }
     }
@@ -235,12 +241,8 @@ async fn transport_probe(ctx: RequestContext) -> Result<Response, EdgeError> {
         .get::<Arc<State>>()
         .cloned()
         .ok_or_else(probe_failure)?;
-    super::transport::probe(
-        ctx,
-        state.runtime.adapter(),
-        state.runtime.outbound_client()?,
-    )
-    .await
+    let native = state.runtime.outbound_client(&ctx)?;
+    super::transport::probe(ctx, state.runtime.adapter(), native).await
 }
 
 fn observed(mut job: Job, closed: Arc<AtomicBool>, polls: Arc<AtomicUsize>) -> Job {
@@ -745,6 +747,70 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
+    fn framing_receipt_uses_one_complete_write_for_a_ready_sink() {
+        #[derive(Default)]
+        struct Sink {
+            calls: usize,
+            bytes: Vec<u8>,
+        }
+        impl std::io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.calls += 1;
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let receipt = json!({"event":"framing-terminal", "application":"LengthMismatch", "qualification":false});
+        let mut sink = Sink::default();
+        write_framing_receipt(&mut sink, &receipt).unwrap();
+        assert_eq!(sink.calls, 1);
+        assert_eq!(sink.bytes.last(), Some(&b'\n'));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&sink.bytes).unwrap(),
+            receipt
+        );
+    }
+
+    #[test]
+    fn framing_receipt_completes_short_writes_and_propagates_sink_failure() {
+        #[derive(Default)]
+        struct Sink {
+            bytes: Vec<u8>,
+            fail: bool,
+        }
+        impl std::io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.fail {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                self.bytes.push(bytes[0]);
+                Ok(1)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let receipt = json!({"event":"framing-terminal", "qualification":false});
+        let mut sink = Sink::default();
+        write_framing_receipt(&mut sink, &receipt).unwrap();
+        assert_eq!(sink.bytes.last(), Some(&b'\n'));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&sink.bytes).unwrap(),
+            receipt
+        );
+        sink.fail = true;
+        assert_eq!(
+            write_framing_receipt(&mut sink, &receipt)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
     fn dispatch_return_waiter_is_pending_until_marked_and_wakes_once() {
         use std::{
             future::Future,
@@ -780,7 +846,10 @@ mod tests {
         fn adapter(&self) -> &'static str {
             "test"
         }
-        fn outbound_client(&self) -> Result<Arc<dyn OutboundHttpClient>, EdgeError> {
+        fn outbound_client(
+            &self,
+            _ctx: &RequestContext,
+        ) -> Result<Arc<dyn OutboundHttpClient>, EdgeError> {
             Err(probe_failure())
         }
         fn perform(&self, target: String) -> Job {
@@ -1352,7 +1421,10 @@ mod tests {
             fn adapter(&self) -> &'static str {
                 "test"
             }
-            fn outbound_client(&self) -> Result<Arc<dyn OutboundHttpClient>, EdgeError> {
+            fn outbound_client(
+                &self,
+                _ctx: &RequestContext,
+            ) -> Result<Arc<dyn OutboundHttpClient>, EdgeError> {
                 Err(probe_failure())
             }
             fn perform(&self, _target: String) -> Job {

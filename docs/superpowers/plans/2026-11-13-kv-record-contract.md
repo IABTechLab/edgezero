@@ -1,10 +1,38 @@
 # Portable KV records implementation plan
 
-Status: implementation and required workspace, provider, generated-consumer and selected Fastly CI checks passed on 2026-11-13. Local risk-based review is underway. The pre-existing Cloudflare SDK dependency-graph question remains open. TS adoption and public changes have not started.
+Status, 2026-11-16: the original fork-based celld route below is historical. The [stock-service design](../specs/2026-11-16-stock-celld-record-contract-design.md) now owns celld behavior. The candidate merges current #422 into current #439 and preserves the existing record history. Service and Rust provider tests, actual generated TLS consumer/shared-contract checks, two-node resend/deadline/takeover proof and strict workspace Clippy pass. Broader integration checks, downstream reconciliation, TS fixture retargeting and review remain open. The feature-aware WASM dependency policy is settled. No new public writes are authorized.
 
 Worktree: `/home/pav/worktrees/feat-kv-record-contract`, branch `feat/kv-record-contract`, initially based on #439 at `645703bf39f5965dad5b54d7907e28c9197a7034`.
 
 This file owns EdgeZero task-level progress and checks. The Obsidian plan at `Projects/Trusted Server/plans/Implement the Record Contract and Reconcile Provider Adoption.md` owns celld source/artifact coordination, TS #1536/#1537 reconciliation, publication and stack disposition. The spec owns behavior. Keep those responsibilities separate rather than maintain competing copies of this checklist.
+
+Current acceptance gap: actual WASM/Viceroy 0.21.0 execution passed the shared
+contract and Add race, but both independent CAS writers reported success. The
+one-winner assertion remains unchanged and fails. Viceroy's KV implementation
+checks the existing generation and replaces the row under separate lock
+acquisitions. The SDK backend and record fixture are unchanged from the earlier
+record tag. The user deferred this emulator issue so SDK and TS integration can continue.
+Keep the failed check as a disclosed validation gap in final acceptance and
+publication review. Do not repair the runtime in this effort, weaken assertions
+or treat an earlier favorable race receipt as clearing this defect.
+
+## Stock-service reconciliation checks
+
+The current #439 prerequisite added bounded harness artifact reads and reviewed
+controller fingerprints after the original record work. The record CI caller
+now passes the existing `CI_ARTIFACT_RECORDS` limit.
+
+Reviewed the three changed controller functions against the reconciled #439
+baseline before updating their fingerprints. `Args::parse_from` adds only the
+Fastly-only record selector, `runners::fastly` dispatches that selector, and
+`ci::run` runs and validates the mandatory record suite before the existing
+platform stages. Existing outbound dispatch, phase status checks and other
+fingerprints are unchanged. The fingerprint assertion remains strict.
+
+Native all-feature Fastly test linking fails on host ABI symbols on both this
+candidate and the clean prerequisite. Use default native workspace tests,
+feature-specific native store tests, and actual WASM/Viceroy checks rather than
+claim that unsupported host invocation passed.
 
 ## Delivery contract
 
@@ -26,7 +54,7 @@ flowchart TD
     C --> F[5. DynamoDB record writes and Query]
     F --> G[6. Global Scan enumeration]
     C --> H[7. Native feature and binding selection]
-    I[Companion celld protocol and rebuilt artifact] --> J[8. celld record binding]
+    I[EdgeZero record service on official stock celld] --> J[8. celld record binding]
     H --> J
     D --> K[9. Shared real-path acceptance]
     E --> K
@@ -228,31 +256,31 @@ Also run affected docs, demo/generated-consumer and other required WASM checks f
 
 ## Requirement coverage
 
-| Spec requirements | Execution tasks |
-| --- | --- |
-| R1, R4, R7, R9 | 1, then provider implementations and 9 |
-| R2, R11 | 2 and 7, plus startup acceptance in 9 |
-| R3, R10 | 3, 4, 5 and 8 |
-| R5 | 9 and 10 |
-| R6 | 5, with stored-key/traffic assertions in 9 |
-| R8 | 3, 4, 5 and 8, then 9 |
-| R12 | 7 and 10 |
-| R13 | 6 and global Scan acceptance in 9 |
+| Spec requirements | Execution tasks                            |
+| ----------------- | ------------------------------------------ |
+| R1, R4, R7, R9    | 1, then provider implementations and 9     |
+| R2, R11           | 2 and 7, plus startup acceptance in 9      |
+| R3, R10           | 3, 4, 5 and 8                              |
+| R5                | 9 and 10                                   |
+| R6                | 5, with stored-key/traffic assertions in 9 |
+| R8                | 3, 4, 5 and 8, then 9                      |
+| R12               | 7 and 10                                   |
+| R13               | 6 and global Scan acceptance in 9          |
 
 ## Progress and evidence
 
 All commands use Rust `+1.98.1`, `--locked --offline`, task-local TMPDIR and isolated local services. This is executed local acceptance, not hosted deployment qualification. No publication or TS source edits have occurred.
 
-| Checkpoint | Current result | Evidence under `/home/pav/.cache/edgezero-kv-record-contract/` |
-| --- | --- | --- |
-| Workspace | Strict all-target/all-feature Clippy and full all-target tests passed | `noninteractive-clippy.log`, `noninteractive-tests.log`. Workspace feature unification ran 1174 core, 503 Axum and 261 CLI unit tests, plus other workspace targets. Separate core run included 15 doctests. |
-| Persistent records | Transactional contract, lifetime, native races and expiry cleanup passed | 36 selected KV cases, including 9 record cases. Final workspace rerun covers the test-only convention fixes. |
-| Fastly records | Target-matched provider tests/lint and full selected CI passed | `fastly-style-all-targets-clippy-final.log`, `fastly-style-all-targets-unit.log`; `fastly-ci-20261113/` records all ten CI stages. Independent Add/CAS each had one winner, 1001 descendants crossed two pages, exact existence and cleanup passed, shared suite executed exactly once. |
-| DynamoDB | Record66, legacy46, settings11, strict lint and Local2 passed | `aws-verify-*.log`. Scope includes resolved endpoint, table ARN and optional TableId. Expiry/reopen proof simulates physical value-row removal, not an AWS TTL sweep. |
-| Native/platform selection | Combined features, native startup, unsupported providers and WASM checks passed | `final-check.log`, `final-native-records.log`, `final-spin-wasm.log`; both-native `record_`13 and `native_`63, plus earlier platform/CLI/template selections. |
-| celld service/client | Protocol12, process4, startup10 plus explicit TLS/60s2; client wire8, neighbors64, default5 and strict lint passed | `celld-worker-*-current.log`, service receipts in the cross-repository plan. Real interop includes independent races, post-commit dropped PUT/DELETE replies and 512-byte escaped/Unicode keys at limit1. |
-| Generated consumers | Both old/new AWS consumers2 plus Local2; both old/new celld TLS consumers2 plus real interop1 passed | `generated-aws-runner.log`, `generated-celld-runner.log`. Existing runners require exact nonzero sentinels. |
-| Runner/docs | Node18 and affected published docs passed | `record-runner-node-tests.log`, `docs-build.log`, `docs-lint.log`; Prettier3.9.10 checked the five published-doc files. |
+| Checkpoint                | Current result                                                                                                     | Evidence under `/home/pav/.cache/edgezero-kv-record-contract/`                                                                                                                                                                                                                          |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Workspace                 | Strict all-target/all-feature Clippy and full all-target tests passed                                              | `noninteractive-clippy.log`, `noninteractive-tests.log`. Workspace feature unification ran 1174 core, 503 Axum and 261 CLI unit tests, plus other workspace targets. Separate core run included 15 doctests.                                                                            |
+| Persistent records        | Transactional contract, lifetime, native races and expiry cleanup passed                                           | 36 selected KV cases, including 9 record cases. Final workspace rerun covers the test-only convention fixes.                                                                                                                                                                            |
+| Fastly records            | Target-matched provider tests/lint and full selected CI passed                                                     | `fastly-style-all-targets-clippy-final.log`, `fastly-style-all-targets-unit.log`; `fastly-ci-20261113/` records all ten CI stages. Independent Add/CAS each had one winner, 1001 descendants crossed two pages, exact existence and cleanup passed, shared suite executed exactly once. |
+| DynamoDB                  | Record66, legacy46, settings11, strict lint and Local2 passed                                                      | `aws-verify-*.log`. Scope includes resolved endpoint, table ARN and optional TableId. Expiry/reopen proof simulates physical value-row removal, not an AWS TTL sweep.                                                                                                                   |
+| Native/platform selection | Combined features, native startup, unsupported providers and WASM checks passed                                    | `final-check.log`, `final-native-records.log`, `final-spin-wasm.log`; both-native `record_`13 and `native_`63, plus earlier platform/CLI/template selections.                                                                                                                           |
+| celld service/client      | Protocol12, process4, startup10 plus explicit TLS/60s2; client wire8, neighbors64, default5 and strict lint passed | `celld-worker-*-current.log`, service receipts in the cross-repository plan. Real interop includes independent races, post-commit dropped PUT/DELETE replies and 512-byte escaped/Unicode keys at limit1.                                                                               |
+| Generated consumers       | Both old/new AWS consumers2 plus Local2; both old/new celld TLS consumers2 plus real interop1 passed               | `generated-aws-runner.log`, `generated-celld-runner.log`. Existing runners require exact nonzero sentinels.                                                                                                                                                                             |
+| Runner/docs               | Node18 and affected published docs passed                                                                          | `record-runner-node-tests.log`, `docs-build.log`, `docs-lint.log`; Prettier3.9.10 checked the five published-doc files.                                                                                                                                                                 |
 
 ### Inputs and retained limitations
 

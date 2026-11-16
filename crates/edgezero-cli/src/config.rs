@@ -468,7 +468,7 @@ pub fn run_config_push_typed<C>(args: &ConfigPushArgs) -> Result<(), String>
 where
     C: DeserializeOwned + Serialize + Validate + AppConfigMeta,
 {
-    reject_remote_bound_config_push(args)?;
+    reject_aws_bound_config_push(args)?;
     // Pre-flight: load + validate.
     let ctx = load_push_context(args)?;
     let validation_scope = AdapterValidationScope::Selected(ctx.adapter);
@@ -1576,7 +1576,6 @@ fn load_validated_native_bindings(
             secrets_manager: true,
             dynamodb: true,
             dynamodb_records: true,
-            celld_config: true,
             celld_kv: true,
             celld_records: true,
         },
@@ -1645,7 +1644,7 @@ fn run_native_bindings_validate(_args: &ConfigValidateArgs) -> Result<(), String
 }
 
 #[cfg(feature = "edgezero-adapter-axum")]
-fn reject_remote_bound_config_push(args: &ConfigPushArgs) -> Result<(), String> {
+fn reject_aws_bound_config_push(args: &ConfigPushArgs) -> Result<(), String> {
     let Some(path) = args.store_bindings.as_deref() else {
         return Ok(());
     };
@@ -1659,21 +1658,17 @@ fn reject_remote_bound_config_push(args: &ConfigPushArgs) -> Result<(), String> 
         .map_err(|_error| "failed to load application manifest".to_owned())?;
     let logical = resolve_config_store_id(args.store.as_deref(), manifest.manifest())?;
     let bindings = load_validated_native_bindings(manifest.manifest(), path)?;
-    let remote = match bindings.config().get(&logical) {
-        Some(NativeConfigBinding::AppConfigAgent(_)) => Some("AWS"),
-        Some(NativeConfigBinding::Celld(_)) => Some("celld"),
-        None => None,
-    };
-    if let Some(provider) = remote {
-        return Err(format!(
-            "config push does not publish to {provider}-bound native config stores; update the selected binding through its deployment workflow"
-        ));
+    if matches!(
+        bindings.config().get(&logical),
+        Some(NativeConfigBinding::AppConfigAgent(_))
+    ) {
+        return Err("config push does not publish to AWS-bound native config stores; update the selected binding through its deployment workflow".to_owned());
     }
     Ok(())
 }
 
 #[cfg(not(feature = "edgezero-adapter-axum"))]
-fn reject_remote_bound_config_push(args: &ConfigPushArgs) -> Result<(), String> {
+fn reject_aws_bound_config_push(args: &ConfigPushArgs) -> Result<(), String> {
     if args.store_bindings.is_some() {
         return Err("`--store-bindings` requires the CLI Axum native-bindings feature".to_owned());
     }
@@ -2992,7 +2987,7 @@ default = "remote"
         .expect("write bindings");
         let mut args = push_args(&manifest, "axum");
         args.store_bindings = Some(bindings.clone());
-        let error = reject_remote_bound_config_push(&args).expect_err("AWS-bound push is refused");
+        let error = reject_aws_bound_config_push(&args).expect_err("AWS-bound push is refused");
         assert!(error.contains("does not publish to AWS-bound"));
         for (local, dry_run) in [(false, false), (true, false), (false, true), (true, true)] {
             args.local = local;
@@ -3007,10 +3002,10 @@ default = "remote"
         }
 
         fs::write(&bindings, AWS_BINDINGS_FIXTURE).expect("write unrelated AWS binding");
-        reject_remote_bound_config_push(&args).expect("unrelated declared AWS binding is allowed");
+        reject_aws_bound_config_push(&args).expect("unrelated declared AWS binding is allowed");
         fs::write(&bindings, AWS_BINDINGS_FIXTURE.replace("remote", "unknown"))
             .expect("write typo");
-        reject_remote_bound_config_push(&args)
+        reject_aws_bound_config_push(&args)
             .expect_err("undeclared bindings are not a valid push selection");
     }
 
@@ -3047,25 +3042,22 @@ default = "remote"
 
     #[cfg(feature = "edgezero-adapter-axum")]
     const CELLD_BINDINGS_FIXTURE: &str = r#"version = 1
-[config.remote]
-provider = "celld-config"
+[kv.state]
+provider = "celld-kv"
 endpoint = "https://127.0.0.1:7780"
-default_key = "main"
-[config.remote.access]
+store = "checkout-state"
+[kv.state.access]
 mode = "authenticated"
 token_env = "CELLD_TEST_TOKEN_MUST_NOT_BE_RESOLVED"
-[config.remote.documents.main]
-store = "checkout-config"
-key = "application-envelope"
 "#;
+
+    #[cfg(feature = "edgezero-adapter-axum")]
+    const CELLD_MANIFEST_STORES: &str = "[stores.kv]\nids = [\"state\"]\ndefault = \"state\"\n";
 
     #[cfg(feature = "edgezero-adapter-axum")]
     #[test]
     fn celld_bindings_only_validation_does_not_resolve_tokens_features_or_endpoints() {
-        let manifest_text = PUSH_MANIFEST.replace(
-            "ids = [\"app_config\"]",
-            "ids = [\"app_config\", \"remote\"]\ndefault = \"app_config\"",
-        );
+        let manifest_text = format!("{PUSH_MANIFEST}{CELLD_MANIFEST_STORES}");
         let (dir, manifest, app_config) = setup_project(&manifest_text, VALID_APP_CONFIG);
         fs::remove_file(app_config).expect("structural validation needs no local app config");
         let listener = TcpListener::bind("127.0.0.1:0").expect("probe sentinel");
@@ -3094,39 +3086,9 @@ key = "application-envelope"
 
     #[cfg(feature = "edgezero-adapter-axum")]
     #[test]
-    fn celld_push_refuses_only_selected_remote_config_without_local_side_effects() {
-        let manifest_text = PUSH_MANIFEST.replace(
-            "ids = [\"app_config\"]",
-            "ids = [\"app_config\", \"remote\"]\ndefault = \"app_config\"",
-        );
-        let (dir, manifest, app_config) = setup_project(&manifest_text, VALID_APP_CONFIG);
-        fs::remove_file(app_config).expect("remote refusal precedes app TOML loading");
-        let bindings = dir.path().join("celld.toml");
-        fs::write(
-            &bindings,
-            CELLD_BINDINGS_FIXTURE.replace("config.remote", "config.app_config"),
-        )
-        .expect("write selected celld binding");
-        let mut args = push_args(&manifest, "axum");
-        args.store_bindings = Some(bindings.clone());
-        for (local, dry_run) in [(false, false), (true, false), (false, true), (true, true)] {
-            args.local = local;
-            args.dry_run = dry_run;
-            let error = run_config_push_typed::<FixtureConfig>(&args)
-                .expect_err("remote publication unsupported");
-            assert!(error.contains("does not publish to celld-bound"));
-            assert!(!error.contains("CELLD_TEST_TOKEN"));
-            assert!(!dir.path().join(".edgezero").exists());
-        }
-        fs::write(&bindings, CELLD_BINDINGS_FIXTURE).expect("unrelated remote config");
-        reject_remote_bound_config_push(&args)
-            .expect("local selected ID is not blocked by another remote ID");
-    }
-
-    #[cfg(feature = "edgezero-adapter-axum")]
-    #[test]
     fn celld_validation_and_push_share_strict_structural_rejection() {
-        let (dir, manifest, app_config) = setup_project(PUSH_MANIFEST, FIXTURE_APP_CONFIG);
+        let manifest_text = format!("{PUSH_MANIFEST}{CELLD_MANIFEST_STORES}");
+        let (dir, manifest, app_config) = setup_project(&manifest_text, FIXTURE_APP_CONFIG);
         fs::remove_file(app_config).expect("structural errors need no app TOML");
         let bindings = dir.path().join("celld.toml");
         let mut validate = args_for(&manifest);
@@ -3135,9 +3097,12 @@ key = "application-envelope"
         let mut push = push_args(&manifest, "axum");
         push.store_bindings = Some(bindings.clone());
         for input in [
-            CELLD_BINDINGS_FIXTURE.to_owned(),
-            CELLD_BINDINGS_FIXTURE.replace("celld-config", "celld-secret"),
-            CELLD_BINDINGS_FIXTURE.replace("default_key = \"main\"", "default_key = \"missing\""),
+            CELLD_BINDINGS_FIXTURE.replace("[kv.state]", "[kv.undeclared]"),
+            CELLD_BINDINGS_FIXTURE.replace("celld-kv", "celld-secret"),
+            CELLD_BINDINGS_FIXTURE
+                .replace("[kv.state]", "[config.app_config]")
+                .replace("celld-kv", "celld-config"),
+            CELLD_BINDINGS_FIXTURE.replace("checkout-state", "bad/store"),
         ] {
             fs::write(&bindings, input).expect("invalid document");
             let validation = run_config_validate(&validate).expect_err("invalid bindings");

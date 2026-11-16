@@ -36,7 +36,7 @@ assert_no_native_runtime wasm -p edgezero-adapter-cloudflare --target wasm32-unk
 assert_no_native_runtime wasm -p edgezero-adapter-fastly --target wasm32-wasip1 --features fastly
 assert_no_native_runtime wasm -p edgezero-adapter-spin --target wasm32-wasip2 --features spin
 assert_no_native_runtime wasm -p edgezero-store-aws --target wasm32-wasip1 --no-default-features --features dynamodb-records
-assert_no_native_runtime wasm -p edgezero-store-celld --target wasm32-wasip1 --no-default-features --features records-v2
+assert_no_native_runtime wasm -p edgezero-store-celld --target wasm32-wasip1 --no-default-features --features records
 
 assert_no_sdk -p edgezero-cli --no-default-features --features cli,edgezero-adapter-axum
 assert_no_sdk -p edgezero-store-aws --no-default-features
@@ -87,7 +87,7 @@ if grep -Eq '(^|,)dynamodb-records(,|$)' <<< "$aws_raw_features" || ! grep -Eq '
   printf 'Explicit DynamoDB record feature forwarding failed.\n' >&2
   exit 1
 fi
-if grep -Eq '(^|,)records-v2(,|$)' <<< "$celld_raw_features" || ! grep -Eq '(^|,)records-v2(,|$)' <<< "$celld_record_features"; then
+if grep -Eq '(^|,)records(,|$)' <<< "$celld_raw_features" || ! grep -Eq '(^|,)records(,|$)' <<< "$celld_record_features"; then
   printf 'Explicit celld record feature forwarding failed.\n' >&2
   exit 1
 fi
@@ -97,7 +97,7 @@ if grep -Eq '^(reqwest|tokio|edgezero-core|aws-config|aws-sdk-[^ ]+) v' <<< "$ce
   printf 'Runtime/client dependency leaked into settings-only celld.\n' >&2
   exit 1
 fi
-for feature in config kv records records-v2; do
+for feature in kv records; do
   assert_no_sdk -p edgezero-store-celld --no-default-features --features "$feature"
   graph="$(cargo tree --offline --locked --edges normal --prefix none -p edgezero-store-celld --no-default-features --features "$feature")"
   if grep -Eq '^(celld(-[^ ]+)?|v8|worker|worker-build|edgezero-adapter-[^ ]+) v' <<< "$graph"; then
@@ -105,14 +105,7 @@ for feature in config kv records records-v2; do
     exit 1
   fi
   selected="$(provider_features edgezero-store-celld -p edgezero-store-celld --no-default-features --features "$feature")"
-  forbidden=config
-  case "$feature" in
-    config) forbidden='kv|records|records-v2' ;;
-    kv) forbidden='config|records|records-v2' ;;
-    records) forbidden='config|records-v2' ;;
-    records-v2) forbidden='config|records' ;;
-  esac
-  if ! grep -Eq "(^|,)$feature(,|$)" <<< "$selected" || grep -Eq "(^|,)($forbidden)(,|$)" <<< "$selected"; then
+  if ! grep -Eq "(^|,)$feature(,|$)" <<< "$selected" || grep -Eq '(^|,)(config|records-v2)(,|$)' <<< "$selected"; then
     printf 'Celld service feature isolation failed: %s: %s\n' "$feature" "$selected" >&2
     exit 1
   fi

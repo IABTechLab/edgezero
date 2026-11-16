@@ -22,9 +22,7 @@ use edgezero_core::secret_store::MAX_NAME_LEN;
 use edgezero_store_aws::settings::{
     AppConfigAgentSettings, AwsPreparationLimits, DynamoDbKvSettings, SecretsManagerSettings,
 };
-use edgezero_store_celld::settings::{
-    CelldConfigSettings, CelldKvSettings, CelldPreparationLimits,
-};
+use edgezero_store_celld::settings::{CelldKvSettings, CelldPreparationLimits};
 use serde::Deserialize;
 
 /// Closed bootstrap failures. File, TOML and provider inputs never become source chains.
@@ -96,19 +94,16 @@ pub struct NativeProviderCapabilities {
     pub secrets_manager: bool,
     pub dynamodb: bool,
     pub dynamodb_records: bool,
-    pub celld_config: bool,
     pub celld_kv: bool,
     pub celld_records: bool,
 }
 
-/// Strict configuration dispatch. Each provider validates its own settings.
+/// Strict configuration dispatch. Provider-specific fields are validated by AWS settings.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "provider", deny_unknown_fields)]
 pub enum NativeConfigBinding {
     #[serde(rename = "aws-appconfig-agent")]
     AppConfigAgent(AppConfigAgentSettings),
-    #[serde(rename = "celld-config")]
-    Celld(CelldConfigSettings),
 }
 
 /// Strict KV dispatch. The physical namespace is independent of the declared ID.
@@ -394,21 +389,11 @@ impl NativeStoreBindings {
             charge_mappings(counter, 1)?;
         }
         for binding in self.config.values() {
-            let (counter, count) = match binding {
-                NativeConfigBinding::AppConfigAgent(settings) => {
-                    settings
-                        .validate()
-                        .map_err(|_category| NativeBindingsError::Invalid)?;
-                    (&mut aws_mappings, settings.documents.len())
-                }
-                NativeConfigBinding::Celld(settings) => {
-                    settings
-                        .validate()
-                        .map_err(|_category| NativeBindingsError::Invalid)?;
-                    (&mut celld_mappings, settings.documents.len())
-                }
-            };
-            charge_mappings(counter, count)?;
+            let NativeConfigBinding::AppConfigAgent(settings) = binding;
+            settings
+                .validate()
+                .map_err(|_category| NativeBindingsError::Invalid)?;
+            charge_mappings(&mut aws_mappings, settings.documents.len())?;
         }
         for binding in self.secrets.values() {
             let NativeSecretBinding::SecretsManager(settings) = binding;
@@ -462,7 +447,7 @@ impl NativeStoreBindings {
         self
     }
 
-    /// Selects a celld document policy without discarding an AWS policy.
+    /// Selects a celld preparation policy without discarding an AWS policy.
     #[inline]
     #[must_use]
     pub fn with_celld_limits(mut self, limits: CelldPreparationLimits) -> Self {
@@ -681,10 +666,8 @@ impl<'declarations> NativeSourceSelection<'declarations> {
                 "secrets",
             )?,
         };
-        if bindings.config.values().any(|binding| match binding {
-            NativeConfigBinding::AppConfigAgent(_) => !capabilities.appconfig_agent,
-            NativeConfigBinding::Celld(_) => !capabilities.celld_config,
-        }) || (!bindings.secrets.is_empty() && !capabilities.secrets_manager)
+        if (!bindings.config.is_empty() && !capabilities.appconfig_agent)
+            || (!bindings.secrets.is_empty() && !capabilities.secrets_manager)
             || bindings.kv.values().any(|binding| match binding {
                 NativeKvBinding::DynamoDb(_) => !capabilities.dynamodb,
                 NativeKvBinding::DynamoDbRecords(_) => !capabilities.dynamodb_records,
@@ -811,7 +794,13 @@ mod tests {
 
     const CONFIG: &str = "version = 1\n[config.app]\nprovider = 'aws-appconfig-agent'\ndefault_key = 'settings'\nendpoint = 'http://127.0.0.1:2772'\n[config.app.documents.settings]\napplication = 'example-app'\nenvironment = 'production'\nprofile = 'envelope'\n";
 
-    const CELLD: &str = "version=1\n[config.app]\nprovider='celld-config'\nendpoint='http://127.0.0.1:8788'\ndefault_key='settings'\n[config.app.access]\nmode='trusted-network'\n[config.app.documents.settings]\nstore='config-fixture'\nkey='settings'\n[kv.state]\nprovider='celld-kv'\nendpoint='http://127.0.0.1:8788'\nstore='state-fixture'\n[kv.state.access]\nmode='trusted-network'\n";
+    const CELLD: &str = "version=1\n[kv.state]\nprovider='celld-kv'\nendpoint='http://127.0.0.1:8788'\nstore='state-fixture'\n[kv.state.access]\nmode='trusted-network'\n";
+
+    fn celld_kv(id: &str) -> String {
+        format!(
+            "\n[kv.{id}]\nprovider='celld-kv'\nendpoint='http://127.0.0.1:8788'\nstore='{id}-fixture'\n[kv.{id}.access]\nmode='trusted-network'\n"
+        )
+    }
 
     #[test]
     fn record_binding_tags_require_their_own_compiled_capability() -> Result<(), NativeBindingsError>
@@ -893,14 +882,17 @@ mod tests {
                 ),
         ] {
             let document = NativeStoreBindings::parse(&input, limits)?;
-            assert_eq!(document.config().len(), 1);
+            assert!(document.config().is_empty());
             assert_eq!(document.kv().len(), 1);
             assert!(!format!("{document:?}").contains("fixture"));
         }
         for bad in [
-            CELLD.replace("celld-config", "celld-unknown"),
-            CELLD.replace("[config.app]", "[secrets.app]"),
-            CELLD.replace("default_key='settings'", "default_key='missing'"),
+            CELLD.replace("celld-kv", "celld-unknown"),
+            CELLD.replace("[kv.state]", "[secrets.state]"),
+            CELLD.replace(
+                "[kv.state]\nprovider='celld-kv'",
+                "[config.state]\nprovider='celld-config'",
+            ),
             CELLD.replace("store='state-fixture'", "store='bad/store'"),
             CELLD.replace("mode='trusted-network'", "mode='authenticated'"),
             CELLD.replace(
@@ -924,39 +916,22 @@ mod tests {
     fn capabilities_follow_actual_variants() -> Result<(), NativeBindingsError> {
         let limits = NativeBindingsLimits::default();
         let aws_kv = "\n[kv.state]\nprovider='aws-dynamodb'\nregion='us-east-1'\ntable='fixture-table'\nnamespace='fixture-space'\n";
-        let celld_kv = CELLD
-            .split("[kv.state]")
-            .nth(1)
-            .ok_or(NativeBindingsError::Invalid)?;
-        let celld_config = CELLD
-            .split("[kv.state]")
-            .next()
-            .ok_or(NativeBindingsError::Invalid)?;
-        for (input, aws_config, aws_state, celld_app, celld_state) in [
-            (CELLD.to_owned(), false, false, true, true),
-            (format!("{CONFIG}{aws_kv}"), true, true, false, false),
-            (
-                format!("{CONFIG}[kv.state]{celld_kv}"),
-                true,
-                false,
-                false,
-                true,
-            ),
-            (format!("{celld_config}{aws_kv}"), false, true, true, false),
+        for (input, aws_config, aws_state, celld_state) in [
+            (CELLD.to_owned(), false, false, true),
+            (format!("{CONFIG}{aws_kv}"), true, true, false),
+            (format!("{CONFIG}{}", celld_kv("state")), true, false, true),
         ] {
             let document = NativeStoreBindings::parse(&input, limits)?;
-            for mask in 0_u8..16 {
+            for mask in 0_u8..8 {
                 let caps = NativeProviderCapabilities {
                     appconfig_agent: mask & 1 != 0,
                     dynamodb: mask & 2 != 0,
-                    celld_config: mask & 4 != 0,
-                    celld_kv: mask & 8 != 0,
+                    celld_kv: mask & 4 != 0,
                     secrets_manager: false,
                     ..Default::default()
                 };
                 let accepted = (!aws_config || caps.appconfig_agent)
                     && (!aws_state || caps.dynamodb)
-                    && (!celld_app || caps.celld_config)
                     && (!celld_state || caps.celld_kv);
                 assert_eq!(
                     NativeSourceSelection::validate(
@@ -992,16 +967,9 @@ mod tests {
             aws: Some(aws),
             celld: Some(celld),
         };
-        let mixed = format!(
-            "{CONFIG}{}",
-            CELLD
-                .replace("version=1\n", "")
-                .replace("config.app", "config.remote")
-        );
+        let mixed = format!("{CONFIG}{}{}", celld_kv("state"), celld_kv("other"));
         NativeStoreBindings::parse_with_policies(&mixed, limits, policies)?;
-        let too_many = format!(
-            "{mixed}\n[config.remote.documents.alias]\nstore='config-fixture'\nkey='settings'\n"
-        );
+        let too_many = format!("{mixed}{}", celld_kv("third"));
         assert_eq!(
             NativeStoreBindings::parse_with_policies(&too_many, limits, policies).err(),
             Some(NativeBindingsError::SizeLimit)
@@ -1070,30 +1038,24 @@ mod tests {
     }
 
     #[test]
-    fn explicit_celld_policy_raises_caps_during_file_parse() -> Result<(), Box<dyn Error>> {
-        let mut input = CELLD.to_owned();
-        for index in 0..1_024_u32 {
-            writeln!(
-                input,
-                "\n[config.app.documents.alias{index}]\nstore='config-fixture'\nkey='settings'"
-            )?;
-        }
+    fn explicit_celld_policy_caps_apply_during_file_parse() -> Result<(), Box<dyn Error>> {
+        let input = format!("{CELLD}{}{}", celld_kv("other"), celld_kv("third"));
         let limits = NativeBindingsLimits::default();
-        assert_eq!(
-            NativeStoreBindings::parse(&input, limits).err(),
-            Some(NativeBindingsError::SizeLimit)
-        );
-        let explicit = NativePreparationPolicySources {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("bindings.toml");
+        fs::write(&path, input)?;
+        let policy = |max_remote_values| NativePreparationPolicySources {
             celld: Some(CelldPreparationLimits {
-                max_remote_values: 2_048,
+                max_remote_values,
                 ..Default::default()
             }),
             aws: None,
         };
-        let root = tempfile::tempdir()?;
-        let path = root.path().join("bindings.toml");
-        fs::write(&path, input)?;
-        NativeStoreBindings::read_with_policies(&path, limits, explicit)?;
+        assert_eq!(
+            NativeStoreBindings::read_with_policies(&path, limits, policy(2)).err(),
+            Some(NativeBindingsError::SizeLimit)
+        );
+        NativeStoreBindings::read_with_policies(&path, limits, policy(3))?;
         Ok(())
     }
 
