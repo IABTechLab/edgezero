@@ -25,9 +25,12 @@ applications. The shell script only launches it through Cargo.
 The runner now treats TCP readiness as provisional and requires responder identity on
 the first prescribed response, with bounded startup and capture. See the
 [startup contract](README.md#bounded-startup).
-Headerless canonical Fastly assembly-error responses cannot currently establish that
-identity; those modes remain unverified and do not receive case-evidence credit.
-This does not weaken their functional assertions or replace the standard entrypoints.
+The Fastly assembly fixture explicitly enables `assembly-attestation`: bounded test-only
+diagnostic metadata is added at the existing commit boundary, so the original canonical failure
+can attest without a successful app or failed-app callbacks. The first prescribed response
+still must match; missing/conflicting identity remains unverified/no-credit. Standard entrypoints,
+canonical-response assertions and cleanup are unchanged; production and hosted guarantees are
+not promoted by this instrumented-fixture evidence.
 
 ### Cloudflare Native Module Loading
 

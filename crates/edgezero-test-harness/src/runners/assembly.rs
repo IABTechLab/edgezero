@@ -381,6 +381,8 @@ pub(super) fn fastly(exe: &Path, run: &Path, records: &mut Records) -> Result<()
         "fixture-fastly",
         "--bin",
         "fixture-fastly-assembly",
+        "--features",
+        "assembly-attestation",
         "--target",
         "wasm32-wasip1",
     ]))?;

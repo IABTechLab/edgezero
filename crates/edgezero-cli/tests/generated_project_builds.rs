@@ -21,6 +21,7 @@ mod fallback_tcp;
 #[cfg(test)]
 mod tests {
     use std::env;
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Command, ExitStatus, Stdio};
 
@@ -203,6 +204,61 @@ mod tests {
         super::fallback_tcp::assert_fallbacks(command, "generated", b"scaffold-probe app");
     }
 
+    fn assert_generated_fastly_logging_validation(project: &Path) {
+        let generated: toml::Value = toml::from_str(
+            &fs::read_to_string(project.join("edgezero.toml")).expect("generated manifest"),
+        )
+        .expect("valid generated TOML");
+        assert_eq!(
+            generated["adapters"]["fastly"]["logging"]["endpoint"].as_str(),
+            Some("scaffold_probe_log"),
+            "Fastly uses the project-specific named endpoint, never a reserved stream"
+        );
+        let bins = project.join("crates/scaffold-probe-core/src/bin");
+        fs::create_dir_all(&bins).expect("temporary compile probes");
+        for (case, endpoint, valid) in [("valid", "probe_logs", true), ("invalid", "ts:log", false)]
+        {
+            let manifest = format!("logging-{case}.toml");
+            let document = toml::toml! { [adapters.fastly.logging] endpoint = endpoint };
+            fs::write(project.join(&manifest), toml::to_string(&document).unwrap())
+                .expect("probe manifest");
+            let bin = format!("logging-{case}");
+            fs::write(
+                bins.join(format!("{bin}.rs")),
+                format!(
+                    "edgezero_core::app!(\"../../{manifest}\", LoggingProbe);\nfn main() {{}}\n"
+                ),
+            )
+            .expect("fresh compilation unit avoids manifest-cache assumptions");
+            let output = Command::new(env!("CARGO"))
+                .args([
+                    "check",
+                    "--offline",
+                    "--locked",
+                    "-p",
+                    "scaffold-probe-core",
+                    "--bin",
+                    &bin,
+                ])
+                .current_dir(project)
+                .output()
+                .expect("compile actual app! probe");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.success(), valid, "{case}: {stderr}");
+            if !valid {
+                assert!(stderr.contains(&manifest), "{stderr}");
+                assert!(
+                    stderr.contains("[adapters.fastly.logging].endpoint"),
+                    "{stderr}"
+                );
+                assert!(
+                    !stderr.contains(endpoint),
+                    "endpoint must not be echoed: {stderr}"
+                );
+            }
+        }
+    }
+
     #[test]
     #[ignore = "compiles a generated workspace and may fetch crates; run explicitly"]
     #[expect(
@@ -330,5 +386,6 @@ mod tests {
             );
         }
         assert_generated_fallback_tcp(&project);
+        assert_generated_fastly_logging_validation(&project);
     }
 }
