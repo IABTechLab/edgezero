@@ -157,7 +157,7 @@ whether it succeeds or fails:
 | `schema_version` | integer | `1` for this spec. See §6.5. |
 | `command` | string | The command path as the user types it: `"active-version"`, `"auth status"`, `"build"`, `"config gc"`, `"config validate"`, `"deploy"`, `"healthcheck"`, `"provision"`, `"rollback"`. |
 | `ok` | boolean | `true` exactly when the process will exit 0. |
-| `result` | object or `null` | Never `null` when `ok` is `true`. When `ok` is `false` it holds the **partial result** if the command produced one (an unhealthy healthcheck, a partially failed gc, an unauthenticated `auth status`, a deploy that went live without a resolvable version), and is `null` otherwise. |
+| `result` | object or `null` | Never `null` when `ok` is `true`. When `ok` is `false` it holds the **partial result** if the command produced one (an unhealthy healthcheck, a partially failed gc, an unauthenticated `auth status`, a managed deploy that failed after its draft exists, a legacy deploy that went live without a resolvable version or with a reported version it could not verify), and is `null` otherwise. |
 | `error` | object or `null` | `null` exactly when `ok` is `true`. Otherwise `{ "message": string }`. |
 
 **Field conventions**, applied to the envelope and every result:
@@ -206,8 +206,9 @@ This way, downstream CLIs generated from the template before this change get
 ### 6.4 Exit codes
 
 Exit codes do not change, except for the two Goal 2 exceptions: `build`
-(below) and Cloudflare's built-in `auth status`, which exits `1` when logged
-out or when wrangler's output has no `loggedIn` (§8).
+(below) and Cloudflare's built-in `auth status`, which exits non-zero (`1` for
+the bundled binary, `2` for a generated CLI) when logged out or when wrangler's
+output has no `loggedIn` (§8).
 
 | Situation | Exit | stdout under `json` |
 | --- | --- | --- |
@@ -294,8 +295,8 @@ pub enum ActionOutcome {
     ActiveVersion(ActiveVersionOutcome), // { service_id, version: Option<u64> }
     AuthStatus(AuthStatusOutcome),       // { state: AuthState }
     Build(BuildOutcome),                 // { artifact: Option<PathBuf> }
-    Deploy(DeployOutcome),               // { failure, package_sha256, service_id, version,
-                                         //   version_state: Option<DeployedVersionState> }
+    Deploy(DeployOutcome),               // { failure, package_sha256, service_id,
+                                         //   version: Option<DeployedVersion> }
     Empty,                               // login, logout, serve, manifest command overrides,
                                          //   a legacy Fastly production deploy before
                                          //   finalize_deploy
@@ -307,6 +308,7 @@ pub enum ActionOutcome {
 }
 
 pub enum AuthState { Authenticated, NotApplicable, Unauthenticated { reason: String } }
+pub struct DeployedVersion { pub number: u64, pub state: DeployedVersionState }
 pub enum DeployedVersionState { Draft, Published, Unknown }
 
 fn preflight_deploy(&self, context: &AdapterDeployContext, args: &[String])
@@ -327,8 +329,8 @@ pub enum DeployFailure {
 ```
 
 The outcome structs have public fields and no `#[non_exhaustive]`, so adapter
-crates can build them. `AuthState`, `ProvisionAction` and `StoreKind` are
-deliberately **exhaustive**: the CLI maps each variant onto the wire schema, so
+crates can build them. `AuthState`, `DeployedVersionState`, `ProvisionAction` and
+`StoreKind` are deliberately **exhaustive**: the CLI maps each variant onto the wire schema, so
 adding a variant fails to compile until the schema covers it.
 
 **Outcomes versus errors.** A negative result that the command still finished
@@ -480,7 +482,8 @@ Every command's `result` includes `adapter` (string), except
   `result: null`.
 - Cloudflare's built-in probe is `wrangler whoami --json`, and `state` is its
   `loggedIn` field (plain `wrangler whoami` exits 0 when logged out). Output
-  without that field gives `result: null`.
+  without that field, and `loggedIn: true` from a wrangler that exited
+  non-zero, give `result: null`.
 - Otherwise `state` comes from the probe command's exit status, or from a
   manifest `commands.auth_status` override. Output and account details are not
   parsed, so `authenticated` means "the probe exited 0", not "a token works":
@@ -504,10 +507,15 @@ adapter cannot know the path.
 }
 ```
 
-- `version_state` is `published` (staged for `--staging`, activated
-  otherwise), `draft` (created, never staged or activated) or `unknown`
-  (staging or activation was attempted and failed, so it may have committed).
-  It is `null` exactly when `version` is.
+- `version_state` is `null` exactly when `version` is. Otherwise it is one of:
+  - `published`: live on the deploy's target. That means active for
+    production, or the active staging version for `--staging`.
+  - `draft`: the target draft, which Fastly still shows as unlocked, inactive
+    and not staged.
+  - `unknown`: EdgeZero could not confirm whether it is published. Either a
+    publish was attempted, or the readback showed it locked, published only to
+    the other target, or not listed, or the read failed. A legacy reported
+    version that could not be verified active is also `unknown`.
 - `package_sha256` is the verified package's digest for a managed Fastly
   deploy, else `null`.
 - A **managed** Fastly deploy (any `--staging`, any `--application-release`,
@@ -522,7 +530,9 @@ adapter cannot know the path.
 - A managed deploy that fails after creating its draft gives `ok: false` with
   `result` present: that `version`. `version_state` is `unknown` once staging
   or activation was attempted; before that it comes from reading the version
-  back (`draft`, `published` if another actor published it, or `unknown`).
+  back, classified against the deploy's target as above. The readback runs
+  only under `--format json` (`AdapterDeployContext::report_version_state`);
+  text mode never shows the state and makes no extra provider call.
 - A legacy deploy that went live but whose version could not be resolved
   gives `ok: false` with `result` present and `version: null`; one whose
   reported version could not be verified active keeps that `version` with
@@ -647,21 +657,27 @@ never on string matches (#383), and text tests assert exact bytes.
    `fastly` binaries on `PATH`, and need no network or credentials. The
    harness clears `FASTLY_API_TOKEN`, `FASTLY_SERVICE_ID`, and every
    `EDGEZERO__*` and `DEMO_APP__*` variable. Each JSON test asserts that stdout
-   parses as exactly one JSON value. There are 32 tests:
+   parses as exactly one JSON value. There are 32 tests, 31 of them outside
+   Linux (the envelope-write test needs `/dev/full`). The fakes are `curl`,
+   `fastly` and `wrangler`:
    - **build:** child stdout reaches only stderr under JSON; exact text bytes;
      a usage error leaves stdout empty; a passthrough `--format`, `--format=json`
      or `-- --format json` is rejected with the bundled binary's exit 1 and an
      empty stdout.
    - **auth status:** a failing probe gives the `unauthenticated` partial
      result; a passing probe gives `authenticated`; a missing native CLI gives
-     `result: null`; exact text bytes on success and failure.
+     `result: null`; exact text bytes on success and failure; Cloudflare's
+     built-in probe reads `wrangler whoami --json`
+     (`cloudflare_auth_status_reads_whoami_json`).
    - **provision** and **config validate:** the parsed structure, exact text
      bytes, and a validate failure with `result: null`.
    - **config gc:** a default dry run (`dry_run: true`, `deleted: null`,
      `older_than_secs: null`) and a real run with nothing to reclaim
      (`deleted: 0`, `older_than_secs: 3600`), both with exact text bytes.
    - **healthcheck:** the exact line-contract bytes; an unhealthy probe's full
-     partial result; `version_verified` only when both API checks ran.
+     partial result; `version_verified` only when both API checks ran; the
+     status code kept after a failed retry
+     (`json_healthcheck_status_code_after_a_failed_retry`).
    - **deploy:** the version read from captured output; a deploy that went live
      without a version keeps its result; a reported version that cannot be
      verified is kept as `unknown`; a staged deploy without
@@ -669,7 +685,8 @@ never on string matches (#383), and text tests assert exact bytes.
    - **rollback** and **active-version:** production and staged rollback, and
      an active version present or absent, each in text and JSON.
    - the bundled `config diff` stub still absorbs `--format json`.
-   - a failed envelope write (stdout on `/dev/full`) fails the command.
+   - a failed envelope write (stdout on `/dev/full`, Linux only) fails the
+     command.
 4. **Argument parsing** (`args.rs`). Every in-scope command defaults to `Text`
    and accepts `--format json` and `--format=text`. `unified` and `structured`
    are rejected. `build --adapter fastly --format json --release` parses the
@@ -684,8 +701,10 @@ never on string matches (#383), and text tests assert exact bytes.
    The Fastly managed-deploy outcome mapping is unit-tested for each
    `version_state`, and the CLI's deploy mapping (a managed failure with a
    version, the fallback path's finalizer precedence and `Finalize` failure) is
-   tested through a recording adapter. Cloudflare `auth status` is tested
-   against a fake `wrangler` for logged in, logged out and non-JSON output.
+   tested through a recording adapter. The readback is classified per target
+   and driven through a fake `curl` serving the versions API. Cloudflare
+   `auth status` is tested against a fake `wrangler` for logged in, logged
+   out, non-JSON output, and notices before or after the JSON.
 6. **Lint gate.** `cargo clippy --workspace --all-targets --all-features -- -D warnings`
    passes with the new `disallowed-methods` entries, and so does every clippy
    variant in `format.yml`, including the wasm matrix.
@@ -863,8 +882,29 @@ Revision 7 records the changes from the fifth review of #388.
   that nothing changed (§8).
 - **`healthcheck` `status_code`** is documented as implemented: a transport
   failure keeps the previous status, curl's `000` gives `null` (§8).
-- **Cloudflare `auth status`** is a declared Goal 2 exception (§2, §6.4, §9.2);
+- **Cloudflare `auth status`** is a declared Goal 2 exception (§2, §6.4, §7.2,
+  §9.2);
   its errors quote the exit code, stdout and stderr without colour, it needs a
   successful exit for `authenticated`, and it tolerates a notice before the
   JSON.
 - **Removing a string-enum value** is a breaking change (§6.5).
+
+Revision 8 records the changes from the sixth review of #388.
+
+- **`version_state` is classified against the deploy's target.** The
+  readback reports `published` only when the version is live on that target
+  (active for production, the active staging version for `--staging`), using
+  the same staging test as the version-source selection. A version published
+  only to the other target is `unknown`. The three definitions are now the
+  same in §8, the CLI reference and `DeployedVersionState`.
+- **The readback runs only under `--format json`**, via the new
+  `AdapterDeployContext::report_version_state`, so text mode makes the same
+  provider calls as `main`. A failed read is logged at debug level.
+- **Cloudflare `auth status`** sets `WRANGLER_LOG=log` and reads only the first
+  JSON value on each candidate line, so output after the JSON no longer fails a
+  logged-in user. When stdout parsed as the whoami JSON, it is left out of the
+  error. The exit code when logged out is non-zero, not `1` (§6.4).
+- **§6.1, §7.2 and §9.3** now match the code: the deploy partial-result cases,
+  `DeployedVersion`, the exhaustive `DeployedVersionState`, and the test list.
+- Revision 6 was edited in place by the fifth-review commit. Its bullets now
+  also reflect that review.

@@ -806,15 +806,20 @@ output without that field (for example from a Wrangler too old for `--json`),
 and `loggedIn: true` from a `wrangler` that exited non-zero, give
 `result: null`. This changes the text mode of the built-in probe too:
 
-- `auth status` exits `1` when logged out, even though plain `wrangler whoami`
-  exits `0` there. Output without `loggedIn` also exits `1`.
+- `auth status` exits non-zero (`1` for the bundled binary, `2` for a
+  generated CLI) when logged out, even though plain `wrangler whoami` exits `0`
+  there. Output without `loggedIn` also exits non-zero.
 - wrangler's output is captured, not echoed. A logged-in run prints
-  `[edgezero] wrangler is logged in as <email>`, and a failed probe quotes
-  wrangler's exit status, stdout and stderr in its error.
+  `[edgezero] wrangler is logged in as <email>` when wrangler reports an
+  `email`, and prints nothing otherwise (for example with API-token auth).
+- A logged-out result's error is a fixed message telling you to run
+  `wrangler login`. A failed probe's error quotes wrangler's exit status,
+  stdout and stderr, each cut to its first 400 characters. When stdout parsed
+  as the whoami JSON it is omitted, because it carries account details.
 
-A manifest `auth-status` override keeps the old behaviour. For the other adapters, and for a manifest `auth-status`
-override, `state` reflects the probe command's exit status only (the probes are
-listed under [Adapter built-ins](#edgezero-auth)): `authenticated` means the
+For the other adapters, and for a manifest `auth-status` override (which keeps
+the old behaviour), `state` reflects the probe command's exit status only (the
+probes are listed under [Adapter built-ins](#edgezero-auth)): `authenticated` means the
 probe exited `0`, not that a token was checked, and `fastly profile list` only
 lists saved profiles. `unauthenticated` gives `ok: false` with the result
 present. A missing native CLI gives `result: null`.
@@ -834,13 +839,13 @@ a `--format`.
 
 **`deploy`**
 
-| Key              | Type    | Nullable | Meaning                                                                                                                                                  |
-| ---------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `service_id`     | string  | yes      | The service the deploy targeted (see below), else `--service-id` as passed, else `null`.                                                                 |
-| `staging`        | boolean | no       | Whether `--staging` was passed.                                                                                                                          |
-| `version`        | integer | yes      | The version the deploy created, staged or activated (see below); `null` when none is known.                                                              |
-| `version_state`  | string  | yes      | `published` (staged for `--staging`, activated otherwise), `draft` (created, never staged or activated), or `unknown`. `null` exactly when `version` is. |
-| `package_sha256` | string  | yes      | The verified package's SHA-256 for a managed Fastly deploy (the text output's `package-sha256=` line); `null` otherwise.                                 |
+| Key              | Type    | Nullable | Meaning                                                                                                                  |
+| ---------------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `service_id`     | string  | yes      | The service the deploy targeted (see below), else `--service-id` as passed, else `null`.                                 |
+| `staging`        | boolean | no       | Whether `--staging` was passed.                                                                                          |
+| `version`        | integer | yes      | The version the deploy created, staged or activated (see below); `null` when none is known.                              |
+| `version_state`  | string  | yes      | `published`, `draft` or `unknown` (see below). `null` exactly when `version` is.                                         |
+| `package_sha256` | string  | yes      | The verified package's SHA-256 for a managed Fastly deploy (the text output's `package-sha256=` line); `null` otherwise. |
 
 A Fastly deploy takes one of two paths:
 
@@ -856,15 +861,29 @@ A Fastly deploy takes one of two paths:
 
 `--application-release` is not echoed in the result.
 
+`version_state` means:
+
+- `published`: the version is live on the deploy's target. It is the active
+  version for a production deploy, or the active staging version for
+  `--staging`.
+- `draft`: the deploy's target draft, which Fastly still shows as unlocked,
+  inactive and not staged.
+- `unknown`: EdgeZero could not confirm whether the version is published.
+  Either staging or activation was attempted, or the readback found the
+  version locked, published only to the other target, or missing from the list,
+  or the read failed. A legacy reported version that could not be verified
+  active is also `unknown`.
+
 A deploy that fails can still have changed the service, so check `result`, not
 only `ok`, before assuming nothing was deployed:
 
 - A managed deploy that fails after creating its draft gives `ok: false` with
   the result present: `version` is that draft. If staging or activation was
   attempted, `version_state` is `unknown` (the request may have committed
-  before failing). Otherwise EdgeZero reads the version back: `draft` if
-  Fastly still shows an editable draft, `published` if another actor
-  activated or staged it, and `unknown` if it is locked or the read failed.
+  before failing). Otherwise EdgeZero reads the version back from Fastly and
+  reports it as defined above. `published` here means another actor published
+  it to this deploy's target. The readback runs only under `--format json`,
+  so text mode makes no extra provider call.
 - A legacy deploy that went live but whose version could not be resolved gives
   `ok: false` with the result present and `version: null`. When the deploy
   command reported a version that could not be verified active, `version` is
