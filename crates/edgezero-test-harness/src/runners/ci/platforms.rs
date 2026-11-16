@@ -49,7 +49,7 @@ fn fixture_check_command(adapter: &str, target: &str, runner: Option<&str>) -> R
             .filter(|value| !value.trim().is_empty())
             .ok_or("Fastly fixture tests require the selected Viceroy runner")?;
         command
-            .args(["--features", "progress"])
+            .args(["--features", "progress,assembly-attestation"])
             .env("CARGO_TARGET_WASM32_WASIP1_RUNNER", runner);
     }
     Ok(command)
@@ -491,7 +491,7 @@ mod tests {
         assert!(args.contains(&"test") && args.contains(&"--all-targets"));
         assert!(
             args.windows(2)
-                .any(|pair| pair == ["--features", "progress"])
+                .any(|pair| pair == ["--features", "progress,assembly-attestation"])
         );
         for name in [
             "callback_cleanup::tests::callback_mode_accepts_only_exact_case_tokens",

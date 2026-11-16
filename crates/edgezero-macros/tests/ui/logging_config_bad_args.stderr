@@ -1,0 +1,19 @@
+error: expected string literal
+ --> tests/ui/logging_config_bad_args.rs:2:44
+  |
+2 |     let _ = edgezero_core::logging_config!(String::from("edgezero.toml"), "fastly");
+  |                                            ^^^^^^
+
+error: expected `,`
+ --> tests/ui/logging_config_bad_args.rs:3:13
+  |
+3 |     let _ = edgezero_core::logging_config!("edgezero.toml");
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `edgezero_core::logging_config` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: unexpected token
+ --> tests/ui/logging_config_bad_args.rs:4:71
+  |
+4 |     let _ = edgezero_core::logging_config!("edgezero.toml", "fastly", "extra");
+  |                                                                       ^^^^^^^

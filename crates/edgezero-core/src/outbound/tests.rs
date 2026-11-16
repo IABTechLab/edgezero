@@ -2805,6 +2805,30 @@ fn response_header_limiter_accumulates_field_sections() {
 }
 
 #[test]
+fn response_header_limiter_clones_share_charges_not_unrelated_responses() {
+    let mut head = ResponseHeaderLimiter::new(Some(8), Some(2));
+    let mut trailer = head.clone();
+    head.observe_raw_field(b"a", b"123").expect("head");
+    trailer
+        .observe_raw_field(b"b", b"456")
+        .expect("exact cumulative cap");
+    assert!(matches!(
+        head.observe_raw_field(b"c", b""),
+        Err(EdgeError::ResponseTooLarge {
+            reason: ResponseLimitReason::HeaderCount,
+            ..
+        })
+    ));
+    let mut independent = ResponseHeaderLimiter::new(Some(8), Some(2));
+    independent
+        .observe_raw_field(b"a", b"123")
+        .expect("independent head");
+    independent
+        .observe_raw_field(b"b", b"456")
+        .expect("independent exact cap");
+}
+
+#[test]
 fn proxy_header_is_included_in_exact_byte_and_count_limits() {
     let cases = [
         ("axum", 20_u64),
