@@ -975,3 +975,23 @@ timing is rewritten to claim a pass. Historical failed captures remain retained.
 
 This approval permits implementation, full validation and normal publication in PR #275;
 it grants neither reviewer-thread acceptance, a merge exception nor hosted qualification.
+
+## Scoped Shared-Finalizer Repair Approval (2026-11-16)
+
+AG answered "Approve scoped four-finding repairs" for review `5925848646`, starting from
+`b65e7144`. The approval explicitly includes a minimal shared-finalizer fairness hook:
+
+```rust,ignore
+impl OutboundHead {
+    pub fn with_body_checkpoint<F>(self, checkpoint: F) -> Self
+    where F: Fn() -> OutboundFuture<()> + 'static;
+}
+```
+
+This is one adapter-owned host-event attachment, not a second response pipeline. Core owns
+quota/terminal arbitration under the original paired timer, clock history, scope and limits.
+Cloudflare supplies its existing real host-event future. Other adapters retain their ordinary
+finalizer path. Streamed handoff transfers the factory lazily; discarded heads never run it.
+Supported unwind notification, Fastly retained body failures and persisted evidence replay are
+the other three repairs. No compatibility wrappers, provider capability promotions, deployment,
+hosted qualification, reviewer acceptance or merge exception are authorized by this approval.

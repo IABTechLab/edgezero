@@ -202,6 +202,7 @@ pub struct OutboundLocationEvidence {
 /// to a live streamed response without starting another transport exchange.
 #[must_use]
 pub struct OutboundHead {
+    checkpoint: Option<head::BodyCheckpoint>,
     context: OutboundResponseContext,
     encoded: BodyStream,
     headers: HeaderMap,

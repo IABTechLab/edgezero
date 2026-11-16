@@ -1,11 +1,14 @@
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::str;
 use std::task::{Context, Poll};
 
 use async_stream::stream;
 use bytes::Bytes;
 use futures_util::future::poll_fn;
+use futures_util::stream::{empty, once};
 use futures_util::{Stream, StreamExt as _};
 
 use super::{
@@ -19,13 +22,47 @@ use super::{
 };
 use crate::body::{Body, BodyPayload, BodyStream};
 use crate::error::{BudgetSource, EdgeError};
+use crate::error_detail::ProviderFailureDetail;
 use crate::http::header::LOCATION;
 use crate::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use crate::time::{Deadline, DispatchBudget, MonotonicClock, MonotonicInstant};
 
+const BODY_CHECKPOINT_QUOTA: u8 = 64;
+
+#[derive(Clone)]
+pub(super) struct BodyCheckpoint(Rc<CheckpointState>);
+
+struct CheckpointState {
+    detail: Cell<Option<ProviderFailureDetail>>,
+    factory: Box<dyn Fn() -> OutboundFuture<()>>,
+    scope: RefCell<OutboundScope>,
+}
+
+impl BodyCheckpoint {
+    fn bind_scope(&self, scope: &OutboundScope) {
+        let previous = self.0.scope.replace(scope.clone());
+        drop(previous);
+    }
+
+    fn detail(&self) -> Option<ProviderFailureDetail> {
+        self.0.detail.get()
+    }
+
+    async fn wait(&self) -> Result<(), EdgeError> {
+        let scope = self.0.scope.borrow().clone();
+        scope.check()?;
+        let pending = (self.0.factory)();
+        scope.check()?;
+        let outcome = pending.await;
+        scope.check()?;
+        outcome
+    }
+}
+
 struct OwnedPayload {
     body_progress: bool,
     cause: BudgetSource,
+    checkpoint: Option<BodyCheckpoint>,
     deadline: Deadline,
     entered_at: MonotonicInstant,
     owner: Option<OutboundExchangeOwner>,
@@ -250,6 +287,7 @@ impl OutboundHead {
             entered_at,
             Box::pin(async move {
                 let Self {
+                    checkpoint,
                     owner,
                     context,
                     encoded,
@@ -270,33 +308,48 @@ impl OutboundHead {
                     | ResponseBodyDisposition::ResetContent {
                         declared_body: true,
                     } => {
-                        drop(owner);
-                        drop(encoded);
+                        previous =
+                            OwnedPayload::bodyless(encoded, owner, &context, previous, checkpoint)
+                                .await?;
                         Body::empty()
                     }
                     ResponseBodyDisposition::ResetContent {
                         declared_body: false,
                     } => {
-                        let mut source = OwnedPayload::new(encoded, owner, &context, previous);
+                        let mut source =
+                            OwnedPayload::new(encoded, owner, &context, previous, checkpoint);
                         if let Some(item) = source.next().await {
                             item?;
                         }
+                        source.finish_terminal(None).await?;
                         previous = source.previous;
                         drop(source);
                         Body::empty()
                     }
                     ResponseBodyDisposition::Payload => {
-                        let shaped = apply_response_body_policy(
-                            cooperative_encoded_stream(encoded),
+                        let mut source = OwnedPayload::from_policy(
+                            encoded,
+                            owner,
+                            &context,
+                            previous,
+                            checkpoint,
                             &mut headers,
-                            context.body_policy,
-                        )?;
-                        let mut source = OwnedPayload::new(shaped, owner, &context, previous);
+                        )
+                        .await?;
                         match mode {
                             ResponseMode::Buffered { max_bytes } => {
-                                let bytes =
+                                let collected =
                                     collect_response_stream_inner(&mut source, max_bytes, None)
-                                        .await?;
+                                        .await;
+                                let bytes = match collected {
+                                    Ok(bytes) => bytes,
+                                    Err(error) => {
+                                        source.finish_terminal(Some(error)).await?;
+                                        return Err(EdgeError::internal(anyhow::anyhow!(
+                                            "outbound collector lost its terminal error"
+                                        )));
+                                    }
+                                };
                                 previous = source.previous;
                                 drop(source);
                                 Body::from(bytes)
@@ -359,6 +412,7 @@ impl OutboundHead {
         )?;
         context.body_policy.status = status;
         Ok(Self {
+            checkpoint: None,
             context,
             encoded,
             headers,
@@ -373,6 +427,26 @@ impl OutboundHead {
     #[inline]
     pub fn status(&self) -> StatusCode {
         self.status
+    }
+
+    /// Adds a provider host-event yield to the shared payload finalizer.
+    ///
+    /// The factory is lazy: it runs before item 65 and before each terminal result,
+    /// including finalizer-owned cap failures. It must yield to a real host event,
+    /// not just self-wake or schedule a microtask. Core retains the original paired
+    /// deadline, timer and clock high-water mark while awaiting the checkpoint.
+    /// Discarded heads do not run it; streamed heads transfer it with their body.
+    #[inline]
+    pub fn with_body_checkpoint<F>(mut self, checkpoint: F) -> Self
+    where
+        F: Fn() -> OutboundFuture<()> + 'static,
+    {
+        self.checkpoint = Some(BodyCheckpoint(Rc::new(CheckpointState {
+            detail: Cell::new(None),
+            factory: Box::new(checkpoint),
+            scope: RefCell::new(self.context.scope.clone()),
+        })));
+        self
     }
 }
 
@@ -393,6 +467,9 @@ impl OwnedPayload {
         if context.scope.kind() == Some(OutboundScopeKind::ResponseBody) {
             context.scope.check()?;
             self.scope = context.scope.clone();
+            if let Some(checkpoint) = &self.checkpoint {
+                checkpoint.bind_scope(&self.scope);
+            }
             self.body_progress = true;
             return Ok((context.scope.clone(), None));
         }
@@ -400,8 +477,73 @@ impl OwnedPayload {
         owner.accept_body_handoff()?;
         let scope = owner.with(|| OutboundScope::capture(context.scope.progress()));
         self.scope = scope.clone();
+        if let Some(checkpoint) = &self.checkpoint {
+            checkpoint.bind_scope(&self.scope);
+        }
         self.body_progress = true;
         Ok((scope, Some(owner)))
+    }
+
+    async fn bodyless(
+        encoded: BodyStream,
+        owner: OutboundExchangeOwner,
+        context: &OutboundResponseContext,
+        previous: MonotonicInstant,
+        checkpoint: Option<BodyCheckpoint>,
+    ) -> Result<MonotonicInstant, EdgeError> {
+        drop(encoded);
+        if checkpoint.is_none() {
+            drop(owner);
+            return Ok(previous);
+        }
+        let mut terminal = Self::new(empty().boxed_local(), owner, context, previous, checkpoint);
+        terminal.next().await.transpose()?;
+        Ok(terminal.previous)
+    }
+
+    async fn finish_terminal(&mut self, error: Option<EdgeError>) -> Result<(), EdgeError> {
+        let Some(checkpoint) = &self.checkpoint else {
+            return error.map_or(Ok(()), Err);
+        };
+        let terminal = error.map_or_else(
+            || empty().boxed_local(),
+            |failure| once(async move { Err(failure) }).boxed_local(),
+        );
+        let source = checkpointed_stream(terminal, None, checkpoint.clone());
+        drop((self.source.replace(source), self.owner.take()));
+        self.next().await.transpose()?;
+        Ok(())
+    }
+
+    async fn from_policy(
+        encoded: BodyStream,
+        owner: OutboundExchangeOwner,
+        context: &OutboundResponseContext,
+        previous: MonotonicInstant,
+        checkpoint: Option<BodyCheckpoint>,
+        headers: &mut HeaderMap,
+    ) -> Result<Self, EdgeError> {
+        match apply_response_body_policy(
+            cooperative_encoded_stream(encoded),
+            headers,
+            context.body_policy,
+        ) {
+            Ok(shaped) => Ok(Self::new(shaped, owner, context, previous, checkpoint)),
+            Err(error) if checkpoint.is_some() => {
+                let mut terminal = Self::new(
+                    once(async move { Err(error) }).boxed_local(),
+                    owner,
+                    context,
+                    previous,
+                    checkpoint,
+                );
+                terminal.next().await.transpose()?;
+                Err(EdgeError::internal(anyhow::anyhow!(
+                    "outbound policy failure lost its terminal error"
+                )))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn new(
@@ -409,13 +551,20 @@ impl OwnedPayload {
         owner: OutboundExchangeOwner,
         context: &OutboundResponseContext,
         previous: MonotonicInstant,
+        checkpoint: Option<BodyCheckpoint>,
     ) -> Self {
         let (deadline, cause) = effective_deadline(context);
+        let (shaped_source, sole_owner) = if let Some(gate) = &checkpoint {
+            (checkpointed_stream(source, Some(owner), gate.clone()), None)
+        } else {
+            (source, Some(owner))
+        };
         Self {
             body_progress: false,
+            checkpoint,
             entered_at: context.entered_at,
-            owner: Some(owner),
-            source: Some(source),
+            owner: sole_owner,
+            source: Some(shaped_source),
             timer: None,
             time: Some(context.time.clone()),
             cause,
@@ -439,7 +588,10 @@ impl OwnedPayload {
         if let Poll::Ready(result) = timer.as_mut().poll(cx) {
             result?;
             self.scope.check()?;
-            return Poll::Ready(Some(Err(timeout_error(self.cause))));
+            return Poll::Ready(Some(Err(with_timeout_detail(
+                timeout_error(self.cause),
+                self.checkpoint.as_ref().and_then(BodyCheckpoint::detail),
+            ))));
         }
         self.scope.check()?;
         let Some(source) = &mut self.source else {
@@ -452,9 +604,17 @@ impl OwnedPayload {
                 if let EdgeError::GatewayTimeout {
                     provider_detail, ..
                 } = &mut selected
-                    && let Poll::Ready(Some(Err(error))) = &next
                 {
-                    *provider_detail = error.provider_failure_detail().copied();
+                    *provider_detail = self
+                        .checkpoint
+                        .as_ref()
+                        .and_then(BodyCheckpoint::detail)
+                        .or_else(|| match &next {
+                            Poll::Ready(Some(Err(error))) => {
+                                error.provider_failure_detail().copied()
+                            }
+                            Poll::Ready(None | Some(Ok(_))) | Poll::Pending => None,
+                        });
                 }
                 selected
             },
@@ -476,6 +636,7 @@ impl OwnedPayload {
             self.source.take(),
             self.timer.take(),
             self.time.take(),
+            self.checkpoint.take(),
         );
         drop(resources);
     }
@@ -552,6 +713,42 @@ pub(super) fn checked_sample(
     Ok(now)
 }
 
+fn checkpointed_stream(
+    source: BodyStream,
+    owner: Option<OutboundExchangeOwner>,
+    checkpoint: BodyCheckpoint,
+) -> BodyStream {
+    stream! {
+        let mut active = Some((source, owner));
+        let mut ready_items = 0_u8;
+        loop {
+            let received = active.as_mut().ok_or_else(|| EdgeError::internal(anyhow::anyhow!("outbound checkpoint source already released")))?.0.next().await;
+            match received {
+                Some(Ok(bytes)) => {
+                    yield Ok(bytes);
+                    ready_items = ready_items.saturating_add(1);
+                    if ready_items == BODY_CHECKPOINT_QUOTA {
+                        let result = checkpoint.wait().await;
+                        ready_items = 0;
+                        if let Err(error) = result {
+                            drop(active.take());
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                }
+                terminal => {
+                    checkpoint.0.detail.set(terminal.as_ref().and_then(|item| item.as_ref().err()).and_then(|error| error.provider_failure_detail().copied()));
+                    drop(active.take());
+                    checkpoint.wait().await?;
+                    if let Some(item) = terminal { yield item; }
+                    return;
+                }
+            }
+        }
+    }.boxed_local()
+}
+
 fn cooperative_encoded_stream(mut source: BodyStream) -> BodyStream {
     stream! {
         while let Some(item) = source.next().await {
@@ -604,16 +801,29 @@ fn timeout_error(cause: BudgetSource) -> EdgeError {
     EdgeError::gateway_timeout_caused("outbound response deadline expired", cause)
 }
 
+fn with_timeout_detail(mut error: EdgeError, detail: Option<ProviderFailureDetail>) -> EdgeError {
+    if let EdgeError::GatewayTimeout {
+        provider_detail, ..
+    } = &mut error
+    {
+        *provider_detail = detail;
+    }
+    error
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::{Cell, RefCell};
+    use std::future::Future as _;
     use std::io::Write as _;
+    use std::pin::Pin;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
+    use async_stream::stream;
     use bytes::Bytes;
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -627,10 +837,10 @@ mod tests {
     use crate::http::{HeaderMap, HeaderValue, Method, StatusCode};
     use crate::{
         BodyStream, BudgetSource, ContentTypeProvenance, DispatchBudget, EdgeError, MonotonicClock,
-        OutboundExchangeOwner, OutboundHead, OutboundHeaderFidelity, OutboundHeaderInput,
-        OutboundProxyMarker, OutboundResponseContext, OutboundScopeOwner, OutboundSendMode,
-        OutboundTime, ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding,
-        ResponseHeaderLimiter, ResponseLimitReason, ResponseMode,
+        MonotonicInstant, OutboundExchangeOwner, OutboundHead, OutboundHeaderFidelity,
+        OutboundHeaderInput, OutboundProxyMarker, OutboundResponseContext, OutboundScopeOwner,
+        OutboundSendMode, OutboundTime, ResponseBodyDisposition, ResponseBodyPolicy,
+        ResponseDecoding, ResponseHeaderLimiter, ResponseLimitReason, ResponseMode,
     };
 
     thread_local! {
@@ -1144,6 +1354,344 @@ mod tests {
                     assert_eq!(releases.get(), 1);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn checkpoint_never_starts_after_owner_cleanup_closes_scope() {
+        let callback = Rc::new(OutboundScopeOwner::callback());
+        let mut captured = context(ResponseMode::Buffered { max_bytes: 16 });
+        captured.scope = callback.scope();
+        let close = Rc::clone(&callback);
+        let checkpoints = Rc::new(Cell::new(0_usize));
+        let observed = Rc::clone(&checkpoints);
+        let head = OutboundHead::new(
+            StatusCode::OK,
+            input(HeaderMap::new()),
+            stream::once(async { Err(EdgeError::bad_gateway("source failed")) }).boxed_local(),
+            captured,
+            OutboundExchangeOwner::new(move || close.close()),
+        )
+        .unwrap()
+        .with_body_checkpoint(move || {
+            observed.set(observed.get().saturating_add(1));
+            Box::pin(pending())
+        });
+        let error = block_on(head.finish()).unwrap_err();
+        assert!(matches!(error, EdgeError::Internal { .. }));
+        assert_eq!(
+            checkpoints.get(),
+            0,
+            "closed ownership forbids new host work"
+        );
+    }
+
+    #[test]
+    fn checkpoint_completion_cannot_read_again_after_closing_scope() {
+        let callback = Rc::new(OutboundScopeOwner::callback());
+        let mut captured = context(ResponseMode::Buffered {
+            max_bytes: 1024 * 1024,
+        });
+        captured.scope = callback.scope();
+        captured.body_policy.max_decoded_response_bytes = None;
+        captured.body_policy.max_encoded_response_bytes = None;
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(&vec![b'x'; 63 * 8192 + 1]).unwrap();
+        let mut encoded = Some(Bytes::from(gzip.finish().unwrap()));
+        let polls = Rc::new(Cell::new(0_usize));
+        let counted = Rc::clone(&polls);
+        let source = stream::poll_fn(move |_| {
+            counted.set(counted.get().saturating_add(1));
+            encoded
+                .take()
+                .map_or(Poll::Pending, |bytes| Poll::Ready(Some(Ok(bytes))))
+        })
+        .boxed_local();
+        let mut headers = HeaderMap::new();
+        headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+        let releases = Rc::new(Cell::new(0));
+        let close = Rc::clone(&callback);
+        let head = OutboundHead::new(
+            StatusCode::OK,
+            input(headers),
+            source,
+            captured,
+            owner(&releases),
+        )
+        .unwrap()
+        .with_body_checkpoint(move || {
+            let closing = Rc::clone(&close);
+            Box::pin(async move {
+                closing.close();
+                Ok(())
+            })
+        });
+        assert!(matches!(
+            block_on(head.finish()),
+            Err(EdgeError::Internal { .. })
+        ));
+        assert_eq!(
+            polls.get(),
+            1,
+            "checkpoint completion cannot start another native read"
+        );
+        assert_eq!(releases.get(), 1);
+    }
+
+    #[test]
+    fn decoded_checkpoint_blocks_item_sixty_five_and_cancellation_releases_source() {
+        for compressed in [false, true] {
+            let mut captured = context(ResponseMode::Streamed);
+            captured.body_policy.max_decoded_response_bytes = None;
+            captured.body_policy.max_encoded_response_bytes = None;
+            let mut headers = HeaderMap::new();
+            let source_drops = Rc::new(Cell::new(0));
+            let lease = SourceLease(Rc::clone(&source_drops));
+            let body = if compressed {
+                let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+                gzip.write_all(&vec![b'x'; 2 * 1024 * 1024]).unwrap();
+                let bytes = Bytes::from(gzip.finish().unwrap());
+                headers.insert("content-encoding", HeaderValue::from_static("gzip"));
+                stream! { let _lease = lease; yield Ok(bytes); pending::<()>().await; }
+                    .boxed_local()
+            } else {
+                stream! { let _lease = lease; loop { yield Ok(Bytes::new()); } }.boxed_local()
+            };
+            let checkpoints = Rc::new(Cell::new(0_usize));
+            let observed = Rc::clone(&checkpoints);
+            let releases = Rc::new(Cell::new(0));
+            let head = OutboundHead::new(
+                StatusCode::OK,
+                input(headers),
+                body,
+                captured,
+                owner(&releases),
+            )
+            .unwrap()
+            .with_body_checkpoint(move || {
+                observed.set(observed.get().saturating_add(1));
+                Box::pin(pending())
+            });
+            let response = block_on(head.finish()).unwrap();
+            assert_eq!(checkpoints.get(), 0, "head handoff is lazy");
+            let mut source = response.into_body().into_stream().unwrap();
+            for _ in 0_usize..64 {
+                block_on(source.next()).unwrap().unwrap();
+            }
+            let mut next = source.next();
+            assert!(
+                Pin::new(&mut next)
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            assert_eq!(
+                checkpoints.get(),
+                1,
+                "decoded and empty items share the quota"
+            );
+            drop(next);
+            drop(source);
+            assert_eq!(source_drops.get(), 1);
+            assert_eq!(releases.get(), 1);
+        }
+    }
+
+    #[test]
+    fn collector_checkpoint_retains_the_existing_timer_and_clock_high_water() {
+        let start = MonotonicInstant::now();
+        let now = Arc::new(Mutex::new(start));
+        let sampled = Arc::clone(&now);
+        let mut captured = context(ResponseMode::Buffered { max_bytes: 1 });
+        captured.entered_at = start;
+        captured.time = OutboundTime::new(
+            MonotonicClock::new(move || *sampled.lock().unwrap()),
+            |_, _| Box::pin(pending()),
+        );
+        let source_clock = Arc::clone(&now);
+        let body = stream::once(async move {
+            *source_clock.lock().unwrap() = start + Duration::from_millis(2);
+            Ok(Bytes::from_static(b"body"))
+        })
+        .boxed_local();
+        let releases = Rc::new(Cell::new(0));
+        let freed = Rc::clone(&releases);
+        let head = OutboundHead::new(
+            StatusCode::OK,
+            input(HeaderMap::new()),
+            body,
+            captured,
+            owner(&releases),
+        )
+        .unwrap()
+        .with_body_checkpoint(move || {
+            assert_eq!(freed.get(), 1, "cap cleanup precedes host work");
+            *now.lock().unwrap() = start + Duration::from_millis(1);
+            Box::pin(async { Ok(()) })
+        });
+        let error = block_on(head.finish()).unwrap_err();
+        assert!(matches!(error, EdgeError::Internal { .. }), "{error:?}");
+        assert_eq!(releases.get(), 1);
+    }
+
+    fn checkpoint_waiter(
+        ready: &Arc<AtomicBool>,
+        fault: &Arc<()>,
+        return_fault: bool,
+    ) -> crate::OutboundFuture<()> {
+        let enabled = Arc::clone(ready);
+        let identity = Arc::clone(fault);
+        Box::pin(poll_fn(move |_| {
+            if enabled.load(Ordering::SeqCst) {
+                Poll::Ready(if return_fault {
+                    Err(EdgeError::internal(IdentityError(Arc::clone(&identity))))
+                } else {
+                    Ok(())
+                })
+            } else {
+                Poll::Pending
+            }
+        }))
+    }
+
+    #[test]
+    fn terminal_checkpoint_timeout_keeps_pending_source_detail_and_timer_faults() {
+        use crate::{CloudflareFailureCause, ProviderFailureDetail, ProviderFailurePhase};
+
+        for path in 0_u8..4 {
+            let start = MonotonicInstant::now();
+            let now = Arc::new(Mutex::new(start));
+            let sampled = Arc::clone(&now);
+            let ready = Arc::new(AtomicBool::new(false));
+            let waiter_ready = Arc::clone(&ready);
+            let original = Arc::new(());
+            let fault = Arc::clone(&original);
+            let detail = ProviderFailureDetail::Cloudflare {
+                phase: ProviderFailurePhase::ResponseBodyRead,
+                cause: CloudflareFailureCause::TypeError,
+            };
+            let mut captured = context(ResponseMode::Streamed);
+            captured.entered_at = start;
+            captured.budget.deadline =
+                crate::Deadline::at_instant(start + Duration::from_millis(10));
+            captured.time = OutboundTime::new(
+                MonotonicClock::new(move || *sampled.lock().unwrap()),
+                move |_, _| checkpoint_waiter(&waiter_ready, &fault, path == 2),
+            );
+            let releases = Rc::new(Cell::new(0));
+            let on_event = Arc::clone(&now);
+            let head = OutboundHead::new(
+                StatusCode::OK,
+                input(HeaderMap::new()),
+                stream::once(async move {
+                    Err(EdgeError::bad_gateway_with_detail(
+                        "source failed",
+                        crate::BadGatewayReason::Transport,
+                        detail,
+                    ))
+                })
+                .boxed_local(),
+                captured,
+                owner(&releases),
+            )
+            .unwrap()
+            .with_body_checkpoint(move || {
+                if matches!(path, 0 | 3) {
+                    *on_event.lock().unwrap() = start + Duration::from_millis(10);
+                }
+                if path == 3 {
+                    Box::pin(async {
+                        Err(EdgeError::internal(anyhow::anyhow!("checkpoint failed")))
+                    })
+                } else {
+                    Box::pin(pending())
+                }
+            });
+            let mut body = block_on(head.finish())
+                .unwrap()
+                .into_body()
+                .into_stream()
+                .unwrap();
+            let mut next = body.next();
+            let mut cx = Context::from_waker(Waker::noop());
+            let first = Pin::new(&mut next).poll(&mut cx);
+            let result = if matches!(path, 0 | 3) {
+                first
+            } else {
+                assert!(first.is_pending());
+                assert_eq!(
+                    releases.get(),
+                    1,
+                    "source releases while terminal checkpoint waits"
+                );
+                *now.lock().unwrap() = start + Duration::from_millis(10);
+                ready.store(true, Ordering::SeqCst);
+                Pin::new(&mut next).poll(&mut cx)
+            };
+            let Poll::Ready(Some(Err(error))) = result else {
+                panic!("terminal decision must be ready");
+            };
+            if path == 2 {
+                let identity = error
+                    .inner()
+                    .unwrap()
+                    .downcast_ref::<IdentityError>()
+                    .unwrap();
+                assert!(Arc::ptr_eq(&identity.0, &original));
+            } else {
+                assert!(matches!(
+                    error,
+                    EdgeError::GatewayTimeout {
+                        cause: BudgetSource::PerCallTimeout,
+                        ..
+                    }
+                ));
+                assert_eq!(error.provider_failure_detail(), Some(&detail));
+            }
+            assert_eq!(releases.get(), 1);
+        }
+    }
+
+    #[test]
+    fn terminal_checkpoint_runs_once_and_preserves_early_error_identity() {
+        for source_error in [false, true] {
+            let releases = Rc::new(Cell::new(0));
+            let checkpoint_calls = Rc::new(Cell::new(0_usize));
+            let observed = Rc::clone(&checkpoint_calls);
+            let freed = Rc::clone(&releases);
+            let original = Arc::new(());
+            let retained = Arc::clone(&original);
+            let body = if source_error {
+                stream::once(async move { Err(EdgeError::internal(IdentityError(retained))) })
+                    .boxed_local()
+            } else {
+                stream::empty().boxed_local()
+            };
+            let head = OutboundHead::new(
+                StatusCode::OK,
+                input(HeaderMap::new()),
+                body,
+                context(ResponseMode::Buffered { max_bytes: 16 }),
+                owner(&releases),
+            )
+            .unwrap()
+            .with_body_checkpoint(move || {
+                assert_eq!(freed.get(), 1);
+                observed.set(observed.get().saturating_add(1));
+                Box::pin(async { Ok(()) })
+            });
+            let result = block_on(head.finish());
+            if source_error {
+                let error = result.unwrap_err();
+                let identity = error
+                    .inner()
+                    .unwrap()
+                    .downcast_ref::<IdentityError>()
+                    .unwrap();
+                assert!(Arc::ptr_eq(&identity.0, &original));
+            } else {
+                assert!(result.unwrap().body().as_bytes().unwrap().is_empty());
+            }
+            assert_eq!(checkpoint_calls.get(), 1);
         }
     }
 
