@@ -862,6 +862,36 @@ jobs:
           FAKE_FAIL_AFTER_ACTIVATION: "1"
         run: .github/actions/deploy-fastly/tests/assert-json-deploy-version.sh unknown
 
+      - name: Reset the fake Fastly provider
+        run: .github/actions/deploy-fastly/tests/make-fake-fastly-env.sh
+      - name: A draft another actor activated reports published
+        env:
+          FAKE_FAIL_AFTER_VERSION: "1"
+          FAKE_OTHER_ACTOR_PUBLISHES: production
+        run: .github/actions/deploy-fastly/tests/assert-json-deploy-version.sh published
+
+      - name: Reset the fake Fastly provider
+        run: .github/actions/deploy-fastly/tests/make-fake-fastly-env.sh
+      - name: A staging draft another actor staged reports published
+        env:
+          EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME: config-stage
+          EDGEZERO__STORES__KV__CACHE__NAME: cache-stage
+          EDGEZERO__STORES__SECRETS__CREDENTIALS__NAME: credentials-stage
+          FAKE_FAIL_AFTER_VERSION: "1"
+          FAKE_OTHER_ACTOR_PUBLISHES: staging
+        run: .github/actions/deploy-fastly/tests/assert-json-deploy-version.sh published --staging
+
+      - name: Reset the fake Fastly provider
+        run: .github/actions/deploy-fastly/tests/make-fake-fastly-env.sh
+      - name: A staging draft another actor activated is not reported as staged
+        env:
+          EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME: config-stage
+          EDGEZERO__STORES__KV__CACHE__NAME: cache-stage
+          EDGEZERO__STORES__SECRETS__CREDENTIALS__NAME: credentials-stage
+          FAKE_FAIL_AFTER_VERSION: "1"
+          FAKE_OTHER_ACTOR_PUBLISHES: production
+        run: .github/actions/deploy-fastly/tests/assert-json-deploy-version.sh unknown --staging
+
   recovery-smoke:
     needs: fixture-release
     runs-on: ubuntu-latest
