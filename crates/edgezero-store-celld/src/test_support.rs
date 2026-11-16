@@ -1,4 +1,4 @@
-//! Private real TCP fixtures shared by config and KV tests. No transport mocking.
+//! Private real TCP fixture speaking the store service wire protocol. No transport mocking.
 
 #![expect(
     clippy::arbitrary_source_item_ordering,
@@ -24,8 +24,13 @@ use tokio::time::{sleep, timeout};
 use tokio_rustls::TlsAcceptor;
 use url::Url;
 
+/// Headers every service response carries, for hand-written replies.
+pub(crate) const SERVICE_HEADERS: &str =
+    "x-edgezero-store-version: 1\r\nx-edgezero-store-instance: AAAAAAAAAAAAAAAAAAAAAA\r\n";
+
 pub(crate) struct Request {
     pub(crate) body: Vec<u8>,
+    pub(crate) mutation_id: Option<String>,
     pub(crate) connection: usize,
     pub(crate) method: String,
     pub(crate) target: String,
@@ -35,7 +40,6 @@ pub(crate) struct Request {
 
 pub(crate) enum Reply {
     Bytes(Vec<u8>),
-    #[cfg(feature = "kv")]
     Drop,
     Stall,
     SlowBody,
@@ -43,7 +47,7 @@ pub(crate) enum Reply {
 
 impl Reply {
     pub(crate) fn response(status: u16, content_type: &str, body: &[u8]) -> Self {
-        Self::custom(status, content_type, "x-celld-store-version: 1\r\n", body)
+        Self::custom(status, content_type, SERVICE_HEADERS, body)
     }
 
     pub(crate) fn custom(status: u16, content_type: &str, headers: &str, body: &[u8]) -> Self {
@@ -202,6 +206,7 @@ where
         let mut length = 0;
         let mut authorization = None;
         let mut encoding = None;
+        let mut mutation_id = None;
         loop {
             let mut line = String::new();
             if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
@@ -223,6 +228,9 @@ where
                 if name.eq_ignore_ascii_case("accept-encoding") {
                     encoding = Some(value.to_owned());
                 }
+                if name.eq_ignore_ascii_case("x-edgezero-mutation-id") {
+                    mutation_id = Some(value.to_owned());
+                }
             }
         }
         let mut body = vec![0; length];
@@ -231,6 +239,7 @@ where
         }
         let request = Request {
             body,
+            mutation_id,
             connection,
             method,
             target,
@@ -249,14 +258,18 @@ where
                     return;
                 }
             }
-            #[cfg(feature = "kv")]
             Reply::Drop => return,
             Reply::Stall => {
                 sleep(Duration::from_secs(5)).await;
                 return;
             }
             Reply::SlowBody => {
-                if stream.get_mut().write_all(b"HTTP/1.1 200 Fixture\r\nx-celld-store-version: 1\r\nContent-Type: application/octet-stream\r\nContent-Length: 2\r\n\r\nx").await.is_err() { return; }
+                let head = format!(
+                    "HTTP/1.1 200 Fixture\r\n{SERVICE_HEADERS}Content-Type: application/octet-stream\r\nContent-Length: 2\r\n\r\nx"
+                );
+                if stream.get_mut().write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
                 sleep(Duration::from_secs(5)).await;
                 return;
             }
@@ -278,16 +291,16 @@ fn apply(request: &Request, values: &mut BTreeMap<(String, String), Vec<u8>>) ->
     let params: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
     let key = params.get("key").cloned().unwrap_or_default();
     let target = (store.clone(), key);
-    match request.method.as_str() {
-        "PUT" => {
+    match (request.method.as_str(), url.path().rsplit('/').next()) {
+        ("POST", Some("put")) => {
             values.insert(target, request.body.clone());
             Reply::response(204, "application/octet-stream", b"")
         }
-        "DELETE" => {
+        ("POST", Some("delete")) => {
             values.remove(&target);
             Reply::response(204, "application/octet-stream", b"")
         }
-        "HEAD" => Reply::response(
+        ("HEAD", _) => Reply::response(
             if values.contains_key(&target) {
                 200
             } else {

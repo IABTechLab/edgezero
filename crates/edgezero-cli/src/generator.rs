@@ -2015,9 +2015,12 @@ git = "https://example.invalid/spin-sdk-test"
             "aws-appconfig-agent",
             "aws-secrets-manager",
             "aws-dynamodb",
-            "celld-config",
             "celld-kv",
         ] {
+            assert!(
+                features.get("celld-config").is_none(),
+                "the store service has no config provider"
+            );
             assert_eq!(
                 features.get(feature),
                 Some(&toml::Value::Array(vec![toml::Value::String(format!(

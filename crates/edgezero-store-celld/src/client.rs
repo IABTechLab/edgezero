@@ -1,4 +1,8 @@
 //! One bounded HTTP exchange. No discovery, redirects, proxies or mutation replay.
+//!
+//! Every mutation carries a fresh random ID. The store service records it in the
+//! same transaction as the write, so a duplicate delivery inside celld or a proxy
+//! cannot apply it twice. The client itself never resends a mutation.
 
 #![expect(
     clippy::arbitrary_source_item_ordering,
@@ -8,13 +12,14 @@
 use std::fmt;
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use edgezero_core::time::{Deadline, MonotonicClock};
 use futures_util::StreamExt as _;
-#[cfg(feature = "kv")]
-use reqwest::header::CONTENT_LENGTH;
 use reqwest::header::{
-    ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue,
+    ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap,
+    HeaderValue,
 };
 use reqwest::redirect::Policy;
 use reqwest::retry::never;
@@ -27,7 +32,9 @@ use crate::PreparationError;
 use crate::settings::{CelldAccessToken, CelldPreparationLimits};
 
 const ERROR_CAP: usize = 1_024;
-const VERSION_HEADER: &str = "x-celld-store-version";
+const INSTANCE_HEADER: &str = "x-edgezero-store-instance";
+const MUTATION_HEADER: &str = "x-edgezero-mutation-id";
+const VERSION_HEADER: &str = "x-edgezero-store-version";
 
 pub(crate) struct ScopedClient {
     authorization: Option<HeaderValue>,
@@ -45,78 +52,35 @@ impl fmt::Debug for ScopedClient {
 
 #[derive(Clone, Copy)]
 pub(crate) enum ResponseKind {
-    #[cfg(feature = "kv")]
     Exists,
-    #[cfg(feature = "kv")]
     Mutation,
-    #[cfg(feature = "kv")]
     Page,
-    #[cfg(feature = "config")]
-    Document,
-    #[cfg(feature = "kv")]
     Value,
-    #[cfg(feature = "records")]
-    Record,
-    #[cfg(feature = "records")]
-    RecordExists,
-    #[cfg(feature = "records")]
-    RecordMutation,
-    #[cfg(feature = "records")]
-    RecordPage,
 }
 
 impl ResponseKind {
-    fn mutation(self) -> bool {
-        match self {
-            #[cfg(feature = "kv")]
-            Self::Mutation => true,
-            #[cfg(feature = "records")]
-            Self::RecordMutation => true,
-            #[cfg(feature = "kv")]
-            Self::Exists | Self::Page | Self::Value => false,
-            #[cfg(feature = "config")]
-            Self::Document => false,
-            #[cfg(feature = "records")]
-            Self::Record | Self::RecordExists | Self::RecordPage => false,
-        }
+    const fn mutation(self) -> bool {
+        matches!(self, Self::Mutation)
     }
 
-    fn json(self) -> bool {
-        match self {
-            #[cfg(feature = "kv")]
-            Self::Page => true,
-            #[cfg(feature = "records")]
-            Self::Record | Self::RecordPage => true,
-            #[cfg(feature = "kv")]
-            Self::Exists | Self::Mutation | Self::Value => false,
-            #[cfg(feature = "config")]
-            Self::Document => false,
-            #[cfg(feature = "records")]
-            Self::RecordExists | Self::RecordMutation => false,
-        }
+    const fn json(self) -> bool {
+        matches!(self, Self::Page)
     }
 
-    fn optional(self) -> bool {
-        match self {
-            #[cfg(feature = "kv")]
-            Self::Value => true,
-            #[cfg(feature = "records")]
-            Self::Record => true,
-            #[cfg(feature = "kv")]
-            Self::Exists | Self::Mutation | Self::Page => false,
-            #[cfg(feature = "config")]
-            Self::Document => false,
-            #[cfg(feature = "records")]
-            Self::RecordExists | Self::RecordMutation | Self::RecordPage => false,
-        }
+    const fn optional(self) -> bool {
+        matches!(self, Self::Value)
     }
+}
 
-    #[cfg(feature = "records")]
-    fn record(self) -> bool {
-        matches!(
-            self,
-            Self::Record | Self::RecordExists | Self::RecordMutation | Self::RecordPage
-        )
+/// A validated exchange. The instance identifies the store's durable state.
+pub(crate) struct Exchange {
+    pub body: Option<Vec<u8>>,
+    pub instance: Option<String>,
+}
+
+impl fmt::Debug for Exchange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Exchange").finish_non_exhaustive()
     }
 }
 
@@ -197,7 +161,8 @@ impl ScopedClient {
     }
 
     /// Covers sending, streaming and decoding with one real timer and injected
-    /// monotonic checks. None means a validated miss, never a protocol failure.
+    /// monotonic checks. A None body means a validated miss, never a protocol
+    /// failure. Successful responses must name the store instance.
     pub(crate) async fn execute(
         &self,
         method: Method,
@@ -206,7 +171,7 @@ impl ScopedClient {
         cap: usize,
         deadline: Deadline,
         kind: ResponseKind,
-    ) -> Result<Option<Vec<u8>>, PreparationError> {
+    ) -> Result<Exchange, PreparationError> {
         let budget = self
             .check(deadline)?
             .min(Duration::from_millis(self.limits.operation_timeout_ms));
@@ -218,25 +183,19 @@ impl ScopedClient {
         if let Some(authorization) = &self.authorization {
             request = request.header(AUTHORIZATION, authorization.clone());
         }
+        if kind.mutation() {
+            request = request.header(MUTATION_HEADER, mutation_id()?);
+        }
         if let Some(payload) = body {
-            #[cfg(feature = "records")]
-            let content_type = if matches!(kind, ResponseKind::RecordMutation) {
-                "application/json"
-            } else {
-                "application/octet-stream"
-            };
-            #[cfg(not(feature = "records"))]
-            let content_type = "application/octet-stream";
-            request = request.header(CONTENT_TYPE, content_type).body(payload);
+            request = request
+                .header(CONTENT_TYPE, "application/octet-stream")
+                .body(payload);
         }
         let result = timeout(budget, async {
             let response = request.send().await.map_err(http_error)?;
             let headers = response.headers();
             validate_headers(headers)?;
-            #[cfg(feature = "records")]
-            if kind.record() {
-                validate_record_version(headers)?;
-            }
+            let instance = instance(headers)?;
             let status = response.status();
             let success = status
                 == if kind.mutation() {
@@ -244,22 +203,35 @@ impl ScopedClient {
                 } else {
                     StatusCode::OK
                 };
-            #[cfg(feature = "kv")]
-            if status == StatusCode::NO_CONTENT
-                && success
-                && headers
+            if success && instance.is_none() {
+                return Err(PreparationError::Malformed);
+            }
+            // A mutation acknowledgement carries no body, so it has no media type.
+            if status == StatusCode::NO_CONTENT && success {
+                if headers
                     .get(CONTENT_LENGTH)
                     .is_some_and(|length| length.as_bytes() != b"0")
-            {
-                return Err(PreparationError::Malformed);
+                {
+                    return Err(PreparationError::Malformed);
+                }
+                return Ok(Exchange {
+                    body: Some(Vec::new()),
+                    instance,
+                });
             }
             let missing = status == StatusCode::NOT_FOUND;
             // The wire HEAD contract has no error body, including non-404 errors.
             if method == Method::HEAD {
                 return if success {
-                    Ok(Some(Vec::new()))
+                    Ok(Exchange {
+                        body: Some(Vec::new()),
+                        instance,
+                    })
                 } else if missing {
-                    Ok(None)
+                    Ok(Exchange {
+                        body: None,
+                        instance,
+                    })
                 } else {
                     Err(status_error(status)
                         .map_or(PreparationError::Malformed, |(_, error)| error))
@@ -274,7 +246,10 @@ impl ScopedClient {
             let response_cap = if success { cap } else { ERROR_CAP };
             let bytes = collect(response, response_cap, &self.clock, deadline).await?;
             if success {
-                return Ok(Some(bytes));
+                return Ok(Exchange {
+                    body: Some(bytes),
+                    instance,
+                });
             }
             let (expected, error) = status_error(status).ok_or(PreparationError::Malformed)?;
             let parsed: ErrorBody =
@@ -283,7 +258,10 @@ impl ScopedClient {
                 return Err(PreparationError::Malformed);
             }
             if missing && kind.optional() {
-                return Ok(None);
+                return Ok(Exchange {
+                    body: None,
+                    instance,
+                });
             }
             Err(error)
         })
@@ -294,13 +272,31 @@ impl ScopedClient {
     }
 }
 
-#[cfg(feature = "records")]
-fn validate_record_version(headers: &HeaderMap) -> Result<(), PreparationError> {
-    let mut versions = headers.get_all("x-celld-record-version").iter();
-    if versions.next().is_none_or(|value| value.as_bytes() != b"1") || versions.next().is_some() {
-        return Err(PreparationError::UnsupportedVersion);
+/// A fresh 128-bit mutation ID. It is never reused, including after a failure.
+fn mutation_id() -> Result<HeaderValue, PreparationError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_error| PreparationError::Unavailable)?;
+    HeaderValue::from_str(&URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|_error| PreparationError::Unavailable)
+}
+
+fn instance(headers: &HeaderMap) -> Result<Option<String>, PreparationError> {
+    let mut values = headers.get_all(INSTANCE_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    let bytes = value.as_bytes();
+    if values.next().is_some()
+        || bytes.len() != 22
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(PreparationError::Malformed);
     }
-    Ok(())
+    Ok(Some(
+        String::from_utf8(bytes.to_vec()).map_err(|_error| PreparationError::Malformed)?,
+    ))
 }
 
 fn validate_headers(headers: &HeaderMap) -> Result<(), PreparationError> {
@@ -383,8 +379,6 @@ fn status_error(status: StatusCode) -> Option<(&'static str, PreparationError)> 
         401 => ("unauthenticated", PreparationError::Unauthenticated),
         403 => ("forbidden", PreparationError::Forbidden),
         404 => ("not_found", PreparationError::Missing),
-        #[cfg(feature = "records")]
-        412 => ("precondition_failed", PreparationError::PreconditionFailed),
         413 => ("limit_exceeded", PreparationError::SizeLimit),
         426 => ("unsupported_version", PreparationError::UnsupportedVersion),
         503 => ("unavailable", PreparationError::Unavailable),
@@ -394,7 +388,6 @@ fn status_error(status: StatusCode) -> Option<(&'static str, PreparationError)> 
 }
 
 #[cfg(test)]
-#[cfg(any(feature = "config", feature = "kv"))]
 mod tests {
     use std::env::{current_exe, var};
     use std::io::ErrorKind;
@@ -408,7 +401,7 @@ mod tests {
     use super::{ResponseKind, ScopedClient};
     use crate::PreparationError;
     use crate::settings::{CelldAccessToken, CelldPreparationLimits};
-    use crate::test_support::{Fixture, Reply};
+    use crate::test_support::{Fixture, Reply, SERVICE_HEADERS};
 
     #[tokio::test(flavor = "current_thread")]
     async fn native_tls_requires_trust_matching_identity_and_valid_dates() {
@@ -435,7 +428,7 @@ mod tests {
             ),
         ] {
             let fixture = Fixture::tls(certificate, vec![]).await;
-            fixture.seed("config", "key", b"TLS").await;
+            fixture.seed("state", "key", b"TLS").await;
             let token =
                 CelldAccessToken::new("test-tls-bearer-credential-at-least-32-bytes".to_owned())
                     .unwrap();
@@ -450,7 +443,7 @@ mod tests {
                 root,
             )
             .unwrap();
-            let mut url = client.url("config", "value").unwrap();
+            let mut url = client.url("state", "value").unwrap();
             url.query_pairs_mut().append_pair("key", "key");
             let result = client
                 .execute(
@@ -463,7 +456,7 @@ mod tests {
                 )
                 .await;
             if accepted {
-                assert_eq!(result.unwrap(), Some(b"TLS".to_vec()));
+                assert_eq!(result.unwrap().body, Some(b"TLS".to_vec()));
                 assert_eq!(
                     fixture.requests().await[0].authorization.as_deref(),
                     Some(format!("Bearer {}", token.expose()).as_str())
@@ -482,7 +475,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn native_tls_keeps_distinct_credentials_on_reused_connections() {
         let fixture = Fixture::tls(include_bytes!("fixtures/tls-valid.der"), vec![]).await;
-        fixture.seed("config", "key", b"TLS").await;
+        fixture.seed("state", "key", b"TLS").await;
         let mut clients = Vec::new();
         for token_text in [
             "first-tls-credential-at-least-32-bytes",
@@ -505,7 +498,7 @@ mod tests {
         }
         for index in [0, 1, 0] {
             let client = &clients[index];
-            let mut url = client.url("config", "value").unwrap();
+            let mut url = client.url("state", "value").unwrap();
             url.query_pairs_mut().append_pair("key", "key");
             assert_eq!(
                 client
@@ -518,7 +511,8 @@ mod tests {
                         kind()
                     )
                     .await
-                    .unwrap(),
+                    .unwrap()
+                    .body,
                 Some(b"TLS".to_vec())
             );
         }
@@ -578,7 +572,7 @@ mod tests {
             return;
         }
         let fixture = Fixture::new(vec![]).await;
-        fixture.seed("config", "key", b"direct").await;
+        fixture.seed("state", "key", b"direct").await;
         let client = ScopedClient::new(
             Url::parse(fixture.endpoint()).unwrap(),
             None,
@@ -586,7 +580,7 @@ mod tests {
             CelldPreparationLimits::default(),
         )
         .unwrap();
-        let mut url = client.url("config", "value").unwrap();
+        let mut url = client.url("state", "value").unwrap();
         url.query_pairs_mut().append_pair("key", "key");
         assert_eq!(
             client
@@ -599,7 +593,8 @@ mod tests {
                     kind()
                 )
                 .await
-                .unwrap(),
+                .unwrap()
+                .body,
             Some(b"direct".to_vec())
         );
         assert_eq!(fixture.count().await, 1);
@@ -608,10 +603,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn oversized_response_headers_fail_at_the_http_parser_bound() {
-        let header = format!(
-            "x-celld-store-version: 1\r\nx-excess: {}\r\n",
-            "x".repeat(512 * 1024)
-        );
+        let header = format!("{SERVICE_HEADERS}x-excess: {}\r\n", "x".repeat(512 * 1024));
         let fixture = Fixture::new(vec![Reply::custom(
             200,
             "application/octet-stream",
@@ -626,7 +618,7 @@ mod tests {
             CelldPreparationLimits::default(),
         )
         .expect("bounded client");
-        let url = client.url("config", "value").expect("value URL");
+        let url = client.url("state", "value").expect("value URL");
         assert_eq!(
             client
                 .execute(
@@ -644,15 +636,8 @@ mod tests {
         assert_eq!(fixture.count().await, 1);
     }
 
-    fn kind() -> ResponseKind {
-        #[cfg(feature = "kv")]
-        {
-            ResponseKind::Value
-        }
-        #[cfg(not(feature = "kv"))]
-        {
-            ResponseKind::Document
-        }
+    const fn kind() -> ResponseKind {
+        ResponseKind::Value
     }
 
     async fn read(fixture: &Fixture, cap: usize) -> Result<Option<Vec<u8>>, PreparationError> {
@@ -677,6 +662,7 @@ mod tests {
                 kind(),
             )
             .await
+            .map(|exchange| exchange.body)
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -704,6 +690,7 @@ mod tests {
             )
             .await
             .unwrap()
+            .body
             .unwrap();
         assert_eq!(bytes, [0, 255, 1]);
         fixture.seed("state", key, b"").await;
@@ -719,6 +706,7 @@ mod tests {
                 )
                 .await
                 .unwrap()
+                .body
                 .unwrap()
                 .is_empty()
         );
@@ -741,9 +729,10 @@ mod tests {
     async fn every_response_requires_exactly_one_version_and_identity_encoding() {
         for headers in [
             "",
-            "x-celld-store-version: 2\r\n",
-            "x-celld-store-version: 1\r\nx-celld-store-version: 1\r\n",
-            "x-celld-store-version: 1, 1\r\n",
+            "x-edgezero-store-version: 2\r\n",
+            "x-edgezero-store-version: 1\r\nx-edgezero-store-version: 1\r\n",
+            "x-edgezero-store-version: 1, 1\r\n",
+            "x-celld-store-version: 1\r\n",
         ] {
             let fixture = Fixture::new(vec![Reply::custom(
                 200,
@@ -764,7 +753,7 @@ mod tests {
             let fixture = Fixture::new(vec![Reply::custom(
                 200,
                 "application/octet-stream",
-                &format!("x-celld-store-version: 1\r\n{headers}"),
+                &format!("{SERVICE_HEADERS}{headers}"),
                 b"v",
             )])
             .await;
@@ -813,13 +802,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn misses_are_distinct_from_empty_and_bad_statuses() {
         let missing_fixture = Fixture::new(vec![]).await;
-        #[cfg(feature = "kv")]
         assert_eq!(read(&missing_fixture, 1).await.unwrap(), None);
-        #[cfg(not(feature = "kv"))]
-        assert_eq!(
-            read(&missing_fixture, 1).await,
-            Err(PreparationError::Missing)
-        );
         for status in [201, 204, 206, 302, 500] {
             let fixture = Fixture::new(vec![Reply::response(
                 status,
@@ -833,8 +816,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn declared_and_chunked_values_are_capped_before_unbounded_collection() {
-        let declared = Reply::Bytes(b"HTTP/1.1 200 Fixture\r\nx-celld-store-version: 1\r\nContent-Type: application/octet-stream\r\nContent-Length: 9999999\r\n\r\n".to_vec());
-        let chunked = Reply::Bytes(b"HTTP/1.1 200 Fixture\r\nx-celld-store-version: 1\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n".to_vec());
+        let declared = Reply::Bytes(format!("HTTP/1.1 200 Fixture\r\n{SERVICE_HEADERS}Content-Type: application/octet-stream\r\nContent-Length: 9999999\r\n\r\n").into_bytes());
+        let chunked = Reply::Bytes(format!("HTTP/1.1 200 Fixture\r\n{SERVICE_HEADERS}Content-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n").into_bytes());
         for reply in [declared, chunked] {
             let fixture = Fixture::new(vec![reply]).await;
             assert_eq!(read(&fixture, 5).await, Err(PreparationError::SizeLimit));
@@ -848,7 +831,7 @@ mod tests {
             302,
             "application/json",
             &format!(
-                "x-celld-store-version: 1\r\nLocation: {}/v1/stores/state/value?key=k\r\n",
+                "{SERVICE_HEADERS}Location: {}/v1/stores/state/value?key=k\r\n",
                 destination.endpoint()
             ),
             b"{}",
@@ -886,7 +869,8 @@ mod tests {
                         client.deadline().unwrap(),
                         kind()
                     )
-                    .await,
+                    .await
+                    .map(|exchange| exchange.body),
                 Err(PreparationError::Deadline)
             );
         }
