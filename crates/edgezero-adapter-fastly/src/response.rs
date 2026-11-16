@@ -10,6 +10,11 @@
 #[path = "fastly_response_abi.rs"]
 mod fastly_abi;
 
+/// Scoped emission diagnostics for instrumented fixtures, not production response policy.
+#[cfg(any(test, feature = "test-utils"))]
+#[path = "response_testing.rs"]
+pub mod testing;
+
 #[cfg(feature = "fastly")]
 use core::convert::identity;
 use std::task::Poll;
@@ -409,8 +414,14 @@ where
         clock,
         deadline: policy.write_deadline,
     });
+    #[cfg(feature = "test-utils")]
+    let diagnostic_headers = testing::headers(&parts.headers);
+    #[cfg(feature = "test-utils")]
+    let headers = diagnostic_headers.as_ref();
+    #[cfg(not(feature = "test-utils"))]
+    let headers = &parts.headers;
     let prepared_head =
-        match committer.prepare(parts.status, &parts.headers, transmits_body, buffered_body) {
+        match committer.prepare(parts.status, headers, transmits_body, buffered_body) {
             Ok(prepared_head) => prepared_head,
             Err(error) => {
                 log::error!("response-egress Fastly head preparation failed");
@@ -761,7 +772,9 @@ mod tests {
     use bytes::Bytes;
     use edgezero_core::app::App;
     use edgezero_core::context::RequestContext;
-    use edgezero_core::http::{Version, request_builder, response_builder};
+    use edgezero_core::http::{
+        HeaderName, HeaderValue, Version, request_builder, response_builder,
+    };
     use edgezero_core::ingress::{IngressDispatchOutcome, IngressFraming, IngressHeadAccounting};
     use edgezero_core::response_egress::{
         ResponseEgressBodyKind, ResponseEgressCompletion, ResponseEgressHead,
@@ -942,6 +955,155 @@ mod tests {
 
     fn stable_clock(now: MonotonicInstant) -> MonotonicClock {
         MonotonicClock::new(move || now)
+    }
+
+    #[test]
+    #[cfg(feature = "test-utils")]
+    fn assembly_emission_diagnostics_preserve_canonical_delivery() {
+        let start = MonotonicInstant::now();
+        for method in [Method::GET, Method::HEAD] {
+            for category in ["service", "config", "internal"] {
+                let deliver = || {
+                    let error = match category {
+                        "service" => EdgeError::service_unavailable("state unavailable"),
+                        "config" => EdgeError::config_out_of_date("configuration unavailable", ""),
+                        _ => EdgeError::internal(anyhow::anyhow!("private-token=secret")),
+                    };
+                    let envelope = App::assembly_error_egress(
+                        error,
+                        method.clone(),
+                        start,
+                        stable_clock(start),
+                    );
+                    let state = Rc::new(RefCell::new(SinkState::default()));
+                    let delivered =
+                        send_egress_with(envelope, &mut MockCommitter::new(Rc::clone(&state)));
+                    assert_eq!(delivered.commitment(), FastlyResponseCommitState::Committed);
+                    assert_eq!(delivered.report().outcome, ResponseEgressOutcome::Completed);
+                    assert!(delivered.report().fallback_disposition.is_none());
+                    (state, delivered)
+                };
+                let (baseline_state, baseline_delivery) = deliver();
+                let (stamped_state, stamped_delivery) = super::testing::with_diagnostic_header(
+                    HeaderName::from_static("x-test-launch"),
+                    HeaderValue::from_static("guest-build-identity"),
+                    deliver,
+                )
+                .unwrap();
+                assert_eq!(stamped_delivery.report(), baseline_delivery.report());
+                let mut stamped = stamped_state.borrow_mut();
+                let baseline = baseline_state.borrow();
+                assert_eq!(stamped.commits.len(), 1);
+                assert_eq!(baseline.commits.len(), 1);
+                assert_eq!(
+                    stamped.commits[0].1.remove("x-test-launch").unwrap(),
+                    "guest-build-identity"
+                );
+                assert_eq!(stamped.commits, baseline.commits);
+                assert_eq!(stamped.staged, baseline.staged);
+                assert_eq!(stamped.accepted, baseline.accepted);
+                assert_eq!(stamped.events, baseline.events);
+                assert!(!String::from_utf8_lossy(&stamped.accepted).contains("private-token"));
+                if method == Method::HEAD {
+                    assert!(stamped.accepted.is_empty());
+                } else {
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&stamped.accepted).unwrap();
+                    assert_eq!(body["error"]["status"], stamped.commits[0].0.as_u16());
+                }
+                assert_eq!(
+                    stamped.commits[0].1.get("retry-after").is_some(),
+                    category == "config"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "test-utils")]
+    fn emission_diagnostics_preserve_fallback_and_deadline_outcomes() {
+        use edgezero_core::response_egress::ResponseEgressDeadline;
+
+        let start = MonotonicInstant::now();
+        for expired in [false, true] {
+            let deliver = || {
+                let mut envelope = App::assembly_error_egress(
+                    EdgeError::service_unavailable("state unavailable"),
+                    Method::GET,
+                    start,
+                    stable_clock(start),
+                );
+                if expired {
+                    envelope
+                        .response_mut()
+                        .extensions_mut()
+                        .insert(ResponseEgressDeadline::at(Deadline::at_instant(start)));
+                }
+                let state = Rc::new(RefCell::new(SinkState::default()));
+                let mut committer = MockCommitter::new(Rc::clone(&state));
+                if !expired {
+                    committer.prepare_plan = VecDeque::from([Err(()), Ok(())]);
+                }
+                let delivered = send_egress_with(envelope, &mut committer);
+                assert_eq!(delivered.error(), None);
+                assert_eq!(delivered.commitment(), FastlyResponseCommitState::Committed);
+                assert_eq!(
+                    delivered.report().fallback_disposition,
+                    Some(ResponseEgressFallbackDisposition::Completed)
+                );
+                assert_eq!(
+                    delivered.report().outcome,
+                    if expired {
+                        ResponseEgressOutcome::DeadlineExceeded
+                    } else {
+                        ResponseEgressOutcome::ConversionError
+                    }
+                );
+                (state, delivered)
+            };
+            let (baseline_state, baseline_delivery) = deliver();
+            let (stamped_state, stamped_delivery) = super::testing::with_diagnostic_header(
+                HeaderName::from_static("x-test-launch"),
+                HeaderValue::from_static("guest-build-identity"),
+                deliver,
+            )
+            .unwrap();
+            assert_eq!(stamped_delivery.report(), baseline_delivery.report());
+            let baseline = baseline_state.borrow();
+            let mut stamped = stamped_state.borrow_mut();
+            assert_eq!(stamped.commits.len(), 1);
+            assert_eq!(
+                stamped.commits[0].1.remove("x-test-launch").unwrap(),
+                "guest-build-identity"
+            );
+            assert_eq!(stamped.commits, baseline.commits);
+            assert_eq!(stamped.accepted, baseline.accepted);
+            assert_eq!(stamped.events, baseline.events);
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "test-utils"))]
+    fn default_emission_never_applies_diagnostic_metadata() {
+        let start = MonotonicInstant::now();
+        let envelope = App::assembly_error_egress(
+            EdgeError::service_unavailable("state unavailable"),
+            Method::GET,
+            start,
+            stable_clock(start),
+        );
+        let state = Rc::new(RefCell::new(SinkState::default()));
+        let delivered = super::testing::with_diagnostic_header(
+            HeaderName::from_static("x-test-launch"),
+            HeaderValue::from_static("guest-build-identity"),
+            || send_egress_with(envelope, &mut MockCommitter::new(Rc::clone(&state))),
+        )
+        .unwrap();
+        assert_eq!(delivered.error(), None);
+        assert_eq!(delivered.report().outcome, ResponseEgressOutcome::Completed);
+        let snapshot = state.borrow();
+        assert_eq!(snapshot.commits.len(), 1);
+        assert!(!snapshot.commits[0].1.contains_key("x-test-launch"));
     }
 
     fn attempt(observer: &RecordingObserver, now: MonotonicInstant) -> ResponseEgressAttempt {

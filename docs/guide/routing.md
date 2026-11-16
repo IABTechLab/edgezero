@@ -275,7 +275,8 @@ cannot install a hook through the macro or modify the built router. A
 hand-written `Hooks` implementation does not inherit the generated metadata.
 Move your existing `app!` invocation **unchanged, including all arguments**
 (`owns_logging = …`, `state = …`), into a separate module. Delegate the baked
-manifest, stores, logging, name and application configuration. For example, an application whose
+manifest, stores, name and application configuration; use `logging_config!` for compile-time
+logging metadata. For example, an application whose
 existing invocation uses `owns_logging = true, state = 42_u32` would keep them.
 If the invocation has no app name, scaffolded projects use
 `app!("../../edgezero.toml")`, which defines `App`; import it as
@@ -318,7 +319,7 @@ impl Hooks for HookedApp {
     fn manifest_json() -> Option<&'static str> { ManifestApp::manifest_json() }
     fn stores() -> StoresMetadata { ManifestApp::stores() }
     fn logging_for(adapter: &str) -> ResolvedLoggingConfig {
-        ManifestApp::logging_for(adapter)
+        edgezero_core::logging_config!("edgezero.toml", adapter)
     }
     fn owns_logging() -> bool { ManifestApp::owns_logging() }
     fn name() -> &'static str { ManifestApp::name() }

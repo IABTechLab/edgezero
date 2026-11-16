@@ -761,6 +761,10 @@ fn p5(socket: &mut TcpStream, target: &str, second: u16, shared: &Shared) -> Res
     let mut blocked = None;
     let mut policy_reject = false;
     match parts.as_slice() {
+        ["trailers", token] if !token.is_empty() && token.len() <= 64 => {
+            socket.write_all(b"HTTP/1.1 200 Fixture\r\nDate: Tue, 27 Oct 2026 00:00:00 GMT\r\nConnection: close\r\nTransfer-Encoding: chunked\r\nTrailer: X-Trailer\r\n\r\n1\r\nx\r\n0\r\nX-Trailer: one\r\nX-Trailer: two\r\n\r\n")?;
+            return Ok(());
+        }
         [
             "batch",
             token,

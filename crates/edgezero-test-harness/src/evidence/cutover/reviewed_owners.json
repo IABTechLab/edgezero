@@ -15,5 +15,5 @@
   "src/runners/wire.rs:progress_suite": "d1e53fe63ab0253375c977b9df2c9c7caa7f45b0718a9d60f1dc7bdd77c75d8e",
   "src/runners/wire.rs:progress_wire": "1df9d7bb954ba2077049864d016d3e4e85fb5ac1b5b3055280ef45fdf3cef082",
   "src/runners/wire.rs:qualify_budgets": "26211fef305be669d839d6b72dcde750f2ff4eff7c045b08484f6c72ff571d16",
-  "src/runners/wire.rs:run": "3a78e1bd603ae1017b9925ac02adf48c90c10e72a5f74adcba9fca2f207025ba"
+  "src/runners/wire.rs:run": "305b428d676103af43f6457d72aab5f4309d60e694d1633c4d545a6af28ad159"
 }
