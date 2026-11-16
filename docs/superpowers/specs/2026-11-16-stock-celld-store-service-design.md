@@ -38,7 +38,7 @@ CAS matters for the later record contract: several TS pods can update one EC rec
 | S6 | A duplicate delivery applies nothing and returns the first outcome. | Ledger |
 | S7 | A mutation does not apply after a bounded window from Worker receipt. | Apply-before |
 | S8 | The client never resends a mutation and reports a possible commit on failure. | Unchanged client policy |
-| S9 | Detect a reset or replaced store instead of answering for it. | Instance header and cursor binding |
+| S9 | Detect a reset or replaced store instead of answering for it. | Instance header on every success and logical miss, and cursor binding |
 | S10 | Old forked servers fail against the new client. | Different version header |
 | S11 | Ordinary rows carry generation, metadata and nullable expiry, ready for same-row records. | `rows-v1` |
 
@@ -124,7 +124,7 @@ celld can hold a call while a cell recovers, by default up to 240 retries at one
 
 ### Instance identity
 
-`meta.instance` is 16 random bytes created with the database. A client handle records the first instance it sees and fails every later response from a different one. Service cursors embed the instance. Restoring an old backup, discarding cell data, or renaming the script or class therefore fails visibly.
+`meta.instance` is 16 random bytes created with the database. A client handle records the first instance it sees and fails every later response from a different one. Service cursors embed the instance. Discarding cell data or renaming the script or class creates a new database and therefore a new instance, which fails visibly. Restoring an older snapshot of the same store keeps its instance, so a rollback is not detected; generations and ledger entries from after the snapshot could then be reused.
 
 ## Client changes
 
@@ -143,7 +143,7 @@ The Axum adapter loses the `celld-config` binding variant, capability and featur
 | Atomic generation allocation | Object transaction | Writes to one namespace are serialized in one cell (D5) |
 | No duplicate effects | Mutation ledger | Retention must exceed the apply window plus clock skew |
 | Bounded uncertainty | Apply-before window | Node clocks |
-| Reset detection | Instance header | Detected, not prevented |
+| Reset detection | Instance header | Detects a new database, not a rollback to an older snapshot of the same one |
 | Auth and grants | Worker policy in `vars` | Changes need a redeploy, adopted within about 30 s |
 | Transport security | Deployment network or TLS proxy | celld does not terminate TLS |
 
@@ -159,7 +159,7 @@ All against official celld v0.6.3, `celld-x86_64-unknown-linux-gnu.gz` SHA-256 `
 
 | Check | Result |
 | --- | --- |
-| `node --test services/celld-store/test/service.test.mjs` | 16 passed |
+| `node --test services/celld-store/test/service.test.mjs` | 17 passed |
 | `node --test scripts/run_native_celld_integration.test.mjs scripts/run_celld_store_fleet_proof.test.mjs` | 9 and 4 passed |
 | `cargo test -p edgezero-store-celld --all-features --lib` | 32 passed |
 | `cargo test -p edgezero-adapter-axum --features celld-kv,test-utils --lib` and `--test native_celld_startup` | 440 passed, 1 ignored; 4 passed |

@@ -203,7 +203,11 @@ impl ScopedClient {
                 } else {
                     StatusCode::OK
                 };
-            if success && instance.is_none() {
+            let missing = status == StatusCode::NOT_FOUND;
+            // Only the store itself can report a key as absent or present. A 404
+            // from routing, such as a proxy that rewrote the path, has no instance.
+            let logical_miss = missing && (method == Method::HEAD || kind.optional());
+            if (success || logical_miss) && instance.is_none() {
                 return Err(PreparationError::Malformed);
             }
             // A mutation acknowledgement carries no body, so it has no media type.
@@ -219,7 +223,6 @@ impl ScopedClient {
                     instance,
                 });
             }
-            let missing = status == StatusCode::NOT_FOUND;
             // The wire HEAD contract has no error body, including non-404 errors.
             if method == Method::HEAD {
                 return if success {

@@ -285,12 +285,11 @@ async function principalGrants(policy, headers) {
     if (values !== null) fail("unauthenticated");
     return policy.grants;
   }
-  if (values === null || values.includes(",")) fail("unauthenticated");
-  if (!values.startsWith("Bearer ")) fail("unauthenticated");
-  const token = values.slice("Bearer ".length);
-  if (token.length < 32 || token.length > 512 || !/^[\x21-\x7e]+$/.test(token)) {
-    fail("unauthenticated");
-  }
+  // Headers joins repeated values with ", ". Tokens have no spaces, so a
+  // combined value fails this grammar while a token may still contain commas.
+  const match = values === null ? null : /^Bearer ([\x21-\x7e]{32,512})$/.exec(values);
+  if (match === null) fail("unauthenticated");
+  const token = match[1];
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(token)));
   let selected = null;
   // Compare against every verifier with no early exit.

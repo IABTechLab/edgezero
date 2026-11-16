@@ -148,13 +148,22 @@ spec:
             - { name: service, mountPath: /service, readOnly: true }
       volumes:
         - name: service
-          projected:
-            sources:
-              - configMap:
-                  name: edgezero-store-service
+          configMap:
+            name: edgezero-store-service
+            items:
+              - { key: wrangler.jsonc, path: wrangler.jsonc }
+              - { key: index.js, path: src/index.js }
 ```
 
-The ConfigMap holds `wrangler.jsonc` and `src/index.js` from the pinned EdgeZero release. Use the same bucket credentials your celld nodes use, in celld's namespace, never in the application's. Re-running the Job with unchanged content redeploys the same code and keeps all stored data. The bucket names and endpoint are examples. Pin the celld image and EdgeZero release you tested.
+Create the ConfigMap from the pinned EdgeZero release. ConfigMap keys cannot contain `/`, so the `items` above put `index.js` back under `src/`:
+
+```sh
+kubectl create configmap edgezero-store-service \
+  --from-file=wrangler.jsonc=./wrangler.jsonc \
+  --from-file=index.js=services/celld-store/src/index.js
+```
+
+Use the same bucket credentials your celld nodes use, in celld's namespace, never in the application's. Re-running the Job with unchanged content redeploys the same code and keeps all stored data. The bucket names and endpoint are examples. Pin the celld image and EdgeZero release you tested.
 
 The bucket must pass `celld diagnose`. celld's qualified stores are Amazon S3, Cloudflare R2, Tigris, Google Cloud Storage and Azure Blob Storage; test any other S3-compatible store before relying on it. Run at least two celld nodes, or every write waits for a bucket round trip.
 

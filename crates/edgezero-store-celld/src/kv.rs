@@ -776,6 +776,32 @@ mod tests {
         kv.get_bytes("k")
             .await
             .expect_err("a miss from another instance must not count as absence");
+        let routed = Fixture::new(vec![
+            Reply::response(200, "application/octet-stream", b"present"),
+            Reply::custom(
+                404,
+                "application/json",
+                "x-edgezero-store-version: 1\r\n",
+                br#"{"error":"not_found"}"#,
+            ),
+            Reply::custom(
+                404,
+                "application/json",
+                "x-edgezero-store-version: 1\r\n",
+                b"",
+            ),
+        ])
+        .await;
+        let pinned = store(&routed, "state");
+        assert!(pinned.get_bytes("k").await.unwrap().is_some());
+        pinned
+            .get_bytes("k")
+            .await
+            .expect_err("a routing 404 without an instance is not an absent key");
+        pinned
+            .exists("k")
+            .await
+            .expect_err("a routing HEAD 404 without an instance is not an absent key");
         for headers in [
             "x-edgezero-store-version: 1\r\n",
             "x-edgezero-store-version: 1\r\nx-edgezero-store-instance: short\r\n",

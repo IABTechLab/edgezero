@@ -12,7 +12,9 @@ import {
   environment,
   internals,
   mutationId,
+  sha256,
   trustedPolicy,
+  worker,
 } from "./support.mjs";
 
 const VERSION = "x-edgezero-store-version";
@@ -104,6 +106,20 @@ test("every response names the protocol, and errors are closed categories", asyn
   }
   const readOnly = environment(await authenticatedPolicy(["read"]));
   assert.equal((await put(readOnly, "k", "v", { token: TOKEN })).status, 403);
+});
+
+test("a token may contain commas, but two Authorization headers never authenticate", async () => {
+  const token = "comma,token-that-is-longer-than-32-bytes";
+  const policy = JSON.parse(await authenticatedPolicy());
+  policy.access.tokens[0].sha256 = await sha256(token);
+  const env = environment(JSON.stringify(policy));
+  assert.equal((await call(env, "/v1/stores/state/capabilities", { token })).status, 200);
+  const headers = new Headers();
+  headers.append("authorization", `Bearer ${token}`);
+  headers.append("authorization", `Bearer ${token}`);
+  const doubled = await worker.fetch(new Request("https://store.test/v1/stores/state/capabilities", { headers }), env);
+  assert.equal(doubled.status, 401);
+  assert.equal((await call(env, "/v1/stores/state/capabilities", { headers: { authorization: `bearer ${token}` } })).status, 401);
 });
 
 test("trusted-network mode never ignores a supplied credential", async () => {
