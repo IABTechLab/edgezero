@@ -67,7 +67,7 @@ pub use config_store::{
     DEFAULT_CONFIG_JSON_DEPTH, DEFAULT_CONFIG_JSON_NODES, DEFAULT_CONFIG_SECRET_BYTES,
 };
 
-pub use edgezero_macros::{AppConfig, action, app};
+pub use edgezero_macros::{AppConfig, action, app, logging_config};
 pub use error::{
     BadGatewayDecodeReason, BadGatewayReason, BudgetSource, EdgeError, RequestBodyOverflowOrigin,
     ResponseLimitReason, StoreExtractionReason,

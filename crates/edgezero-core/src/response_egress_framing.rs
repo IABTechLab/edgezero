@@ -16,6 +16,7 @@ use crate::http::header::{
 use crate::http::{
     HeaderMap, HeaderName, HeaderValue, MAX_CONNECTION_EMPTY_MEMBERS, Method, Response, StatusCode,
 };
+use crate::response_headers::RequiredErrorResponseHeaders;
 use futures_util::StreamExt as _;
 use futures_util::stream::unfold;
 
@@ -170,6 +171,14 @@ pub fn prepare_response_egress(
                 *response.body_mut() = Body::from_parts(limited_payload, owner);
             }
         }
+    }
+
+    // Renderer nominations cannot remove metadata owned by the original framework error.
+    if let Some(required) = response
+        .extensions_mut()
+        .remove::<RequiredErrorResponseHeaders>()
+    {
+        required.apply(response.headers_mut());
     }
 
     Ok(PreparedResponseEgress {
@@ -724,21 +733,43 @@ mod tests {
 
     #[test]
     fn connection_nominated_content_length_is_not_reused_for_framing() {
-        let source_response = response_builder()
-            .status(StatusCode::OK)
-            .header("connection", "content-length")
-            .header("content-length", "5")
+        for framing in [
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            ResponseEgressFramingMode::HostAutomatic,
+        ] {
+            let source_response = response_builder()
+                .header("connection", "content-length")
+                .header("content-length", "999")
+                .body(Body::from("hello"))
+                .expect("response");
+            let prepared = prepare_response_egress(framing, &Method::GET, source_response)
+                .expect("prepared response");
+            if framing == ResponseEgressFramingMode::ExplicitBufferedLength {
+                assert_eq!(prepared.declared_length(), Some(5));
+                assert_eq!(prepared.into_response().headers()[CONTENT_LENGTH], "5");
+            } else {
+                assert_eq!(prepared.declared_length(), None);
+                assert!(
+                    !prepared
+                        .into_response()
+                        .headers()
+                        .contains_key(CONTENT_LENGTH)
+                );
+            }
+        }
+        let response = response_builder()
+            .header("content-length", "999")
             .body(Body::from("hello"))
             .expect("response");
-
-        let prepared = prepare_response_egress(
-            ResponseEgressFramingMode::ExplicitBufferedLength,
-            &Method::GET,
-            source_response,
-        )
-        .expect("prepared response");
-        assert_eq!(prepared.declared_length(), Some(5));
-        assert_eq!(prepared.into_response().headers()[CONTENT_LENGTH], "5");
+        assert_eq!(
+            prepare_response_egress(
+                ResponseEgressFramingMode::ExplicitBufferedLength,
+                &Method::GET,
+                response
+            )
+            .err(),
+            Some(ResponseEgressFramingError::ContentLengthMismatch)
+        );
     }
 
     #[test]

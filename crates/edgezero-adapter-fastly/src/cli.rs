@@ -66,7 +66,7 @@ static FASTLY_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
         serve: "fastly compute serve -C {crate_dir}",
     },
     logging: LoggingDefaults {
-        endpoint: Some("stdout"),
+        endpoint: None,
         level: "info",
         echo_stdout: Some(true),
     },
@@ -6887,6 +6887,11 @@ mod tests {
     const TEST_CONFIG_ID: &str = "app_config";
     const TEST_KV_ID: &str = "sessions";
     const TEST_SECRET_ID: &str = "default";
+
+    #[test]
+    fn logging_blueprint_leaves_named_endpoint_to_generator() {
+        assert!(FASTLY_BLUEPRINT.logging.endpoint.is_none());
+    }
 
     #[test]
     fn adapter_capability_matrix_matches_contracts() {

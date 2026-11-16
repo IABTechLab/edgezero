@@ -1,0 +1,2 @@
+[adapters.Fastly.logging]
+endpoint = "bad:logs"

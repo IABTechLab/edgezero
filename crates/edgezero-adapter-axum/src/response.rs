@@ -27,7 +27,7 @@ use http_body::{Body as HttpBody, Frame, SizeHint};
 use tokio::sync::Notify;
 use tokio::task::yield_now;
 use tokio::time::Instant as TokioInstant;
-use tokio::time::timeout;
+use tokio::time::timeout_at;
 
 use crate::diagnostics::SelectedStatus;
 
@@ -126,8 +126,9 @@ impl EgressConnection {
         deadline: Deadline,
         clock: &MonotonicClock,
     ) -> Option<Rc<ConnectionResponseState>> {
+        let anchor = TokioInstant::now();
         let remaining = deadline.remaining_at(clock.now())?;
-        let host_deadline = TokioInstant::now().checked_add(remaining)?;
+        let host_deadline = anchor.checked_add(remaining)?;
         let state = Rc::new(ConnectionResponseState {
             active: Cell::new(true),
             connection: Rc::downgrade(&self.inner),
@@ -633,9 +634,13 @@ async fn validate_empty_stream(
     let mut response = prepared.into_response();
     let (payload, _scope) = mem::take(response.body_mut()).into_parts();
     if let BodyPayload::Stream(mut source) = payload {
+        let anchor = TokioInstant::now();
         let remaining = deadline
             .remaining_at(clock.now())
             .ok_or(ResponseEgressOutcome::DeadlineExceeded)?;
+        let host_deadline = anchor
+            .checked_add(remaining)
+            .ok_or(ResponseEgressOutcome::ConversionError)?;
         let validation = async {
             loop {
                 if deadline.is_expired_at(clock.now()) {
@@ -662,7 +667,7 @@ async fn validate_empty_stream(
                 }
             }
         };
-        timeout(remaining, validation)
+        timeout_at(host_deadline, validation)
             .await
             .map_err(|_elapsed| ResponseEgressOutcome::DeadlineExceeded)??;
     }
@@ -1013,6 +1018,75 @@ mod tests {
             ResponseEgressObserverHandle::new(observer.clone()),
             MonotonicClock::default(),
         )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn egress_deadline_does_not_add_clock_sampling_delay() {
+        use tokio::time::{Instant, advance};
+
+        let started = Instant::now();
+        let deadline = Deadline::at_instant((started + Duration::from_millis(100)).into_std());
+        let clock = MonotonicClock::new(|| {
+            let sampled = Instant::now();
+            assert!(advance(Duration::from_millis(60)).now_or_never().is_none());
+            sampled.into_std()
+        });
+        let connection = EgressConnection::default();
+        let state = connection.register(deadline, &clock).expect("registered");
+        assert_eq!(
+            connection.next_deadline(),
+            Some(started + Duration::from_millis(100))
+        );
+        advance(Duration::from_millis(40)).await;
+        assert!(connection.signal_elapsed_deadline(Instant::now()));
+        assert_eq!(
+            state.requested_terminal.get(),
+            Some(ResponseEgressOutcome::DeadlineExceeded)
+        );
+        state.unregister();
+        state.unregister();
+        assert!(connection.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn empty_stream_deadline_does_not_add_clock_sampling_delay() {
+        use tokio::time::{Instant, advance};
+
+        let started = Instant::now();
+        let deadline = Deadline::at_instant((started + Duration::from_millis(100)).into_std());
+        let delayed = AtomicBool::new(false);
+        let clock = MonotonicClock::new(move || {
+            let sampled = Instant::now();
+            if !delayed.swap(true, Ordering::SeqCst) {
+                assert!(advance(Duration::from_millis(60)).now_or_never().is_none());
+            }
+            sampled.into_std()
+        });
+        let observer = RecordingObserver::default();
+        let mut attempt = attempt(&observer, started.into_std());
+        let prepared = prepare_response_egress(
+            ResponseEgressFramingMode::ExplicitBufferedLength,
+            &Method::GET,
+            response_builder()
+                .header("content-length", "0")
+                .body(Body::from_stream(pending()))
+                .expect("response"),
+        )
+        .expect("prepared");
+        let method = Method::GET;
+        let mut validation = Box::pin(super::validate_empty_stream(
+            prepared,
+            &method,
+            deadline,
+            &clock,
+            &mut attempt,
+        ));
+        assert!(validation.as_mut().now_or_never().is_none());
+        advance(Duration::from_millis(40)).await;
+        assert!(matches!(
+            validation.as_mut().now_or_never(),
+            Some(Err(ResponseEgressOutcome::DeadlineExceeded))
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
