@@ -306,7 +306,7 @@ mod fastly_impl {
     use futures_util::{FutureExt as _, StreamExt as _};
     use sha2::{Digest as _, Sha256};
 
-    use super::progress::{HeadFailure, HeadPoll, Progress, Transport};
+    use super::progress::{ExchangeFailure, HeadPoll, Progress, Transport};
     use super::{timeout_error, validate_supported_options};
 
     #[cfg(feature = "test-utils")]
@@ -793,10 +793,10 @@ mod fastly_impl {
         fn pipeline(
             plan: RequestPlan,
             progress: &NativeProgress,
-            failure: HeadFailure,
+            failure: ExchangeFailure,
         ) -> OutboundFuture<OutboundResponse> {
             let client = Self::with_time(plan.context.time().clone());
-            let exchange_progress = progress.with_head_failure(failure.clone());
+            let exchange_progress = progress.with_exchange_failure(failure.clone());
             Box::pin(async move {
                 let budget = plan.context.budget();
                 let time = plan.context.time().clone();
@@ -855,8 +855,8 @@ mod fastly_impl {
                 request.entered_at(),
             );
             Box::pin(async move {
-                let failure = HeadFailure::default();
-                let progress = selected_progress?.with_head_failure(failure.clone());
+                let failure = ExchangeFailure::default();
+                let progress = selected_progress?.with_exchange_failure(failure.clone());
                 let budget = request.budget();
                 let time = request.time().clone();
                 progress
@@ -879,9 +879,9 @@ mod fastly_impl {
             scope.check()?;
             let time = request.time().clone();
             let entered = request.entered_at();
-            let failure = HeadFailure::default();
+            let failure = ExchangeFailure::default();
             let progress = super::scope::native_progress(&scope, &time, entered)?
-                .with_head_failure(failure.clone());
+                .with_exchange_failure(failure.clone());
             super::scope::begin(
                 &scope,
                 Self::pipeline(RequestPlan::new(request), &progress, failure),
@@ -942,7 +942,7 @@ mod fastly_impl {
                 .into_iter()
                 .map(|(index, plan)| {
                     let budget = plan.context.budget();
-                    let failure = HeadFailure::default();
+                    let failure = ExchangeFailure::default();
                     let future = Self::pipeline(plan, &progress, failure.clone());
                     let clock = time.clock().clone();
                     async move {
@@ -1655,11 +1655,11 @@ mod fastly_impl {
             .body(native, budget)
     }
 
-    async fn race_deadline<Output>(
+    pub(super) async fn race_deadline<Output>(
         future: impl Future<Output = Result<Output, EdgeError>>,
         budget: DispatchBudget,
         time: &OutboundTime,
-        failure: &HeadFailure,
+        failure: &ExchangeFailure,
     ) -> Result<Output, EdgeError> {
         let mut timer = time.wait_until(budget.deadline);
         let mut previous = time.clock().now();
@@ -1776,7 +1776,7 @@ mod fastly_impl {
         use std::thread;
 
         use super::super::testing;
-        use super::HeadFailure;
+        use super::ExchangeFailure;
         use edgezero_core::error::{BudgetSource, ResponseLimitReason};
         use edgezero_core::http::header::{
             CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
@@ -1794,7 +1794,7 @@ mod fastly_impl {
         #[test]
         fn retained_head_failure_precedes_later_deadline_without_polling_io() {
             let start = MonotonicInstant::now();
-            let failure = HeadFailure::default();
+            let failure = ExchangeFailure::default();
             failure.record(
                 start + Duration::from_millis(5),
                 EdgeError::bad_gateway("early failure"),
@@ -1832,7 +1832,7 @@ mod fastly_impl {
                 MonotonicClock::new(move || *sampled.lock().unwrap()),
                 |_, _| Box::pin(pending()),
             );
-            let failure = HeadFailure::default();
+            let failure = ExchangeFailure::default();
             let budget = DispatchBudget {
                 deadline: Deadline::at_instant(start + Duration::from_millis(100)),
                 duration: Duration::from_millis(100),
@@ -1874,7 +1874,7 @@ mod fastly_impl {
                 MonotonicClock::new(move || *sampled.lock().unwrap()),
                 |_, _| Box::pin(pending()),
             );
-            let failure = HeadFailure::default();
+            let failure = ExchangeFailure::default();
             let budget = DispatchBudget {
                 deadline: Deadline::at_instant(start + Duration::from_millis(100)),
                 duration: Duration::from_millis(100),

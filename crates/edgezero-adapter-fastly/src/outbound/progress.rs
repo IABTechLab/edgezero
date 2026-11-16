@@ -40,14 +40,14 @@ struct DriverContext {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct HeadFailure(Rc<RefCell<Option<ObservedHeadFailure>>>);
+pub(super) struct ExchangeFailure(Rc<RefCell<Option<ObservedExchangeFailure>>>);
 
-struct ObservedHeadFailure {
+struct ObservedExchangeFailure {
     at: MonotonicInstant,
     error: Option<EdgeError>,
 }
 
-impl HeadFailure {
+impl ExchangeFailure {
     pub(super) fn observed_at(&self) -> Option<MonotonicInstant> {
         self.0.borrow().as_ref().map(|failure| failure.at)
     }
@@ -55,7 +55,7 @@ impl HeadFailure {
     pub(super) fn record(&self, at: MonotonicInstant, error: EdgeError) {
         let mut saved = self.0.borrow_mut();
         if saved.is_none() {
-            *saved = Some(ObservedHeadFailure {
+            *saved = Some(ObservedExchangeFailure {
                 at,
                 error: Some(error),
             });
@@ -168,7 +168,7 @@ struct Slot<T: Transport> {
     budget: DispatchBudget,
     clock: MonotonicClock,
     expired: bool,
-    head_failure: Option<HeadFailure>,
+    exchange_failure: Option<ExchangeFailure>,
     phase: Phase<T>,
     previous: MonotonicInstant,
     waker: Option<Waker>,
@@ -191,7 +191,7 @@ pub(super) struct Progress<T: Transport> {
     clock: MonotonicClock,
     driving: Rc<Cell<bool>>,
     entered: MonotonicInstant,
-    head_failure: Option<HeadFailure>,
+    exchange_failure: Option<ExchangeFailure>,
     state: Rc<RefCell<State<T>>>,
     wake_requested: Arc<AtomicBool>,
 }
@@ -251,7 +251,7 @@ impl<T: Transport> Clone for Progress<T> {
             clock: self.clock.clone(),
             driving: Rc::clone(&self.driving),
             entered: self.entered,
-            head_failure: self.head_failure.clone(),
+            exchange_failure: self.exchange_failure.clone(),
             state: Rc::clone(&self.state),
             wake_requested: Arc::clone(&self.wake_requested),
         }
@@ -261,7 +261,7 @@ impl<T: Transport> Clone for Progress<T> {
         self.clock.clone_from(&source.clock);
         self.driving.clone_from(&source.driving);
         self.entered = source.entered;
-        self.head_failure.clone_from(&source.head_failure);
+        self.exchange_failure.clone_from(&source.exchange_failure);
         self.state.clone_from(&source.state);
         self.wake_requested.clone_from(&source.wake_requested);
     }
@@ -341,7 +341,7 @@ impl<T: Transport + 'static> Progress<T> {
             clock: clock.clone(),
             driving: Rc::new(Cell::new(false)),
             entered: previous,
-            head_failure: None,
+            exchange_failure: None,
             state: Rc::new(RefCell::new(State {
                 boundary,
                 clock,
@@ -370,10 +370,10 @@ impl<T: Transport + 'static> Progress<T> {
         result
     }
 
-    pub(super) fn observed_head_failure_at(&self) -> Option<MonotonicInstant> {
-        self.head_failure
+    pub(super) fn observed_exchange_failure_at(&self) -> Option<MonotonicInstant> {
+        self.exchange_failure
             .as_ref()
-            .and_then(HeadFailure::observed_at)
+            .and_then(ExchangeFailure::observed_at)
     }
 
     pub(super) fn poll_once<Output>(
@@ -451,8 +451,7 @@ impl<T: Transport + 'static> Progress<T> {
             budget,
             clock: self.clock.clone(),
             expired: false,
-            head_failure: matches!(&phase, Phase::Head(_))
-                .then(|| self.head_failure.clone().unwrap_or_default()),
+            exchange_failure: Some(self.exchange_failure.clone().unwrap_or_default()),
             phase,
             previous: self.entered,
             waker: None,
@@ -512,7 +511,7 @@ impl<T: Transport + 'static> Progress<T> {
             clock,
             driving: Rc::clone(&self.driving),
             entered,
-            head_failure: self.head_failure.clone(),
+            exchange_failure: self.exchange_failure.clone(),
             state: Rc::clone(&self.state),
             wake_requested: Arc::clone(&self.wake_requested),
         }
@@ -530,9 +529,9 @@ impl<T: Transport + 'static> Progress<T> {
         operation()
     }
 
-    pub(super) fn with_head_failure(&self, failure: HeadFailure) -> Self {
+    pub(super) fn with_exchange_failure(&self, failure: ExchangeFailure) -> Self {
         Self {
-            head_failure: Some(failure),
+            exchange_failure: Some(failure),
             ..self.clone()
         }
     }
@@ -554,6 +553,13 @@ impl<T: Transport + 'static> Lease<T> {
             .get_mut(self.index)
             .and_then(Option::as_mut)
             .ok_or_else(missing_slot)?;
+        if let Some(error) = slot
+            .exchange_failure
+            .as_ref()
+            .and_then(ExchangeFailure::take)
+        {
+            return Poll::Ready(Err(error));
+        }
         let Phase::Body {
             next, requested, ..
         } = &mut slot.phase
@@ -576,7 +582,11 @@ impl<T: Transport + 'static> Lease<T> {
                 .get_mut(self.index)
                 .and_then(Option::as_mut)
                 .ok_or_else(missing_slot)?;
-            if let Some(error) = slot.head_failure.as_ref().and_then(HeadFailure::take) {
+            if let Some(error) = slot
+                .exchange_failure
+                .as_ref()
+                .and_then(ExchangeFailure::take)
+            {
                 return Poll::Ready(Err(error));
             }
             match &mut slot.phase {
@@ -719,7 +729,7 @@ impl<T: Transport> State<T> {
         if polled.budget.deadline.is_expired_at(now) {
             expire(polled, &mut self.wakes);
         }
-        polled.capture_head_failure();
+        polled.capture_failure();
         Ok(())
     }
 
@@ -837,6 +847,7 @@ impl<T: Transport> State<T> {
         if serviced.budget.deadline.is_expired_at(observed_at) {
             expire(serviced, &mut self.wakes);
         }
+        serviced.capture_failure();
         Ok(())
     }
 
@@ -1023,13 +1034,21 @@ impl<T: Transport> State<T> {
 }
 
 impl<T: Transport> Slot<T> {
-    fn capture_head_failure(&mut self) {
-        if let Some(saved) = &self.head_failure
-            && let Phase::HeadReady(result) = &mut self.phase
-            && result.as_ref().is_some_and(Result::is_err)
-            && let Some(Err(error)) = result.take()
-        {
-            saved.record(self.previous, error);
+    fn capture_failure(&mut self) {
+        let Some(saved) = &self.exchange_failure else {
+            return;
+        };
+        let error = match &mut self.phase {
+            Phase::HeadReady(result) if result.as_ref().is_some_and(Result::is_err) => {
+                result.take().and_then(Result::err)
+            }
+            Phase::Body { next, .. } if next.as_ref().is_some_and(Result::is_err) => {
+                next.take().and_then(Result::err)
+            }
+            Phase::Body { .. } | Phase::Head(_) | Phase::HeadReady(_) => None,
+        };
+        if let Some(observed) = error {
+            saved.record(self.previous, observed);
         }
     }
 
@@ -1051,9 +1070,9 @@ where
 {
     if slot.expired
         || slot
-            .head_failure
+            .exchange_failure
             .as_ref()
-            .and_then(HeadFailure::observed_at)
+            .and_then(ExchangeFailure::observed_at)
             .is_some()
     {
         return false;
@@ -1086,7 +1105,7 @@ where
             *requested = false;
         }
     }
-    slot.capture_head_failure();
+    slot.capture_failure();
     if let Some(waker) = slot.waker.take() {
         wakes.push(waker);
     }
@@ -1156,6 +1175,7 @@ mod tests {
     #[derive(Default)]
     struct Observations {
         advance_on_head: Option<(u32, MonotonicInstant)>,
+        blocked_body: Option<u32>,
         clock_samples: Vec<MonotonicInstant>,
         complete_at: Option<MonotonicInstant>,
         domains: Vec<Vec<u32>>,
@@ -1166,6 +1186,7 @@ mod tests {
         source_error: bool,
         spurious_heads: usize,
         terminal_heads: Vec<(u32, MonotonicInstant)>,
+        terminal_bodies: Vec<(u32, MonotonicInstant)>,
         waits: Vec<u32>,
     }
     struct TestTransport {
@@ -1216,7 +1237,7 @@ mod tests {
             (!pending.opaque).then_some(pending.id)
         }
         fn is_ready(&mut self, handle: u32) -> Result<bool, EdgeError> {
-            let ready = handle != 0;
+            let ready = handle != 0 && self.observations.borrow().blocked_body != Some(handle);
             if ready {
                 self.observations.borrow_mut().permission = Some(handle);
             }
@@ -1271,6 +1292,7 @@ mod tests {
                 *self.now.lock().expect("clock") = at;
             }
             if observed.source_error {
+                observed.terminal_bodies.push((body.id, clock.now()));
                 return Err(source_failure());
             }
             let count = body.remaining.min(maximum);
@@ -2009,8 +2031,8 @@ mod tests {
         let mut receivers = Vec::new();
         for id in 1_u32..=2 {
             let millis = if id == 1 { 100 } else { 1000 };
-            let failure = HeadFailure::default();
-            let head = progress.with_head_failure(failure.clone()).head(
+            let failure = ExchangeFailure::default();
+            let head = progress.with_exchange_failure(failure.clone()).head(
                 handle(id, 0, false, &released),
                 budget(&now, millis, BudgetSource::PerCallTimeout),
             );
@@ -2087,6 +2109,178 @@ mod tests {
         ));
         drop(receivers);
         assert_eq!(released.get(), 2);
+    }
+
+    #[test]
+    #[cfg(feature = "fastly")]
+    fn independent_driver_preserves_body_failure_before_foreign_clock_advance() {
+        use super::super::{fastly_impl::race_deadline, scope::schedule_batch, testing};
+        use edgezero_core::{
+            OutboundBatch, OutboundBatchDriverEvent, OutboundCollectedSlot, OutboundRequest,
+            OutboundScopeOwner, OutboundTime,
+        };
+
+        let callback = OutboundScopeOwner::callback();
+        let (progress, observed, now) = fixture();
+        let entered = *now.lock().unwrap();
+        let released = Rc::new(Cell::new(0));
+        let armed = Rc::new(Cell::new(false));
+        let finish_polls = Rc::new(Cell::new(0_usize));
+        observed.borrow_mut().blocked_body = Some(1);
+        observed.borrow_mut().spurious_heads = usize::MAX;
+        observed.borrow_mut().source_error = true;
+        let time = OutboundTime::new(progress.clock(), super::wait_current);
+        let cutoff = Deadline::at_instant(entered + Duration::from_secs(1));
+        let mut receivers = Vec::new();
+        for id in 1_u32..=2 {
+            let millis = if id == 1 { 100 } else { 1000 };
+            let failure = ExchangeFailure::default();
+            let selected = progress.with_exchange_failure(failure.clone());
+            let slot_budget = budget(&now, millis, BudgetSource::PerCallTimeout);
+            let request = || {
+                OutboundRequest::get("https://fixture.invalid/")
+                    .unwrap()
+                    .timeout(Duration::from_millis(millis))
+            };
+            let future: OutboundFuture<edgezero_core::OutboundResponse> = if id == 1 {
+                let (_, context) =
+                    testing::batch_dispatch(request(), time.clone(), cutoff).into_parts();
+                pending_buffered_error(&selected, context, &released, Rc::clone(&finish_polls))
+            } else {
+                let head = selected.head(handle(id, 0, false, &released), slot_budget);
+                armed_foreign_head_error(head, Rc::clone(&armed), &progress)
+            };
+            let paired = time.clone();
+            let clock = progress.clock();
+            let source = stream! {
+                let outcome = race_deadline(future, slot_budget, &paired, &failure).await;
+                yield OutboundBatchDriverEvent::Item {
+                    index: 0, completed_at: failure.observed_at().unwrap_or_else(|| clock.now()), outcome,
+                };
+            };
+            let context =
+                testing::batch_context_for_requests(vec![request()], time.clone(), cutoff);
+            let driver = callback
+                .with(|| schedule_batch(&callback.scope(), source, &progress, &time, entered));
+            receivers.push(OutboundBatch::from_driver(
+                context,
+                driver,
+                testing::owner(),
+            ));
+        }
+        let prior_polls = finish_polls.get();
+        assert!(
+            prior_polls > 0,
+            "the buffered body read must already be pending"
+        );
+        observed.borrow_mut().advance_on_head = Some((2, entered + Duration::from_millis(150)));
+        *now.lock().unwrap() = entered + Duration::from_millis(5);
+        armed.set(true);
+        assert!(
+            callback
+                .with(
+                    || progress.poll_once(&mut Context::from_waker(Waker::noop()), &mut |_| {
+                        Poll::Pending::<()>
+                    },)
+                )
+                .is_pending()
+        );
+        assert_eq!(*now.lock().unwrap(), entered + Duration::from_millis(150));
+        assert_eq!(
+            observed.borrow().terminal_bodies,
+            [(1, entered + Duration::from_millis(5))]
+        );
+        let polls_after_observation = finish_polls.get();
+        let completed = block_on(receivers.remove(0).collect()).unwrap();
+        let [OutboundCollectedSlot::Resolved(result)] = completed.slots() else {
+            panic!("the original body error must resolve its slot");
+        };
+        assert_body_source_failure(result.outcome.as_ref().unwrap_err());
+        assert_eq!(result.elapsed, Duration::from_millis(5));
+        assert_eq!(
+            finish_polls.get(),
+            polls_after_observation,
+            "retained error must win before polling decoded body again"
+        );
+        assert_eq!(observed.borrow().reads, [1]);
+        assert!(observed.borrow().waits.is_empty());
+        drop(receivers);
+        assert_eq!(released.get(), 2);
+    }
+
+    #[cfg(feature = "fastly")]
+    fn assert_body_source_failure(error: &EdgeError) {
+        assert!(
+            matches!(
+                error,
+                EdgeError::BadGateway {
+                    reason: BadGatewayReason::Transport,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.provider_failure_detail(),
+            source_failure().provider_failure_detail()
+        );
+    }
+
+    #[cfg(feature = "fastly")]
+    fn pending_buffered_error(
+        progress: &Progress<TestTransport>,
+        context: edgezero_core::OutboundResponseContext,
+        released: &Rc<Cell<usize>>,
+        polls: Rc<Cell<usize>>,
+    ) -> OutboundFuture<edgezero_core::OutboundResponse> {
+        use edgezero_core::http::{HeaderMap, StatusCode};
+        use edgezero_core::{OutboundHead, OutboundHeaderFidelity, OutboundHeaderInput};
+
+        let budget = context.budget();
+        let head = OutboundHead::new(
+            StatusCode::OK,
+            OutboundHeaderInput::new(
+                "fastly",
+                HeaderMap::new(),
+                OutboundHeaderFidelity::AdapterVisibleFields,
+            ),
+            progress.body(handle(1, 1, false, released), budget),
+            context,
+            super::super::testing::owner(),
+        )
+        .unwrap();
+        let mut finish = head.finish();
+        Box::pin(poll_fn(move |cx| {
+            polls.set(polls.get() + 1);
+            finish.as_mut().poll(cx)
+        }))
+    }
+
+    #[cfg(feature = "fastly")]
+    fn armed_foreign_head_error(
+        head: super::Lease<TestTransport>,
+        arm: Rc<Cell<bool>>,
+        progress: &Progress<TestTransport>,
+    ) -> OutboundFuture<edgezero_core::OutboundResponse> {
+        let enable = Rc::clone(&progress.state.borrow().transport.observations);
+        let engine = Rc::clone(&progress.state);
+        Box::pin(async move {
+            poll_fn(move |_| {
+                if arm.get() {
+                    enable.borrow_mut().blocked_body = None;
+                    enable.borrow_mut().spurious_heads = 0;
+                    engine.borrow_mut().cursor = 0;
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            head.receive().await?;
+            Err(EdgeError::internal(anyhow::anyhow!(
+                "error fixture cannot succeed"
+            )))
+        })
     }
 
     #[test]

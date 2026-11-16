@@ -128,7 +128,7 @@ where
     let clock = progress.clock();
     let source = async_stream::stream! {
         let outcome = driver.drive(future).await.and_then(identity);
-        let completed_at = driver.observed_head_failure_at().unwrap_or_else(|| clock.now());
+        let completed_at = driver.observed_exchange_failure_at().unwrap_or_else(|| clock.now());
         yield OutboundBatchDriverEvent::Item { index: 0, completed_at, outcome };
     };
     let mut receiver = schedule_batch(scope, source, progress, time, entered);
