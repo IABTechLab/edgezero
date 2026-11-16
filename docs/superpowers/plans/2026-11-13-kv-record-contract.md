@@ -263,9 +263,11 @@ All commands use Rust `+1.98.1`, `--locked --offline`, task-local TMPDIR and iso
 - The first parallel workspace attempt exceeded an unchanged TCP test's205ms ceiling by0.263ms. Its isolated rerun and final serial workspace run passed without changing the timing bound. A later CLI test assumed non-TTY stdin; the corrected full invocation closes stdin with `</dev/null` and uses `RUST_TEST_THREADS=1`. No product workaround or passing skip was added.
 - The user requested less delegation. All implementation workers have finished and were removed. Remaining review and TS work are coordinator-owned; no reviewer agents were launched.
 
-### Open dependency baseline question
+### Feature-aware portable dependency checks
 
-Pinned Cloudflare `worker =0.8.5` already brings featureless Tokio1.52.3 into WASM. No Tokio runtime or features are activated. Core/Cloudflare dependency pins remain unchanged from439; the only root lock change is celld's native test `tempfile` dependency. All new record graph checks pass before the final absolute no-Tokio check. That pre-existing edge still fails the script pending the user's scope decision. No SDK pin or dependency policy has been relaxed.
+The user approved checking enabled Tokio runtime/native-I/O features instead of adding a baseline exception. Both native-store and Geo checks now share `scripts/portable_dependency_checks.sh`. WASM graphs may use portable Tokio traits/utilities, but runtime/native-I/O features fail. Core still rejects Tokio packages entirely, and native client/SDK bans remain. The Geo check no longer has a Worker/Tokio version allowlist. No dependency, pin or lockfile changed.
+
+Both complete graph checks pass. A disposable real Cloudflare consumer passes with featureless Tokio and fails when the same Cargo graph enables `tokio/rt`. The new regressions cover forbidden features, duplicate/multiple versions, malformed feature output and retained core/SDK bans. Tooling189, scoped Core configuration4, ShellCheck, formatting and diff checks pass. Receipts: `portable-{native,geo}-graphs.log`, `portable-probe-result.log`, `portable-tooling-tests.log` and `portable-core-regression.log` in the task cache. Implementation commit: `5e0e34ea`.
 
 ## References
 
