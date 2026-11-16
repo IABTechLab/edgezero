@@ -372,8 +372,6 @@ where
     A: Hooks,
 {
     let env = EnvConfig::from_env();
-    let stores = A::stores();
-    let kv_init_requirement = kv_init_requirement(stores);
 
     let level = env
         .logging_level()
@@ -389,9 +387,8 @@ where
         log::warn!("{warning}");
     }
     let addr = resolution.addr;
-    let trusted_ja4_header = TrustedJa4Header::from_env(&env)?;
-    let app = A::build_app();
-    let router = app.router().clone();
+    // Validate before binding so a partial JA4 config fails without a listener.
+    let _validated = TrustedJa4Header::from_env(&env)?;
 
     log::info!("[edgezero] starting axum server on http://{addr}");
 
@@ -409,18 +406,39 @@ where
         let listener = TokioTcpListener::from_std(std_listener)
             .context("failed to adopt std listener into tokio")?;
 
-        let kv_registry = build_kv_registry(stores.kv, &env, kv_init_requirement)?;
-        let config_registry = build_config_registry(stores.config, &env);
-        let secret_registry = build_secret_registry(stores.secrets, &env);
-
-        let request_stores = Stores {
-            config_registry,
-            kv_registry,
-            secret_registry,
-            ..Stores::default()
-        };
-        serve_with_stores(router, listener, true, request_stores, trusted_ja4_header).await
+        serve_app::<A>(&env, listener, true).await
     })
+}
+
+/// Serve `A` on `listener` with stores and the trusted JA4 header read from `env`.
+async fn serve_app<A>(
+    env: &EnvConfig,
+    listener: TokioTcpListener,
+    enable_ctrl_c: bool,
+) -> anyhow::Result<()>
+where
+    A: Hooks,
+{
+    let trusted_ja4_header = TrustedJa4Header::from_env(env)?;
+    let stores = A::stores();
+    let kv_registry = build_kv_registry(stores.kv, env, kv_init_requirement(stores))?;
+    let config_registry = build_config_registry(stores.config, env);
+    let secret_registry = build_secret_registry(stores.secrets, env);
+    let request_stores = Stores {
+        config_registry,
+        kv_registry,
+        secret_registry,
+        ..Stores::default()
+    };
+    let router = A::build_app().router().clone();
+    serve_with_stores(
+        router,
+        listener,
+        enable_ctrl_c,
+        request_stores,
+        trusted_ja4_header,
+    )
+    .await
 }
 
 /// Build the per-request KV registry from baked store metadata.
@@ -1067,6 +1085,69 @@ mod integration_tests {
             assert_eq!(response.text().await.expect("body"), expected);
             handle.abort();
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn serve_app_reads_ja4_trusted_proxy_env() {
+        use edgezero_core::ja4::{CapturedJa4, Ja4Source};
+        use tokio::time::timeout;
+
+        struct Ja4App;
+
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "test stub — only `routes` is overridden; every other Hooks method uses its trait default"
+        )]
+        impl Hooks for Ja4App {
+            fn routes() -> RouterService {
+                async fn ja4_state(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+                    Ok(match ctx.ja4() {
+                        Some(CapturedJa4::Captured {
+                            source: Ja4Source::TrustedProxyHeader,
+                            ..
+                        }) => "captured",
+                        _ => "unexpected",
+                    })
+                }
+                RouterService::builder().get("/ja4", ja4_state).build()
+            }
+        }
+
+        let header = ("EDGEZERO__ADAPTER__JA4_HEADER", "x-ja4");
+        let proxies = ("EDGEZERO__ADAPTER__JA4_TRUSTED_PROXY_CIDRS", "127.0.0.0/8");
+
+        // Only one of the two variables set: startup fails instead of serving.
+        for partial in [header, proxies] {
+            let listener = TokioTcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let result = timeout(
+                Duration::from_secs(5),
+                serve_app::<Ja4App>(&EnvConfig::from_vars([partial]), listener, false),
+            )
+            .await
+            .expect("partial JA4 env should fail startup, not serve");
+            assert!(result.is_err(), "partial JA4 env {partial:?} should fail");
+        }
+
+        let listener = TokioTcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let env = EnvConfig::from_vars([header, proxies]);
+        let handle = tokio::spawn(async move {
+            let _result = serve_app::<Ja4App>(&env, listener, false).await;
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/ja4");
+        let response = send_with_retry(&client, |http_client| {
+            http_client
+                .get(url.as_str())
+                .header("x-ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1")
+        })
+        .await;
+        assert_eq!(response.text().await.expect("body"), "captured");
+        handle.abort();
     }
 
     #[tokio::test(flavor = "multi_thread")]
