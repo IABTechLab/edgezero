@@ -11,9 +11,10 @@ contract and Add race, but both independent CAS writers reported success. The
 one-winner assertion remains unchanged and fails. Viceroy's KV implementation
 checks the existing generation and replaces the row under separate lock
 acquisitions. The SDK backend and record fixture are unchanged from the earlier
-record tag. This candidate is not ready for SDK publication. A runtime repair
-with its own regression proof or an approved real-platform acceptance route is
-still needed; the earlier favorable race receipt does not clear this defect.
+record tag. The user deferred this emulator issue so SDK and TS integration can continue.
+Keep the failed check as a disclosed validation gap in final acceptance and
+publication review. Do not repair the runtime in this effort, weaken assertions
+or treat an earlier favorable race receipt as clearing this defect.
 
 ## Stock-service reconciliation checks
 
