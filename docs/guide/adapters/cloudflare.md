@@ -163,6 +163,11 @@ async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
 }
 ```
 
+`ctx.ja4()` returns the client's JA4 fingerprint only on zones with Enterprise
+Bot Management. Otherwise, and in local development and tests (no `cf`
+object), it reports `Unavailable(Missing)`. See
+[Client TLS fingerprint](./overview#client-tls-fingerprint-ja4).
+
 ## Environment Variables
 
 Define non-secret variables in `wrangler.toml`; the adapter reads the

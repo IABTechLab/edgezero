@@ -72,6 +72,11 @@ Known gates:
 - Spin 4.1.0 rejects non-UTF-8 header values before component invocation.
   It consumes chunked framing and removes Transfer-Encoding before the hook in
   `chunked` and `te-cl` cases.
+- JA4: the hook reports only a fixed `ja4_state` label, never the value. The
+  local runtimes serve plain HTTP, so Fastly and Cloudflare report `missing`
+  and Spin reports `not_exposed`; the `spoof` case's `ja4` and
+  `cloudfront-viewer-ja4-fingerprint` headers must not change this. Captured
+  fingerprints need a live TLS deployment.
 - Global original field order is unavailable on Axum, Cloudflare and Spin.
   Fastly reports Unknown: original-name/count APIs provide partial evidence,
   without associating original fields with converted values. Local evidence

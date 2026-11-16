@@ -34,10 +34,11 @@ mod tests {
         CapturedTarget, MAX_TARGET_BYTES, OriginSource, Preservation, RequestIngress,
         TargetUnavailable,
     };
+    use edgezero_core::ja4::{CapturedJa4, Ja4Fingerprint, Ja4Source, Ja4Unavailable};
     use edgezero_core::router::{PreDispatchHook, RouterService};
     use futures::stream;
     use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
-    use worker::js_sys::Object;
+    use worker::js_sys::{Object, Reflect};
     use worker::wasm_bindgen::{JsCast as _, JsValue};
     use worker::worker_sys::Context as WorkerSysContext;
     use worker::{Context, Env, Method as CfMethod, Request as CfRequest, RequestInit};
@@ -180,6 +181,72 @@ mod tests {
                     .header_fidelity(&"x-repeat".parse().expect("should parse name"))
                     .field_multiplicity(),
                 Preservation::Unknown
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn ingress_ja4_is_missing_without_cf_despite_header() {
+        let raw = web_sys::Request::new_with_str("https://example.com/").expect("should construct");
+        raw.headers()
+            .set("ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1")
+            .expect("should set header");
+        let (env, ctx) = test_env_ctx();
+        let converted = into_core_request(CfRequest::from(raw), env, ctx)
+            .await
+            .expect("should convert Web Request");
+        assert_eq!(
+            converted
+                .extensions()
+                .get::<RequestIngress>()
+                .expect("should insert metadata")
+                .ja4(),
+            Some(&CapturedJa4::Unavailable(Ja4Unavailable::Missing))
+        );
+    }
+
+    /// Attach a `cf.botManagement.ja4` value the way the Workers runtime does,
+    /// so the adapter's `cf → bot_management → ja4` read actually runs.
+    fn request_with_cf_ja4(ja4: &str) -> web_sys::Request {
+        let raw = web_sys::Request::new_with_str("https://example.com/").expect("should construct");
+        let bot = Object::new();
+        Reflect::set(&bot, &"ja4".into(), &ja4.into()).expect("should set ja4");
+        let cf = Object::new();
+        Reflect::set(&cf, &"botManagement".into(), &bot).expect("should set botManagement");
+        Reflect::set(&raw, &"cf".into(), &cf).expect("should set cf");
+        raw
+    }
+
+    #[wasm_bindgen_test]
+    async fn ingress_ja4_reads_cf_bot_management() {
+        let fingerprint = "t13d1516h2_8daaf6152771_e5627efa2ab1";
+        for (value, expected) in [
+            (
+                fingerprint,
+                CapturedJa4::Captured {
+                    fingerprint: Ja4Fingerprint::parse(fingerprint).expect("should accept JA4"),
+                    source: Ja4Source::RuntimeTls,
+                },
+            ),
+            (
+                "not-a-ja4",
+                CapturedJa4::Unavailable(Ja4Unavailable::Malformed),
+            ),
+            ("", CapturedJa4::Unavailable(Ja4Unavailable::Missing)),
+        ] {
+            let (env, ctx) = test_env_ctx();
+            let converted =
+                into_core_request(CfRequest::from(request_with_cf_ja4(value)), env, ctx)
+                    .await
+                    .expect("should convert Web Request");
+            assert_eq!(
+                converted
+                    .extensions()
+                    .get::<RequestIngress>()
+                    .expect("should insert metadata")
+                    .ja4(),
+                Some(&expected),
+                "cf.botManagement.ja4 = {value:?}"
             );
         }
     }
