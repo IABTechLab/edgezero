@@ -8,6 +8,9 @@ pub const MAX_SYNTHESIZED_RESPONSE_HEADER_BYTES: usize = 4096;
 /// Maximum synthesized field values, counting repeated names separately.
 pub const MAX_SYNTHESIZED_RESPONSE_HEADER_COUNT: usize = 32;
 
+#[derive(Clone)]
+pub(crate) struct RequiredErrorResponseHeaders(HeaderMap);
+
 /// Immutable, prevalidated decoration for framework-generated responses, not routed responses.
 ///
 /// Values must be visible ASCII or interior HTAB, without leading/trailing whitespace. This
@@ -30,6 +33,16 @@ pub enum SynthesizedResponseHeadersError {
     TooManyBytes,
     #[error("synthesized response headers exceed the field limit")]
     TooManyFields,
+}
+
+impl RequiredErrorResponseHeaders {
+    pub(crate) fn apply(self, target: &mut HeaderMap) {
+        target.extend(self.0);
+    }
+
+    pub(crate) fn new(headers: HeaderMap) -> Self {
+        Self(headers)
+    }
 }
 
 impl fmt::Debug for SynthesizedResponseHeaders {

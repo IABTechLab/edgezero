@@ -1,0 +1,11 @@
+[app]
+name = "logging-only-manifest"
+middleware = ["not a Rust path!"]
+
+[[triggers.http]]
+path = "/manifest-route"
+handler = "unresolved handler!"
+
+[logging.fastly]
+level = "debug"
+endpoint = "manual_logs"

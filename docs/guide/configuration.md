@@ -499,7 +499,7 @@ serve = "fastly compute serve -C crates/demo-adapter-fastly"
 deploy = "fastly compute deploy -C crates/demo-adapter-fastly"
 
 [adapters.fastly.logging]
-endpoint = "stdout"
+endpoint = "demo_log"
 level = "info"
 echo_stdout = true
 ```
@@ -623,7 +623,7 @@ deploy = "fastly compute deploy -C crates/my-app-adapter-fastly"
 serve = "fastly compute serve -C crates/my-app-adapter-fastly"
 
 [adapters.fastly.logging]
-endpoint = "stdout"
+endpoint = "my_app_log"
 level = "info"
 echo_stdout = true
 
