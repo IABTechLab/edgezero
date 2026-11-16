@@ -73,6 +73,27 @@ remain requirements. See the [implementation tracker](../plans/2026-10-18-truste
 for incomplete lifecycle, redirect, provider and qualification work rather than inferring
 completion from these interfaces or from local test results.
 
+### Shared-Finalizer Review Repairs (2026-11-16)
+
+`OutboundHead::with_body_checkpoint` attaches one lazy adapter host-event factory to the
+existing finalizer. Cloudflare uses it for decoded-output quotas (64 items, including empty
+items), EOF/errors, bodyless/205 settlement, eager payload-policy failures and buffered cap
+errors. Raw-input fairness remains before decoding. The shared absolute waiter, clock
+high-water mark, governing timeout cause and observed provider detail survive these waits;
+terminal cleanup precedes the event and cancellation drops the checkpoint. Discarded heads
+do not run it, and streamed handoff transfers it without polling the payload. Other adapters
+retain their existing no-hook path. This adds no decoder, executor or alternate transport.
+
+Fastly's existing retained failure receipt covers body errors as well as head errors, including
+the original observation instant across independent producer progress. A failure first observed
+at or after expiry still selects its governing timeout. Supported cleanup unwinding releases
+each payload before waking its revoked waiter, including unvisited siblings, and propagates
+the original panic. No panic-abort cleanup guarantee is implied.
+
+The CI harness replays saved redirect evidence through the same ordered matrix as live runs;
+matching case/receipt counts alone are insufficient. These repairs do not promote capabilities,
+alter original deadlines, weaken suppression, or close hosted/parity qualification gates.
+
 ### Fastly B31 Existing-Path Policy (2026-10-25)
 
 The [scoped implementation approval](../../audits/2026-10-18-outbound-api-approval.md#scoped-b31-implementation-approval)

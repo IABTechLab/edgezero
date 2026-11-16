@@ -13,6 +13,17 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Retain Fastly body failures as well as head failures at their original observation time,
+  even when another producer advances their shared clock before collection. Later timer
+  observations cannot replace an already-terminal typed error.
+- Add `OutboundHead::with_body_checkpoint` for adapters requiring real host-event fairness
+  in the shared finalizer. Cloudflare checkpoints decoded output every 64 items and all
+  body-terminal/cap decisions under the original timer and clock history, without a second
+  decoder or transport. Streamed handoff remains lazy; cancellation releases owned work.
+- Notify every revoked outbound waiter after payload release even when another payload's
+  destructor unwinds. Preserve the original panic and exactly-once cleanup.
+- Replay persisted redirect cases through the existing ordered wire matrix for all adapters,
+  rejecting missing reports, substituted cases and corrupted receipts despite matching totals.
 - Attest Fastly assembly fixtures on their original first canonical error response using
   scoped, bounded `test-utils` diagnostic headers at the existing commit boundary. Preserve
   standard entrypoint coverage, failed-app isolation and all response/deadline/cleanup checks;
