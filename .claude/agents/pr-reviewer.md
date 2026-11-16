@@ -118,7 +118,7 @@ Every comment — inline or body-level — must start with the emoji.
 | ❓    | question     | Clarification needed — something is unclear and needs a substantive answer   | Yes       |
 | 🤔    | thinking     | Reasoning aloud — expressing concern or exploring an alternative             | No        |
 | ♻️    | refactor     | Refactoring suggestion — actionable restructuring or extraction opportunity  | No        |
-| 🏕    | campsite     | Campsite rule — "leave it cleaner than you found it"; unrelated improvement  | No        |
+| 🏕     | campsite     | Campsite rule — "leave it cleaner than you found it"; unrelated improvement  | No        |
 | ⛏     | nitpick      | Nitpick — minor style/formatting preference; not blocking                    | No        |
 | 🌱    | seedling     | Future consideration — planting a seed for later, not blocking               | No        |
 | 📝    | memo         | Informational note — fun fact, context, or explanation; no action required   | No        |
@@ -153,9 +153,15 @@ After user approval, submit the selected findings as a formal review.
 
 #### Determine the review verdict
 
-- If any 🔧 or ❓ findings are included: `CHANGES_REQUESTED`
-- If only non-blocking findings (🤔 ♻️ 🏕 ⛏ 🌱 📝 📌 😃): `COMMENT`
-- If no findings (only 😃 praise): `APPROVE`
+Choose one of two verdicts based on the findings selected for submission:
+
+- Any 🔧 or ❓ finding included → `REQUEST_CHANGES`.
+- Otherwise → `APPROVE`, including reviews with non-blocking suggestions,
+  nitpicks, notes, praise, or no findings.
+
+Include non-blocking findings as inline comments or in the review body.
+Label them explicitly as optional. Their presence does not prevent approval.
+Submit only `APPROVE` or `REQUEST_CHANGES`, never `COMMENT`.
 
 #### Build inline comments
 
@@ -217,6 +223,14 @@ concerns, architectural issues, dependency problems) in the review body:
 
 #### Submit the review
 
+Before pending-review handling or any submit/delete command, compare the PR
+author's login with the authenticated user's login using
+`gh pr view <number> --json author --jq '.author.login'` and
+`gh api user --jq '.login'`. If they match, stop before submission and keep
+the prepared review intact. Render it in chat with the intended verdict and
+explain that a different GitHub identity must submit it because GitHub rejects
+self-approval and self-requested changes.
+
 Use the GitHub API to submit. Handle these known issues:
 
 1. **"User can only have one pending review"**: Delete the existing pending
@@ -240,7 +254,7 @@ Submit the review:
 
 ```
 gh api repos/IABTechLab/edgezero/pulls/<number>/reviews -X POST \
-  -f event="<APPROVE|COMMENT|REQUEST_CHANGES>" \
+  -f event="<APPROVE|REQUEST_CHANGES>" \
   -f body="<review body>" \
   --input comments.json
 ```
