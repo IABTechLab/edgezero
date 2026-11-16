@@ -6,11 +6,23 @@
 #[cfg(any(feature = "fastly", test))]
 use crate::context::observation::Guard as ObservationGuard;
 #[cfg(any(feature = "fastly", test))]
+use crate::delivery::FastlyRequestDelivery;
+#[cfg(feature = "fastly")]
+use crate::logger::initialize_for_app;
+#[cfg(any(feature = "fastly", test))]
 use crate::outbound::scope;
+#[cfg(feature = "fastly")]
+use crate::request::send_assembly_error;
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::OutboundScopeOwner;
 #[cfg(feature = "fastly")]
+use edgezero_core::app::Hooks;
+#[cfg(any(feature = "fastly", test))]
+use edgezero_core::logging::ManagedLoggerError;
+#[cfg(feature = "fastly")]
 use fastly::http::serve::{HandlerResult, Serve, ServeSummary};
+#[cfg(any(feature = "fastly", test))]
+use std::io::{self, Write};
 
 /// State owned by one invocation of a custom serving entry point.
 ///
@@ -136,6 +148,88 @@ pub(crate) fn with_callback<R>(action: impl FnOnce() -> R) -> R {
     }
 }
 
+#[cfg(any(feature = "fastly", test))]
+fn with_managed_logging<Q, E>(
+    request: Q,
+    initialize: impl FnOnce() -> Result<(), ManagedLoggerError>,
+    reject: impl FnOnce(Q, ManagedLoggerError) -> FastlyRequestDelivery<()>,
+    handler: impl FnOnce(Q) -> Result<(), E>,
+) -> Result<(), E>
+where
+    E: From<ManagedLoggerError>,
+{
+    if let Err(error) = initialize() {
+        let delivery = reject(request, error);
+        let _diagnostic = write_logger_failure_diagnostic(error, &delivery, &mut io::stderr());
+        return Err(error.into());
+    }
+    handler(request)
+}
+
+#[cfg(any(feature = "fastly", test))]
+#[expect(
+    clippy::use_debug,
+    reason = "only fixed, payload-free category enums are formatted; no provider or request text"
+)]
+fn write_logger_failure_diagnostic(
+    error: ManagedLoggerError,
+    result: &FastlyRequestDelivery<()>,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    use crate::delivery::FastlyResponseCommitState;
+    use edgezero_core::response_egress::{ResponseEgressBodyKind, ResponseEgressOutcome};
+
+    match result {
+        FastlyRequestDelivery::Detached(delivery)
+        | FastlyRequestDelivery::Routed { delivery, .. } => {
+            let report = delivery.report();
+            if delivery.error().is_some()
+                || delivery.commitment() != FastlyResponseCommitState::Committed
+                || report.body_kind == ResponseEgressBodyKind::Fallback
+                || report.fallback_disposition.is_some()
+                || !matches!(
+                    report.outcome,
+                    ResponseEgressOutcome::Completed | ResponseEgressOutcome::HostHandoff
+                )
+            {
+                writeln!(
+                    output,
+                    "edgezero managed logging rejection: setup={error:?} commitment={:?} outcome={:?} body={:?} fallback={:?} error={:?}",
+                    delivery.commitment(),
+                    report.outcome,
+                    report.body_kind,
+                    report.fallback_disposition,
+                    delivery.error(),
+                )?;
+            }
+            Ok(())
+        }
+        FastlyRequestDelivery::Aborted => writeln!(
+            output,
+            "edgezero managed logging rejection: setup={error:?} disposition=aborted"
+        ),
+        FastlyRequestDelivery::NoAttempt(_) => writeln!(
+            output,
+            "edgezero managed logging rejection: setup={error:?} disposition=no-attempt"
+        ),
+    }
+}
+
+#[cfg(feature = "fastly")]
+fn reject_logging_failure(
+    request: fastly::Request,
+    error: ManagedLoggerError,
+) -> FastlyRequestDelivery<()> {
+    let clock = edgezero_core::MonotonicClock::default();
+    let request_start = clock.now();
+    send_assembly_error(
+        request,
+        edgezero_core::EdgeError::internal(error),
+        request_start,
+        clock,
+    )
+}
+
 /// Serve custom callbacks with lazy retained state and the supplied SDK limits.
 ///
 /// The callback controls initialization, dispatch, finalization and streaming.
@@ -146,18 +240,33 @@ pub(crate) fn with_callback<R>(action: impl FnOnce() -> R) -> R {
 /// Batches created while polling a response body have an independent delivery lifetime.
 ///
 /// SDK limits are upper bounds, not a guarantee of reuse. This function does not
-/// read configuration or enable reuse in existing entry points.
+/// enable reuse in existing entry points. `A` supplies the managed logging policy,
+/// initialized before the callback unless `A::owns_logging()` is true. `E` must
+/// accept its fixed typed setup error. Failed setup attempts one bounded, redacted 500
+/// before returning that error unchanged; HEAD transmits no payload. The callback does
+/// not run. A callback error, even a logger error, never causes an automatic response.
 #[cfg(feature = "fastly")]
 #[must_use = "inspect the serving summary or call into_result() to handle terminal errors"]
 #[inline]
-pub fn serve_custom<T, F, E>(serve: Serve, mut handler: F) -> ServeSummary<E>
+pub fn serve_custom<A, T, F, E>(serve: Serve, mut handler: F) -> ServeSummary<E>
 where
+    A: Hooks,
+    E: From<ManagedLoggerError>,
     F: FnMut(fastly::Request, &mut Sandbox<T>) -> Result<(), E>,
 {
     crate::init_fastly_abi();
     let mut sandbox = Sandbox::default();
     serve.run_with_context(
-        |request, context: &mut Sandbox<T>| DeliveryResult(context.handle(request, &mut handler)),
+        |incoming, retained: &mut Sandbox<T>| {
+            DeliveryResult(retained.handle(incoming, |request, context| {
+                with_managed_logging(
+                    request,
+                    initialize_for_app::<A>,
+                    reject_logging_failure,
+                    |ready| handler(ready, context),
+                )
+            }))
+        },
         &mut sandbox,
     )
 }
@@ -166,37 +275,54 @@ where
 ///
 /// Takes a request already received by the caller. Sending remains owned by the
 /// callback; this function never asks the SDK to render an error. Use an ordinary `main`.
+/// `A` supplies the same managed logging policy as standard serving. Install an
+/// application-owned logger before entry when `A::owns_logging()` is true.
 /// Callback exit releases its batch drivers without waiting for retained handles to drop.
 ///
 /// # Errors
-/// Returns the callback error unchanged without another response attempt.
+/// Failed managed setup attempts one bounded, redacted 500 and returns the original
+/// logger error without invoking the callback. Returns callback errors unchanged
+/// without another response attempt, including after commitment.
 #[cfg(feature = "fastly")]
 #[inline]
-pub fn run_custom<T, E, F>(request: fastly::Request, handler: F) -> Result<(), E>
+pub fn run_custom<A, T, E, F>(incoming: fastly::Request, handler: F) -> Result<(), E>
 where
+    A: Hooks,
+    E: From<ManagedLoggerError>,
     F: FnOnce(fastly::Request, &mut Sandbox<T>) -> Result<(), E>,
 {
     crate::init_fastly_abi();
-    Sandbox::default().handle(request, handler)
+    Sandbox::default().handle(incoming, |request, context| {
+        with_managed_logging(
+            request,
+            initialize_for_app::<A>,
+            reject_logging_failure,
+            |ready| handler(ready, context),
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{DeliveryResult, Sandbox};
+    use crate::delivery::{
+        DeliveryError, FastlyRequestDelivery, FastlyResponseCommitState, FastlyResponseDelivery,
+    };
+    #[cfg(feature = "fastly")]
+    use crate::outbound::native_time;
+    use crate::outbound::scope::bind_batch;
     use crate::outbound::testing;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
+    use edgezero_core::logging::ManagedLoggerError;
     use edgezero_core::{EdgeError, OutboundBatch, OutboundBatchDriverEvent};
     use futures::executor::block_on;
     use futures_util::stream::poll_fn;
     use std::task::Poll;
-
-    use super::{DeliveryResult, Sandbox};
-    #[cfg(feature = "fastly")]
-    use crate::outbound::native_time;
-    use crate::outbound::scope::bind_batch;
 
     // Neither the retained value nor an error payload needs framework traits.
     struct App(u64);
@@ -224,6 +350,180 @@ mod tests {
         fn drop(&mut self) {
             self.0.set(self.0.get().saturating_add(1));
         }
+    }
+
+    fn logger_rejection_delivery(
+        commitment: FastlyResponseCommitState,
+        error: Option<DeliveryError>,
+        fallback: bool,
+    ) -> FastlyRequestDelivery<()> {
+        use edgezero_core::response_egress::{
+            ResponseEgressBodyKind, ResponseEgressFallbackDisposition,
+            ResponseEgressFramingFailures, ResponseEgressOutcome, ResponseEgressReport,
+        };
+        let report = ResponseEgressReport {
+            body_kind: if fallback {
+                ResponseEgressBodyKind::Fallback
+            } else {
+                ResponseEgressBodyKind::Application
+            },
+            bytes_written: 0,
+            elapsed: Duration::ZERO,
+            fallback_disposition: fallback.then_some(ResponseEgressFallbackDisposition::Completed),
+            framing_failures: ResponseEgressFramingFailures::default(),
+            outcome: if fallback {
+                ResponseEgressOutcome::ConversionError
+            } else {
+                ResponseEgressOutcome::HostHandoff
+            },
+            request_start: edgezero_core::MonotonicInstant::now(),
+            route: None,
+            source_failure: None,
+        };
+        FastlyRequestDelivery::Detached(FastlyResponseDelivery::new(
+            commitment,
+            report,
+            error.map_or(Ok(()), Err),
+        ))
+    }
+
+    #[test]
+    fn managed_logging_setup_failure_rejects_once_without_calling_callback() {
+        struct RequestDrop(Rc<Cell<usize>>);
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for RequestDrop {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        for error in [
+            ManagedLoggerError::AlreadyInstalled,
+            ManagedLoggerError::ConfigurationChanged,
+            ManagedLoggerError::ConfigurationUnavailable,
+            ManagedLoggerError::InvalidConfiguration,
+            ManagedLoggerError::UnsupportedTarget,
+        ] {
+            let rejected = Cell::new(0_usize);
+            let dropped = Rc::new(Cell::new(0));
+            let result: Result<(), ManagedLoggerError> = super::with_managed_logging(
+                RequestDrop(Rc::clone(&dropped)),
+                || Err(error),
+                |request, original| {
+                    assert_eq!(original, error);
+                    rejected.set(rejected.get() + 1);
+                    drop(request);
+                    logger_rejection_delivery(FastlyResponseCommitState::Committed, None, false)
+                },
+                |_| panic!("callback must not run after failed setup"),
+            );
+            assert_eq!(result, Err(error));
+            assert_eq!(rejected.get(), 1);
+            assert_eq!(dropped.get(), 1);
+        }
+    }
+
+    #[test]
+    fn managed_logging_does_not_reinterpret_callback_logger_errors() {
+        for result in [Ok(()), Err(ManagedLoggerError::AlreadyInstalled)] {
+            let called = Cell::new(0_usize);
+            let actual = super::with_managed_logging(
+                (),
+                || Ok(()),
+                |(), _| panic!("callback results must not send automatic errors"),
+                |()| {
+                    called.set(called.get() + 1);
+                    result
+                },
+            );
+            assert_eq!(actual, result);
+            assert_eq!(called.get(), 1);
+        }
+    }
+
+    #[test]
+    fn managed_logging_delivery_failure_keeps_original_error_without_retry() {
+        for commitment in [
+            FastlyResponseCommitState::NotCommitted,
+            FastlyResponseCommitState::Unknown,
+            FastlyResponseCommitState::Committed,
+        ] {
+            for failure in [
+                DeliveryError::Conversion,
+                DeliveryError::Deadline,
+                DeliveryError::Source,
+                DeliveryError::Transport,
+            ] {
+                let rejected = Cell::new(0_usize);
+                let result: Result<(), ManagedLoggerError> = super::with_managed_logging(
+                    (),
+                    || Err(ManagedLoggerError::ConfigurationUnavailable),
+                    |(), _| {
+                        rejected.set(rejected.get() + 1);
+                        logger_rejection_delivery(commitment, Some(failure), false)
+                    },
+                    |()| panic!("no callback after failed setup"),
+                );
+                assert_eq!(result, Err(ManagedLoggerError::ConfigurationUnavailable));
+                assert_eq!(rejected.get(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn managed_logging_delivery_diagnostic_includes_degraded_fallback_without_payloads() {
+        for (commitment, label) in [
+            (FastlyResponseCommitState::Committed, "Committed"),
+            (FastlyResponseCommitState::NotCommitted, "NotCommitted"),
+            (FastlyResponseCommitState::Unknown, "Unknown"),
+        ] {
+            for (error, fallback) in [
+                (None, false),
+                (Some(DeliveryError::Transport), false),
+                (None, true),
+                (Some(DeliveryError::Source), true),
+            ] {
+                let delivery = logger_rejection_delivery(commitment, error, fallback);
+                let mut bytes = Vec::new();
+                super::write_logger_failure_diagnostic(
+                    ManagedLoggerError::AlreadyInstalled,
+                    &delivery,
+                    &mut bytes,
+                )
+                .unwrap();
+                let expected = commitment != FastlyResponseCommitState::Committed
+                    || error.is_some()
+                    || fallback;
+                assert_eq!(!bytes.is_empty(), expected);
+                assert!(bytes.len() < 512, "diagnostic must remain bounded");
+                if expected {
+                    let text = String::from_utf8(bytes).unwrap();
+                    assert!(text.contains("AlreadyInstalled"));
+                    assert!(text.contains(label));
+                    assert!(text.contains(if fallback {
+                        "ConversionError"
+                    } else {
+                        "HostHandoff"
+                    }));
+                    if error.is_some() {
+                        assert!(text.contains(if fallback { "Source" } else { "Transport" }));
+                    }
+                }
+            }
+        }
+        let mut unavailable: &mut [u8] = &mut [];
+        let delivery = logger_rejection_delivery(
+            FastlyResponseCommitState::Unknown,
+            Some(DeliveryError::Transport),
+            false,
+        );
+        assert!(
+            super::write_logger_failure_diagnostic(
+                ManagedLoggerError::AlreadyInstalled,
+                &delivery,
+                &mut unavailable
+            )
+            .is_err()
+        );
     }
 
     fn pending_batch(released: Rc<Cell<usize>>) -> OutboundBatch {
@@ -416,7 +716,8 @@ mod tests {
     #[test]
     fn retained_client_resolves_fresh_callback_scope() {
         use crate::outbound::FastlyOutboundClient;
-        use edgezero_core::{Deadline, OutboundBatchNext, OutboundRequest};
+        use edgezero_core::{Body, Deadline, OutboundBatchNext, OutboundRequest};
+        use futures::stream::pending;
         use std::time::Duration;
 
         let client = edgezero_core::HttpClient::with_client(FastlyOutboundClient::new());
@@ -431,26 +732,18 @@ mod tests {
                 let request = OutboundRequest::get("https://example.com")
                     .unwrap()
                     .stream_response();
-                let mut batch = client.start_batch_until(
-                    vec![
-                        request,
-                        OutboundRequest::post("http://127.0.0.1:9/callback-scope")
-                            .unwrap()
-                            .body("pending"),
-                    ],
-                    Deadline::after(Duration::from_secs(1)),
-                );
+                let mut batch = client
+                    .start_batch_until(vec![request], Deadline::after(Duration::from_secs(1)));
                 let OutboundBatchNext::Item(_) = block_on(batch.next()).unwrap() else {
                     panic!("fresh scope");
                 };
-                // Both observed slots may already be complete after a loopback refusal.
-                // Retain unpolled work to test callback revocation independently of IO timing.
                 drop(batch);
+                // A never-ready upload keeps this batch pending without depending on host I/O.
                 client.start_batch_until(
                     vec![
                         OutboundRequest::post("http://127.0.0.1:9/callback-scope")
                             .unwrap()
-                            .body("pending"),
+                            .body(Body::from_stream(pending())),
                     ],
                     Deadline::after(Duration::from_secs(1)),
                 )

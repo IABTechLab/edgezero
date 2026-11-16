@@ -306,7 +306,7 @@ mod fastly_impl {
     use futures_util::{FutureExt as _, StreamExt as _};
     use sha2::{Digest as _, Sha256};
 
-    use super::progress::{HeadPoll, Progress, Transport};
+    use super::progress::{HeadFailure, HeadPoll, Progress, Transport};
     use super::{timeout_error, validate_supported_options};
 
     #[cfg(feature = "test-utils")]
@@ -792,9 +792,11 @@ mod fastly_impl {
 
         fn pipeline(
             plan: RequestPlan,
-            progress: NativeProgress,
+            progress: &NativeProgress,
+            failure: HeadFailure,
         ) -> OutboundFuture<OutboundResponse> {
             let client = Self::with_time(plan.context.time().clone());
+            let exchange_progress = progress.with_head_failure(failure.clone());
             Box::pin(async move {
                 let budget = plan.context.budget();
                 let time = plan.context.time().clone();
@@ -802,7 +804,7 @@ mod fastly_impl {
                     async {
                         let prepared = client.configure_plan(plan)?;
                         client
-                            .execute_head(prepared, &progress)
+                            .execute_head(prepared, &exchange_progress)
                             .boxed_local()
                             .await?
                             .finish()
@@ -810,6 +812,7 @@ mod fastly_impl {
                     },
                     budget,
                     &time,
+                    &failure,
                 )
                 .await
             })
@@ -852,7 +855,8 @@ mod fastly_impl {
                 request.entered_at(),
             );
             Box::pin(async move {
-                let progress = selected_progress?;
+                let failure = HeadFailure::default();
+                let progress = selected_progress?.with_head_failure(failure.clone());
                 let budget = request.budget();
                 let time = request.time().clone();
                 progress
@@ -863,6 +867,7 @@ mod fastly_impl {
                         },
                         budget,
                         &time,
+                        &failure,
                     ))
                     .await?
             })
@@ -874,10 +879,12 @@ mod fastly_impl {
             scope.check()?;
             let time = request.time().clone();
             let entered = request.entered_at();
-            let progress = super::scope::native_progress(&scope, &time, entered)?;
+            let failure = HeadFailure::default();
+            let progress = super::scope::native_progress(&scope, &time, entered)?
+                .with_head_failure(failure.clone());
             super::scope::begin(
                 &scope,
-                Self::pipeline(RequestPlan::new(request), progress.clone()),
+                Self::pipeline(RequestPlan::new(request), &progress, failure),
                 &progress,
                 &time,
                 entered,
@@ -935,11 +942,12 @@ mod fastly_impl {
                 .into_iter()
                 .map(|(index, plan)| {
                     let budget = plan.context.budget();
-                    let future = Self::pipeline(plan, progress.clone());
+                    let failure = HeadFailure::default();
+                    let future = Self::pipeline(plan, &progress, failure.clone());
                     let clock = time.clock().clone();
                     async move {
                         let outcome = future.await;
-                        let completed_at = clock.now();
+                        let completed_at = failure.observed_at().unwrap_or_else(|| clock.now());
                         let beyond_cutoff = cutoff.is_expired_at(completed_at)
                             && !budget.own_deadline_expired_before(cutoff, completed_at);
                         (
@@ -1684,17 +1692,49 @@ mod fastly_impl {
         future: impl Future<Output = Result<Output, EdgeError>>,
         budget: DispatchBudget,
         time: &OutboundTime,
+        failure: &HeadFailure,
     ) -> Result<Output, EdgeError> {
         let mut timer = time.wait_until(budget.deadline);
         let mut previous = time.clock().now();
-        race_with_timer(future, budget, time, &mut timer, &mut previous, |result| {
-            result
-                .as_ref()
-                .err()
-                .and_then(EdgeError::provider_failure_detail)
-                .copied()
+        futures_util::pin_mut!(future);
+        poll_fn(|cx| {
+            checked_now(time, &mut previous)?;
+            if let Some(error) = failure.take() {
+                return Poll::Ready(Err(error));
+            }
+            if let Poll::Ready(result) = timer.as_mut().poll(cx) {
+                return Poll::Ready(Err(result
+                    .err()
+                    .unwrap_or_else(|| timeout_error(budget.cause))));
+            }
+            if budget
+                .deadline
+                .is_expired_at(checked_now(time, &mut previous)?)
+            {
+                return Poll::Ready(Err(timeout_error(budget.cause)));
+            }
+            let output = future.as_mut().poll(cx);
+            let observed = checked_now(time, &mut previous)?;
+            if let Some(error) = failure.take() {
+                return Poll::Ready(Err(error));
+            }
+            if failure.observed_at().is_some() && matches!(&output, Poll::Ready(Err(_))) {
+                return output;
+            }
+            if budget.deadline.is_expired_at(observed) {
+                let mut error = timeout_error(budget.cause);
+                if let EdgeError::GatewayTimeout {
+                    provider_detail, ..
+                } = &mut error
+                    && let Poll::Ready(Err(source)) = &output
+                {
+                    *provider_detail = source.provider_failure_detail().copied();
+                }
+                return Poll::Ready(Err(error));
+            }
+            output
         })
-        .await?
+        .await
     }
 
     fn checked_now(
@@ -1709,43 +1749,6 @@ mod fastly_impl {
         }
         *previous = observed;
         Ok(observed)
-    }
-
-    async fn race_with_timer<Output>(
-        future: impl Future<Output = Output>,
-        budget: DispatchBudget,
-        time: &OutboundTime,
-        timer: &mut OutboundFuture<()>,
-        previous: &mut MonotonicInstant,
-        detail: impl FnOnce(&Output) -> Option<edgezero_core::ProviderFailureDetail>,
-    ) -> Result<Output, EdgeError> {
-        let mut extract_detail = Some(detail);
-        futures_util::pin_mut!(future);
-        poll_fn(|cx| {
-            checked_now(time, previous)?;
-            if let Poll::Ready(result) = timer.as_mut().poll(cx) {
-                return Poll::Ready(Err(result
-                    .err()
-                    .unwrap_or_else(|| timeout_error(budget.cause))));
-            }
-            if budget.deadline.is_expired_at(checked_now(time, previous)?) {
-                return Poll::Ready(Err(timeout_error(budget.cause)));
-            }
-            let output = future.as_mut().poll(cx);
-            if budget.deadline.is_expired_at(checked_now(time, previous)?) {
-                let mut error = timeout_error(budget.cause);
-                if let EdgeError::GatewayTimeout {
-                    provider_detail, ..
-                } = &mut error
-                    && let Poll::Ready(value) = &output
-                {
-                    *provider_detail = extract_detail.take().and_then(|extract| extract(value));
-                }
-                return Poll::Ready(Err(error));
-            }
-            output.map(Ok)
-        })
-        .await
     }
 
     fn validate_request_body_length(bytes: &Bytes, maximum: u64) -> Result<(), EdgeError> {
@@ -1806,6 +1809,7 @@ mod fastly_impl {
         use std::thread;
 
         use super::super::testing;
+        use super::HeadFailure;
         use edgezero_core::error::{BudgetSource, ResponseLimitReason};
         use edgezero_core::http::header::{
             CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
@@ -1819,6 +1823,111 @@ mod fastly_impl {
         use futures_util::stream;
 
         use super::*;
+
+        #[test]
+        fn retained_head_failure_precedes_later_deadline_without_polling_io() {
+            let start = MonotonicInstant::now();
+            let failure = HeadFailure::default();
+            failure.record(
+                start + Duration::from_millis(5),
+                EdgeError::bad_gateway("early failure"),
+            );
+            let time = OutboundTime::new(
+                MonotonicClock::new(move || start + Duration::from_millis(150)),
+                |_, _| panic!("completed failure must not start a new host wait"),
+            );
+            let budget = DispatchBudget {
+                deadline: Deadline::at_instant(start + Duration::from_millis(100)),
+                duration: Duration::from_millis(100),
+                cause: BudgetSource::PerCallTimeout,
+            };
+            let error = block_on(super::race_deadline::<()>(
+                async { panic!("completed failure must not poll fresh I/O") },
+                budget,
+                &time,
+                &failure,
+            ))
+            .unwrap_err();
+            assert!(matches!(error, EdgeError::BadGateway { .. }));
+            assert_eq!(
+                failure.observed_at(),
+                Some(start + Duration::from_millis(5))
+            );
+            assert!(failure.take().is_none());
+        }
+
+        #[test]
+        fn head_failure_consumed_inside_poll_retains_original_classification() {
+            let start = MonotonicInstant::now();
+            let observed = Arc::new(Mutex::new(start));
+            let sampled = Arc::clone(&observed);
+            let time = OutboundTime::new(
+                MonotonicClock::new(move || *sampled.lock().unwrap()),
+                |_, _| Box::pin(pending()),
+            );
+            let failure = HeadFailure::default();
+            let budget = DispatchBudget {
+                deadline: Deadline::at_instant(start + Duration::from_millis(100)),
+                duration: Duration::from_millis(100),
+                cause: BudgetSource::PerCallTimeout,
+            };
+            let future = async {
+                failure.record(
+                    start + Duration::from_millis(5),
+                    EdgeError::gateway_timeout_caused(
+                        "early connect failure",
+                        BudgetSource::ConnectTimeout,
+                    ),
+                );
+                let error = failure.take().expect("one owned terminal failure");
+                *observed.lock().unwrap() = start + Duration::from_millis(150);
+                Err::<(), _>(error)
+            };
+            let error =
+                block_on(super::race_deadline(future, budget, &time, &failure)).unwrap_err();
+            assert!(matches!(
+                error,
+                EdgeError::GatewayTimeout {
+                    cause: BudgetSource::ConnectTimeout,
+                    ..
+                }
+            ));
+            assert_eq!(
+                failure.observed_at(),
+                Some(start + Duration::from_millis(5))
+            );
+        }
+
+        #[test]
+        fn unfinished_success_at_deadline_equality_is_not_a_retained_head_failure() {
+            let start = MonotonicInstant::now();
+            let observed = Arc::new(Mutex::new(start));
+            let sampled = Arc::clone(&observed);
+            let time = OutboundTime::new(
+                MonotonicClock::new(move || *sampled.lock().unwrap()),
+                |_, _| Box::pin(pending()),
+            );
+            let failure = HeadFailure::default();
+            let budget = DispatchBudget {
+                deadline: Deadline::at_instant(start + Duration::from_millis(100)),
+                duration: Duration::from_millis(100),
+                cause: BudgetSource::PerCallTimeout,
+            };
+            let future = async {
+                *observed.lock().unwrap() = start + Duration::from_millis(100);
+                Ok(())
+            };
+            let error =
+                block_on(super::race_deadline(future, budget, &time, &failure)).unwrap_err();
+            assert!(matches!(
+                error,
+                EdgeError::GatewayTimeout {
+                    cause: BudgetSource::PerCallTimeout,
+                    ..
+                }
+            ));
+            assert!(failure.observed_at().is_none());
+        }
 
         std::thread_local! {
             static NATIVE_ENCODED_CREATED: Cell<usize> = const { Cell::new(0) };

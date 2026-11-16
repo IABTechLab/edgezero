@@ -56,14 +56,14 @@ pub struct OutboundBatchItem {
 }
 
 /// The ownership state of one input position after collection.
-#[derive(Debug)]
 #[cfg_attr(
     target_pointer_width = "64",
     expect(
         clippy::large_enum_variant,
-        reason = "ingress body policy increases native result size; preserve the public unboxed slot contract"
+        reason = "terminal positional results stay inline; ingress body policy and scalar Body framing metadata do not warrant a per-slot allocation"
     )
 )]
+#[derive(Debug)]
 pub enum OutboundCollectedSlot {
     AlreadyDelivered,
     Resolved(OutboundSlotResult),

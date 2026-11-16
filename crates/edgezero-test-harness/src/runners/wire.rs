@@ -338,6 +338,7 @@ pub(super) fn validate_spin_artifact(events: &[Value]) -> Result<()> {
     }
     validate_policy_inventory(&cases, receipts)?;
     normalization::validate_artifact(events, origin_port)?;
+    normalization::validate_trailers(events)?;
     encoding::validate_artifact(events, "spin")?;
     batch_recovery::validate_artifact(events, "spin")?;
     marker::validate_artifact(events, "spin")?;
@@ -992,6 +993,7 @@ pub(super) fn run(name: &str, run: &Path, records: &mut Records) -> Result<()> {
         let baseline = (matrix.exchanges, matrix.dispatches);
         let policy = spin_policy(port, &origins, matrix.records)?;
         normalization::run(port, &origins, matrix.records)?;
+        normalization::run_trailers(port, matrix.records)?;
         encoding::run("spin", port, matrix.records)?;
         batch_recovery::run("spin", port, matrix.records)?;
         marker::run("spin", port, matrix.records)?;
@@ -1389,6 +1391,7 @@ mod tests {
         values.push(json!({"event":"spin-wire-inventory","status":"pass","exchanges":68,"origin_requests":84,"qualification":false}));
         values.push(json!({"event":"spin-policy-inventory","status":"pass","exchanges":26,"origin_requests":26,"qualification":false}));
         values.extend(normalization::tests::artifact(first));
+        values.extend(normalization::tests::trailer_artifact());
         values.extend(encoding::tests::artifact("spin"));
         values.extend(batch_recovery::tests::artifact("spin"));
         values.extend(marker::tests::artifact("spin"));
@@ -1415,6 +1418,21 @@ mod tests {
         assert!(
             validate_spin_artifact(&records).is_err(),
             "missing encoding evidence cannot pass parent validation"
+        );
+    }
+
+    #[test]
+    fn persisted_spin_wire_requires_the_trailer_cohort() {
+        let mut records = spin_artifact();
+        records.retain(|record| {
+            !matches!(
+                record["event"].as_str(),
+                Some("spin-native-trailers" | "spin-trailer-limit" | "spin-trailer-inventory")
+            )
+        });
+        assert!(
+            validate_spin_artifact(&records).is_err(),
+            "missing trailer evidence cannot pass parent validation"
         );
     }
 

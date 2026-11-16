@@ -1,0 +1,5 @@
+error: failed to validate tests/fixtures/logging_config_case_duplicate.toml: __all__: manifest declares `[logging.Fastly]` AND `[logging.fastly]`, which differ only in case; logging adapter names are matched case-insensitively. Pick one spelling.
+ --> tests/ui/logging_config_case_duplicate.rs:2:44
+  |
+2 |     let _ = edgezero_core::logging_config!("tests/fixtures/logging_config_case_duplicate.toml", "fastly");
+  |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -183,20 +183,32 @@ BestEffort.
 
 ## Logging
 
-EdgeZero does not install a Cloudflare logger by default. Use your preferred logger (for example
-`console_log` or your own `log` implementation), and view output in Wrangler or the Cloudflare
-dashboard.
+`run_app` installs a Rust `log` backend using Workers console methods before application assembly.
+It resolves `EDGEZERO__LOGGING__LEVEL` from Worker bindings with the shared resolver: absent or
+invalid means `Info`, and valid values are case-insensitive. View output in Wrangler or the
+Cloudflare dashboard. `edgezero::boot` retains Error/Warn independently of ordinary Error/Off.
 
-Workers console capture does not install a Rust `log` backend. Initialize your backend and
-both its filter and facade maximum **before** `run_app`, and set `owns_logging = true`.
-`edgezero_core::resolve_logging_level(&env_config)` resolves a supplied platform `EnvConfig`;
-`edgezero::boot` is available for separately filtered startup diagnostics. The no-op adapter
-initializer cannot guarantee their visibility.
+Manual lifecycle owners call `init_logger(level)?` before assembly. Repeated same-level setup is
+idempotent; changed instance configuration or a foreign logger returns a typed error. The old
+parameterless no-op API is removed. Manifest logging defaults are not applied implicitly.
 
-::: tip Logging status
-Cloudflare logging is opt-in; install a logger (such as `console_log`) in your entrypoint if you
-need structured output.
-:::
+For application-owned logging, install your backend and configure its filter and facade maximum
+before `run_app`, and set `owns_logging = true`. EdgeZero then leaves all logging state untouched.
+
+Inside a hand-written `Hooks` implementation, obtain the same compile-time logging
+metadata as `app!` without generating routes:
+
+```rust
+fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+    edgezero_core::logging_config!("edgezero.toml", adapter)
+}
+```
+
+The path is relative to the consuming crate's `CARGO_MANIFEST_DIR` (for example,
+`"../../edgezero.toml"` in scaffolded core crates). This lookup performs no runtime
+manifest I/O or parsing. It does not initialize a logger, configure filters, read
+runtime overrides or change `owns_logging`. Existing runner and application-owned
+logging responsibilities remain unchanged.
 
 ## Context Access
 

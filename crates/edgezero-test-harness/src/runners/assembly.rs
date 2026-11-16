@@ -1,5 +1,7 @@
 use super::*;
 
+mod managed_logging;
+
 fn header<'a>(reply: &'a Value, name: &str) -> Option<&'a str> {
     reply["headers"].as_array()?.iter().find_map(|field| {
         field[0]
@@ -379,6 +381,8 @@ pub(super) fn fastly(exe: &Path, run: &Path, records: &mut Records) -> Result<()
         "fixture-fastly",
         "--bin",
         "fixture-fastly-assembly",
+        "--features",
+        "assembly-attestation",
         "--target",
         "wasm32-wasip1",
     ]))?;
@@ -507,7 +511,9 @@ pub(super) fn fastly(exe: &Path, run: &Path, records: &mut Records) -> Result<()
         );
         failed += usize::from(result.is_err());
     }
-    require(failed == 0, "one or more Fastly assembly cases failed")
+    let logging = managed_logging::fastly(exe, run, records);
+    require(failed == 0, "one or more Fastly assembly cases failed")?;
+    logging
 }
 
 pub(super) fn provider(name: &str, run: &Path, records: &mut Records) -> Result<()> {
@@ -530,6 +536,20 @@ pub(super) fn provider(name: &str, run: &Path, records: &mut Records) -> Result<
                 &log,
                 port,
             )?;
+            if name == "spin" {
+                // Canonical assembly errors intentionally have no application headers.
+                // Attest the owned guest before observing those detached responses.
+                let token = token();
+                let identity = net::request(port, &format!("/probe/{token}"), &token, None, None)?;
+                require(
+                    identity["status"] == 200,
+                    "assembly guest attestation failed",
+                )?;
+                records.push(annotate(
+                    identity,
+                    json!({"adapter":name,"mode":mode,"phase":"assembly-attestation"}),
+                ))?;
+            }
             for (path, case) in [
                 ("/assembly/configuration", "single-config"),
                 ("/assembly/internal", "single-internal"),
@@ -659,7 +679,9 @@ pub(super) fn provider(name: &str, run: &Path, records: &mut Records) -> Result<
         );
         failed += usize::from(result.is_err());
     }
-    require(failed == 0, "one or more provider assembly cases failed")
+    let logging = managed_logging::run(name, &exe, &staged, &package, run, records);
+    require(failed == 0, "one or more provider assembly cases failed")?;
+    logging
 }
 
 fn axum_startup(run: &Path, records: &mut Records) -> Result<()> {

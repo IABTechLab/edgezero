@@ -499,7 +499,7 @@ serve = "fastly compute serve -C crates/demo-adapter-fastly"
 deploy = "fastly compute deploy -C crates/demo-adapter-fastly"
 
 [adapters.fastly.logging]
-endpoint = "stdout"
+endpoint = "demo_log"
 level = "info"
 echo_stdout = true
 ```
@@ -547,13 +547,18 @@ Logging can be configured per adapter under `[adapters.<name>.logging]` or via a
 | `echo_stdout` | Fastly   | Mirror logs to stdout. The Axum runner ignores it           |
 
 Manifest logging settings and runtime `EDGEZERO__LOGGING__*` overrides are separate; consult
-the adapter guide for which source its runner consumes. Cloudflare and Spin do not install a
-Rust `log` backend. `owns_logging = true` transfers installation **and filter configuration**
+the adapter guide for which source its runner consumes. Cloudflare resolves the runtime level
+from Worker bindings; Spin reads the runtime environment, not the manifest logging table.
+Fastly keeps the manifest endpoint/stdout settings and default level; its optional
+`edgezero_logging` Config Store overrides only `EDGEZERO__LOGGING__LEVEL`, including in
+Viceroy without rebuilding the wasm. See the Fastly guide for the bounded lookup and
+instance-immutable policy. No general runtime-selector store is involved.
+`owns_logging = true` transfers installation **and filter configuration**
 to the application, before entering the runner. The pure
 `edgezero_core::resolve_logging_level(&EnvConfig)` helper resolves runtime levels without
 implicitly applying manifest defaults or changing global state.
 
-Managed Fastly/Axum loggers retain `edgezero::boot` errors and warnings at `Warn` even when
+All managed adapter loggers retain `edgezero::boot` errors and warnings at `Warn` even when
 ordinary runtime logging is `Off`. See [Logging Initialisation](/guide/adapters/overview#logging-initialisation).
 
 ### Geo (Axum only)
@@ -640,7 +645,7 @@ deploy = "fastly compute deploy -C crates/my-app-adapter-fastly"
 serve = "fastly compute serve -C crates/my-app-adapter-fastly"
 
 [adapters.fastly.logging]
-endpoint = "stdout"
+endpoint = "my_app_log"
 level = "info"
 echo_stdout = true
 
