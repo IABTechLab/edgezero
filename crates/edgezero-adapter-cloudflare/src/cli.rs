@@ -553,6 +553,8 @@ fn auth_status() -> Result<AuthStatusOutcome, String> {
         // wrangler colours stderr even when piped; keep escapes out of errors.
         .env("NO_COLOR", "1")
         .env("FORCE_COLOR", "0")
+        // `WRANGLER_LOG=debug` would print debug lines to stdout after the JSON.
+        .env("WRANGLER_LOG", "log")
         .output()
         .map_err(|err| {
             if err.kind() == ErrorKind::NotFound {
@@ -571,7 +573,14 @@ fn auth_status() -> Result<AuthStatusOutcome, String> {
         let mut lines = vec![format!(
             "`wrangler whoami --json` exited with {status} without a usable `loggedIn`"
         )];
-        for (stream, text) in [("stdout", stdout.trim()), ("stderr", stderr.trim())] {
+        // Parsed whoami JSON carries the account email and ids; keep it out of
+        // CI logs.
+        let quoted_stdout = if whoami_json(&stdout).is_some() {
+            "<whoami JSON omitted>"
+        } else {
+            stdout.trim()
+        };
+        for (stream, text) in [("stdout", quoted_stdout), ("stderr", stderr.trim())] {
             if !text.is_empty() {
                 let excerpt: String = text.chars().take(WHOAMI_EXCERPT_CHARS).collect();
                 let ellipsis = if excerpt.len() < text.len() {
@@ -586,18 +595,28 @@ fn auth_status() -> Result<AuthStatusOutcome, String> {
     })
 }
 
-/// The session state in `wrangler whoami --json` output, if it reports one.
-/// The JSON runs from the last line starting with `{` to the end, so a notice
-/// wrangler prints first does not hide it.
-fn parse_whoami(stdout: &str, success: bool) -> Option<AuthStatusOutcome> {
-    let lines: Vec<&str> = stdout.lines().collect();
-    let whoami = (0..lines.len()).rev().find_map(|start| {
-        let rest = lines.get(start..)?;
-        if !rest.first()?.starts_with('{') {
+/// The first JSON value in `wrangler whoami --json` output that has a boolean
+/// `loggedIn`. Each line starting with `{` (wrangler indents nested objects) is
+/// a candidate, and only its first JSON value is read, so a notice before the
+/// JSON or a line after it does not hide it.
+fn whoami_json(stdout: &str) -> Option<serde_json::Value> {
+    stdout.lines().enumerate().find_map(|(index, line)| {
+        if !line.starts_with('{') {
             return None;
         }
-        serde_json::from_str::<serde_json::Value>(&rest.join("\n")).ok()
-    })?;
+        let rest = stdout.lines().skip(index).collect::<Vec<_>>().join("\n");
+        let value = serde_json::Deserializer::from_str(&rest)
+            .into_iter::<serde_json::Value>()
+            .next()?
+            .ok()?;
+        value.get("loggedIn")?.as_bool()?;
+        Some(value)
+    })
+}
+
+/// The session state in `wrangler whoami --json` output, if it reports one.
+fn parse_whoami(stdout: &str, success: bool) -> Option<AuthStatusOutcome> {
+    let whoami = whoami_json(stdout)?;
     let state = if whoami.get("loggedIn")?.as_bool()? {
         if !success {
             return None;
@@ -2161,8 +2180,24 @@ id = "00112233445566778899aabbccddeeff"
             state("Update available!\n{\n  \"loggedIn\": true\n}\n", 0_i32),
             Ok(AuthState::Authenticated)
         );
-        // `loggedIn: true` with a failed exit is not trusted.
-        state(r#"{"loggedIn": true}"#, 1_i32).expect_err("not trusted");
+        // Output after the JSON (an update notice, a debug line, a second
+        // JSON line) does not hide it either.
+        assert_eq!(
+            state(
+                "{\n    \"loggedIn\": true\n}\nUpdate available!\n{\"debug\": 1}\n",
+                0_i32
+            ),
+            Ok(AuthState::Authenticated)
+        );
+        // `loggedIn: true` with a failed exit is not trusted, and the error
+        // does not quote the account details.
+        let untrusted = state(r#"{"loggedIn": true, "email": "a@example.com"}"#, 1_i32)
+            .expect_err("not trusted");
+        assert!(!untrusted.contains("a@example.com"), "{untrusted}");
+        assert!(
+            untrusted.contains("stdout: <whoami JSON omitted>"),
+            "{untrusted}"
+        );
     }
 
     #[cfg(unix)]
