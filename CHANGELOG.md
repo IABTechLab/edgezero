@@ -13,6 +13,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Attest Fastly assembly fixtures on their original first canonical error response using
+  scoped, bounded `test-utils` diagnostic headers at the existing commit boundary. Preserve
+  standard entrypoint coverage, failed-app isolation and all response/deadline/cleanup checks;
+  production serving behavior and provider qualification claims are unchanged.
 - Preserve Fastly head failures and their original observation instant when another driver
   advances the shared family past that exchange's deadline. Keep timer-first arbitration for
   unfinished work and reject genuinely late results.

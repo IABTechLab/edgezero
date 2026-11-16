@@ -653,6 +653,8 @@ mod tests {
             "fixture-fastly",
             "--bin",
             "fixture-fastly-assembly",
+            "--features",
+            "assembly-attestation",
             "--target",
             "wasm32-wasip1",
         ]))?;

@@ -206,11 +206,15 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           target_args=()
+          feature_args=()
           if [[ "${TARGET}" != "native" ]]; then
             target_args=(--target "${TARGET}")
           fi
+          if [[ "${ADAPTER}" == fastly ]]; then
+            feature_args=(--features assembly-attestation)
+          fi
           cargo clippy --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml \
-            -p "fixture-${ADAPTER}" "${target_args[@]}" --all-targets -- -D warnings
+            -p "fixture-${ADAPTER}" "${target_args[@]}" "${feature_args[@]}" --all-targets -- -D warnings
           if [[ "${ADAPTER}" == spin ]]; then
             cargo clippy --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml \
               -p fixture-spin-async -p fixture-spin-wire "${target_args[@]}" --all-targets -- -D warnings

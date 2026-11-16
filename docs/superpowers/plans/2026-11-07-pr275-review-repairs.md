@@ -63,40 +63,40 @@ above have focused local evidence; full-suite and pinned-runtime verification ar
 still required before a pushed-head handoff. Fixing commits and final dispositions
 will be recorded in each original review thread.
 
-| Thread | Validated scope and planned response |
-| --- | --- |
-| 4483656372 | Keep audited decoder pins; do not substitute the root lockfile for a downstream dependency contract. Assess other shared-library pins separately. |
-| 4483656377 | Retain allocator/checksum anchors required by source audits; document their purpose and linked update policy. |
-| 4483656381 | Approved bounded empty-Connection standards correction at shared normalization boundaries. |
-| 4483656386 | Already fixed and explicitly accepted by the reviewer; verify current coverage, no second cancellation implementation. |
-| 4483656396 | Clarify explicit driver Cutoff obligation and test late observation plus EOF; preserve fail-closed EOF and partial results. |
-| 4483656406 | Clarify cooperative helper overrun explicitly; test observed expiry precedence without a second timer. |
-| 4483656417 | Document blocking service-wide backend quota as a hard operator constraint; a sandbox-local cap cannot prove global availability. |
-| 4483656422 | Link immutable SDK source to its eager-progress audit/upstream exit condition; preserve coordinated pins. |
-| 4492016684 | Preserve exact Spin selected file; map supported Fastly native filename selectors or refuse before launch. |
-| 4492016690 | Align demo helper/import cfg with the CLI-gated module; verify both no-default-feature combinations. |
-| 4492016695 | Follow explicitly selected Cargo-config symlinks and hash target contents; retain source-tree symlink rejection. |
-| 4492016701 | Parse socket inode as nonzero u64, not a bounded duration; preserve stable-identity checks. |
-| 4492016710 | Replace remaining removed RequestContext methods and compile the corrected examples. |
-| 4492016717 | Disable inherited commit/tag signing in synthetic test repositories only. |
-| 4492016728 | Correct the current-file digest assertion to the actual approved current interface file, not another historical digest. |
-| 4492016740 | Replace deleted check commands and old fixture location in active verification instructions. |
-| 4492016748 | Distinguish absent root-key field path from safe secret-schema field path; preserve redaction. |
-| 4492016759 | Classify explicit connect timeouts only when the setter actually accepted them; retain aggregate expiry priority. |
+| Thread     | Validated scope and planned response                                                                                                                      |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 4483656372 | Keep audited decoder pins; do not substitute the root lockfile for a downstream dependency contract. Assess other shared-library pins separately.         |
+| 4483656377 | Retain allocator/checksum anchors required by source audits; document their purpose and linked update policy.                                             |
+| 4483656381 | Approved bounded empty-Connection standards correction at shared normalization boundaries.                                                                |
+| 4483656386 | Already fixed and explicitly accepted by the reviewer; verify current coverage, no second cancellation implementation.                                    |
+| 4483656396 | Clarify explicit driver Cutoff obligation and test late observation plus EOF; preserve fail-closed EOF and partial results.                               |
+| 4483656406 | Clarify cooperative helper overrun explicitly; test observed expiry precedence without a second timer.                                                    |
+| 4483656417 | Document blocking service-wide backend quota as a hard operator constraint; a sandbox-local cap cannot prove global availability.                         |
+| 4483656422 | Link immutable SDK source to its eager-progress audit/upstream exit condition; preserve coordinated pins.                                                 |
+| 4492016684 | Preserve exact Spin selected file; map supported Fastly native filename selectors or refuse before launch.                                                |
+| 4492016690 | Align demo helper/import cfg with the CLI-gated module; verify both no-default-feature combinations.                                                      |
+| 4492016695 | Follow explicitly selected Cargo-config symlinks and hash target contents; retain source-tree symlink rejection.                                          |
+| 4492016701 | Parse socket inode as nonzero u64, not a bounded duration; preserve stable-identity checks.                                                               |
+| 4492016710 | Replace remaining removed RequestContext methods and compile the corrected examples.                                                                      |
+| 4492016717 | Disable inherited commit/tag signing in synthetic test repositories only.                                                                                 |
+| 4492016728 | Correct the current-file digest assertion to the actual approved current interface file, not another historical digest.                                   |
+| 4492016740 | Replace deleted check commands and old fixture location in active verification instructions.                                                              |
+| 4492016748 | Distinguish absent root-key field path from safe secret-schema field path; preserve redaction.                                                            |
+| 4492016759 | Classify explicit connect timeouts only when the setter actually accepted them; retain aggregate expiry priority.                                         |
 | 4494112256 | Do not silently replace approved workspace discovery with ancestor-only lookup; document/test current selection and surface any policy change separately. |
-| 4494112523 | Reject ordinary upstream payloads with surviving ambiguous TE+CL before content-length/cap decisions; preserve bodyless precedence. |
-| 4494112817 | Require the complete canonical response-egress schedule in the sole Rust validator, with coherent-subset negative tests. |
-| 4494113120 | First prove pinned Spin wire framing; derive any buffered length from actual bytes, never stale caller framing or prebuffered streams. |
-| 4494113388 | Preserve typed host-read failures under EZ-1.4; characterize malformed uploads and do not blanket-map arbitrary failures to 400. |
-| 4494113685 | Fully qualify generated Result/Ok paths and test caller aliases/shadowing. |
-| 4494113946 | Investigate adapter-owned blocking KV operations; no unapproved offload-overload/shutdown policy. |
-| 4494114314 | Existing proxy-environment behavior is not a new regression; document it rather than silently disabling deployed proxy setups. |
-| 4494114613 | Preserve the single shared opaque-SDK readiness pulse and cache semantics; do not add unqualified backoff or bypass the SDK transport. |
-| 4494114967 | Document JSON 8 MiB and form 1 MiB defaults, 413 behavior and explicit-limit alternatives. |
-| 4494115310 | Document the intentional breaking target-aware adapter migration; do not restore unsafe execute fallback. |
-| 4494115611 | Verify pinned forbidden-header behavior; normalize connection-specific HTTP2-Settings centrally. Response Host policy needs an explicit decision. |
-| 4494115844 | Preserve RFC-permitted strict outbound comma-CL rejection and intentional egress normalization; explain the distinction. |
-| 4494116079 | Verify existing B31 versioned identity/golden coverage and strengthen only missing policy-version documentation. |
+| 4494112523 | Reject ordinary upstream payloads with surviving ambiguous TE+CL before content-length/cap decisions; preserve bodyless precedence.                       |
+| 4494112817 | Require the complete canonical response-egress schedule in the sole Rust validator, with coherent-subset negative tests.                                  |
+| 4494113120 | First prove pinned Spin wire framing; derive any buffered length from actual bytes, never stale caller framing or prebuffered streams.                    |
+| 4494113388 | Preserve typed host-read failures under EZ-1.4; characterize malformed uploads and do not blanket-map arbitrary failures to 400.                          |
+| 4494113685 | Fully qualify generated Result/Ok paths and test caller aliases/shadowing.                                                                                |
+| 4494113946 | Investigate adapter-owned blocking KV operations; no unapproved offload-overload/shutdown policy.                                                         |
+| 4494114314 | Existing proxy-environment behavior is not a new regression; document it rather than silently disabling deployed proxy setups.                            |
+| 4494114613 | Preserve the single shared opaque-SDK readiness pulse and cache semantics; do not add unqualified backoff or bypass the SDK transport.                    |
+| 4494114967 | Document JSON 8 MiB and form 1 MiB defaults, 413 behavior and explicit-limit alternatives.                                                                |
+| 4494115310 | Document the intentional breaking target-aware adapter migration; do not restore unsafe execute fallback.                                                 |
+| 4494115611 | Verify pinned forbidden-header behavior; normalize connection-specific HTTP2-Settings centrally. Response Host policy needs an explicit decision.         |
+| 4494115844 | Preserve RFC-permitted strict outbound comma-CL rejection and intentional egress normalization; explain the distinction.                                  |
+| 4494116079 | Verify existing B31 versioned identity/golden coverage and strengthen only missing policy-version documentation.                                          |
 
 ## Verification And Handoff
 
@@ -245,6 +245,7 @@ predicate is relaxed.
 Two read-only verification agents rechecked the process/logging/identity and Spin
 resource/framing changes. Their follow-up reviews found no remaining issues after
 the version-probe ownership, pre-cleanup observation and immutable-header fixes.
+
 ### Final Local Validation
 
 - All five primary Rust gates pass on Rust 1.98.1. The workspace run reports 2,700
@@ -805,14 +806,14 @@ compared before central implementation.
       actual fixing SHA/evidence, and request re-review. Reviewer acceptance and hosted evidence
       remain separate from implementation.
 
-| Original thread | Planned disposition |
-| --- | --- |
-| 4580379395 | Disagree with removing SDK readback. Stock 0.21.0 lacks hostcalls; the explicitly selected tracked repair passes the identical guest assertions. Clarify prerequisite and preserve both results. |
-| 4580597424 | Fix absolute native deadline anchoring; pending-source and early-wake controls retain cleanup assertions. |
-| 4580597430 | Fix local upload failure rendezvous; verify real async peers held open until the original source/cap failure returns. |
-| 4580597433 | Fix required wire headers through final normalization without hiding invalid framing. |
-| 4580597437 | Fix original terminal head error/timestamp across independent family drivers, preserving timeout precedence for unfinished/late work. |
-| 4580597442 | Fix one cumulative trailer/head budget after proving the pinned host exposes trailers; no claim about earlier provider allocation. |
+| Original thread | Planned disposition                                                                                                                                                                              |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 4580379395      | Disagree with removing SDK readback. Stock 0.21.0 lacks hostcalls; the explicitly selected tracked repair passes the identical guest assertions. Clarify prerequisite and preserve both results. |
+| 4580597424      | Fix absolute native deadline anchoring; pending-source and early-wake controls retain cleanup assertions.                                                                                        |
+| 4580597430      | Fix local upload failure rendezvous; verify real async peers held open until the original source/cap failure returns.                                                                            |
+| 4580597433      | Fix required wire headers through final normalization without hiding invalid framing.                                                                                                            |
+| 4580597437      | Fix original terminal head error/timestamp across independent family drivers, preserving timeout precedence for unfinished/late work.                                                            |
+| 4580597442      | Fix one cumulative trailer/head budget after proving the pinned host exposes trailers; no claim about earlier provider allocation.                                                               |
 
 This snapshot precedes publication. The fixing commit, publication readback and final
 per-thread dispositions are recorded in the original threads and PR #275's current checkpoint.
@@ -905,3 +906,58 @@ hosted qualification. The separate Fastly assembly command still exits 1 with se
 `missing launch identity on required prescribed response` failures, retained in capture
 `18e864212f89b920-54cb-0`. Their origin is not established by a base/head comparison here.
 No assembly gate, issue #504 behavior, provider capability or hosted/manual checkbox is changed.
+
+### Focused Assembly Attestation Repair (2026-11-15)
+
+The user approved diagnosing and repairing the seven Fastly assembly attestation failures,
+retaining their original first-response, sticky-failure, deadline and cleanup requirements.
+No warmup/retry, replacement entrypoint, deployment or capability promotion is authorized.
+
+- [x] Reproduce all seven failures on `fe32185f` with the unchanged assembly command.
+- [x] Trace controller and guest independently, then compare two read-only solution proposals.
+- [x] Add scoped test-only diagnostic header instrumentation at the existing commit boundary,
+      without exposing response/body/status/deadline mutation or invoking failed-app hooks.
+- [x] Prove bounds, collisions, nested/unwind/thread isolation and unchanged canonical delivery.
+- [x] Attest the original first GET in all seven existing cases; preserve subsequent recovery,
+      HEAD, partial-state release, header exclusion, terminal reports and teardown assertions.
+- [ ] Run the complete prescribed suite and feature/format/lint/documentation gates, then
+      commit, push and request independent acceptance at the new head.
+
+The raw baseline responses retain canonical JSON, redaction and retry policy but lack the
+fixture identity. Assembly fails before fixture middleware can run. A production callback or
+static-header facility would broaden the API solely for instrumentation; modifying the failed
+app renderer would violate isolation. Both read-only proposals selected a bounded additive
+test-only snapshot, installed before the existing entrypoints and applied immediately before
+their existing committer. It proves the instrumented guest emitted the observed response, not
+that production builds emit launch headers or that hosted delivery is qualified. Production
+assembly rendering, outbound APIs, timers, limits, pins and capability claims stay unchanged.
+
+The failed reproduction is retained under the harness at
+`fixtures/reusable-app/.runs/18e86e2ba4ce8288-112d0-0`; it is not credited as acceptance.
+
+The repaired assembly command exits 0. Capture `18e86f1d26dc5fb0-87e0-0` contains all seven
+`canonical-assembly-delivery` passes, seven matching startup identities after successful teardown,
+one failed-state release witness, 27 logging passes and six logging-failure-boundary passes,
+with no failed events. Every record remains `qualification: false`. No warmup or deferred
+assembly exception was added. This is local functional evidence for the repair tree, not
+frozen-candidate or hosted qualification.
+
+Forty native Fastly response tests pass, including unchanged canonical GET/HEAD payloads,
+statuses, retry fields, commitment and complete terminal reports with/without instrumentation;
+fallback and expired-deadline comparisons preserve their original causes. The initial no-op
+instrumentation produces two failing missing-header regressions. The controller's 672 tests
+pass with four opt-in ignored; workspace, Fastly WASM, fixture and harness Clippy pass. Initial
+compiler/lint mistakes are retained as failed attempts, not passing evidence. Both independent
+read-only reviews found no remaining blocking issue after feature coverage and documentation
+were aligned. Full-suite validation and current-head review remain required below.
+
+The November 16 continuation rebuilt the tracked Viceroy repair in isolation from
+the same upstream revision and lockfile; all 136 runtime-library tests passed.
+The current assembly repeat, `18e898da0b851c20-9738-0`, exits 0 with no failed events.
+The complete prescribed suite, primary Rust gates, strict rustdoc, all twelve
+adapter Clippy configurations and excluded-workspace/fixture lint gates pass on
+the combined working tree. This does not promote hosted capabilities or close
+manual qualification. The separately approved #504 scope is tracked in
+[its implementation plan](2026-11-15-compile-time-logging.md), including the
+disclosed initial harness-cancellation failure and successful unchanged reruns.
+Publication and independent current-head acceptance remain pending.

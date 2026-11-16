@@ -195,6 +195,14 @@ Only explicitly prescribed headerless fault observations may remain pending/no-c
 until the prescribed identity-bearing recovery response. This exception does not allow
 an unstamped recovery response to borrow a later response's identity.
 
+The Fastly assembly binary explicitly enables `assembly-attestation`, using the adapter's
+`test-utils` diagnostic-header scope at its existing commit boundary. This stamps the original
+canonical failure even before an application exists, without running failed-app hooks or
+replacing standard serving entrypoints. Only bounded extension metadata can be added; existing
+fields (including conflicting identities) are never replaced. This is instrumented-fixture
+provenance, not a production response-header feature or hosted qualification. All seven first
+GETs, canonical bodies, partial-app exclusion, recovery, HEAD and teardown checks remain required.
+
 Startup has one 45-second deadline beginning before process creation. HTTP exchanges
 use at most 12 seconds, shortened by the remaining startup budget, across connection,
 write, read and trailer handling. Capture is bounded to a 16 KiB status line, a separate
@@ -210,8 +218,9 @@ without probing the real compiler inside cancellation or readiness timing window
 
 The existing ephemeral-port handoff is not atomic reservation. Identity checks mitigate
 wrong-listener success without port reselection, respawn or retry-until-green. Modes
-without an identity-bearing response, including canonical Fastly assembly failures,
-remain explicitly unverified rather than gaining a test-only production lifecycle API.
+without an identity-bearing response remain explicitly unverified. Canonical Fastly assembly
+failures are covered by the explicit fixture instrumentation above, not a new production
+lifecycle API or a deferred-attestation exception.
 
 Owned Unix processes are signalled directly through safe Nix PID/process-group APIs, not helper
 subprocesses. Targets must be positive IDs greater than one; only `ESRCH` establishes absence.
