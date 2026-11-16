@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Independent normal dependency graphs; workspace --all-features is not isolation proof.
 set -euo pipefail
+# shellcheck source=scripts/portable_dependency_checks.sh
+source "$(dirname "${BASH_SOURCE[0]}")/portable_dependency_checks.sh"
 
 assert_no_sdk() {
   local graph
@@ -12,19 +14,29 @@ assert_no_sdk() {
 }
 
 assert_no_native_runtime() {
-  local graph
-  graph="$(cargo tree --offline --locked --edges normal --prefix none "$@")"
-  if grep -Eq '^(aws-(config|sdk-[^ ]+)|reqwest|tokio|celld(-[^ ]+)?|v8) v' <<< "$graph"; then
+  local scope="$1" graph forbidden
+  shift
+  graph="$(cargo tree --offline --locked --edges normal --prefix none --format '{p}|{f}' "$@")"
+  forbidden='aws-(config|sdk-[^ ]+)|reqwest|celld(-[^ ]+)?|v8'
+  if [[ "$scope" == core ]]; then
+    forbidden+='|tokio(-[^ ]+)?'
+  fi
+  if grep -Eq "^($forbidden) v" <<< "$graph"; then
     printf 'Native runtime/client dependency leaked into core or WASM: %s\n' "$*" >&2
+    exit 1
+  fi
+  if ! assert_wasm_tokio_features <<< "$graph"; then
+    printf 'Tokio runtime/native-I/O features leaked into WASM: %s\n' "$*" >&2
     exit 1
   fi
 }
 
-assert_no_native_runtime -p edgezero-core --all-features
-assert_no_native_runtime -p edgezero-adapter-fastly --target wasm32-wasip1 --features fastly
-assert_no_native_runtime -p edgezero-adapter-spin --target wasm32-wasip2 --features spin
-assert_no_native_runtime -p edgezero-store-aws --target wasm32-wasip1 --no-default-features --features dynamodb-records
-assert_no_native_runtime -p edgezero-store-celld --target wasm32-wasip1 --no-default-features --features records-v2
+assert_no_native_runtime core -p edgezero-core --all-features
+assert_no_native_runtime wasm -p edgezero-adapter-cloudflare --target wasm32-unknown-unknown --features cloudflare
+assert_no_native_runtime wasm -p edgezero-adapter-fastly --target wasm32-wasip1 --features fastly
+assert_no_native_runtime wasm -p edgezero-adapter-spin --target wasm32-wasip2 --features spin
+assert_no_native_runtime wasm -p edgezero-store-aws --target wasm32-wasip1 --no-default-features --features dynamodb-records
+assert_no_native_runtime wasm -p edgezero-store-celld --target wasm32-wasip1 --no-default-features --features records-v2
 
 assert_no_sdk -p edgezero-cli --no-default-features --features cli,edgezero-adapter-axum
 assert_no_sdk -p edgezero-store-aws --no-default-features
@@ -105,7 +117,4 @@ for feature in config kv records records-v2; do
     exit 1
   fi
 done
-# Run the absolute Cloudflare no-Tokio requirement last so an existing SDK
-# dependency does not hide coverage of the newly added record feature graphs.
-assert_no_native_runtime -p edgezero-adapter-cloudflare --target wasm32-unknown-unknown --features cloudflare
-printf 'Native store SDK and celld feature isolation graphs passed.\n'
+printf 'Native store SDK, WASM runtime features and celld feature isolation graphs passed.\n'
