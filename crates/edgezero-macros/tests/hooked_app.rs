@@ -40,7 +40,7 @@ mod tests {
             ManifestApp::configure(app)
         }
         fn logging_for(adapter: &str) -> ResolvedLoggingConfig {
-            ManifestApp::logging_for(adapter)
+            edgezero_core::logging_config!("tests/fixtures/hooked_app.toml", adapter)
         }
         fn manifest() -> BakedManifest {
             ManifestApp::manifest()

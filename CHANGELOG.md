@@ -25,6 +25,35 @@ their scope when introduced; the current summary supersedes their then-pending A
 
 ### Head-First Outbound Hard Cut
 
+- Attest Fastly assembly fixtures on their original first canonical error response using
+  scoped, bounded `test-utils` diagnostic headers at the existing commit boundary. Preserve
+  standard entrypoint coverage, failed-app isolation and all response/deadline/cleanup checks;
+  production serving behavior and provider qualification claims are unchanged.
+- Preserve Fastly head failures and their original observation instant when another driver
+  advances the shared family past that exchange's deadline. Keep timer-first arbitration for
+  unfinished work and reject genuinely late results.
+- Share one response-field counter across normalized final headers, the synthetic proxy
+  marker and SDK-exposed Spin trailers. Buffered overflow fails before returning a response;
+  streamed overflow is a terminal body error, without acknowledging successful completion.
+- Return Spin upload source/cap failures immediately, dropping the request writers with their
+  failure defaults instead of awaiting a peer's completion acknowledgment. Successful uploads
+  still follow the existing two-way completion protocol.
+- Anchor Axum inbound and response-egress native timers before sampling the paired clock,
+  including empty-stream validation. Clock sampling cannot extend the absolute native target.
+- Retain authoritative framework `Allow` and config `Retry-After` headers through final egress
+  normalization, even when custom renderers nominate them as hop-by-hop. Invalid framing is
+  still rejected before those fields are restored.
+- Reject invalid effective Fastly logging endpoint names during manifest loading and
+  `app!` expansion, with field-specific, value-free diagnostics. Preserve whole-section
+  logging overrides and other adapters' endpoint formats.
+- Add `edgezero_core::logging_config!("edgezero.toml", adapter)` (#504) for
+  hand-written `Hooks`, sharing `app!`'s compile-time logging resolution without
+  runtime manifest parsing or generated routes. Logger ownership, filters and
+  runtime overrides are unchanged.
+- Deliver a bounded, redacted 500 when managed Fastly logging fails before a custom
+  callback, suppress HEAD payloads and return the original typed setup error even if
+  delivery fails. Report secondary delivery degradation without relying on that logger.
+  Callback errors never trigger an automatic response or a second send.
 - Require the application Hooks type on Fastly `serve_custom` and `run_custom`, with
   callback errors convertible from `ManagedLoggerError`. Standard/custom lifecycles
   now share managed setup. Fastly lines include targets; complete endpoint/level/stdout

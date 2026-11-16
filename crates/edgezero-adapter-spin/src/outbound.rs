@@ -591,7 +591,7 @@ mod spin_impl {
         OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture, OutboundHead,
         OutboundHttpClient, OutboundPending, OutboundPreparedBatch, OutboundProgressRuntime,
         OutboundRequest, OutboundRequestParts, OutboundResponseContext, OutboundSendMode,
-        OutboundTime, OutboundUploadCounter,
+        OutboundTime, OutboundUploadCounter, ResponseHeaderLimiter,
     };
     use edgezero_core::time::{DispatchBudget, MonotonicClock};
     use futures_util::StreamExt as _;
@@ -605,7 +605,7 @@ mod spin_impl {
     };
     use spin_sdk::wasip3::http_compat::BodyWriter;
     use spin_sdk::wasip3::spawn_local;
-    use spin_sdk::wasip3::wit_bindgen::{FutureReader, FutureWriter, StreamReader, StreamResult};
+    use spin_sdk::wasip3::wit_bindgen::{FutureReader, StreamReader, StreamResult};
     use spin_sdk::wasip3::wit_future;
 
     use super::{
@@ -1104,28 +1104,19 @@ mod spin_impl {
         };
 
         // `BodyWriter` configures `result_writer` to publish a typed host error on drop.
-        // Deadline returns can therefore signal failure without awaiting after budget expiry.
+        // A local failure must never await the peer's acknowledgment before returning.
         while let Some(item) = source.next().await {
             budget_remaining(budget, &time)?;
             let bytes = match item {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     drop(stream_writer);
-                    signal_upload_failure(result_writer, ErrorCode::InternalError(None)).await;
+                    drop(result_writer);
                     return Err(error);
                 }
             };
             if let Err(error) = counter.observe(bytes.len()) {
                 drop(stream_writer);
-                if matches!(error, EdgeError::PayloadTooLarge { .. }) {
-                    signal_upload_failure(
-                        result_writer,
-                        ErrorCode::HttpRequestBodySize(counter.observed_bytes()),
-                    )
-                    .await;
-                    return Err(error);
-                }
-                // The writer's default error-on-drop aborts without delaying this local failure.
                 drop(result_writer);
                 return Err(error);
             }
@@ -1146,15 +1137,6 @@ mod spin_impl {
             return Ok(UploadCompletion::ReaderGone);
         }
         Ok(UploadCompletion::Complete)
-    }
-
-    async fn signal_upload_failure(
-        writer: FutureWriter<Result<Option<Fields>, ErrorCode>>,
-        error: ErrorCode,
-    ) {
-        match writer.write(Err(error)).await {
-            Ok(()) | Err(_) => {}
-        }
     }
 
     fn response_head(
@@ -1178,6 +1160,7 @@ mod spin_impl {
             response,
             budget,
             time,
+            context.header_limiter(),
             #[cfg(feature = "test-utils")]
             recorder.clone(),
         );
@@ -1225,6 +1208,7 @@ mod spin_impl {
         response: Response,
         budget: DispatchBudget,
         time: OutboundTime,
+        mut header_limiter: ResponseHeaderLimiter,
         #[cfg(feature = "test-utils")] recorder: Option<NativeBodyRecorder>,
     ) -> BodyStream {
         let (completion_writer, result_reader) = wit_future::new(default_response_result);
@@ -1266,7 +1250,17 @@ mod spin_impl {
                         )
                         .await;
                         match trailer_result {
-                            Ok(Ok(_trailers)) => {}
+                            Ok(Ok(trailers)) => {
+                                if let Some(fields) = trailers {
+                                    let checked = fields.copy_all().into_iter().try_for_each(|(name, value)| {
+                                        header_limiter.observe_raw_field(name.as_bytes(), &value)
+                                    });
+                                    if let Err(error) = checked {
+                                        yield Err(error);
+                                        return;
+                                    }
+                                }
+                            }
                             Ok(Err(error)) => {
                                 yield Err(map_spin_host_error(
                                     &error,
