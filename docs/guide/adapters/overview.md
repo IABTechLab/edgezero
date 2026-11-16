@@ -247,17 +247,17 @@ match ctx.ja4() {
 Pre-dispatch hooks receive the `Request` and read the same value with
 `request.extensions().get::<RequestIngress>().and_then(RequestIngress::ja4)`.
 
-| Adapter                              | HTTPS client request                                                                                                  | Plain HTTP, local development, tests | Provider value fails validation |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------ | ------------------------------- |
-| Fastly                               | `Captured { RuntimeTls }`                                                                                             | `Unavailable(Missing)`               | `Unavailable(Malformed)`        |
-| Cloudflare                           | `Captured { RuntimeTls }` with Enterprise Bot Management; otherwise `Unavailable(Missing)`                            | `Unavailable(Missing)`               | `Unavailable(Malformed)`        |
-| Spin                                 | `Unavailable(NotExposed)`                                                                                             | `Unavailable(NotExposed)`            | n/a                             |
-| Axum                                 | `Unavailable(NotExposed)`; with a [trusted proxy](./axum#ja4-from-a-trusted-proxy), `Captured { TrustedProxyHeader }` | `Unavailable(NotExposed)`            | `Unavailable(Malformed)`        |
-| Custom adapter or hand-built request | `None`                                                                                                                | `None`                               | n/a                             |
+| Adapter                              | HTTPS client request                                                                                                  | Plain HTTP, local development, tests                                                                  | Provider value fails validation |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Fastly                               | `Captured { RuntimeTls }`                                                                                             | `Unavailable(Missing)`                                                                                | `Unavailable(Malformed)`        |
+| Cloudflare                           | `Captured { RuntimeTls }` with Enterprise Bot Management; otherwise `Unavailable(Missing)`                            | `Unavailable(Missing)`                                                                                | `Unavailable(Malformed)`        |
+| Spin                                 | `Unavailable(NotExposed)`                                                                                             | `Unavailable(NotExposed)`                                                                             | n/a                             |
+| Axum                                 | `Unavailable(NotExposed)`; with a [trusted proxy](./axum#ja4-from-a-trusted-proxy), `Captured { TrustedProxyHeader }` | `Unavailable(NotExposed)`; from a configured trusted proxy without the header, `Unavailable(Missing)` | `Unavailable(Malformed)`        |
+| Custom adapter or hand-built request | `None`                                                                                                                | `None`                                                                                                | n/a                             |
 
 `Ja4Fingerprint::parse` accepts only the 36-character `a_b_c` shape, with
 lowercase hex in the hash sections. A provider value that fails validation is
-dropped and reported as `Malformed`. `Ja4Fingerprint`'s `Debug` output is
+dropped and reported as `Malformed`; an empty value is reported as `Missing`. `Ja4Fingerprint`'s `Debug` output is
 redacted, and it has no `Display` or `Serialize`; a fingerprint is a
 quasi-identifier, so do not log it casually.
 

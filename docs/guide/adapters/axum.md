@@ -313,9 +313,8 @@ default `ctx.ja4()` reports `Unavailable(NotExposed)` and JA4 headers such as
 
 When a TLS-terminating proxy in front of Axum computes JA4 (FoxIO's
 [ja4-nginx-module](https://github.com/FoxIO-LLC/ja4-nginx-module), HAProxy's
-ja4 module, the Apache Traffic Server JA4 plugin, CloudFront, …), Axum can read
-it from a header, but only when the direct TCP peer is one of the proxies you
-name:
+ja4 module, the Apache Traffic Server JA4 plugin, …), Axum can read it from a
+header, but only when the direct TCP peer is one of the proxies you name:
 
 ```sh
 EDGEZERO__ADAPTER__JA4_HEADER=x-ja4
@@ -329,7 +328,7 @@ peers match their IPv4 networks.
 | Request                                          | `ctx.ja4()`                                      |
 | ------------------------------------------------ | ------------------------------------------------ |
 | From a trusted proxy, one valid header           | `Captured { source: TrustedProxyHeader, .. }`    |
-| From a trusted proxy, no header                  | `Unavailable(Missing)`                           |
+| From a trusted proxy, no or empty header         | `Unavailable(Missing)`                           |
 | From a trusted proxy, invalid or repeated header | `Unavailable(Malformed)`                         |
 | From any other peer                              | `Unavailable(NotExposed)`; the header is ignored |
 
@@ -344,6 +343,22 @@ omits it when the value is empty:
 proxy_set_header X-JA4 $http_ssl_ja4;
 ```
 
+nginx inherits `proxy_set_header` from an enclosing block only when the
+current block defines none. A `location` that sets its own
+`proxy_set_header Host …` silently drops an `X-JA4` set at the `server` or
+`http` level, and the client's own `X-JA4` then reaches Axum from a trusted
+peer. Set it in every block that has its own `proxy_set_header`, and in every
+server block that proxies to Axum, including plain-HTTP ones.
+:::
+
+::: danger Only list proxies you operate
+The allowlist works only when nobody else can send requests from those
+addresses. Do not list shared provider ranges such as CloudFront's: any AWS
+customer can point their own distribution at your origin and add any header
+they like, so its requests pass the peer check. CloudFront needs the
+protected-CloudFront check from
+[#439](https://github.com/IABTechLab/edgezero/pull/439), which this setting
+does not provide.
 :::
 
 In code, build the setting with `TrustedJa4Header::parse(header, cidrs)` and

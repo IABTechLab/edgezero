@@ -3,10 +3,11 @@
 //! The Axum adapter serves plain HTTP and never sees a TLS `ClientHello`, so on
 //! its own it reports JA4 as `NotExposed`. A TLS-terminating proxy in front of
 //! it (`FoxIO`'s nginx module, `HAProxy`'s ja4 module, the Apache Traffic Server
-//! plugin, `CloudFront`, …) can compute JA4 and forward it in a header. The
-//! adapter records that header only when the direct TCP peer is inside an
-//! operator-configured CIDR allowlist; from any other peer JA4 stays
-//! `NotExposed`, so clients cannot forge it.
+//! plugin, …) can compute JA4 and forward it in a header. The adapter records
+//! that header only when the direct TCP peer is inside an operator-configured
+//! CIDR allowlist; from any other peer JA4 stays `NotExposed`, so clients
+//! cannot forge it. List only proxies the operator runs: shared provider ranges
+//! such as `CloudFront`'s let any of that provider's customers pass the check.
 
 use std::net::{IpAddr, SocketAddr};
 
