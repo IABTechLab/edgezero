@@ -195,6 +195,21 @@ parameterless no-op API is removed. Manifest logging defaults are not applied im
 For application-owned logging, install your backend and configure its filter and facade maximum
 before `run_app`, and set `owns_logging = true`. EdgeZero then leaves all logging state untouched.
 
+Inside a hand-written `Hooks` implementation, obtain the same compile-time logging
+metadata as `app!` without generating routes:
+
+```rust
+fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+    edgezero_core::logging_config!("edgezero.toml", adapter)
+}
+```
+
+The path is relative to the consuming crate's `CARGO_MANIFEST_DIR` (for example,
+`"../../edgezero.toml"` in scaffolded core crates). This lookup performs no runtime
+manifest I/O or parsing. It does not initialize a logger, configure filters, read
+runtime overrides or change `owns_logging`. Existing runner and application-owned
+logging responsibilities remain unchanged.
+
 ## Context Access
 
 Access Cloudflare-specific APIs via the request context extensions:

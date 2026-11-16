@@ -1,0 +1,5 @@
+error: failed to read tests/fixtures/logging_config_directory.toml: Is a directory (os error 21)
+ --> tests/ui/logging_config_unreadable.rs:2:44
+  |
+2 |     let _ = edgezero_core::logging_config!("tests/fixtures/logging_config_directory.toml", "fastly");
+  |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: failed to validate tests/fixtures/logging_config_bad_endpoint.toml: __all__: [adapters.Fastly.logging].endpoint: invalid Fastly logging configuration; endpoint name is malformed
+ --> tests/ui/logging_config_bad_endpoint.rs:2:44
+  |
+2 |     let _ = edgezero_core::logging_config!("tests/fixtures/logging_config_bad_endpoint.toml", "fastly");
+  |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

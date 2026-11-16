@@ -1,0 +1,4 @@
+[logging.fastly]
+level = "debug"
+[logging.Fastly]
+level = "error"

@@ -55,6 +55,14 @@ impl OutboundResponseContext {
         self.entered_at
     }
 
+    /// Shares the captured field budget with adapter-visible informational or trailer sections.
+    /// Cloning this handle preserves prior charges and cannot change its configured limits.
+    #[must_use]
+    #[inline]
+    pub fn header_limiter(&self) -> ResponseHeaderLimiter {
+        self.header_limiter.clone()
+    }
+
     #[must_use]
     #[inline]
     pub fn mode(&self) -> OutboundSendMode {
@@ -344,10 +352,7 @@ impl OutboundHead {
         owner: OutboundExchangeOwner,
     ) -> Result<Self, EdgeError> {
         let (headers, normalization, location_evidence) = input.normalize(
-            ResponseHeaderLimiter::new(
-                context.max_response_header_bytes,
-                context.max_response_header_count,
-            ),
+            context.header_limiter(),
             &context.request_method,
             status,
             context.proxy_marker,
@@ -786,8 +791,7 @@ mod tests {
                 response_mode: mode,
                 status: StatusCode::OK,
             },
-            max_response_header_bytes: None,
-            max_response_header_count: None,
+            header_limiter: ResponseHeaderLimiter::new(None, None),
             proxy_marker: OutboundProxyMarker::On,
             original_chain_deadline: None,
             scope: crate::OutboundScope::capture(Rc::new(crate::IndependentOutboundProgress)),
@@ -1099,7 +1103,7 @@ mod tests {
                     captured.body_policy.response_decoding = decoding;
                     captured.body_policy.max_encoded_response_bytes = Some(0);
                     captured.body_policy.max_decoded_response_bytes = Some(0);
-                    captured.max_response_header_count = header_cap;
+                    captured.header_limiter = ResponseHeaderLimiter::new(None, header_cap);
                     let mut headers = HeaderMap::new();
                     headers.insert("content-length", HeaderValue::from_static("100"));
                     headers.insert("transfer-encoding", HeaderValue::from_static("chunked"));
@@ -1658,7 +1662,7 @@ mod tests {
             (1, OutboundProxyMarker::Off, 2, true),
         ] {
             let mut captured = context(ResponseMode::Streamed);
-            captured.max_response_header_count = Some(cap);
+            captured.header_limiter = ResponseHeaderLimiter::new(None, Some(cap));
             captured.proxy_marker = marker;
             let mut headers = HeaderMap::new();
             for _ in 0..values {
@@ -1687,6 +1691,63 @@ mod tests {
                 result.expect("within cap").discard();
             }
             assert_eq!(releases.get(), 1);
+        }
+    }
+
+    #[test]
+    fn trailer_fields_share_head_filter_and_marker_budget() {
+        for mode in [
+            ResponseMode::Buffered { max_bytes: 8 },
+            ResponseMode::Streamed,
+        ] {
+            for (max_bytes, max_count, expected) in [
+                (Some(47), Some(4), None),
+                (Some(46), Some(4), Some(ResponseLimitReason::HeaderBytes)),
+                (Some(47), Some(3), Some(ResponseLimitReason::HeaderCount)),
+                (Some(46), Some(3), Some(ResponseLimitReason::HeaderCount)),
+            ] {
+                // The opaque head field is charged even though normalization removes it.
+                let mut headers = HeaderMap::new();
+                headers.append(
+                    "x-filtered",
+                    HeaderValue::from_bytes(&[0xff]).expect("opaque"),
+                );
+                let mut captured = context(mode);
+                captured.proxy_marker = OutboundProxyMarker::On;
+                captured.header_limiter = ResponseHeaderLimiter::new(max_bytes, max_count);
+                let mut limiter = captured.header_limiter();
+                let encoded = async_stream::stream! {
+                    yield Ok(Bytes::from_static(b"x"));
+                    for _ in 0_u8..2_u8 {
+                        if let Err(error) = limiter.observe_raw_field(b"x-end", b"one") {
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                }
+                .boxed_local();
+                let releases = Rc::new(Cell::new(0));
+                let head = OutboundHead::new(
+                    StatusCode::OK,
+                    input(headers),
+                    encoded,
+                    captured,
+                    owner(&releases),
+                )
+                .expect("head fits");
+                let outcome = block_on(async {
+                    let response = head.finish().await?;
+                    assert!(!response.headers().contains_key("x-filtered"));
+                    assert_eq!(response.headers()["x-edgezero-proxy"], "test");
+                    response.into_body().into_bytes_bounded(8).await
+                });
+                match expected {
+                    None => assert_eq!(outcome.expect("exact cumulative cap"), b"x".as_slice()),
+                    Some(reason) => assert!(matches!(outcome,
+                        Err(EdgeError::ResponseTooLarge { reason: actual, .. }) if actual == reason)),
+                }
+                assert_eq!(releases.get(), 1);
+            }
         }
     }
 
@@ -2144,7 +2205,7 @@ mod tests {
                 headers.insert("connection", HeaderValue::from_static("bad name"));
             } else {
                 headers.insert("x", HeaderValue::from_static("y"));
-                captured.max_response_header_bytes = Some(1);
+                captured.header_limiter = ResponseHeaderLimiter::new(Some(1), None);
             }
             let releases = Rc::new(Cell::new(0));
             let result = OutboundHead::new(

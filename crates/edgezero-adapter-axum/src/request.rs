@@ -19,7 +19,7 @@ use edgezero_core::outbound::HttpClient;
 use edgezero_core::time::{Deadline, MonotonicClock};
 use futures_util::{StreamExt as _, stream};
 use http_body::Body as _;
-use tokio::time::timeout;
+use tokio::time::{Instant as TokioInstant, timeout_at};
 
 use crate::context::AxumRequestContext;
 use crate::ja4::TrustedJa4Header;
@@ -185,6 +185,7 @@ fn deadline_body(
             let clock = monotonic_clock.clone();
             async move {
                 let mut state_stream = stream_state?;
+                let anchor = TokioInstant::now();
                 let Some(remaining) = deadline.remaining_at(clock.now()) else {
                     return Some((
                         Err(EdgeError::request_timeout(
@@ -193,7 +194,15 @@ fn deadline_body(
                         None,
                     ));
                 };
-                let item = match timeout(remaining, state_stream.next()).await {
+                let Some(host_deadline) = anchor.checked_add(remaining) else {
+                    return Some((
+                        Err(EdgeError::internal(anyhow::anyhow!(
+                            "inbound body read deadline exceeds native timer range"
+                        ))),
+                        None,
+                    ));
+                };
+                let item = match timeout_at(host_deadline, state_stream.next()).await {
                     Ok(item) => item,
                     Err(_elapsed) => {
                         return Some((
@@ -296,6 +305,45 @@ mod tests {
             .next()
             .await
             .expect("terminal timeout item")
+            .expect_err("timeout");
+        assert_eq!(error.status(), StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_deadline_does_not_add_clock_sampling_delay() {
+        use futures_util::FutureExt as _;
+        use std::time::Duration;
+        use tokio::time::{Instant, advance};
+
+        let started = Instant::now();
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let signal = DropSignal(Arc::clone(&dropped));
+        let source = stream::poll_fn(move |_| {
+            let _keep_alive = &signal;
+            Poll::<Option<Result<Bytes, io::Error>>>::Pending
+        });
+        let clock = MonotonicClock::new(|| {
+            let sampled = Instant::now();
+            assert!(advance(Duration::from_millis(60)).now_or_never().is_none());
+            sampled.into_std()
+        });
+        let deadline = Deadline::at_instant((started + Duration::from_millis(100)).into_std());
+        let mut body = deadline_body(
+            AxumBody::from_stream(source).into_data_stream(),
+            deadline,
+            clock,
+        )
+        .into_stream()
+        .expect("stream");
+        let mut read = Box::pin(body.next());
+        assert!(read.as_mut().now_or_never().is_none());
+        advance(Duration::from_millis(40)).await;
+        let error = read
+            .as_mut()
+            .now_or_never()
+            .expect("original deadline wakes")
+            .expect("timeout item")
             .expect_err("timeout");
         assert_eq!(error.status(), StatusCode::REQUEST_TIMEOUT);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
