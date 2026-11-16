@@ -132,12 +132,15 @@ pub struct DeployedVersion {
 /// schema.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeployedVersionState {
-    /// Created, but never staged or activated.
+    /// The deploy's target draft, which the platform still shows as unlocked,
+    /// inactive and not staged.
     Draft,
-    /// Staged (for a staging deploy) or activated.
+    /// Live on the deploy's target: activated for production, the active
+    /// staging version for a staging deploy.
     Published,
-    /// Staging or activation was attempted and its outcome is not known, so
-    /// the version may be published.
+    /// Not confirmed either way: a publish was attempted, or the readback
+    /// showed it locked, published only to the other target, not listed, or
+    /// failed, or a reported version could not be verified active.
     Unknown,
 }
 
@@ -218,6 +221,9 @@ pub struct AdapterDeployContext {
     pub application_manifest_path: Option<PathBuf>,
     /// Canonical root of an extracted immutable application release.
     pub application_release_root: Option<PathBuf>,
+    /// Set under `--format json`, the only output that shows a failed deploy's
+    /// `version_state`. Adapters may skip a provider readback when unset.
+    pub report_version_state: bool,
     pub service_id: Option<String>,
     pub staging: bool,
     pub stores: DeployStoreIds,

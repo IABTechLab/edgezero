@@ -912,7 +912,14 @@ fn deploy_managed_with_context(
         plan.package_sha256.clone(),
         &progress,
         executed,
-        |version| observed_version_state(&plan, version),
+        |version| {
+            // Only JSON output shows the state; text mode skips the extra call.
+            if context.report_version_state {
+                observed_version_state(&plan.service_id, plan.token.as_str(), plan.target, version)
+            } else {
+                DeployedVersionState::Unknown
+            }
+        },
     )
 }
 
@@ -951,30 +958,50 @@ fn managed_deploy_outcome(
     })
 }
 
-/// Reads back what Fastly reports for `version`. `Draft` only when Fastly
-/// still shows it as an unpublished editable draft.
-fn observed_version_state(plan: &ManagedDeployPlan, version: u64) -> DeployedVersionState {
-    let listed = fastly_api_get(
-        &format!("/service/{}/version", plan.service_id),
-        plan.token.as_str(),
-    )
-    .and_then(|raw| parse_service_versions(&raw));
+/// Reads back what Fastly reports for `version` on the deploy's `target`.
+/// `Draft` only when Fastly still shows it as an unpublished editable draft.
+fn observed_version_state(
+    service_id: &str,
+    token: &str,
+    target: PublishTarget,
+    version: u64,
+) -> DeployedVersionState {
+    let listed = fastly_api_get(&format!("/service/{service_id}/version"), token)
+        .and_then(|raw| parse_service_versions(&raw));
     match listed {
         Ok(versions) => versions
             .iter()
             .find(|candidate| candidate.number == version)
-            .map_or(DeployedVersionState::Unknown, version_record_state),
-        Err(_error) => DeployedVersionState::Unknown,
+            .map_or(DeployedVersionState::Unknown, |record| {
+                version_record_state(record, target)
+            }),
+        Err(error) => {
+            log::debug!("[edgezero] could not read back Fastly version {version}: {error}");
+            DeployedVersionState::Unknown
+        }
     }
 }
 
-fn version_record_state(record: &ServiceVersionRecord) -> DeployedVersionState {
-    if record.active || !record.environments.is_empty() {
+/// `Published` only when `record` is live on `target`: active for production,
+/// the active staging version for staging. Anything short of an unlocked,
+/// inactive draft no environment points at is `Unknown`.
+fn version_record_state(
+    record: &ServiceVersionRecord,
+    target: PublishTarget,
+) -> DeployedVersionState {
+    let staged = record.environments.iter().any(|environment| {
+        environment.name == "staging" && environment.active_version == record.number
+    });
+    let published = match target {
+        PublishTarget::Production => record.active,
+        PublishTarget::Staging => staged,
+    };
+    if published {
         DeployedVersionState::Published
-    } else if record.locked {
-        DeployedVersionState::Unknown
-    } else {
+    } else if !record.active && !record.locked && !staged {
         DeployedVersionState::Draft
+    } else {
+        DeployedVersionState::Unknown
     }
 }
 
@@ -6676,6 +6703,7 @@ fn legacy_deploy_context(args: &[String], staging: bool) -> AdapterDeployContext
         adapter_manifest_path: arg_value(args, "--manifest-path").map(PathBuf::from),
         application_manifest_path: None,
         application_release_root: None,
+        report_version_state: false,
         service_id: arg_value(args, "--service-id").map(str::to_owned),
         stores: DeployStoreIds::default(),
         staging,
@@ -7502,37 +7530,60 @@ mod tests {
     }
 
     #[test]
-    fn version_record_state_reports_draft_only_for_an_editable_draft() {
-        let record = |active, locked, staged: bool| ServiceVersionRecord {
+    fn version_record_state_reports_published_only_on_the_deploy_target() {
+        use PublishTarget::{Production, Staging};
+        let staging_env = |active_version: u64| -> ServiceEnvironmentRecord {
+            serde_json::from_str(&format!(
+                r#"{{"name":"staging","active_version":{active_version},"service_id":"SVC1"}}"#
+            ))
+            .expect("environment")
+        };
+        let record = |active, locked, environments| ServiceVersionRecord {
             active,
             locked,
-            environments: if staged {
-                vec![
-                    serde_json::from_str(
-                        r#"{"name":"staging","active_version":42,"service_id":"SVC1"}"#,
-                    )
-                    .expect("environment"),
-                ]
-            } else {
-                Vec::new()
-            },
+            environments,
             number: 42,
         };
+        let draft = record(false, false, Vec::new());
+        let activated = record(true, true, Vec::new());
+        let staged = record(false, true, vec![staging_env(42)]);
+        // An environment record pointing at another version does not stage 42.
+        let stale_env = record(false, false, vec![staging_env(41)]);
+        let retired = record(false, true, Vec::new());
+
+        for target in [Production, Staging] {
+            assert_eq!(
+                version_record_state(&draft, target),
+                DeployedVersionState::Draft
+            );
+            assert_eq!(
+                version_record_state(&stale_env, target),
+                DeployedVersionState::Draft,
+                "{target:?}"
+            );
+            assert_eq!(
+                version_record_state(&retired, target),
+                DeployedVersionState::Unknown,
+                "{target:?}"
+            );
+        }
         assert_eq!(
-            version_record_state(&record(false, false, false)),
-            DeployedVersionState::Draft
-        );
-        assert_eq!(
-            version_record_state(&record(true, true, false)),
+            version_record_state(&activated, Production),
             DeployedVersionState::Published
         );
         assert_eq!(
-            version_record_state(&record(false, true, true)),
+            version_record_state(&staged, Staging),
             DeployedVersionState::Published
         );
         assert_eq!(
-            version_record_state(&record(false, true, false)),
-            DeployedVersionState::Unknown
+            version_record_state(&activated, Staging),
+            DeployedVersionState::Unknown,
+            "activated, not staged, is not published for --staging"
+        );
+        assert_eq!(
+            version_record_state(&staged, Production),
+            DeployedVersionState::Unknown,
+            "staged, not activated, is not published for production"
         );
     }
 
@@ -7708,6 +7759,7 @@ mod tests {
             adapter_manifest_path: Some(manifest),
             application_manifest_path: None,
             application_release_root: None,
+            report_version_state: false,
             service_id: Some("SVC1".to_owned()),
             staging: true,
             stores: DeployStoreIds {
@@ -10885,6 +10937,74 @@ exit 1
         assert!(healthy.healthy());
         assert!(healthy.version_verified, "both checks ran and passed");
         assert_eq!(api_calls(&healthy_log), 2, "before and after the probe");
+    }
+
+    /// Drives the readback through the versions API, so a deploy that stops
+    /// reading Fastly back cannot pass on a hard-coded state.
+    #[cfg(unix)]
+    #[test]
+    fn observed_version_state_reads_the_versions_api() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _lock = path_mutation_guard().lock().expect("guard");
+        let fake_api = |body: &str, status: u16| {
+            let dir = tempdir().expect("tempdir");
+            let script_path = dir.path().join("curl");
+            fs::write(
+                &script_path,
+                format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n{status}' '{body}'\n"),
+            )
+            .expect("write script");
+            let mut perms = fs::metadata(&script_path).expect("meta").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&script_path, perms).expect("chmod +x");
+            dir
+        };
+        let observe = |body: &str, status: u16, target: PublishTarget| {
+            let curl = fake_api(body, status);
+            let _path = PathPrepend::new(curl.path());
+            observed_version_state("SVC1", "test-token", target, 42)
+        };
+        let version = |active: bool, locked: bool, environments: &str| {
+            format!(
+                r#"[{{"number":41,"active":false,"locked":true,"environments":[]}},{{"number":42,"active":{active},"locked":{locked},"environments":[{environments}]}}]"#
+            )
+        };
+        let staged_env = r#"{"name":"staging","active_version":42,"service_id":"SVC1"}"#;
+
+        assert_eq!(
+            observe(&version(false, false, ""), 200, PublishTarget::Production),
+            DeployedVersionState::Draft
+        );
+        assert_eq!(
+            observe(&version(true, true, ""), 200, PublishTarget::Production),
+            DeployedVersionState::Published
+        );
+        assert_eq!(
+            observe(&version(true, true, ""), 200, PublishTarget::Staging),
+            DeployedVersionState::Unknown
+        );
+        assert_eq!(
+            observe(
+                &version(false, true, staged_env),
+                200,
+                PublishTarget::Staging
+            ),
+            DeployedVersionState::Published
+        );
+        assert_eq!(
+            observe(
+                r#"[{"number":41,"active":true,"locked":true,"environments":[]}]"#,
+                200,
+                PublishTarget::Production
+            ),
+            DeployedVersionState::Unknown,
+            "a version the list does not show is unknown"
+        );
+        assert_eq!(
+            observe("[]", 503, PublishTarget::Production),
+            DeployedVersionState::Unknown,
+            "a failed read is unknown"
+        );
     }
 
     #[cfg(unix)]

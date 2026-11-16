@@ -63,7 +63,8 @@ pub use provision::run_provision;
 
 #[cfg(feature = "cli")]
 use args::{
-    ActiveVersionArgs, BuildArgs, DeployArgs, HealthcheckArgs, NewArgs, RollbackArgs, ServeArgs,
+    ActiveVersionArgs, BuildArgs, DeployArgs, HealthcheckArgs, NewArgs, OutputFormat, RollbackArgs,
+    ServeArgs,
 };
 #[cfg(feature = "cli")]
 use edgezero_adapter::registry::{
@@ -292,6 +293,7 @@ fn deploy(args: &DeployArgs) -> Outcome<DeployResult> {
         adapter_manifest_path,
         application_manifest_path,
         application_release_root,
+        report_version_state: args.format == OutputFormat::Json,
         service_id: args.service_id.clone(),
         stores: deploy_stores,
         staging: args.staging,
