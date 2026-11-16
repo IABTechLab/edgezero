@@ -95,9 +95,12 @@ trait Root {
 }
 
 struct Cleanup {
+    // Field order also releases the payload before notification during unwinding.
     payload: Option<Box<dyn Any>>,
-    waiting: Option<Waker>,
+    waiting: WakeOnDrop,
 }
+
+struct WakeOnDrop(Option<Waker>);
 
 struct Node<T> {
     active: Cell<bool>,
@@ -706,7 +709,14 @@ impl<T: 'static> Drop for Revocable<T> {
 impl Cleanup {
     fn release(mut self) {
         drop(self.payload.take());
-        if let Some(waiting) = self.waiting.take() {
+        drop(self.waiting);
+    }
+}
+
+#[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+impl Drop for WakeOnDrop {
+    fn drop(&mut self) {
+        if let Some(waiting) = self.0.take() {
             waiting.wake();
         }
     }
@@ -734,7 +744,7 @@ impl<T: 'static> Root for Node<T> {
         let waiting = self.waker.borrow_mut().take();
         Cleanup {
             payload: value.map(|payload| -> Box<dyn Any> { Box::new(payload) }),
-            waiting,
+            waiting: WakeOnDrop(waiting),
         }
     }
 
@@ -821,7 +831,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::rc::{Rc, Weak};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
@@ -844,6 +854,25 @@ mod tests {
     struct DropAction(Option<Box<dyn FnOnce()>>);
 
     struct WakeAction;
+
+    struct CleanupWake {
+        notified_after_release: AtomicBool,
+        released: Arc<AtomicBool>,
+        wakes: AtomicUsize,
+    }
+
+    impl ArcWake for CleanupWake {
+        fn wake(self: Arc<Self>) {
+            Self::wake_by_ref(&self);
+        }
+
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.wakes.fetch_add(1, Ordering::SeqCst);
+            arc_self
+                .notified_after_release
+                .store(arc_self.released.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+    }
 
     struct Runtime {
         active: Arc<AtomicBool>,
@@ -1420,21 +1449,64 @@ mod tests {
     fn panicking_payload_cleanup_still_releases_retained_siblings_and_provider_state() {
         let owner = OutboundScopeOwner::callback();
         let scope = owner.scope();
+        let first_released = Arc::new(AtomicBool::new(false));
+        let on_first_drop = Arc::clone(&first_released);
         let first = Revocable::new(
             &scope,
-            DropAction(Some(Box::new(|| panic!("application stream drop")))),
+            DropAction(Some(Box::new(move || {
+                on_first_drop.store(true, Ordering::SeqCst);
+                panic!("application stream drop");
+            }))),
         )
         .expect("first root");
         let sibling_releases = Rc::new(Cell::new(0_usize));
-        let second = Revocable::new(&scope, Release(Rc::clone(&sibling_releases)))
-            .expect("retained sibling");
+        let second_released = Arc::new(AtomicBool::new(false));
+        let on_second_drop = Arc::clone(&second_released);
+        let second = Revocable::new(
+            &scope,
+            (
+                Release(Rc::clone(&sibling_releases)),
+                DropAction(Some(Box::new(move || {
+                    on_second_drop.store(true, Ordering::SeqCst);
+                }))),
+            ),
+        )
+        .expect("retained sibling");
+        let waiters = [first_released, second_released].map(|released| {
+            Arc::new(CleanupWake {
+                wakes: AtomicUsize::new(0),
+                released,
+                notified_after_release: AtomicBool::new(false),
+            })
+        });
+        first
+            .with(
+                &mut Context::from_waker(&waker(Arc::clone(&waiters[0]))),
+                |_, _| (),
+            )
+            .expect("register first waiter");
+        second
+            .with(
+                &mut Context::from_waker(&waker(Arc::clone(&waiters[1]))),
+                |_, _| (),
+            )
+            .expect("register sibling waiter");
         let provider_releases = Rc::new(Cell::new(0_usize));
         drop(
             scope
                 .provider_state(|| Release(Rc::clone(&provider_releases)))
                 .expect("provider state"),
         );
-        assert!(catch_unwind(AssertUnwindSafe(|| owner.close())).is_err());
+        let original =
+            catch_unwind(AssertUnwindSafe(|| owner.close())).expect_err("original panic");
+        assert_eq!(
+            original.downcast_ref::<&str>(),
+            Some(&"application stream drop")
+        );
+        for waiting in &waiters {
+            assert_eq!(waiting.wakes.load(Ordering::SeqCst), 1);
+            assert!(waiting.notified_after_release.load(Ordering::SeqCst));
+        }
         assert!(first.is_revoked());
         assert!(second.is_revoked());
         assert_eq!(
@@ -1446,6 +1518,9 @@ mod tests {
         assert!(!capture().is_managed(), "ambient scope restores on unwind");
         drop((first, second));
         assert_eq!(sibling_releases.get(), 1);
+        for waiting in waiters {
+            assert_eq!(waiting.wakes.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[test]
