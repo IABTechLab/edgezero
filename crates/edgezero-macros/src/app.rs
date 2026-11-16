@@ -163,26 +163,30 @@ fn build_configure_tokens(callback: Option<&syn::Expr>) -> TokenStream2 {
 
 fn logging_config_tokens(config: &ResolvedLoggingConfig) -> TokenStream2 {
     let level = match config.level {
-        LogLevel::Trace => quote! { edgezero_core::manifest::LogLevel::Trace },
-        LogLevel::Debug => quote! { edgezero_core::manifest::LogLevel::Debug },
-        LogLevel::Info => quote! { edgezero_core::manifest::LogLevel::Info },
-        LogLevel::Warn => quote! { edgezero_core::manifest::LogLevel::Warn },
-        LogLevel::Error => quote! { edgezero_core::manifest::LogLevel::Error },
-        LogLevel::Off => quote! { edgezero_core::manifest::LogLevel::Off },
+        LogLevel::Trace => quote! { ::edgezero_core::manifest::LogLevel::Trace },
+        LogLevel::Debug => quote! { ::edgezero_core::manifest::LogLevel::Debug },
+        LogLevel::Info => quote! { ::edgezero_core::manifest::LogLevel::Info },
+        LogLevel::Warn => quote! { ::edgezero_core::manifest::LogLevel::Warn },
+        LogLevel::Error => quote! { ::edgezero_core::manifest::LogLevel::Error },
+        LogLevel::Off => quote! { ::edgezero_core::manifest::LogLevel::Off },
     };
     let endpoint = config.endpoint.as_ref().map_or_else(
-        || quote! { None },
+        || quote! { ::core::option::Option::None },
         |endpoint| {
             let endpoint_literal = LitStr::new(endpoint, Span::call_site());
-            quote! { Some(#endpoint_literal.to_owned()) }
+            quote! {
+                ::core::option::Option::Some(
+                    <::std::string::String as ::core::convert::From<&::core::primitive::str>>::from(#endpoint_literal)
+                )
+            }
         },
     );
     let echo_stdout = config.echo_stdout.map_or_else(
-        || quote! { None },
-        |echo_stdout| quote! { Some(#echo_stdout) },
+        || quote! { ::core::option::Option::None },
+        |echo_stdout| quote! { ::core::option::Option::Some(#echo_stdout) },
     );
     quote! {
-        edgezero_core::manifest::ResolvedLoggingConfig {
+        ::edgezero_core::manifest::ResolvedLoggingConfig {
             echo_stdout: #echo_stdout,
             endpoint: #endpoint,
             level: #level,
@@ -190,26 +194,32 @@ fn logging_config_tokens(config: &ResolvedLoggingConfig) -> TokenStream2 {
     }
 }
 
-fn build_logging_tokens(manifest: &Manifest) -> TokenStream2 {
+pub(crate) fn build_logging_lookup(manifest: &Manifest, adapter: &Ident) -> TokenStream2 {
     let adapter_names = manifest
         .adapters
         .keys()
         .chain(manifest.logging.adapters.keys())
-        .map(|adapter| adapter.to_ascii_lowercase())
+        .map(|name| name.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
-    let arms = adapter_names.into_iter().map(|adapter| {
-        let adapter_lit = LitStr::new(&adapter, Span::call_site());
-        let config = logging_config_tokens(&manifest.logging_or_default(&adapter));
-        quote! {
-            if adapter.eq_ignore_ascii_case(#adapter_lit) {
-                return #config;
-            }
-        }
-    });
+    let mut lookup = quote! {
+        <::edgezero_core::manifest::ResolvedLoggingConfig as ::core::default::Default>::default()
+    };
+    for name in adapter_names.into_iter().rev() {
+        let adapter_lit = LitStr::new(&name, Span::call_site());
+        let config = logging_config_tokens(&manifest.logging_or_default(&name));
+        lookup = quote! {
+            if #adapter.eq_ignore_ascii_case(#adapter_lit) { #config } else { #lookup }
+        };
+    }
+    lookup
+}
+
+fn build_logging_tokens(manifest: &Manifest) -> TokenStream2 {
+    let adapter = Ident::new("adapter", Span::mixed_site());
+    let lookup = build_logging_lookup(manifest, &adapter);
     quote! {
-        fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
-            #(#arms)*
-            edgezero_core::manifest::ResolvedLoggingConfig::default()
+        fn logging_for(#adapter: &::core::primitive::str) -> ::edgezero_core::manifest::ResolvedLoggingConfig {
+            #lookup
         }
     }
 }
@@ -308,17 +318,8 @@ fn build_hooks_tokens(
 pub fn expand_app(input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(input as AppArgs);
 
-    let manifest_path = resolve_manifest_path(args.path.value());
-    let manifest_source = match fs::read_to_string(&manifest_path) {
-        Ok(source) => source,
-        Err(err) => {
-            let msg = format!("failed to read {}: {err}", manifest_path.display());
-            return quote!(compile_error!(#msg);).into();
-        }
-    };
-
-    let manifest = match parse_manifest(&manifest_source, &manifest_path) {
-        Ok(manifest) => manifest,
+    let (manifest_path, manifest) = match load_manifest(&args.path) {
+        Ok(loaded) => loaded,
         Err(msg) => return quote!(compile_error!(#msg);).into(),
     };
 
@@ -370,7 +371,7 @@ pub fn expand_app(input: TokenStream) -> TokenStream {
 
     let output = quote! {
         // Force a rebuild when the manifest file changes (include_bytes tracks it as a build input).
-        const _: &[u8] = include_bytes!(#manifest_path_lit);
+        const _: &[::core::primitive::u8] = ::core::include_bytes!(#manifest_path_lit);
 
         #hooks_tokens
 
@@ -385,6 +386,15 @@ pub fn expand_app(input: TokenStream) -> TokenStream {
     };
 
     output.into()
+}
+
+pub(crate) fn load_manifest(input_path: &LitStr) -> Result<(PathBuf, Manifest), String> {
+    let diagnostic_path = PathBuf::from(input_path.value());
+    let path = resolve_manifest_path(input_path.value());
+    let source = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", diagnostic_path.display()))?;
+    let manifest = parse_manifest(&source, &diagnostic_path)?;
+    Ok((path, manifest))
 }
 
 fn parse_manifest(source: &str, path: &Path) -> Result<Manifest, String> {

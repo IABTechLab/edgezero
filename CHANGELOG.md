@@ -34,6 +34,10 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Reject invalid effective Fastly logging endpoint names during manifest loading and
   `app!` expansion, with field-specific, value-free diagnostics. Preserve whole-section
   logging overrides and other adapters' endpoint formats.
+- Add `edgezero_core::logging_config!("edgezero.toml", adapter)` (#504) for
+  hand-written `Hooks`, sharing `app!`'s compile-time logging resolution without
+  runtime manifest parsing or generated routes. Logger ownership, filters and
+  runtime overrides are unchanged.
 - Deliver a bounded, redacted 500 when managed Fastly logging fails before a custom
   callback, suppress HEAD payloads and return the original typed setup error even if
   delivery fails. Report secondary delivery degradation without relying on that logger.

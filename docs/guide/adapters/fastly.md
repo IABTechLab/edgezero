@@ -275,6 +275,21 @@ field without echoing its value. A specified `[adapters.fastly.logging]` section
 replaces the whole global `[logging.fastly]` section, including when it specifies
 only a level. Host availability and other provider restrictions are checked at runtime.
 
+Inside a hand-written `Hooks` implementation, obtain the same compile-time logging
+metadata as `app!` without generating routes:
+
+```rust
+fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+    edgezero_core::logging_config!("edgezero.toml", adapter)
+}
+```
+
+The path is relative to the consuming crate's `CARGO_MANIFEST_DIR` (for example,
+`"../../edgezero.toml"` in scaffolded core crates). This lookup performs no runtime
+manifest I/O or parsing. It does not initialize a logger, configure filters, read
+runtime overrides or change `owns_logging`. Existing runner and application-owned
+logging responsibilities remain unchanged.
+
 Managed Fastly logging keeps the `edgezero::boot` target at `Warn` while ordinary records use
 the configured level. Both the SDK and facade allow boot warnings even at ordinary `Off`;
 raising the facade maximum alone is insufficient. `edgezero::boot` is a logical target, not a

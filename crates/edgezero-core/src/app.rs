@@ -682,7 +682,17 @@ pub trait Hooks {
     ///
     /// Macro-generated applications override this with the matching
     /// `[adapters.<name>.logging]` or `[logging.<name>]` configuration. A
-    /// handwritten implementation receives the portable defaults.
+    /// handwritten implementation receives the portable defaults unless it
+    /// delegates to [`crate::logging_config!`]:
+    ///
+    /// ```ignore
+    /// fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+    ///     edgezero_core::logging_config!("edgezero.toml", adapter)
+    /// }
+    /// ```
+    ///
+    /// The helper supplies compile-time metadata only; logger initialization,
+    /// ownership, filters and runtime overrides are unchanged.
     #[must_use]
     #[inline]
     fn logging_for(_adapter: &str) -> ResolvedLoggingConfig {
