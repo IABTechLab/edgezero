@@ -16,21 +16,21 @@ Trusted Server is the first consumer. Its shared identity graph already depends 
 
 ## Scope and requirements
 
-| ID | Requirement |
-| --- | --- |
-| R1 | Add record operations to the existing `KvStore` contract and a validated `RecordHandle` over the same provider and logical store. Preserve ordinary-only bindings. |
-| R2 | Declare an immutable application-owned key layout once before provider preparation. Preserve full logical keys. Resolve point operations through that layout and validate complete partition prefixes for record listing. |
-| R3 | Within a record binding, ordinary and record operations reach the same value. Every ordinary overwrite invalidates previous generations. Ordinary no-TTL put remains non-expiring. |
-| R4 | Supply generation-bearing lookup, Add, Overwrite, generation-match write, definitive precondition-failed outcome, strong exact existence, delete and resumable partition listing. |
-| R5 | Implement and run one contract suite on Fastly under Viceroy, `PersistentKvStore`, DynamoDB Local and a rebuilt matching celld service. |
-| R6 | DynamoDB uses distinct namespace-qualified partition-key values for distinct declared partitions. No namespace-wide item is updated on every record insert. |
-| R7 | Metadata is optional UTF-8 text. Missing and empty are equivalent; preserve nonempty text exactly. Bodies remain arbitrary bytes. |
-| R8 | Every record partition-list page uses the promised strong partition query. Pagination is live, not a frozen cross-page snapshot. Only absence of continuation establishes traversal completion. |
-| R9 | Report ambiguous mutation completion explicitly and do not automatically replay the mutation. The application owns reconciliation and conflict policy. |
-| R10 | Use documented provider TTL behavior. Do not add a common exact-deadline read/list guarantee or an expiry envelope. Expiry and physical cleanup are separate. |
-| R11 | Reject unsupported record bindings during initialization without a mutating probe. Missing capability, invalid layout, unavailable provider and runtime write failure are not interchangeable. |
-| R12 | Keep native SDK/runtime dependencies optional and out of core/WASM graphs. Extend existing DynamoDB Local and celld infrastructure rather than add Floci or another emulator framework. |
-| R13 | Retain ordinary arbitrary-prefix/global listing on the partitioned DynamoDB binding through paginated Scan, without an ordering guarantee. It is separate from strong partition listing. |
+| ID  | Requirement                                                                                                                                                                                                               |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R1  | Add record operations to the existing `KvStore` contract and a validated `RecordHandle` over the same provider and logical store. Preserve ordinary-only bindings.                                                        |
+| R2  | Declare an immutable application-owned key layout once before provider preparation. Preserve full logical keys. Resolve point operations through that layout and validate complete partition prefixes for record listing. |
+| R3  | Within a record binding, ordinary and record operations reach the same value. Every ordinary overwrite invalidates previous generations. Ordinary no-TTL put remains non-expiring.                                        |
+| R4  | Supply generation-bearing lookup, Add, Overwrite, generation-match write, definitive precondition-failed outcome, strong exact existence, delete and resumable partition listing.                                         |
+| R5  | Implement and run one contract suite on Fastly under Viceroy, `PersistentKvStore`, DynamoDB Local and a rebuilt matching celld service.                                                                                   |
+| R6  | DynamoDB uses distinct namespace-qualified partition-key values for distinct declared partitions. No namespace-wide item is updated on every record insert.                                                               |
+| R7  | Metadata is optional UTF-8 text. Missing and empty are equivalent; preserve nonempty text exactly. Bodies remain arbitrary bytes.                                                                                         |
+| R8  | Every record partition-list page uses the promised strong partition query. Pagination is live, not a frozen cross-page snapshot. Only absence of continuation establishes traversal completion.                           |
+| R9  | Report ambiguous mutation completion explicitly and do not automatically replay the mutation. The application owns reconciliation and conflict policy.                                                                    |
+| R10 | Use documented provider TTL behavior. Do not add a common exact-deadline read/list guarantee or an expiry envelope. Expiry and physical cleanup are separate.                                                             |
+| R11 | Reject unsupported record bindings during initialization without a mutating probe. Missing capability, invalid layout, unavailable provider and runtime write failure are not interchangeable.                            |
+| R12 | Keep native SDK/runtime dependencies optional and out of core/WASM graphs. Extend existing DynamoDB Local and celld infrastructure rather than add Floci or another emulator framework.                                   |
+| R13 | Retain ordinary arbitrary-prefix/global listing on the partitioned DynamoDB binding through paginated Scan, without an ordering guarantee. It is separate from strong partition listing.                                  |
 
 Out of scope: hosted AWS/IAM qualification, data migration implementation, production load certification, deployment, main merges, after-response work, new identity-provider policy, Cloudflare/Spin record implementations, and DynamoDB/celld execution on WASM. Existing unrelated acceptance obligations are not completed by this work.
 
@@ -228,41 +228,35 @@ Document required SDK operations and new format implications. No hosted AWS/IAM 
 
 ### celld on Axum
 
-Add an explicit record-capable binding mode. All its ordinary operations use the conditional-record dataset, including no-TTL puts. Existing ordinary-only `/value` bindings stay raw KV; do not mix the two datasets under one binding.
+The fork-based implementation described in the original draft is superseded by the [stock-service record design](2026-11-16-stock-celld-record-contract-design.md), following current #422.
 
-The companion service contribution must make the full current scoped-store/record implementation reviewable, not publish only a cursor patch against an unavailable base. Existing local source is `denoland/celld` branch `feat/scoped-store-cas` at `9350a043860c4f41dccb692ec9de98ebd9dac3ae`; no published PR/fork was verified during planning.
+Use the EdgeZero-owned Worker and SQLite Durable Object service on the official, unmodified celld release. Both ordinary and record operations use its existing `rows-v1` values and durable namespace allocator. The record capability is explicit and default-off; ordinary KV handles do not acquire it automatically. Do not restore the fork's raw/record split, `celld-config` or a custom server binary.
 
-The new record protocol must supply:
+The service supplies read-only capability preparation, atomic Add/Overwrite/CAS, UTF-8 metadata, real no-expiry writes, authoritative physical exact existence and complete scoped keyset pagination. Native expiry filtering for lookup/list is separate from physical presence and conditional writes. Keep generations across delete, sweep and restart.
 
-- A read-only capability/version handshake proving pagination and no-expiry support before publishing the binding.
-- Keyset continuation across record prefix, optional cursor, limit and relevant list mode, returning keys plus continuation.
-- Scope/prefix-bound cursor validation and authoritative end detection. Raw KV cursors are not record cursors.
-- An explicit non-expiring record representation for ordinary no-TTL writes. Do not invent a maximum TTL or put the value in raw KV instead.
-- Atomic preconditions/generation allocation for every record-mode overwrite, including ordinary puts.
+Use the existing mutation ledger and apply-before window to neutralize stock celld's internal resend without client retries. Store rejected conditional outcomes too. Validate the prepared store instance before effects, not only after receiving a reply.
 
-Draft format choice: a fresh versioned record format with nullable expiry, leaving the existing positive-expiry-only record table/protocol and raw KV data untouched. The new server must treat no expiry correctly in reads, Add/CAS checks, listing, sweeps and alarm scheduling. No automatic table/data migration is included. Older services must fail preparation for the new binding instead of silently downgrading.
+The DynamoDB no-namespace-wide mutation-item requirement does not impose a new celld allocator architecture. Keep one object per namespace and its documented throughput/takeover limits.
 
-celld's existing namespace-local transactional allocator can remain if it preserves generation lifetime. The no-namespace-wide DynamoDB mutation-item requirement does not impose an unrelated celld allocator redesign.
-
-Rebuild the server from the exact new source/lockfile and record source commit, tree, toolchain, build command and binary hash. Pin that rebuild into both EdgeZero and TS acceptance. The cached 0.6.2 binary and earlier receipts do not implement or prove the new protocol.
+Pin the official runtime version/digest and the matching EdgeZero service source revision in both SDK and TS acceptance. Old fork-based receipts remain historical and are not stock-service record proof.
 
 ## Acceptance and evidence
 
-| Proof | Required observation |
-| --- | --- |
-| Shared suite on all four providers | Exercise the public record handle, not only a provider-specific helper or in-memory double. |
-| Same-row coherence | Ordinary write appears in record lookup and vice versa; ordinary replacement/TTL-put invalidates prior CAS; delete is visible through both views. |
-| Conditional races | Independent writers racing Add or the same generation produce exactly one acknowledged winner. Do not substitute a single-process client mutex. |
-| Generation lifetime | Old generations fail after ordinary overwrite, deletion/recreation, expiry/recreation and restart. Allocation gaps, failure between allocation/value write and allocator exhaustion do not reuse markers. |
-| Strong absence | Stale lookup misses cannot override authoritative existence; prefix neighbours and multi-page exact-key checks do not yield false conclusions. |
-| Distributed DynamoDB keys | Different declared groups produce different PK values. No namespace-wide mutation allocator traffic. Query targets only the declared group. |
-| Pagination | Multiple pages, exact multiples, more than one provider page, empty/short continuation pages, expired rows, prefix neighbours, live changes and foreign/nonadvancing cursors. Stop only on no continuation; do not require alphabetical order. |
-| Global ordinary listing | Scan traverses values across multiple groups, supports arbitrary/empty prefixes, excludes other namespaces and allocator rows, and preserves continuation through filtered-only pages. In a quiescent store compare key sets for completeness/uniqueness. Reject Scan/Query cursor interchange. |
-| Metadata/body | Empty/missing normalization, exact nonempty multibyte text, actual provider byte limits, malformed UTF-8 rejection and binary body fidelity. |
-| No-expiry | Ordinary no-TTL replacement remains non-expiring through the record-capable provider, including celld restart/sweep. |
-| Ambiguous mutations | Lose a response after commit; report possible completion and observe no hidden replay. Definitive contention remains distinguishable. |
-| Initialization | Unsupported/old-protocol/layout-mismatched stores fail before accepting identity work, without a mutation probe or fallback. Ordinary-only bindings remain usable. |
-| Isolation | Required default-off and enabled native feature graphs, generated consumers and portable WASM checks pass without native dependencies in core. |
+| Proof                              | Required observation                                                                                                                                                                                                                                                                            |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shared suite on all four providers | Exercise the public record handle, not only a provider-specific helper or in-memory double.                                                                                                                                                                                                     |
+| Same-row coherence                 | Ordinary write appears in record lookup and vice versa; ordinary replacement/TTL-put invalidates prior CAS; delete is visible through both views.                                                                                                                                               |
+| Conditional races                  | Independent writers racing Add or the same generation produce exactly one acknowledged winner. Do not substitute a single-process client mutex.                                                                                                                                                 |
+| Generation lifetime                | Old generations fail after ordinary overwrite, deletion/recreation, expiry/recreation and restart. Allocation gaps, failure between allocation/value write and allocator exhaustion do not reuse markers.                                                                                       |
+| Strong absence                     | Stale lookup misses cannot override authoritative existence; prefix neighbours and multi-page exact-key checks do not yield false conclusions.                                                                                                                                                  |
+| Distributed DynamoDB keys          | Different declared groups produce different PK values. No namespace-wide mutation allocator traffic. Query targets only the declared group.                                                                                                                                                     |
+| Pagination                         | Multiple pages, exact multiples, more than one provider page, empty/short continuation pages, expired rows, prefix neighbours, live changes and foreign/nonadvancing cursors. Stop only on no continuation; do not require alphabetical order.                                                  |
+| Global ordinary listing            | Scan traverses values across multiple groups, supports arbitrary/empty prefixes, excludes other namespaces and allocator rows, and preserves continuation through filtered-only pages. In a quiescent store compare key sets for completeness/uniqueness. Reject Scan/Query cursor interchange. |
+| Metadata/body                      | Empty/missing normalization, exact nonempty multibyte text, actual provider byte limits, malformed UTF-8 rejection and binary body fidelity.                                                                                                                                                    |
+| No-expiry                          | Ordinary no-TTL replacement remains non-expiring through the record-capable provider, including celld restart/sweep.                                                                                                                                                                            |
+| Ambiguous mutations                | Lose a response after commit; report possible completion and observe no hidden replay. Definitive contention remains distinguishable.                                                                                                                                                           |
+| Initialization                     | Unsupported/old-protocol/layout-mismatched stores fail before accepting identity work, without a mutation probe or fallback. Ordinary-only bindings remain usable.                                                                                                                              |
+| Isolation                          | Required default-off and enabled native feature graphs, generated consumers and portable WASM checks pass without native dependencies in core.                                                                                                                                                  |
 
 Extend `scripts/run_native_aws_integration.mjs`, the matching celld runner, existing provider wire fixtures and Fastly/Viceroy contracts. Do not add another emulator stack. New test selectors must be nonzero and must not pass by skipping unavailable services.
 

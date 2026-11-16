@@ -434,6 +434,74 @@ mod tests {
     }
 
     #[test]
+    fn forwarded_declared_stream_length_reaches_sdk_fields() {
+        use bytes::Bytes;
+        use edgezero_core::{Body, OutboundRequest, http::request_builder};
+        use futures_util::stream;
+
+        let inbound = request_builder()
+            .method(Method::POST)
+            .header("content-length", "4096")
+            .body(Body::from_stream(stream::iter([Ok(Bytes::from(vec![
+                b'x';
+                4096
+            ]))])))
+            .unwrap();
+        let mut outbound =
+            OutboundRequest::from_request(inbound, "http://example.com/upload".parse().unwrap())
+                .unwrap();
+        normalize_for_dispatch(&mut outbound).unwrap();
+        let mut parts = outbound.into_parts();
+        assert!(parts.body.is_stream());
+        let fields = request_fields(&parts.method, &parts.body, &mut parts.headers).unwrap();
+        assert_eq!(fields.get("content-length"), vec![b"4096".to_vec()]);
+        assert!(fields.get("transfer-encoding").is_empty());
+    }
+
+    #[test]
+    fn observed_upload_length_mismatch_with_closed_sdk_peer_releases_source() {
+        use edgezero_adapter_spin::outbound::test_support::pump_request_body;
+        use edgezero_core::{Body, http::request_builder};
+        use futures_util::{FutureExt as _, StreamExt as _, stream};
+
+        for (declared, chunk) in [(1_u64, None), (4, Some(Bytes::from_static(b"large")))] {
+            let owner = Arc::new(());
+            let released = Arc::downgrade(&owner);
+            let source = stream::iter(chunk.into_iter().map(Ok)).map(move |item| {
+                assert_eq!(Arc::strong_count(&owner), 1);
+                item
+            });
+            let inbound = request_builder()
+                .method(Method::POST)
+                .header("content-length", declared)
+                .body(Body::from_stream(source))
+                .unwrap();
+            let request = OutboundRequest::from_request(
+                inbound,
+                "http://example.com/upload".parse().unwrap(),
+            )
+            .unwrap();
+            let start = MonotonicInstant::now();
+            let budget = dispatch_budget(&request, start, None).unwrap();
+            let time = preflight_time(MonotonicClock::new(move || start));
+            let (writer, reader, completion) = BodyWriter::new();
+            // No asynchronous component task runs in the command-style unit harness.
+            // Close the peer resources first; mismatch must still win before any write.
+            drop((reader, completion));
+            let error = pump_request_body(request.into_parts().body, 8, writer, budget, time)
+                .now_or_never()
+                .expect("observed mismatch must not wait for abort acknowledgment")
+                .unwrap_err();
+            assert!(matches!(error, EdgeError::BadRequest { .. }));
+            assert!(error.provider_failure_detail().is_none());
+            assert!(
+                released.upgrade().is_none(),
+                "failed upload source released"
+            );
+        }
+    }
+
+    #[test]
     fn sdk_request_options_execute_all_setters() {
         let options = RequestOptions::new();
         options
