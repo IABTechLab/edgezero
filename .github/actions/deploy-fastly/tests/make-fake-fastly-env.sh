@@ -47,6 +47,14 @@ JSON
           ("\$5" == --version=40 || "\$5" == --version=42) && "\$6" == --json ]] || exit 91
         target=\$(arg_value --version= "\$@") || exit 91
         if [[ "\$target" == 42 && -n "\${FAKE_FAIL_AFTER_VERSION:-}" && -s "\$FAKE_PACKAGE_DIGEST_FILE" ]]; then
+          # Another actor publishes the draft mid-deploy, which is often why
+          # the deploy then fails.
+          case "\${FAKE_OTHER_ACTOR_PUBLISHES:-}" in
+            '') ;;
+            production) printf '42\n' >"\$FAKE_ACTIVE_VERSION_FILE" ;;
+            staging) printf '42\n' >"\$FAKE_STAGED_VERSION_FILE" ;;
+            *) exit 91 ;;
+          esac
           echo 'simulated post-upload resource-link readback failure' >&2
           exit 77
         fi
