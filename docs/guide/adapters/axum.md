@@ -358,6 +358,21 @@ simple_logger::SimpleLogger::new()
 // Then call run_app::<App>() with owns_logging = true.
 ```
 
+Inside a hand-written `Hooks` implementation, obtain the same compile-time logging
+metadata as `app!` without generating routes:
+
+```rust
+fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+    edgezero_core::logging_config!("edgezero.toml", adapter)
+}
+```
+
+The path is relative to the consuming crate's `CARGO_MANIFEST_DIR` (for example,
+`"../../edgezero.toml"` in scaffolded core crates). This lookup performs no runtime
+manifest I/O or parsing. It does not initialize a logger, configure filters, read
+runtime overrides or change `owns_logging`. Existing runner and application-owned
+logging responsibilities remain unchanged.
+
 For custom bind addresses or store wiring, build an assembled application and pass it directly
 to `AxumDevServer::new(app)` or `AxumDevServer::with_config(app, config)`. These constructors no
 longer accept a router or rebuild default policies. All configured policies, state, clock, name

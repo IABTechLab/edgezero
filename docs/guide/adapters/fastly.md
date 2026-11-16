@@ -263,10 +263,32 @@ Fastly uses endpoint-based logging. Configure logging in `edgezero.toml`:
 
 ```toml
 [adapters.fastly.logging]
-endpoint = "stdout"
+endpoint = "app_log"
 level = "info"
 echo_stdout = true
 ```
+
+Use a provisioned Fastly endpoint name; `echo_stdout` independently enables stdout.
+Manifest loading and `app!` expansion reject empty names, LF, colon and the exact
+reserved names `stdout` and `stderr`. Diagnostics identify the effective manifest
+field without echoing its value. A specified `[adapters.fastly.logging]` section
+replaces the whole global `[logging.fastly]` section, including when it specifies
+only a level. Host availability and other provider restrictions are checked at runtime.
+
+Inside a hand-written `Hooks` implementation, obtain the same compile-time logging
+metadata as `app!` without generating routes:
+
+```rust
+fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+    edgezero_core::logging_config!("edgezero.toml", adapter)
+}
+```
+
+The path is relative to the consuming crate's `CARGO_MANIFEST_DIR` (for example,
+`"../../edgezero.toml"` in scaffolded core crates). This lookup performs no runtime
+manifest I/O or parsing. It does not initialize a logger, configure filters, read
+runtime overrides or change `owns_logging`. Existing runner and application-owned
+logging responsibilities remain unchanged.
 
 Managed Fastly logging keeps the `edgezero::boot` target at `Warn` while ordinary records use
 the configured level. Both the SDK and facade allow boot warnings even at ordinary `Off`;
@@ -278,6 +300,15 @@ assembly or the custom callback. Log lines contain timestamp, level, target and 
 Repeated identical setup succeeds without reinstalling. A changed endpoint, level or stdout
 policy returns `ManagedLoggerError::ConfigurationChanged` without changing the installed filters.
 Foreign loggers return `AlreadyInstalled`; use `owns_logging = true` to own installation.
+
+If managed setup fails before a `serve_custom` or `run_custom` callback, EdgeZero
+attempts one canonical, redacted JSON 500 through its app-free assembly-error egress
+path. HEAD transmits no payload. The response uses the finite default write budget,
+not application hooks or synthesized headers, and the callback does not run.
+The original `ManagedLoggerError` still terminates serving, including if delivery
+fails. Secondary delivery failure or degraded fallback is reported with bounded,
+category-only stderr diagnostics that do not depend on the failed logger.
+This does not turn synchronous host calls into interruptible operations.
 
 ### Runtime Level Overrides And Local Debugging
 
@@ -462,10 +493,13 @@ export CARGO_TARGET_WASM32_WASIP1_RUNNER="viceroy run"
 cargo test -p edgezero-adapter-fastly --features fastly --target wasm32-wasip1 --test contract
 ```
 
-This installs the stock reference runtime. The bounded-readiness and subsequent-read legs instead
+This installs the stock reference runtime. The bounded-readiness, subsequent-read and native
+backend timeout setter/getter readback legs instead
 require the explicitly selected, hash-verified [tracked Viceroy repair](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/patches/viceroy/README.md).
 Select that binary through `CARGO_TARGET_WASM32_WASIP1_RUNNER` and the harness's `VICEROY_BIN`;
-do not cite stock 0.21.0 as bounded-read evidence. This local selection does not change installed
+do not cite stock 0.21.0 as bounded-read or timeout-readback evidence. The SDK readback assertions
+are intentional: the tracked repair implements those hostcalls, while stock 0.21.0 does not.
+The shared version string alone cannot identify the repaired binary. This local selection does not change installed
 runtime pins or establish hosted Fastly guarantees.
 
 Fastly SDK-linked Wasm binaries require Viceroy for execution; plain Wasmtime
@@ -614,8 +648,10 @@ commit the head once through the raw Fastly ABI, account accepted body bytes, an
 abandon the body handle exactly once. A native response constructed directly by
 your callback, such as a health reply, must instead be explicitly sent there;
 manual native streams must be pumped, flushed, and finished before returning.
-The lifecycle wrapper never supplies an extra response. Returning `Err` terminates
-serving without a synthetic send, even after commitment. Return `Ok(())` only when
+Once the callback starts, the lifecycle wrapper never supplies an extra response.
+Returning `Err` terminates serving without a synthetic send, even after commitment
+and even when the callback returns a `ManagedLoggerError`. Only managed logging
+failure before callback entry uses the bounded rejection described above. Return `Ok(())` only when
 your policy permits continued serving after cleanup. Complete pending backend and
 post-send operations before returning. Do not cache native store handles with the app.
 
@@ -634,6 +670,8 @@ calls the adapter's closed send helper. The serving wrapper passes only the
 terminal `Result<(), E>` to the SDK without a synthetic response. Applications
 own setup, state, refresh policy, hooks, and post-send work. There is no
 response-returning conversion or whole-body compatibility path.
+Managed logging failure before callback entry is the framework-owned exception:
+the wrapper attempts the canonical 500 and returns the original setup error.
 
 Follow this order inside a callback:
 

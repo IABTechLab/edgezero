@@ -153,7 +153,8 @@ mod sdk {
             }
             let method = match path.as_str() {
                 "/get" | "/get-settled" | "/p5" | "/policy" | "/normalization"
-                | "/batch-recovery" | "/marker" => Method::GET,
+                | "/batch-recovery" | "/marker" | "/trailers-native" | "/trailers-buffered"
+                | "/trailers-streamed" => Method::GET,
                 "/head" | "/head-settled" => Method::HEAD,
                 "/post" => Method::POST,
                 _ => return Err(ErrorCode::HttpRequestUriInvalid),
@@ -179,6 +180,49 @@ mod sdk {
             }
             if path == "/normalization" {
                 return normalization_exchange(uri, &headers).await;
+            }
+            if path == "/trailers-native" {
+                let time = edgezero_adapter_spin::outbound::test_support::native_time(
+                    edgezero_core::MonotonicClock::default(),
+                );
+                let portable = OutboundRequest::new(Method::GET, uri.clone())
+                    .map_err(|_| ErrorCode::HttpRequestUriInvalid)?
+                    .timeout(Duration::from_secs(3));
+                let mut previous = time.clock().now();
+                let budget = edgezero_core::time::dispatch_budget(&portable, previous, None)
+                    .map_err(|_| ErrorCode::HttpRequestUriInvalid)?;
+                let report = edgezero_adapter_spin::outbound::test_support::race_deadline(
+                    native_trailer_report(uri),
+                    budget,
+                    &time,
+                    &mut previous,
+                    |_| None,
+                )
+                .await
+                .map_err(|_| ErrorCode::ConnectionReadTimeout)??;
+                return report.to_string().into_response();
+            }
+            if matches!(path.as_str(), "/trailers-buffered" | "/trailers-streamed") {
+                let limit = headers
+                    .get("x-trailer-limit")
+                    .first()
+                    .and_then(|value| from_utf8(value).ok())
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .filter(|value| *value <= 4096)
+                    .ok_or(ErrorCode::HttpRequestUriInvalid)?;
+                let request = OutboundRequest::new(Method::GET, uri)
+                    .map_err(|_| ErrorCode::HttpRequestUriInvalid)?
+                    .timeout(Duration::from_secs(3))
+                    .proxy_marker(edgezero_core::OutboundProxyMarker::Off);
+                let request = if path == "/trailers-streamed" {
+                    request.stream_response().max_response_header_bytes(limit)
+                } else {
+                    request.max_response_header_count(limit)
+                };
+                return response_policy_report(request)
+                    .await?
+                    .to_string()
+                    .into_response();
             }
             if path == "/marker" {
                 let field = |name: &str| -> Result<String, ErrorCode> {
@@ -446,6 +490,67 @@ mod sdk {
         json!({"case":case,"request":configuration,"report":response_policy_report(request).await?})
             .to_string()
             .into_response()
+    }
+
+    async fn native_trailer_report(uri: Uri) -> Result<Value, ErrorCode> {
+        use futures_util::future::join;
+        use spin_sdk::wasip3::http::types::{Method as NativeMethod, Scheme};
+        use spin_sdk::wasip3::wit_bindgen::StreamResult;
+
+        let (complete, trailers) = wit_future::new(|| Ok(None));
+        drop(complete);
+        let (request, done) = Request::new(Fields::new(), None, trailers, None);
+        request
+            .set_method(&NativeMethod::Get)
+            .map_err(|_| ErrorCode::HttpProtocolError)?;
+        request
+            .set_scheme(Some(&Scheme::Http))
+            .map_err(|_| ErrorCode::HttpProtocolError)?;
+        request
+            .set_authority(uri.authority().map(|authority| authority.as_str()))
+            .map_err(|_| ErrorCode::HttpProtocolError)?;
+        request
+            .set_path_with_query(uri.path_and_query().map(|path| path.as_str()))
+            .map_err(|_| ErrorCode::HttpProtocolError)?;
+        let (response, finished) =
+            join(http::client::send(request), async move { done.await }).await;
+        finished?;
+        let response = response?;
+        let fields = response.get_headers().copy_all();
+        let head_count = fields.len();
+        let head_bytes = fields
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum::<usize>();
+        let (completion, caller_result) = wit_future::new(|| Err(ErrorCode::HttpProtocolError));
+        let (mut body, trailers) = Response::consume_body(response, caller_result);
+        let mut payload = Vec::new();
+        loop {
+            let (state, chunk) = body.read(Vec::with_capacity(16)).await;
+            payload.extend_from_slice(&chunk);
+            if payload.len() > 16 {
+                return Err(ErrorCode::HttpProtocolError);
+            }
+            if matches!(state, StreamResult::Dropped) {
+                break;
+            }
+        }
+        let fields = trailers
+            .await?
+            .map(|fields| fields.copy_all())
+            .unwrap_or_default();
+        let trailer_bytes = fields
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum::<usize>();
+        completion
+            .write(Ok(()))
+            .await
+            .map_err(|_| ErrorCode::HttpProtocolError)?;
+        Ok(
+            json!({"head_count":head_count,"head_bytes":head_bytes,"trailer_count":fields.len(),
+            "trailer_bytes":trailer_bytes,"trailers":fields,"bytes":payload,"qualification":false}),
+        )
     }
 
     async fn response_policy_report(request: OutboundRequest) -> Result<Value, ErrorCode> {
