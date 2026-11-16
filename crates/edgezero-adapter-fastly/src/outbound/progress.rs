@@ -136,8 +136,8 @@ impl<T: Transport> Phase<T> {
 struct Slot<T: Transport> {
     budget: DispatchBudget,
     clock: MonotonicClock,
-    expired: bool,
     exchange_failure: Option<OutboundExchangeFailure>,
+    expired: bool,
     phase: Phase<T>,
     previous: MonotonicInstant,
     waker: Option<Waker>,
@@ -419,8 +419,8 @@ impl<T: Transport + 'static> Progress<T> {
         state.slots.push(Some(Slot {
             budget,
             clock: self.clock.clone(),
-            expired: false,
             exchange_failure: Some(self.exchange_failure.clone().unwrap_or_default()),
+            expired: false,
             phase,
             previous: self.entered,
             waker: None,
@@ -1154,8 +1154,8 @@ mod tests {
         reads: Vec<u32>,
         source_error: bool,
         spurious_heads: usize,
-        terminal_heads: Vec<(u32, MonotonicInstant)>,
         terminal_bodies: Vec<(u32, MonotonicInstant)>,
+        terminal_heads: Vec<(u32, MonotonicInstant)>,
         waits: Vec<u32>,
     }
     struct TestTransport {
