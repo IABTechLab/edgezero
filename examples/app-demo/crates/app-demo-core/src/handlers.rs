@@ -244,9 +244,9 @@ pub async fn follow_demo(RequestContext(ctx): RequestContext) -> Result<Response
     let base = ctx
         .variable("API_BASE_URL")
         .unwrap_or_else(|| DEFAULT_PROXY_BASE.to_owned());
-    let allowed = base
-        .parse::<Uri>()
-        .map_err(|_error| EdgeError::bad_request("invalid follow base URI"))?;
+    let allowed = base.parse::<Uri>().map_err(|_error| {
+        EdgeError::internal(IoError::other("invalid configured outbound base URI"))
+    })?;
     let target = build_proxy_target(&base, "redirect/1", &Uri::from_static("/follow"))?;
     if !follow_target_allowed(&allowed, &target) {
         return follow_denied_response();
@@ -388,6 +388,9 @@ fn outbound_policy(request: OutboundRequest) -> OutboundRequest {
 }
 
 fn build_proxy_target(base: &str, rest: &str, original_uri: &Uri) -> Result<Uri, EdgeError> {
+    base.parse::<Uri>().map_err(|_error| {
+        EdgeError::internal(IoError::other("invalid configured outbound base URI"))
+    })?;
     let mut target = base.trim_end_matches('/').to_owned();
     let trimmed_rest = rest.trim_start_matches('/');
     if !trimmed_rest.is_empty() {
@@ -404,7 +407,7 @@ fn build_proxy_target(base: &str, rest: &str, original_uri: &Uri) -> Result<Uri,
 
     target
         .parse::<Uri>()
-        .map_err(|err| EdgeError::bad_request(format!("invalid proxy target URI: {err}")))
+        .map_err(|_error| EdgeError::bad_request("invalid proxy target URI"))
 }
 
 fn proxy_not_available_response() -> Result<Response, EdgeError> {
@@ -628,6 +631,9 @@ mod tests {
         OutboundSendMode, OutboundTime, ResponseMode,
     };
     use edgezero_core::params::PathParams;
+    use edgezero_core::record_store::{
+        Record, RecordBinding, RecordPage, RecordPartition, RecordWrite, RecordWriteOutcome,
+    };
     use edgezero_core::response::IntoResponse as _;
     use edgezero_core::response_egress_framing::ResponseEgressFramingMode;
     use edgezero_core::secret_store::{InMemorySecretStore, SecretHandle};
@@ -928,6 +934,62 @@ mod tests {
             self.data.lock().unwrap().insert(key.to_owned(), value);
             Ok(())
         }
+
+        fn record_binding(&self) -> Option<RecordBinding> {
+            None
+        }
+
+        async fn record_delete(
+            &self,
+            _key: &str,
+            _partition: &RecordPartition,
+        ) -> Result<(), KvError> {
+            Err(KvError::Unsupported {
+                operation: "record_delete".to_owned(),
+            })
+        }
+
+        async fn record_exists_strong(
+            &self,
+            _key: &str,
+            _partition: &RecordPartition,
+        ) -> Result<bool, KvError> {
+            Err(KvError::Unsupported {
+                operation: "record_exists_strong".to_owned(),
+            })
+        }
+
+        async fn record_insert(
+            &self,
+            _key: &str,
+            _partition: &RecordPartition,
+            _write: RecordWrite<'_>,
+        ) -> Result<RecordWriteOutcome, KvError> {
+            Err(KvError::Unsupported {
+                operation: "record_insert".to_owned(),
+            })
+        }
+
+        async fn record_list_partition(
+            &self,
+            _partition: &RecordPartition,
+            _cursor: Option<&str>,
+            _limit: usize,
+        ) -> Result<RecordPage, KvError> {
+            Err(KvError::Unsupported {
+                operation: "record_list_partition".to_owned(),
+            })
+        }
+
+        async fn record_lookup(
+            &self,
+            _key: &str,
+            _partition: &RecordPartition,
+        ) -> Result<Option<Record>, KvError> {
+            Err(KvError::Unsupported {
+                operation: "record_lookup".to_owned(),
+            })
+        }
     }
 
     impl OutboundHttpClient for TestOutboundClient {
@@ -1215,6 +1277,17 @@ mod tests {
     }
 
     #[test]
+    fn malformed_configured_follow_base_is_a_redacted_server_error_without_dispatch() {
+        let scripted = TestOutboundClient::default();
+        let requests = Arc::clone(&scripted.follow_requests);
+        let response = run_follow_demo(scripted, "https://[configuration-token");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response.into_body().into_bytes().expect("buffered");
+        assert!(!String::from_utf8_lossy(&body).contains("configuration-token"));
+        assert!(requests.lock().expect("requests").is_empty());
+    }
+
+    #[test]
     fn follow_demo_stops_after_four_redirects() {
         let scripted = TestOutboundClient {
             redirect_location: Some("/redirect/1"),
@@ -1368,6 +1441,22 @@ mod tests {
             target.to_string(),
             "https://example.com/api/status/200?foo=bar"
         );
+    }
+
+    #[test]
+    fn target_builder_distinguishes_invalid_configuration_from_invalid_caller_paths() {
+        let original = Uri::from_static("/proxy");
+        let base_error = build_proxy_target("https://[configuration-token", "ok", &original)
+            .expect_err("invalid config");
+        assert_eq!(base_error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let caller_error = build_proxy_target(
+            "https://example.test",
+            "invalid caller-token path",
+            &original,
+        )
+        .expect_err("invalid suffix");
+        assert_eq!(caller_error.status(), StatusCode::BAD_REQUEST);
+        assert!(!caller_error.message().contains("caller-token"));
     }
 
     #[test]

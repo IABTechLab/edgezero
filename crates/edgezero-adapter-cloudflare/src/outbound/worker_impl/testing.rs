@@ -193,6 +193,7 @@ pub(super) async fn finish_fixture_stream(
             context,
             OutboundExchangeOwner::new(|| {}),
         )
+        .map(|head| head.with_body_checkpoint(|| Box::pin(HostEventYield::new())))
     })?;
     client
         .send(OutboundRequest::from_parts(parts)?)

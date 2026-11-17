@@ -12,6 +12,31 @@
 
 ## Status and Authority
 
+### Four-Finding Repair Checkpoint (2026-11-16)
+
+The requester approved the four inline findings in review `5925848646`, including the minimal
+shared-finalizer host-event attachment. This is a scoped implementation repair, not a reopened
+transport, compatibility path, timing relaxation or capability promotion.
+
+- [x] Reproduce missing cancellation wakes during unwinding, then retain a wake-on-drop guard
+      after every cleanup payload. The 33 scope tests pass with exactly-once wake/release checks.
+- [x] Complete Fastly's cross-driver body-error repair for every buffered entrypoint. AG approved
+      the shared-core receipt; the private duplicate is removed. Plain Send's 5 ms failure /
+      150 ms collection regression fails with a timeout before the fix and preserves the original
+      error after it. All 341 Fastly WASM library tests pass, including Begin/Batch controls
+      and invalid receipt-time rejection before outer-race entry.
+- [x] Reproduce count-only persisted redirect acceptance, then reuse the ordered matrix replay
+      for every adapter. All 20 persisted-artifact regressions pass.
+- [x] Reproduce five Cloudflare frozen-clock terminal failures, then attach one real host-event
+      factory to the shared finalizer. The 140 Cloudflare WASM tests and 50 core finalizer tests
+      pass, including decoded/empty quotas, timer faults, clock regression and cancellation.
+- [ ] Finish current-tree full-suite, formatting, strict lint, target, documentation and final
+      independent source verification; publish fixing commits and replies in each original thread.
+
+The detached REVIEWER baseline at `b65e7144` passed the complete prescribed suite and lint/docs
+checks. Those results do not qualify the changed tree or close its four findings. Existing
+independent change requests and manual hosted/parity gates remain open.
+
 The current repair replaces recurring Workers response-egress abort polling with an owned
 listener inside the existing operation race. See the
 [event-driven cancellation checkpoint](../../audits/2026-11-04-native-timing-and-disconnect.md#event-driven-response-cancellation-2026-11-06).
