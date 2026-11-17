@@ -377,7 +377,7 @@ fn configured_kv(
 ) -> Result<NativeGeoSelection, NativeGeoConfigError> {
     #[cfg(not(feature = "geo-kv"))]
     {
-        let _ = (env, manifest);
+        let _: (&EnvConfig, Option<&ManifestAdapterGeo>) = (env, manifest);
         Err(NativeGeoConfigError::UnavailableKv)
     }
     #[cfg(feature = "geo-kv")]
@@ -439,6 +439,14 @@ impl NativeGeoPlan {
         }
     }
 
+    #[cfg_attr(
+        not(feature = "geo-kv"),
+        expect(
+            clippy::unnecessary_wraps,
+            clippy::unused_self,
+            reason = "share the runner's preparation path while compiled-out Geo needs no KV limit"
+        )
+    )]
     pub(crate) fn max_object_bytes(
         &self,
         sources: Option<&NativeSourcePlan>,
@@ -477,6 +485,14 @@ impl NativeGeoPlan {
         Ok(0)
     }
 
+    #[cfg_attr(
+        not(feature = "geo-kv"),
+        expect(
+            clippy::unused_async,
+            clippy::unused_async_trait_impl,
+            reason = "only the optional KV provider awaits preparation"
+        )
+    )]
     pub(crate) async fn prepare(
         self,
         stores: Option<&KvRegistry>,
@@ -566,6 +582,14 @@ impl NativeGeo {
         }
     }
 
+    #[cfg_attr(
+        not(feature = "geo-kv"),
+        expect(
+            clippy::unused_async,
+            clippy::unused_async_trait_impl,
+            reason = "only the optional KV provider awaits request I/O"
+        )
+    )]
     pub(crate) async fn resolve_request(
         &self,
         peer: Option<SocketAddr>,

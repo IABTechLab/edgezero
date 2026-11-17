@@ -45,7 +45,7 @@ with policy fields fails to load.
 
 ## Serve a CSV-backed KV index
 
-1. Build and publish an artifact with the [standalone Geo tool](../../examples/geo-kv-prototype/README.md).
+1. Build and publish an artifact with the [standalone Geo tool](https://github.com/IABTechLab/edgezero/tree/main/examples/geo-kv-prototype#readme).
    Use the publisher's credential for writes. Verify the entire generation and sampled CSV
    results from the serving path before choosing a pin. The tool does not provision a store.
 2. Compile with `geo-kv` plus the feature for your ordinary KV binding, such as `celld-kv`
