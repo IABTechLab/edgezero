@@ -365,13 +365,6 @@ fn progress_feature(name: &str, suite: &str) -> &'static str {
     }
 }
 
-fn capture_command(command: &mut Command, run: &Path, name: &str) -> Result<Vec<u8>> {
-    let stdout = run.join(format!("{name}.stdout"));
-    let diagnostics = run.join(format!("{name}.stderr"));
-    Process::spawn_with_stdout(command, &diagnostics, &stdout)?.wait_success()?;
-    Ok(fs::read(stdout)?)
-}
-
 pub(super) fn build(
     name: &str,
     run: &Path,
