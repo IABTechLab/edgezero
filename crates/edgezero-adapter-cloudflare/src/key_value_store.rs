@@ -11,6 +11,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use edgezero_core::key_value_store::{KvError, KvPage, KvStore, KvStoreOpenFailure};
 use edgezero_core::logging::BOOT_LOG_TARGET;
+use edgezero_core::record_store::{
+    Record, RecordBinding, RecordPage, RecordPartition, RecordWrite, RecordWriteOutcome,
+};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
@@ -167,6 +170,64 @@ impl KvStore for CloudflareKvStore {
             .execute()
             .await
             .map_err(|err| KvError::Internal(anyhow::anyhow!("put with ttl execute failed: {err}")))
+    }
+
+    #[inline]
+    fn record_binding(&self) -> Option<RecordBinding> {
+        None
+    }
+
+    #[inline]
+    async fn record_delete(&self, _key: &str, _partition: &RecordPartition) -> Result<(), KvError> {
+        Err(KvError::Unsupported {
+            operation: "record_delete".to_owned(),
+        })
+    }
+
+    #[inline]
+    async fn record_exists_strong(
+        &self,
+        _key: &str,
+        _partition: &RecordPartition,
+    ) -> Result<bool, KvError> {
+        Err(KvError::Unsupported {
+            operation: "record_exists_strong".to_owned(),
+        })
+    }
+
+    #[inline]
+    async fn record_insert(
+        &self,
+        _key: &str,
+        _partition: &RecordPartition,
+        _write: RecordWrite<'_>,
+    ) -> Result<RecordWriteOutcome, KvError> {
+        Err(KvError::Unsupported {
+            operation: "record_insert".to_owned(),
+        })
+    }
+
+    #[inline]
+    async fn record_list_partition(
+        &self,
+        _partition: &RecordPartition,
+        _cursor: Option<&str>,
+        _limit: usize,
+    ) -> Result<RecordPage, KvError> {
+        Err(KvError::Unsupported {
+            operation: "record_list_partition".to_owned(),
+        })
+    }
+
+    #[inline]
+    async fn record_lookup(
+        &self,
+        _key: &str,
+        _partition: &RecordPartition,
+    ) -> Result<Option<Record>, KvError> {
+        Err(KvError::Unsupported {
+            operation: "record_lookup".to_owned(),
+        })
     }
 }
 
