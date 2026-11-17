@@ -1009,7 +1009,7 @@ async fn geo_observation(mut ctx: RequestContext) -> Result<Response, EdgeError>
     #[cfg(feature = "geo-kv")]
     let kv_reads = geo_artifact::READS.load(Ordering::Relaxed);
     #[cfg(not(feature = "geo-kv"))]
-    let kv_reads = 0;
+    let kv_reads = 0_usize;
     json_response(&json!({
         "geo": geo_json(ctx.geo()),
         "kv_reads": kv_reads,
@@ -1164,12 +1164,9 @@ fn run_explicit_initializer_fixture() -> anyhow::Result<()> {
     clippy::panic_in_result_fn,
     reason = "test-only executable asserts initializer ownership and call counts"
 )]
-#[cfg_attr(
-    feature = "geo-kv",
-    expect(
-        clippy::too_many_lines,
-        reason = "entrypoint dispatches independent fixture scenarios"
-    )
+#[expect(
+    clippy::too_many_lines,
+    reason = "entrypoint dispatches independent fixture scenarios"
 )]
 fn main() -> anyhow::Result<()> {
     let selected = mode();
