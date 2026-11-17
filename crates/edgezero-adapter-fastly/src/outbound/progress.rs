@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::mem::take;
+use std::mem::{swap, take};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -414,9 +414,13 @@ impl<T: Transport + 'static> Progress<T> {
 
     fn register(&self, budget: DispatchBudget, phase: Phase<T>) -> Lease<T> {
         let mut state = self.state.borrow_mut();
-        let index = state.slots.len();
-        // An operation registers each head/body once. Never reuse an index while a lease can live.
-        state.slots.push(Some(Slot {
+        let index = state
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or(state.slots.len());
+        // Only Lease::drop relinquishes an index; live leases never move or alias a new slot.
+        let slot = Some(Slot {
             budget,
             clock: self.clock.clone(),
             exchange_failure: Some(self.exchange_failure.clone().unwrap_or_default()),
@@ -424,7 +428,12 @@ impl<T: Transport + 'static> Progress<T> {
             phase,
             previous: self.entered,
             waker: None,
-        }));
+        });
+        if let Some(vacant) = state.slots.get_mut(index) {
+            *vacant = slot;
+        } else {
+            state.slots.push(slot);
+        }
         Lease {
             index,
             progress: self.clone(),
@@ -516,35 +525,8 @@ impl<T: Transport> Drop for TimerLease<T> {
 
 impl<T: Transport + 'static> Lease<T> {
     fn poll_body(&self, cx: &mut Context<'_>) -> Poll<Result<Bytes, EdgeError>> {
-        let mut state = self.progress.state.borrow_mut();
-        let slot = state
-            .slots
-            .get_mut(self.index)
-            .and_then(Option::as_mut)
-            .ok_or_else(missing_slot)?;
-        if let Some(error) = slot
-            .exchange_failure
-            .as_ref()
-            .and_then(OutboundExchangeFailure::take)
-        {
-            return Poll::Ready(Err(error));
-        }
-        let Phase::Body {
-            next, requested, ..
-        } = &mut slot.phase
-        else {
-            return Poll::Ready(Err(missing_slot()));
-        };
-        if let Some(result) = next.take() {
-            return Poll::Ready(result);
-        }
-        *requested = true;
-        slot.waker = Some(cx.waker().clone());
-        Poll::Pending
-    }
-
-    pub(super) async fn receive(self) -> Result<T::Head, EdgeError> {
-        poll_fn(|cx| {
+        let mut replacement = Some(cx.waker().clone());
+        let observation = {
             let mut state = self.progress.state.borrow_mut();
             let slot = state
                 .slots
@@ -558,14 +540,53 @@ impl<T: Transport + 'static> Lease<T> {
             {
                 return Poll::Ready(Err(error));
             }
-            match &mut slot.phase {
-                Phase::HeadReady(result) => Poll::Ready(result.take().ok_or_else(missing_slot)?),
-                Phase::Head(_) => {
-                    slot.waker = Some(cx.waker().clone());
-                    Poll::Pending
-                }
-                Phase::Body { .. } => Poll::Ready(Err(missing_slot())),
+            let Phase::Body {
+                next, requested, ..
+            } = &mut slot.phase
+            else {
+                return Poll::Ready(Err(missing_slot()));
+            };
+            if let Some(result) = next.take() {
+                return Poll::Ready(result);
             }
+            *requested = true;
+            swap(&mut slot.waker, &mut replacement);
+            Poll::Pending
+        };
+        drop(replacement);
+        observation
+    }
+
+    pub(super) async fn receive(self) -> Result<T::Head, EdgeError> {
+        poll_fn(|cx| {
+            let mut replacement = Some(cx.waker().clone());
+            let observation = {
+                let mut state = self.progress.state.borrow_mut();
+                let slot = state
+                    .slots
+                    .get_mut(self.index)
+                    .and_then(Option::as_mut)
+                    .ok_or_else(missing_slot)?;
+                if let Some(error) = slot
+                    .exchange_failure
+                    .as_ref()
+                    .and_then(OutboundExchangeFailure::take)
+                {
+                    return Poll::Ready(Err(error));
+                }
+                match &mut slot.phase {
+                    Phase::HeadReady(result) => {
+                        Poll::Ready(result.take().ok_or_else(missing_slot)?)
+                    }
+                    Phase::Head(_) => {
+                        swap(&mut slot.waker, &mut replacement);
+                        Poll::Pending
+                    }
+                    Phase::Body { .. } => Poll::Ready(Err(missing_slot())),
+                }
+            };
+            drop(replacement);
+            observation
         })
         .await
     }
@@ -1114,6 +1135,7 @@ mod tests {
     use std::io::ErrorKind;
     use std::iter::repeat_with;
     use std::pin::Pin;
+    use std::ptr;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::task::Wake;
@@ -1183,11 +1205,30 @@ mod tests {
 
     std::thread_local! {
         static CANCEL_TIMER: RefCell<Option<OutboundFuture<()>>> = const { RefCell::new(None) };
+        static WAKER_ACTION: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
         #[cfg(feature = "fastly")]
         static SEND_FIXTURE: RefCell<Option<SendFixture>> = const { RefCell::new(None) };
     }
 
     struct CancelTimer;
+
+    struct ReentrantWake;
+
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for ReentrantWake {
+        fn drop(&mut self) {
+            run_waker_action();
+        }
+    }
+
+    impl Wake for ReentrantWake {
+        fn wake(self: Arc<Self>) {
+            Self::wake_by_ref(&self);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            run_waker_action();
+        }
+    }
 
     #[expect(
         clippy::missing_trait_methods,
@@ -1295,6 +1336,174 @@ mod tests {
             }
             Ok(selected)
         }
+    }
+
+    fn run_waker_action() {
+        let action = WAKER_ACTION.with(|stored| stored.borrow_mut().take());
+        if let Some(callback) = action {
+            callback();
+        }
+    }
+
+    #[expect(
+        unsafe_code,
+        reason = "Test-only data-free RawWaker exercises reentrant clone callbacks"
+    )]
+    fn reentrant_clone_waker() -> Waker {
+        use std::task::{RawWaker, RawWakerVTable};
+
+        fn clone_waker(data: *const ()) -> RawWaker {
+            run_waker_action();
+            RawWaker::new(data, &TABLE)
+        }
+        fn ignore(_data: *const ()) {}
+        static TABLE: RawWakerVTable = RawWakerVTable::new(clone_waker, ignore, ignore, ignore);
+
+        // SAFETY: no pointer is dereferenced or owned; clones carry only this static vtable.
+        unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &TABLE)) }
+    }
+
+    #[test]
+    fn head_and_body_waker_replacement_can_cancel_siblings_reentrantly() {
+        for body in [false, true] {
+            for on_clone in [false, true] {
+                let (progress, _, now) = fixture();
+                let released = Rc::new(Cell::new(0));
+                let budget = budget(&now, 100, BudgetSource::PerCallTimeout);
+                let sibling = progress.head(handle(0, 0, false, &released), budget);
+                let lease = if body {
+                    progress.register(
+                        budget,
+                        Phase::Body {
+                            handle: Some(handle(0, 0, false, &released)),
+                            next: None,
+                            requested: false,
+                        },
+                    )
+                } else {
+                    progress.head(handle(0, 0, false, &released), budget)
+                };
+                let mut source: OutboundFuture<Bytes> = if body {
+                    Box::pin(poll_fn(move |cx| lease.poll_body(cx)))
+                } else {
+                    Box::pin(async move { lease.receive().await.map(|_| Bytes::new()) })
+                };
+                let first = Waker::from(Arc::new(ReentrantWake));
+                assert!(
+                    source
+                        .as_mut()
+                        .poll(&mut Context::from_waker(&first))
+                        .is_pending()
+                );
+                drop(first);
+                WAKER_ACTION.with(|stored| stored.replace(Some(Box::new(move || drop(sibling)))));
+                let replacement = if on_clone {
+                    reentrant_clone_waker()
+                } else {
+                    Waker::noop().clone()
+                };
+                assert!(
+                    source
+                        .as_mut()
+                        .poll(&mut Context::from_waker(&replacement))
+                        .is_pending()
+                );
+                assert_eq!(released.get(), 1, "waker callback released the sibling");
+                assert!(WAKER_ACTION.with(|stored| stored.borrow().is_none()));
+                drop(source);
+                assert_eq!(released.get(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn relinquished_progress_slots_are_reused_without_moving_live_leases() {
+        let (progress, observed, now) = fixture();
+        let released = Rc::new(Cell::new(0));
+        let budget = budget(&now, 100, BudgetSource::PerCallTimeout);
+        let first = progress.head(handle(0, 0, false, &released), budget);
+        let survivor = progress.head(handle(2, 0, false, &released), budget);
+        let survivor_index = survivor.index;
+        drop(first);
+        for _ in 0_usize..10_000 {
+            let transient = progress.head(handle(1, 0, false, &released), budget);
+            assert_eq!(
+                transient.index, 0,
+                "only the relinquished slot may be reused"
+            );
+            assert_eq!(progress.state.borrow().slots.len(), 2);
+            drop(transient);
+        }
+        assert_eq!(survivor.index, survivor_index);
+        assert_eq!(
+            block_on(progress.drive(survivor.receive()))
+                .expect("driver")
+                .expect("head"),
+            2
+        );
+        assert_eq!(observed.borrow().polls, [2]);
+        assert_eq!(released.get(), 10_002);
+    }
+
+    #[test]
+    fn slot_reuse_preserves_retained_outcomes_and_advanced_cursors() {
+        for failed in [false, true] {
+            let (progress, observed, now) = fixture();
+            observed.borrow_mut().source_error = failed;
+            let released = Rc::new(Cell::new(0));
+            let budget = budget(&now, 100, BudgetSource::PerCallTimeout);
+            let vacant = progress.head(handle(0, 0, true, &released), budget);
+            let retained = progress.head(handle(2, 0, false, &released), budget);
+            assert!(progress.observe_ready().expect("publish retained outcome"));
+            let cursor = progress.state.borrow().cursor;
+            progress.state.borrow_mut().opaque_cursor = 1;
+            drop(vacant);
+            for _ in 0_usize..100 {
+                drop(progress.head(handle(3, 0, true, &released), budget));
+                let state = progress.state.borrow();
+                assert_eq!((state.cursor, state.opaque_cursor), (cursor, 1));
+                assert_eq!(state.slots.len(), 2);
+                let slot = state.slots[retained.index].as_ref().expect("retained slot");
+                assert!(
+                    matches!(&slot.phase, Phase::HeadReady(result) if result.is_some() != failed)
+                );
+                assert_eq!(
+                    slot.exchange_failure
+                        .as_ref()
+                        .and_then(OutboundExchangeFailure::observed_at)
+                        .is_some(),
+                    failed
+                );
+            }
+            let result = block_on(progress.drive(retained.receive())).expect("driver");
+            assert_eq!(result.is_err(), failed);
+            if !failed {
+                assert_eq!(result.expect("head"), 2);
+            }
+            assert_eq!(released.get(), 102);
+        }
+    }
+
+    #[test]
+    fn reused_body_slot_keeps_rotating_service_and_fresh_readiness() {
+        let (progress, observed, now) = fixture();
+        let released = Rc::new(Cell::new(0));
+        let selected = budget(&now, 100, BudgetSource::PerCallTimeout);
+        let vacant = progress.head(handle(0, 0, false, &released), selected);
+        let second = progress.body(handle(102, 32_769, false, &released), selected);
+        drop(vacant);
+        progress.state.borrow_mut().cursor = 1;
+        let first = progress.body(handle(101, 32_769, false, &released), selected);
+        assert_eq!(progress.state.borrow().cursor, 1);
+        let (first, second) =
+            block_on(progress.drive(join(collect(first), collect(second)))).expect("driver");
+        assert_eq!(first.expect("first"), 32_769);
+        assert_eq!(second.expect("second"), 32_769);
+        assert_eq!(
+            observed.borrow().reads,
+            [102, 101, 102, 101, 102, 101, 102, 101]
+        );
+        assert_eq!(released.get(), 3);
     }
 
     fn source_failure() -> EdgeError {
