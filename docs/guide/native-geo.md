@@ -1,12 +1,46 @@
 # Native Geo providers
 
 Native Axum hosting can resolve CloudFront country and subdivision assertions once per admitted
-request. Geo is off by default. There is no database, reader-IP lookup, remote call, fallback
-provider, CLI option, environment selector, or manifest selector.
+request. Geo is off by default. Select it from the manifest and `EDGEZERO__` settings, or in
+Rust. There is no database, reader-IP lookup, remote call, fallback provider, or CLI option.
 
 Geography is an estimate, not proof of residence, identity, consent, or permission. Applications
 own jurisdiction recognition and policy. A missing subdivision stays unknown, and a
 syntax-valid subdivision is not necessarily assigned or recognized.
+
+## Select from the manifest and settings
+
+The runner reads `[adapters.axum.geo]` from the app's baked `edgezero.toml`, so an application
+reads `RequestContext::geo()` without its own startup code:
+
+```toml
+[adapters.axum.geo]
+provider = "cloudfront"
+origin_credential_header_name = "x-origin-verify-randomsuffix"
+```
+
+Each key is a default. The matching setting overrides it when the server starts, which keeps
+deployment-only values such as ALB networks out of the compiled manifest:
+
+```sh
+EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS=10.42.1.0/24,10.42.2.0/24
+# EDGEZERO__ADAPTER__GEO__PROVIDER=off turns a baked selection off for one deployment
+# EDGEZERO__ADAPTER__GEO__ORIGIN_CREDENTIAL_HEADER_NAME=x-origin-verify-other
+```
+
+Precedence, highest first: `AxumRunOptions::with_geo`, then the settings, then the manifest,
+then off. Settings come from the options the runner receives: `from_env` and
+`run_production_app` read them from the process, and options built with `new` carry none, but
+the manifest still applies. The development `run_app` reads only the settings and ignores the
+manifest table, because its deployment-only values are usually absent locally.
+`geo_capability_for::<A>()` reports the selection the runner will use. `geo_capability()`
+reports only an explicit `with_geo` selection.
+
+The merged values pass the same validation as the Rust policy below, before the server listens.
+Misconfiguration never falls back to off. An unknown provider, network or header settings with
+no provider selected, settings-supplied policy fields with `provider = "off"`, and a CloudFront
+selection missing networks or a header all fail startup. In the manifest, `provider = "off"`
+with policy fields fails to load.
 
 ## Select a provider in Rust
 
@@ -24,8 +58,8 @@ or declared stores. Existing declared stores keep their own startup requirements
 
 ### Off
 
-Every options constructor defaults to `Off`, including `from_env` and `from_vars`. Selection
-is always programmatic, even when other hosting settings come from the environment.
+Without a manifest table or settings, every options constructor resolves to `Off`, including
+`from_env` and `from_vars`. An explicit `Off` here overrides both.
 
 ```rust
 use edgezero_adapter_axum::dev_server::AxumRunOptions;

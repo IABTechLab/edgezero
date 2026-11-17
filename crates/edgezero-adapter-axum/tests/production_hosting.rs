@@ -2270,6 +2270,73 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "geo-cloudfront")]
+    fn geo_hosting_binds_cloudfront_from_manifest_and_settings() {
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let addr = address();
+        let mut command = geo_command("geo-manifest", &cwd, addr);
+        command
+            .env("EDGEZERO__ADAPTER__HOST", addr.ip().to_string())
+            .env("EDGEZERO__ADAPTER__PORT", addr.port().to_string())
+            .env("EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS", "127.0.0.1/32");
+        let mut server = Server::spawn(command, addr);
+        server.ready();
+        let value = geo_response(
+            &server,
+            "CloudFront-Viewer-Country: us\r\nCloudFront-Viewer-Country-Region: ca\r\nx-origin-verify-fixture: ORIGIN_CREDENTIAL_SENTINEL\r\n",
+        );
+        assert_eq!(value["geo"]["status"], "located");
+        assert_eq!(value["geo"]["provider"], "cloudfront");
+        assert_eq!(value["geo"]["country"], "US");
+        assert_eq!(value["geo"]["subdivision"], "CA");
+        assert_eq!(value["geo"]["trust_basis"], "DeclaredProtectedAlb");
+        finish_geo(&mut server, &cwd);
+    }
+
+    #[test]
+    fn geo_dev_runner_ignores_manifest_and_reads_settings() {
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let dev = |settings: &[(&str, &str)]| {
+            let addr = address();
+            let mut command = geo_command("geo-manifest-dev", &cwd, addr);
+            command
+                .env("EDGEZERO__ADAPTER__HOST", addr.ip().to_string())
+                .env("EDGEZERO__ADAPTER__PORT", addr.port().to_string());
+            for (key, value) in settings {
+                command.env(key, value);
+            }
+            let mut server = Server::spawn(command, addr);
+            server.ready();
+            server
+        };
+        let request = "CloudFront-Viewer-Country: US\r\nCloudFront-Viewer-Country-Region: CA\r\n";
+
+        // The baked table lacks networks; the dev server still starts, with geo off.
+        let unselected = dev(&[]);
+        let value = geo_response(&unselected, request);
+        assert_eq!(value["geo"]["status"], "no_selection");
+        drop(unselected);
+
+        // Settings alone opt a dev run in. Without the built-in this fails startup instead.
+        #[cfg(feature = "geo-cloudfront")]
+        {
+            let selected = dev(&[
+                ("EDGEZERO__ADAPTER__GEO__PROVIDER", "cloudfront"),
+                ("EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS", "127.0.0.1/32"),
+                (
+                    "EDGEZERO__ADAPTER__GEO__ORIGIN_CREDENTIAL_HEADER_NAME",
+                    "x-origin-verify-fixture",
+                ),
+            ]);
+            let located = geo_response(&selected, request);
+            assert_eq!(located["geo"]["status"], "located");
+            assert_eq!(located["geo"]["provider"], "cloudfront");
+            assert_eq!(located["geo"]["country"], "US");
+            assert_eq!(located["geo"]["subdivision"], "CA");
+        }
+    }
+
+    #[test]
     #[cfg(not(feature = "geo-cloudfront"))]
     fn geo_hosting_rejects_unavailable_cloudfront() {
         let cwd = tempfile::tempdir().expect("unrelated cwd");
