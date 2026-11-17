@@ -10,9 +10,28 @@ are removed rather than retained as compatibility aliases. Provider limitations 
 separately from the portable API and must be considered when declaring required capabilities.
 The current outbound migration is summarized first. Earlier checkpoint entries below describe
 their scope when introduced; the current summary supersedes their then-pending API work.
+For adoption, start with [the outbound migration guide](docs/guide/proxying.md#hard-cut-adoption),
+then [dependency coordination](docs/guide/dependency-majors-migration.md) and
+[target capabilities](docs/guide/capabilities.md). The entries below retain the historical
+checkpoints and unverified qualification gates rather than presenting them as new guarantees.
 
 ### Head-First Outbound Hard Cut
 
+- Destroy rejected scoped outputs and uncalled action captures under their original owner,
+  including provider-runtime rejection and unwind. Manual response bodies recheck revocation
+  after source polling and release the source before exposing a terminal scope error.
+- Clone and retire Fastly progress/driver wakers outside mutable borrows. Reuse only slots
+  relinquished by their unique leases; retain live indices, captured outcomes and rotating service.
+- Supervise all Axum fixture Cargo builds through the harness's existing process-group owner,
+  retaining separate stdout/diagnostics and proving controller cancellation also reaps descendants.
+- Pin native Cloudflare and Fastly deploy/serve passthrough to the selected source, manifest and
+  destination. Preserve ordinary option values and validated typed service IDs; Fastly named
+  manifests select their exact environment. Declared application shell-command policy is unchanged.
+- Replace private Fastly response ABI integers with non-Copy owned handles. Streaming sends retain
+  guest body ownership; terminal cleanup relinquishes it once, without retrying uncertain host work.
+- Align demo and generated URL configuration failures as sanitized server errors while retaining
+  client-path errors and redirect-policy denials. Clarify route-aware admission precedes the
+  pre-dispatch hook on canonical application ingress.
 - Retain Fastly body failures as well as head failures at their original observation time,
   even when another producer advances their shared clock before collection. Later timer
   observations cannot replace an already-terminal typed error. Replace the Fastly-private
