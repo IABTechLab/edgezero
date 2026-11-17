@@ -312,8 +312,8 @@ impl Stream for ManualBodyStream {
             return Poll::Ready(None);
         };
         let polled = if let Some(owner) = &this.owner {
-            match owner.scope().check() {
-                Ok(()) => owner.with(|| source.as_mut().poll_next(cx)),
+            match owner.scope().with(|| source.as_mut().poll_next(cx)) {
+                Ok(observation) => observation,
                 Err(error) => Poll::Ready(Some(Err(error))),
             }
         } else {
@@ -459,14 +459,17 @@ mod tests {
     use crate::error::ResponseLimitReason;
     use crate::http::StatusCode;
     use crate::outbound::{
-        IndependentOutboundProgress, OutboundExchangeOwner, OutboundScope, OutboundScopeOwner,
-        Revocable,
+        IndependentOutboundProgress, OutboundExchangeOwner, OutboundScope, OutboundScopeKind,
+        OutboundScopeOwner, OutboundTask, Revocable,
     };
     use futures::executor::block_on;
     use futures_util::stream;
     use std::cell::Cell;
     use std::io;
     use std::rc::Rc;
+    use std::task::Waker;
+
+    struct RevokedSourceDrop(Rc<Cell<usize>>);
 
     #[cfg(panic = "unwind")]
     struct ClosingPanic;
@@ -488,6 +491,72 @@ mod tests {
         fn drop(&mut self) {
             let ambient = OutboundScope::capture(Rc::new(IndependentOutboundProgress));
             self.0.set(ambient.is_managed() && ambient.check().is_err());
+        }
+    }
+
+    #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+    impl Drop for RevokedSourceDrop {
+        fn drop(&mut self) {
+            self.0.set(self.0.get().saturating_add(1));
+            let scope = OutboundScope::capture(Rc::new(IndependentOutboundProgress));
+            assert_eq!(scope.kind(), Some(OutboundScopeKind::ResponseBody));
+            assert!(scope.check().is_err());
+            assert!(matches!(
+                OutboundTask::new(Box::pin(async {})),
+                Err(EdgeError::Internal { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn manual_body_rejects_reentrant_parent_closure_before_exposing_any_outcome() {
+        for mode in 0_u8..5 {
+            let parent = Rc::new(OutboundScopeOwner::callback());
+            let body_owner = parent.with(OutboundScopeOwner::response_body);
+            let polls = Rc::new(Cell::new(0_usize));
+            let observed = Rc::clone(&polls);
+            let releases = Rc::new(Cell::new(0_usize));
+            let cleanup = RevokedSourceDrop(Rc::clone(&releases));
+            let closer = Rc::clone(&parent);
+            let source = stream::poll_fn(move |_| {
+                let _held = &cleanup;
+                observed.set(observed.get().saturating_add(1));
+                closer.close();
+                match mode {
+                    0 | 4 => Poll::Ready(Some(Ok(Bytes::from_static(b"must not escape")))),
+                    1 => Poll::Pending,
+                    2 => Poll::Ready(None),
+                    _ => Poll::Ready(Some(Err(EdgeError::bad_request("source fixture error")))),
+                }
+            });
+            let mut body = Body::from_stream(source)
+                .attach_egress_owner(body_owner)
+                .expect("attached owner")
+                .into_stream()
+                .expect("manual body");
+            if mode == 4 {
+                parent.close();
+            }
+            let foreign = OutboundScopeOwner::callback();
+            foreign.with(|| {
+                assert!(matches!(
+                    body.as_mut()
+                        .poll_next(&mut Context::from_waker(Waker::noop())),
+                    Poll::Ready(Some(Err(EdgeError::Internal { .. })))
+                ));
+                OutboundScope::capture(Rc::new(IndependentOutboundProgress))
+                    .check()
+                    .expect("foreign owner restored");
+            });
+            assert_eq!(polls.get(), usize::from(mode != 4));
+            assert_eq!(
+                releases.get(),
+                1,
+                "terminal poll promptly releases the source"
+            );
+            assert!(block_on(body.next()).is_none());
+            drop(body);
+            assert_eq!(releases.get(), 1);
         }
     }
 
