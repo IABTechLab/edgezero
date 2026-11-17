@@ -211,17 +211,9 @@ impl AxumRunOptions {
         let mut names = BTreeMap::<String, (bool, bool)>::new();
         if let Some(document) = self.bindings.document() {
             for binding in document.config().values() {
-                match binding {
-                    NativeConfigBinding::AppConfigAgent(settings) => {
-                        if let Some(name) = &settings.access_token_env {
-                            names.entry(name.clone()).or_default().0 = true;
-                        }
-                    }
-                    NativeConfigBinding::Celld(settings) => {
-                        if let Some(name) = settings.access.token_env() {
-                            names.entry(name.to_owned()).or_default().1 = true;
-                        }
-                    }
+                let NativeConfigBinding::AppConfigAgent(settings) = binding;
+                if let Some(name) = &settings.access_token_env {
+                    names.entry(name.clone()).or_default().0 = true;
                 }
             }
             for binding in document.kv().values() {
@@ -827,7 +819,7 @@ mod tests {
 
     const BINDINGS: &str = "version = 1\n[config.app]\nprovider = 'aws-appconfig-agent'\ndefault_key = 'settings'\nendpoint = 'http://127.0.0.1:2772'\naccess_token_env = 'AGENT_TOKEN'\n[config.app.documents.settings]\napplication = 'example'\nenvironment = 'production'\nprofile = 'envelope'\n";
 
-    const CELLD: &str = "version=1\n[config.remote]\nprovider='celld-config'\nendpoint='https://unreachable.invalid'\ndefault_key='settings'\n[config.remote.access]\nmode='authenticated'\ntoken_env='CELL_TOKEN'\n[config.remote.documents.settings]\nstore='config-fixture'\nkey='settings'\n[kv.state]\nprovider='celld-kv'\nendpoint='https://unreachable.invalid'\nstore='state-fixture'\n[kv.state.access]\nmode='authenticated'\ntoken_env='CELL_TOKEN'\n";
+    const CELLD: &str = "version=1\n[kv.remote]\nprovider='celld-kv'\nendpoint='https://unreachable.invalid'\nstore='remote-fixture'\n[kv.remote.access]\nmode='authenticated'\ntoken_env='CELL_TOKEN'\n[kv.state]\nprovider='celld-kv'\nendpoint='https://unreachable.invalid'\nstore='state-fixture'\n[kv.state.access]\nmode='authenticated'\ntoken_env='CELL_TOKEN'\n";
     const CELL_TOKEN: &str = "celld-bootstrap-value-01234567890123456789";
 
     fn explicit() -> AxumRunOptions {
@@ -835,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn celld_capture_unions_config_and_kv_names_and_validates_shared_aws_use() {
+    fn celld_capture_unions_kv_names_and_validates_shared_aws_use() {
         for (input, expected) in [
             (CELLD.to_owned(), 1),
             (
@@ -1338,10 +1330,7 @@ mod tests {
                 .expect("captured document")
                 .config()
                 .get("app")
-                .expect("captured binding")
-            else {
-                panic!("expected AppConfig binding")
-            };
+                .expect("captured binding");
             assert_eq!(settings.access_token_env.as_deref(), Some("AGENT_TOKEN"));
             assert_eq!(
                 options

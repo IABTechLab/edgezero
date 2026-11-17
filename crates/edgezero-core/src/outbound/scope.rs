@@ -95,9 +95,12 @@ trait Root {
 }
 
 struct Cleanup {
+    // Field order also releases the payload before notification during unwinding.
     payload: Option<Box<dyn Any>>,
-    waiting: Option<Waker>,
+    waiting: WakeOnDrop,
 }
+
+struct WakeOnDrop(Option<Waker>);
 
 struct Node<T> {
     active: Cell<bool>,
@@ -384,11 +387,12 @@ impl OutboundScope {
     where
         F: Future + ?Sized,
     {
-        let mut called = false;
-        let mut multiple = false;
-        let mut output = None;
-        let observation = self.with(|| {
-            self.progress
+        self.with(|| {
+            let mut called = false;
+            let mut multiple = false;
+            let mut output = None;
+            let observation = self
+                .progress
                 .poll(self, time, entered_at, cx, &mut |inner_cx| {
                     if called {
                         multiple = true;
@@ -402,26 +406,27 @@ impl OutboundScope {
                             Poll::Ready(())
                         }
                     }
-                })
-        });
-        if multiple {
-            return Poll::Ready(Err(invariant(
-                "outbound progress runtime polled an operation more than once",
-            )));
-        }
-        match observation {
-            Err(error) | Ok(Poll::Ready(Err(error))) => Poll::Ready(Err(error)),
-            Ok(Poll::Pending) if called && output.is_none() => Poll::Pending,
-            Ok(Poll::Ready(Ok(()))) if called => match output {
-                Some(value) => Poll::Ready(Ok(value)),
-                None => Poll::Ready(Err(invariant(
-                    "outbound progress runtime completed a pending operation",
+                });
+            if multiple {
+                return Poll::Ready(Err(invariant(
+                    "outbound progress runtime polled an operation more than once",
+                )));
+            }
+            match observation {
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                Poll::Pending if called && output.is_none() => Poll::Pending,
+                Poll::Ready(Ok(())) if called => match output {
+                    Some(value) => Poll::Ready(Ok(value)),
+                    None => Poll::Ready(Err(invariant(
+                        "outbound progress runtime completed a pending operation",
+                    ))),
+                },
+                Poll::Pending | Poll::Ready(Ok(())) => Poll::Ready(Err(invariant(
+                    "outbound progress runtime did not preserve operation readiness",
                 ))),
-            },
-            _ => Poll::Ready(Err(invariant(
-                "outbound progress runtime did not preserve operation readiness",
-            ))),
-        }
+            }
+        })
+        .unwrap_or_else(|error| Poll::Ready(Err(error)))
     }
 
     pub(super) fn progress(&self) -> Rc<dyn OutboundProgressRuntime> {
@@ -513,10 +518,12 @@ impl OutboundScope {
     )]
     #[inline]
     pub fn with<R>(&self, action: impl FnOnce() -> R) -> Result<R, EdgeError> {
-        self.check()?;
-        let output = self.with_cleanup(action);
-        self.check()?;
-        Ok(output)
+        self.with_cleanup(|| {
+            self.check()?;
+            let output = action();
+            self.check()?;
+            Ok(output)
+        })
     }
 
     pub(crate) fn with_cleanup<R, A>(&self, action: A) -> R
@@ -706,7 +713,14 @@ impl<T: 'static> Drop for Revocable<T> {
 impl Cleanup {
     fn release(mut self) {
         drop(self.payload.take());
-        if let Some(waiting) = self.waiting.take() {
+        drop(self.waiting);
+    }
+}
+
+#[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+impl Drop for WakeOnDrop {
+    fn drop(&mut self) {
+        if let Some(waiting) = self.0.take() {
             waiting.wake();
         }
     }
@@ -734,7 +748,7 @@ impl<T: 'static> Root for Node<T> {
         let waiting = self.waker.borrow_mut().take();
         Cleanup {
             payload: value.map(|payload| -> Box<dyn Any> { Box::new(payload) }),
-            waiting,
+            waiting: WakeOnDrop(waiting),
         }
     }
 
@@ -821,7 +835,7 @@ mod tests {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::rc::{Rc, Weak};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
@@ -836,7 +850,7 @@ mod tests {
     use crate::body::Body;
     use crate::error::EdgeError;
     use crate::http::Response;
-    use crate::outbound::{OutboundFuture, OutboundTime};
+    use crate::outbound::{OutboundFuture, OutboundTask, OutboundTime};
     use crate::time::{MonotonicClock, MonotonicInstant};
 
     struct Release(Rc<Cell<usize>>);
@@ -844,6 +858,25 @@ mod tests {
     struct DropAction(Option<Box<dyn FnOnce()>>);
 
     struct WakeAction;
+
+    struct CleanupWake {
+        notified_after_release: AtomicBool,
+        released: Arc<AtomicBool>,
+        wakes: AtomicUsize,
+    }
+
+    impl ArcWake for CleanupWake {
+        fn wake(self: Arc<Self>) {
+            Self::wake_by_ref(&self);
+        }
+
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.wakes.fetch_add(1, Ordering::SeqCst);
+            arc_self
+                .notified_after_release
+                .store(arc_self.released.load(Ordering::SeqCst), Ordering::SeqCst);
+        }
+    }
 
     struct Runtime {
         active: Arc<AtomicBool>,
@@ -928,9 +961,13 @@ mod tests {
                     inner(cx).map(Ok)
                 }
                 1 => Poll::Ready(Ok(())),
-                _ => {
+                2 => {
                     let _first = inner(cx);
                     Poll::Pending
+                }
+                _ => {
+                    let _first = inner(cx);
+                    Poll::Ready(Err(EdgeError::bad_request("runtime fixture failure")))
                 }
             }
         }
@@ -945,6 +982,132 @@ mod tests {
 
     fn capture() -> OutboundScope {
         OutboundScope::capture(Rc::new(IndependentOutboundProgress))
+    }
+
+    fn scope_cleanup(
+        scope: &OutboundScope,
+        releases: &Rc<Cell<usize>>,
+        closed: bool,
+    ) -> DropAction {
+        let expected = scope.state().expect("captured owner");
+        let counted = Rc::clone(releases);
+        DropAction(Some(Box::new(move || {
+            counted.set(counted.get().saturating_add(1));
+            let current = capture();
+            assert!(Rc::ptr_eq(
+                &current.state().expect("cleanup owner"),
+                &expected
+            ));
+            assert_eq!(current.check().is_err(), closed);
+            assert_eq!(OutboundTask::new(Box::pin(async {})).is_err(), closed);
+        })))
+    }
+
+    #[test]
+    fn rejected_scope_output_and_uncalled_captures_drop_under_their_closed_owner() {
+        for preclosed in [false, true] {
+            let original = OutboundScopeOwner::callback();
+            let foreign = OutboundScopeOwner::callback();
+            let scope = original.scope();
+            let releases = Rc::new(Cell::new(0));
+            let cleanup = scope_cleanup(&scope, &releases, true);
+            let called = Cell::new(false);
+            if preclosed {
+                original.close();
+            }
+            foreign.with(|| {
+                let result = scope.with(|| {
+                    called.set(true);
+                    original.close();
+                    cleanup
+                });
+                assert!(result.is_err());
+                assert!(Rc::ptr_eq(
+                    &capture().state().expect("restored foreign owner"),
+                    &foreign.scope().state().expect("foreign owner")
+                ));
+                capture().check().expect("foreign owner stays live");
+            });
+            assert_eq!(called.get(), !preclosed);
+            assert_eq!(releases.get(), 1);
+        }
+    }
+
+    #[test]
+    fn rejected_progress_outputs_drop_before_restoring_a_foreign_owner() {
+        for mode in 0_u8..4 {
+            let original = OutboundScopeOwner::callback();
+            let foreign = OutboundScopeOwner::callback();
+            let runtime: Rc<dyn OutboundProgressRuntime> = if mode == 1 {
+                Rc::new(IndependentOutboundProgress)
+            } else {
+                Rc::new(InvalidRuntime(mode))
+            };
+            let scope = original.with(|| OutboundScope::capture(runtime));
+            let releases = Rc::new(Cell::new(0));
+            let mut cleanup = Some(scope_cleanup(&scope, &releases, mode == 1));
+            let (entered, paired) = time();
+            let mut source = Box::pin(poll_fn(|_| {
+                if mode == 1 {
+                    original.close();
+                }
+                Poll::Ready(cleanup.take().expect("polled only once"))
+            }));
+            foreign.with(|| {
+                let observed = scope.poll(
+                    &paired,
+                    entered,
+                    &mut Context::from_waker(Waker::noop()),
+                    source.as_mut(),
+                );
+                if mode == 3 {
+                    assert!(matches!(
+                        observed,
+                        Poll::Ready(Err(EdgeError::BadRequest { .. }))
+                    ));
+                } else {
+                    assert!(matches!(
+                        observed,
+                        Poll::Ready(Err(EdgeError::Internal { .. }))
+                    ));
+                }
+                capture().check().expect("foreign owner restored");
+            });
+            assert_eq!(releases.get(), 1);
+        }
+    }
+
+    #[cfg(panic = "unwind")]
+    #[test]
+    fn rejected_output_unwind_restores_the_foreign_activation() {
+        let original = OutboundScopeOwner::callback();
+        let foreign = OutboundScopeOwner::callback();
+        let scope = original.scope();
+        let releases = Rc::new(Cell::new(0));
+        let cleanup = scope_cleanup(&scope, &releases, true);
+        foreign.with(|| {
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                scope.with(|| {
+                    original.close();
+                    DropAction(Some(Box::new(move || {
+                        drop(cleanup);
+                        panic!("rejected output fixture panic");
+                    })))
+                })
+            }))
+            .err()
+            .expect("rejected output destructor panics");
+            assert_eq!(
+                panic.downcast_ref::<&str>(),
+                Some(&"rejected output fixture panic")
+            );
+            assert!(Rc::ptr_eq(
+                &capture().state().expect("restored foreign owner"),
+                &foreign.scope().state().expect("foreign owner")
+            ));
+            capture().check().expect("foreign owner stays live");
+        });
+        assert_eq!(releases.get(), 1);
     }
 
     fn time() -> (MonotonicInstant, OutboundTime) {
@@ -1420,21 +1583,64 @@ mod tests {
     fn panicking_payload_cleanup_still_releases_retained_siblings_and_provider_state() {
         let owner = OutboundScopeOwner::callback();
         let scope = owner.scope();
+        let first_released = Arc::new(AtomicBool::new(false));
+        let on_first_drop = Arc::clone(&first_released);
         let first = Revocable::new(
             &scope,
-            DropAction(Some(Box::new(|| panic!("application stream drop")))),
+            DropAction(Some(Box::new(move || {
+                on_first_drop.store(true, Ordering::SeqCst);
+                panic!("application stream drop");
+            }))),
         )
         .expect("first root");
         let sibling_releases = Rc::new(Cell::new(0_usize));
-        let second = Revocable::new(&scope, Release(Rc::clone(&sibling_releases)))
-            .expect("retained sibling");
+        let second_released = Arc::new(AtomicBool::new(false));
+        let on_second_drop = Arc::clone(&second_released);
+        let second = Revocable::new(
+            &scope,
+            (
+                Release(Rc::clone(&sibling_releases)),
+                DropAction(Some(Box::new(move || {
+                    on_second_drop.store(true, Ordering::SeqCst);
+                }))),
+            ),
+        )
+        .expect("retained sibling");
+        let waiters = [first_released, second_released].map(|released| {
+            Arc::new(CleanupWake {
+                wakes: AtomicUsize::new(0),
+                released,
+                notified_after_release: AtomicBool::new(false),
+            })
+        });
+        first
+            .with(
+                &mut Context::from_waker(&waker(Arc::clone(&waiters[0]))),
+                |_, _| (),
+            )
+            .expect("register first waiter");
+        second
+            .with(
+                &mut Context::from_waker(&waker(Arc::clone(&waiters[1]))),
+                |_, _| (),
+            )
+            .expect("register sibling waiter");
         let provider_releases = Rc::new(Cell::new(0_usize));
         drop(
             scope
                 .provider_state(|| Release(Rc::clone(&provider_releases)))
                 .expect("provider state"),
         );
-        assert!(catch_unwind(AssertUnwindSafe(|| owner.close())).is_err());
+        let original =
+            catch_unwind(AssertUnwindSafe(|| owner.close())).expect_err("original panic");
+        assert_eq!(
+            original.downcast_ref::<&str>(),
+            Some(&"application stream drop")
+        );
+        for waiting in &waiters {
+            assert_eq!(waiting.wakes.load(Ordering::SeqCst), 1);
+            assert!(waiting.notified_after_release.load(Ordering::SeqCst));
+        }
         assert!(first.is_revoked());
         assert!(second.is_revoked());
         assert_eq!(
@@ -1446,6 +1652,9 @@ mod tests {
         assert!(!capture().is_managed(), "ambient scope restores on unwind");
         drop((first, second));
         assert_eq!(sibling_releases.get(), 1);
+        for waiting in waiters {
+            assert_eq!(waiting.wakes.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[test]
