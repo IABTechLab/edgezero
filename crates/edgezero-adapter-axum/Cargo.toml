@@ -19,6 +19,8 @@ axum = [
     "dep:tokio",
     "dep:tower",
     "dep:futures-util",
+    "dep:getrandom",
+    "dep:ipnet",
     "dep:http-body",
     "dep:hyper",
     "dep:hyper-util",
@@ -34,6 +36,7 @@ aws-secrets-manager = ["axum", "edgezero-store-aws/secrets-manager"]
 aws-stores = ["aws-appconfig-agent", "aws-secrets-manager"]
 aws-dynamodb = ["axum", "edgezero-store-aws/dynamodb-kv"]
 celld-kv = ["axum", "edgezero-store-celld/kv"]
+geo-cloudfront = ["axum"]
 cli = [
     "native-bindings",
     "dep:edgezero-adapter",

@@ -464,7 +464,7 @@ where
     if let Some(registry) = secret_registry {
         core_request.extensions_mut().insert(registry);
     }
-    let response = app.dispatch_admitted(prepared, core_request).await;
+    let response = Box::pin(app.dispatch_admitted(prepared, core_request)).await;
     Ok(deliver(response)?)
 }
 
