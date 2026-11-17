@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Axum buffered JSON limits and body API
+
+Axum now defaults framework-managed JSON buffering to 2 MiB, exactly 2,097,152 bytes.
+Set `EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES` for standalone hosting, or use the fallible
+`with_json_body_limit_bytes` builder on `AxumRunOptions` or `AxumDevServer`. Explicit
+application caps may tighten the ceiling. Overflow is typed HTTP 413; malformed JSON remains
+400. Taken streams, forwarding, manual collection, and other providers' defaults are unchanged.
+
+The current `Body`/`BodyPayload` representation and exact egress ownership remain unchanged.
+Ingress buffering policy and cache provenance survive context reconstruction independently of
+mutable headers and extensions, and are removed at raw payload transport boundaries.
+
 ### Portable HTTP And Request Lifecycles (PR #275)
 
 The changes below cover [PR #275](https://github.com/IABTechLab/edgezero/pull/275), including its

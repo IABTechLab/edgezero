@@ -511,6 +511,7 @@ dependencies = [
  "hyper-util",
  "libc",
  "log",
+ "mime",
  "redb",
  "reqwest",
  "serde",
