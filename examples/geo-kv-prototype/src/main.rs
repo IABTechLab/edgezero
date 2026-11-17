@@ -227,7 +227,7 @@ async fn run(args: &[String]) -> Result<()> {
                 args.get(3)
                     .map(|s| s.parse())
                     .transpose()?
-                    .unwrap_or(64 * 1024),
+                    .unwrap_or(16 * 1024),
             )
             .await
         }

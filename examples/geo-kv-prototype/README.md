@@ -17,7 +17,7 @@ BIN="$PWD/$TARGET/release/geo-kv-prototype"
 
 SOURCE="$HOME/.cache/edgezero/geo/source/GeoLite2-City-CSV_RELEASE"
 OUT="$HOME/.cache/edgezero/geo/artifacts-64k"
-"$BIN" build "$SOURCE" "$OUT" 65536
+"$BIN" build "$SOURCE" "$OUT"
 "$BIN" verify "$SOURCE" "$OUT" 2048 4194304
 "$BIN" lookup "$OUT" 1.0.1.1 ::1
 ```
@@ -30,7 +30,7 @@ Extract one permitted GeoLite City or Country release outside the repository. Su
 - `inventory.json`, every exact key, byte count and SHA-256, including the manifest.
 - `build-report.json`, source hashes, index shape, size, timings and whole-process peak RSS.
 
-Default object size is 64 KiB. Use separate output directories to compare 16 and 64 KiB. Completed identical builds can be repeated in place. Keep the source, receipt and inventory together. Build files are immutable; an interrupted local file write is not automatically repaired. Regenerate damaged local artifacts in a fresh directory and compare the receipt before publishing.
+The default object budget is 16 KiB. In the [local two-backend proof](../../docs/superpowers/plans/2026-11-17-kv-geo-serving-results.md), the smaller objects fit the repeated-request working set and avoided further KV reads. A 64 KiB budget reduces object count and maximum path reads. Use separate output directories when comparing sizes. Keep the source, receipt and inventory together. Rerunning an interrupted build with identical inputs reuses complete objects. If an existing object differs, build into a fresh directory and compare the receipt before publishing.
 
 `verify` checks inventory closure and the full local tree, then compares cache-disabled, cache-enabled first-pass and repeated-pass lookups with the independent original-CIDR oracle. Samples include family endpoints, stratified CIDR boundaries and neighbors, plus deterministic random points. IPv4-mapped IPv6 follows serving normalization. It writes `verification-report.json`.
 

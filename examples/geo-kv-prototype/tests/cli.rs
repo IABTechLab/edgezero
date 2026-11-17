@@ -49,6 +49,9 @@ fn city_and_country_cli_build_oracle_and_deterministic_inventory() {
         source(src.path(), city);
         success(&["build", text(src.path()), text(out.path()), "1024"]);
         success(&["build", text(src.path()), text(again.path()), "1024"]);
+        let default_out = tempfile::tempdir().unwrap();
+        let defaults = success(&["build", text(src.path()), text(default_out.path())]);
+        assert_eq!(defaults["object_budget_bytes"], 16 * 1024_u64);
         // A completed build can also be repeated in-place.
         success(&["build", text(src.path()), text(out.path()), "1024"]);
         let rejected = command(&["build", text(src.path()), text(out.path()), "2048"]);

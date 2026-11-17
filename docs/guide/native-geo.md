@@ -116,7 +116,9 @@ node scripts/run_geo_kv_integration.mjs
 For the production-size comparison, set `GEO_KV_CSV_DIR` to an absolute path to a permitted
 GeoLite City CSV extraction on Linux. The proof builds 16 KiB and 64 KiB artifacts, verifies
 both backends against the CSV oracle, and reports process peak RSS, latency and backend reads.
-The first pass starts with an empty app cache; the second repeats its sampled addresses.
+The tool defaults to 16 KiB. In the local comparison, these objects fit the repeated-request
+working set on both backends; 64 KiB used fewer reads on the first pass. The first pass starts
+with an empty object cache; the second repeats its sampled addresses.
 Response-body byte counts include backend serialization. Results describe this local workload
 and build, not production SLOs, hosted IAM, or durability.
 
