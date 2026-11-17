@@ -34,6 +34,7 @@ mod tests {
         FastlyRequestDelivery, FastlyResponseCommitState, testing::response_delivery,
     };
     use edgezero_adapter_fastly::request::{FastlyService, into_core_request};
+    use edgezero_core::after_response::AfterResponseHandle;
     use edgezero_core::app::{App, Hooks};
     use edgezero_core::body::Body;
     use edgezero_core::config_store::{
@@ -843,6 +844,124 @@ mod tests {
     }
 
     #[cfg(feature = "test-utils")]
+    fn after_response_router(
+        events: &Arc<Mutex<Vec<&'static str>>>,
+        budget: Duration,
+        started: &Arc<AtomicUsize>,
+        dropped: &Arc<AtomicUsize>,
+    ) -> RouterService {
+        struct TaskDropProbe(Arc<AtomicUsize>);
+
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
+        impl Drop for TaskDropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let handler_events = Arc::clone(events);
+        let handler_started = Arc::clone(started);
+        let handler_dropped = Arc::clone(dropped);
+        RouterService::builder()
+            .get("/after", move |ctx: RequestContext| {
+                let task_events = Arc::clone(&handler_events);
+                let task_started = Arc::clone(&handler_started);
+                let probe = TaskDropProbe(Arc::clone(&handler_dropped));
+                async move {
+                    let handle = ctx
+                        .extensions()
+                        .get::<AfterResponseHandle>()
+                        .cloned()
+                        .expect("an armed Fastly lifecycle installs the handle");
+                    let time = ctx.http_client().expect("outbound client").time();
+                    ctx.after_response(budget, async move {
+                        let _probe = probe;
+                        task_started.fetch_add(1, Ordering::SeqCst);
+                        time.wait_until(Deadline::after(Duration::from_millis(10)))
+                            .await
+                            .expect("timers work inside the callback scope");
+                        let nested = handle.schedule(Duration::from_secs(1), async {});
+                        task_events
+                            .lock()
+                            .expect("events")
+                            .push(if nested.is_err() {
+                                "task"
+                            } else {
+                                "nested-accepted"
+                            });
+                    })?;
+                    Ok::<_, EdgeError>("queued")
+                }
+            })
+            .build()
+    }
+
+    fn run_after_response(
+        router: RouterService,
+        events: &Arc<Mutex<Vec<&'static str>>>,
+        commitment: FastlyResponseCommitState,
+    ) {
+        let app = App::new(router);
+        let delivery_events = Arc::clone(events);
+        let delivered = FastlyService::new(&app).run_request_with_hooks_for_test(
+            fastly_request(FastlyMethod::GET, "/after", None),
+            |_raw, _extensions| {},
+            |_response| (),
+            move |envelope| {
+                let (response, report) = complete_envelope_with_report(envelope);
+                assert_eq!(response.status(), StatusCode::OK);
+                delivery_events.lock().expect("events").push("deliver");
+                response_delivery(commitment, report, Ok(()))
+            },
+        );
+        assert!(matches!(delivered, FastlyRequestDelivery::Routed { .. }));
+    }
+
+    #[test]
+    fn after_response_task_runs_after_delivery_with_timers_and_closed_registration() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let router = after_response_router(&events, Duration::from_secs(2), &started, &dropped);
+        run_after_response(router, &events, FastlyResponseCommitState::Committed);
+        assert_eq!(*events.lock().expect("events"), ["deliver", "task"]);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn after_response_task_runs_when_delivery_did_not_commit() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let router = after_response_router(&events, Duration::from_secs(2), &started, &dropped);
+        run_after_response(router, &events, FastlyResponseCommitState::NotCommitted);
+        assert_eq!(*events.lock().expect("events"), ["deliver", "task"]);
+    }
+
+    #[test]
+    fn after_response_budget_cancels_a_started_task() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        // The task needs 10 ms for its timer; a 1 ms budget cancels it after it started.
+        let router = after_response_router(&events, Duration::from_millis(1), &started, &dropped);
+        run_after_response(router, &events, FastlyResponseCommitState::Committed);
+        assert_eq!(started.load(Ordering::SeqCst), 1, "the task started");
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "the budget dropped the task"
+        );
+        assert_eq!(
+            *events.lock().expect("events"),
+            ["deliver"],
+            "the task never finished"
+        );
+    }
+
     mod ingress_contract {
         use std::collections::VecDeque;
         use std::io::{self, Read};

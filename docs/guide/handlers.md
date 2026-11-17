@@ -209,20 +209,53 @@ async fn inspect(ctx: RequestContext) -> Result<Text<String>, EdgeError> {
 explicit validated-extractor limits. For unvalidated data, use
 `ctx.json_within::<T>(max).await` or `ctx.form_within::<T>(max).await`.
 
-| Method                        | Returns                                                      |
-| ----------------------------- | ------------------------------------------------------------ |
-| `method()`                    | `&Method` - request method                                   |
-| `uri()`                       | `&Uri` - request URI                                         |
-| `headers()`                   | `&HeaderMap` - request headers                               |
-| `path_params()`               | `&PathParams` - raw path parameters                          |
-| `path::<T>()`                 | Deserialize path params to `T`                               |
-| `query::<T>()`                | Deserialize query string to `T`                              |
-| `json_within::<T>(max).await` | Bounded JSON deserialization as `Result<T, EdgeError>`       |
-| `form_within::<T>(max).await` | Bounded form deserialization as `Result<T, EdgeError>`       |
-| `body_bytes(max).await`       | `Result<Bytes, EdgeError>` - bounded, cached body read       |
-| `take_body()`                 | `Result<Body, EdgeError>` - transfer body ownership          |
-| `into_request()`              | `Result<Request, EdgeError>` - consume context, take request |
-| `http_client()`               | `Option<HttpClient>` - adapter outbound HTTP client          |
+| Method                         | Returns                                                      |
+| ------------------------------ | ------------------------------------------------------------ |
+| `method()`                     | `&Method` - request method                                   |
+| `uri()`                        | `&Uri` - request URI                                         |
+| `headers()`                    | `&HeaderMap` - request headers                               |
+| `path_params()`                | `&PathParams` - raw path parameters                          |
+| `path::<T>()`                  | Deserialize path params to `T`                               |
+| `query::<T>()`                 | Deserialize query string to `T`                              |
+| `json_within::<T>(max).await`  | Bounded JSON deserialization as `Result<T, EdgeError>`       |
+| `form_within::<T>(max).await`  | Bounded form deserialization as `Result<T, EdgeError>`       |
+| `body_bytes(max).await`        | `Result<Bytes, EdgeError>` - bounded, cached body read       |
+| `take_body()`                  | `Result<Body, EdgeError>` - transfer body ownership          |
+| `into_request()`               | `Result<Request, EdgeError>` - consume context, take request |
+| `http_client()`                | `Option<HttpClient>` - adapter outbound HTTP client          |
+| `after_response(budget, task)` | `Result<(), EdgeError>` - run `task` after the response      |
+
+### After-Response Tasks
+
+Work that must not delay the response, such as a follow-up store write or a sync request, can run
+after it. The task starts once the response attempt ends and is cancelled when its budget elapses:
+
+```rust
+use std::time::Duration;
+use edgezero_core::context::RequestContext;
+use edgezero_core::outbound::OutboundRequest;
+use edgezero_core::EdgeError;
+
+async fn page(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+    if let Some(client) = ctx.http_client() {
+        ctx.after_response(Duration::from_secs(2), async move {
+            // Build and send the request inside the task, not before it.
+            let sent = match OutboundRequest::get("https://sync.example.com/ping") {
+                Ok(request) => client.send(request).await.map(|_response| ()),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = sent {
+                log::warn!("after-response sync failed: {error}");
+            }
+        })?;
+    }
+    Ok("ok")
+}
+```
+
+Registration returns `501 Not Implemented` on adapters without support; see the
+[after-response task matrix](./capabilities.md#after-response-task-matrix). Tasks return `()`, so
+handle and log their own failures. A task cannot register further tasks.
 
 ### Store Extractors
 

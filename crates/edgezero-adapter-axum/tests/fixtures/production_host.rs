@@ -61,6 +61,7 @@ impl Hooks for FixtureApp {
             .get("/stream", endless_stream)
             .get("/flood", flood)
             .get("/after", after)
+            .get("/after-task", after_task)
             .get("/write", write)
             .get("/read", read)
             .get("/alias", alias)
@@ -128,6 +129,20 @@ fn reader(ctx: &RequestContext) -> Result<LifecycleReader, EdgeError> {
 async fn after() -> Result<&'static str, EdgeError> {
     println!("FORBIDDEN_DISPATCH");
     Ok("forbidden dispatch")
+}
+
+#[action]
+async fn after_task(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+    let millis = env::var("FIXTURE_TASK_MILLIS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(500);
+    ctx.after_response(Duration::from_secs(30), async move {
+        let _guard = WorkGuard("AFTER_TASK_DROPPED");
+        sleep(Duration::from_millis(millis)).await;
+        println!("AFTER_TASK_DONE");
+    })?;
+    Ok("after-task-queued")
 }
 
 #[action]

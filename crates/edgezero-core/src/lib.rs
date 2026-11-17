@@ -14,6 +14,7 @@
 extern crate self as edgezero_core;
 
 pub mod addr;
+pub mod after_response;
 pub mod app;
 pub mod app_config;
 pub mod blob_envelope;

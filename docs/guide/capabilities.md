@@ -328,6 +328,33 @@ terminal report. The boundaries remain `BestEffort` because none proves end-clie
 Provider-owned buffering, SDK allocations, and bytes beyond each stated acceptance boundary are
 not included. These limitations block whole-response-lifetime certification.
 
+## After-Response Task Matrix
+
+| Capability             | Axum   | Cloudflare  | Fastly             | Spin        |
+| ---------------------- | ------ | ----------- | ------------------ | ----------- |
+| `after-response-tasks` | Native | Unsupported | BoundedCooperative | Unsupported |
+
+`ctx.after_response(budget, task)` registers a task while a request is handled. The adapter starts
+the task once the response attempt ends at its terminal egress boundary, whatever the outcome. That
+boundary is the one the response-egress cells describe, so it does not prove the client received the
+response. The task is dropped, and so cancelled, when its budget elapses. Registration closes when
+the request's tasks are released, so a task cannot register more tasks. Start outbound requests
+inside the task.
+
+- Axum spawns each task on the server's executor and releases it when Hyper drops the response body.
+  Production and `run_app` shutdown waits for registered tasks within
+  `EDGEZERO__ADAPTER__SHUTDOWN_GRACE_SECONDS`, after connections drain. Tasks still pending at the
+  grace are cancelled, and the process exits with the existing `grace exhausted` failure. The
+  prebound `AxumDevServer::serve` embedding cancels them, consistent with its cancel-not-drain
+  contract. As with outbound deadlines, cancellation happens at await points; blocking work in a
+  task delays the shared executor.
+- Fastly drives the tasks after the response is sent, before the request callback returns, inside
+  the same outbound scope. The budget is checked whenever a task yields to the adapter's progress
+  driver; a blocked hostcall cannot be preempted. The tasks delay the next request on a reused
+  `serve_app` instance, and a caller-sent native replacement after an uncommitted delivery.
+- Cloudflare and Spin install no scheduler, so registration returns `501 Not Implemented`. Cloudflare
+  `waitUntil` support is tracked in [#478](https://github.com/IABTechLab/edgezero/issues/478).
+
 ## Outbound Matrix
 
 | Capability                              | Axum                              | Cloudflare                        | Fastly                              | Spin                              |

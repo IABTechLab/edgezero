@@ -29,6 +29,8 @@ use tokio::task::yield_now;
 use tokio::time::Instant as TokioInstant;
 use tokio::time::timeout_at;
 
+use crate::after_response::AfterResponseRelease;
+
 const INTERNAL_FALLBACK_BODY: &[u8] = b"internal server error";
 const TIMEOUT_FALLBACK_BODY: &[u8] = b"response write deadline exceeded";
 
@@ -212,6 +214,8 @@ struct ActiveEgress {
 /// Private Hyper body that owns one response-egress attempt through source completion or drop.
 pub(crate) struct AxumEgressBody {
     active: Option<ActiveEgress>,
+    /// Dropped with the body, after the attempt terminates in `Drop`, to start after-response tasks.
+    after_response: Option<AfterResponseRelease>,
     remaining_hint: Option<u64>,
     source: ResponseSource,
     staged_final: Option<Bytes>,
@@ -242,9 +246,15 @@ impl AxumEgressBody {
         )
     }
 
+    /// Holds `release` until Hyper drops this body, which starts the request's after-response tasks.
+    pub(crate) fn release_after_response_on_drop(&mut self, release: AfterResponseRelease) {
+        self.after_response = Some(release);
+    }
+
     fn detached(bytes: Bytes) -> Self {
         Self {
             active: None,
+            after_response: None,
             remaining_hint: u64::try_from(bytes.len()).ok(),
             source: if bytes.is_empty() {
                 ResponseSource::Done
@@ -298,6 +308,7 @@ impl AxumEgressBody {
                 kind,
                 state,
             }),
+            after_response: None,
             remaining_hint: declared_length.or(inferred_length),
             source,
             staged_final: None,

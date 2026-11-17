@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### After-Response Tasks (#476)
+
+- Add `RequestContext::after_response(budget, task)` and the adapter-facing
+  `edgezero_core::after_response::{AfterResponseScheduler, AfterResponseHandle}`. A task starts
+  after the response attempt ends and is cancelled at its budget. Adapters without support return
+  `501 Not Implemented` at registration.
+- Add the `after-response-tasks` capability: Axum `Native`, Fastly `BoundedCooperative`,
+  Cloudflare and Spin `Unsupported` (tracked in #478 and #483).
+- Axum production and `run_app` shutdown now waits for registered after-response tasks within the
+  existing shutdown grace, after connections drain. Tasks still pending at the grace make the
+  process exit non-zero with `grace exhausted`.
+
 ### Portable HTTP And Request Lifecycles (PR #275)
 
 The changes below cover [PR #275](https://github.com/IABTechLab/edgezero/pull/275), including its

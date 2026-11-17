@@ -33,6 +33,7 @@ use tokio::sync::watch;
 #[cfg(test)]
 use tower::Service as TowerService;
 
+use crate::after_response::{AfterResponseTracker, request_tasks};
 #[cfg(test)]
 use crate::connection::{ConnectionExit, serve_http1};
 #[cfg(test)]
@@ -50,6 +51,7 @@ pub(crate) struct AxumIngressAbort;
 /// Shared application state used to construct one private Hyper service per HTTP/1 connection.
 #[derive(Clone)]
 pub(crate) struct AxumServiceState {
+    after_response: AfterResponseTracker,
     app: Arc<App>,
     config_registry: Option<ConfigRegistry>,
     config_store_handle: Option<ConfigStoreHandle>,
@@ -89,6 +91,7 @@ impl AxumServiceState {
             .cloned()
             .or_else(|| initialize(app.monotonic_clock()));
         Self {
+            after_response: AfterResponseTracker::default(),
             app: Arc::new(app),
             executor,
             config_registry: None,
@@ -201,6 +204,12 @@ impl AxumServiceState {
     #[inline]
     pub fn with_secret_registry(mut self, registry: SecretRegistry) -> Self {
         self.secret_registry = Some(registry);
+        self
+    }
+
+    /// Shares the lifecycle owner's tracker so shutdown can drain after-response tasks.
+    pub(crate) fn with_after_response_tracker(mut self, tracker: AfterResponseTracker) -> Self {
+        self.after_response = tracker;
         self
     }
 
@@ -371,8 +380,15 @@ impl AxumServiceState {
             core_request.extensions_mut().insert(registry);
         }
 
+        // Dropping `release` starts this request's after-response tasks: normally when Hyper
+        // drops the response body, or here if this future is cancelled before a body exists.
+        let (after_response, release) =
+            request_tasks(self.executor.clone(), self.after_response.clone());
+        core_request.extensions_mut().insert(after_response);
         let egress = app.dispatch_admitted(prepared, core_request).await;
-        Ok(prepare_egress_response(egress, connection).await)
+        let mut response = prepare_egress_response(egress, connection).await;
+        response.body_mut().release_after_response_on_drop(release);
+        Ok(response)
     }
 }
 

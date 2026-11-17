@@ -20,6 +20,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::after_response::AfterResponseTracker;
 use crate::outbound_executor::{AxumOutboundExecutor, AxumOutboundExecutorHandle};
 pub use crate::run_options::AxumRunOptions;
 use crate::run_options::{failure, shutdown_grace};
@@ -637,8 +638,10 @@ where
     {
         log::warn!(target: BOOT_LOG_TARGET, "application head limits exceed Axum raw ingress limits; the parser rejects first");
     }
-    let mut service =
-        AxumServiceState::with_transport(app, transport, executor).with_phase(reader.clone());
+    let after_response = AfterResponseTracker::default();
+    let mut service = AxumServiceState::with_transport(app, transport, executor)
+        .with_phase(reader.clone())
+        .with_after_response_tracker(after_response.clone());
     if let Some(registry) = stores.config {
         service = service.with_config_registry(registry);
     }
@@ -699,7 +702,7 @@ where
         tasks.clear();
         outcome
     } else {
-        drain_tasks(&mut tasks, grace, signals, outcome).await
+        drain_tasks(&mut tasks, &after_response, grace, signals, outcome).await
     };
     // Service/registry clones are dropped only after every owned connection settles.
     drop(service);
@@ -712,6 +715,7 @@ where
 )]
 async fn drain_tasks(
     tasks: &mut Connections,
+    after_response: &AfterResponseTracker,
     grace: Duration,
     signals: &mut Option<Signals>,
     mut outcome: anyhow::Result<()>,
@@ -737,6 +741,23 @@ async fn drain_tasks(
         }
     }
     tasks.clear();
+    // Every connection has settled, so no handler can register more work. Tasks share the grace.
+    if outcome.is_ok() {
+        tokio::select! {
+            biased;
+            signal = next_signal(signals) => {
+                outcome = Err(signal.err().unwrap_or_else(|| failure("shutdown", "signal", "forced stop")));
+            }
+            () = sleep_until(deadline) => {
+                log::warn!(
+                    "{} after-response task(s) abandoned at the shutdown grace",
+                    after_response.pending()
+                );
+                outcome = Err(failure("shutdown", "budget", "grace exhausted"));
+            }
+            () = after_response.wait_idle() => {}
+        }
+    }
     outcome
 }
 

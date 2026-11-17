@@ -4,8 +4,10 @@ use std::{
     env, mem,
     rc::Rc,
     task::Poll,
+    time::Duration,
 };
 
+use crate::after_response::{AfterResponseHandle, schedule_with};
 use crate::body::{Body, BodyStream};
 use crate::config_store::ConfigExtractionLimits;
 use crate::error::{
@@ -326,6 +328,28 @@ impl Drop for DrainGuard<'_> {
 }
 
 impl RequestContext {
+    /// Registers `task` to run after this request's response leaves the adapter.
+    ///
+    /// The task starts once the response attempt ends at the adapter's terminal egress boundary,
+    /// whatever its outcome, and is cancelled when `budget` elapses. Start outbound requests
+    /// inside `task`: a send future created beforehand belongs to the request's scope.
+    ///
+    /// # Errors
+    /// Returns [`EdgeError::NotImplemented`] when the adapter does not support after-response
+    /// tasks, an internal error for a zero `budget`, or the adapter's scheduling error. The task
+    /// is dropped unpolled on error.
+    #[inline]
+    pub fn after_response<F>(&self, budget: Duration, task: F) -> Result<(), EdgeError>
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        schedule_with(
+            self.parts.extensions.get::<AfterResponseHandle>(),
+            budget,
+            task,
+        )
+    }
+
     /// Drains and caches the inbound body under the caller's byte cap.
     ///
     /// # Errors

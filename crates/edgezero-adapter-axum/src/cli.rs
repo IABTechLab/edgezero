@@ -145,7 +145,8 @@ impl Adapter for AxumCliAdapter {
             | Capability::ResponseEgressBackpressure
             | Capability::ResponseEgressCompletion
             | Capability::ResponseWriteDeadlines => CapabilitySupport::BestEffort,
-            Capability::BufferedResponseContentLength
+            Capability::AfterResponseTasks
+            | Capability::BufferedResponseContentLength
             | Capability::InboundReadDeadlines
             | Capability::IngressAdmission
             | Capability::IngressAdmissionAbort
@@ -890,10 +891,15 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the complete capability data table together"
+    )]
     fn adapter_capability_matrix_matches_contracts() {
         let connect = AXUM_ADAPTER.capability(Capability::OutboundConnectTimeout);
         assert_eq!(connect, CapabilitySupport::BestEffort);
         for (capability, support) in [
+            (Capability::AfterResponseTasks, CapabilitySupport::Native),
             (
                 Capability::ConfigReadAllocationBounds,
                 CapabilitySupport::Unsupported,

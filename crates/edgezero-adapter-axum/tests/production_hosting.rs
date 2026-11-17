@@ -316,6 +316,54 @@ mod tests {
     }
 
     #[test]
+    fn sigterm_waits_for_after_response_task_within_the_grace() {
+        let roots = Roots::new();
+        let addr = address();
+        let mut cmd = command("bare", &roots, addr);
+        cmd.env("EDGEZERO__ADAPTER__SHUTDOWN_GRACE_SECONDS", "3")
+            .env("FIXTURE_TASK_MILLIS", "1500");
+        let mut server = Server::spawn(cmd, addr);
+        server.ready();
+        let response = server.request("/after-task").expect("after-task response");
+        assert!(response.contains("after-task-queued"), "{response}");
+        assert!(
+            !server.log().contains("AFTER_TASK_DONE"),
+            "the task must still be running when SIGTERM arrives"
+        );
+        let signalled = Instant::now();
+        server.signal("TERM");
+        server.wait_line("AFTER_TASK_DONE");
+        assert!(server.wait().success(), "{}", server.log());
+        assert!(signalled.elapsed() >= Duration::from_millis(1000));
+        assert!(
+            !server.log().contains("grace exhausted"),
+            "{}",
+            server.log()
+        );
+    }
+
+    #[test]
+    fn grace_exhaustion_cancels_after_response_task() {
+        let roots = Roots::new();
+        let addr = address();
+        let mut cmd = command("bare", &roots, addr);
+        cmd.env("FIXTURE_TASK_MILLIS", "10000");
+        let mut server = Server::spawn(cmd, addr);
+        server.ready();
+        let response = server.request("/after-task").expect("after-task response");
+        assert!(response.contains("after-task-queued"), "{response}");
+        let signalled = Instant::now();
+        server.signal("TERM");
+        assert!(!server.wait().success(), "{}", server.log());
+        assert!(signalled.elapsed() >= Duration::from_millis(900));
+        assert!(signalled.elapsed() < Duration::from_secs(4));
+        let log = server.log();
+        assert!(log.contains("grace exhausted"), "{log}");
+        assert!(!log.contains("AFTER_TASK_DONE"), "{log}");
+        assert_eq!(log.matches("AFTER_TASK_DROPPED").count(), 1, "{log}");
+    }
+
+    #[test]
     fn second_signal_forces_before_budget_exhaustion() {
         let roots = Roots::new();
         let addr = address();
