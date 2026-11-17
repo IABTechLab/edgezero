@@ -1,0 +1,10 @@
+error: failed to parse tests/fixtures/logging_config_malformed.toml: TOML parse error at line 1, column 16
+         |
+       1 | [logging.fastly
+         |                ^
+       unclosed table, expected `]`
+
+ --> tests/ui/logging_config_malformed.rs:2:44
+  |
+2 |     let _ = edgezero_core::logging_config!("tests/fixtures/logging_config_malformed.toml", "fastly");
+  |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

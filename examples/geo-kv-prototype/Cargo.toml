@@ -1,0 +1,29 @@
+[package]
+name = "geo-kv-prototype"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Offline tooling stays outside the production workspace.
+[workspace]
+
+[features]
+default = []
+celld = ["dep:edgezero-store-celld", "dep:tokio"]
+dynamodb = ["dep:edgezero-store-aws", "dep:tokio"]
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+csv = "=1.4.0"
+edgezero-core = { path = "../../crates/edgezero-core", default-features = false, features = ["geo-kv-build"] }
+edgezero-store-celld = { path = "../../crates/edgezero-store-celld", features = ["kv"], optional = true }
+edgezero-store-aws = { path = "../../crates/edgezero-store-aws", features = ["dynamodb-kv"], optional = true }
+tokio = { version = "1", features = ["rt", "time", "net"], optional = true }
+futures = "0.3"
+ipnet = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"

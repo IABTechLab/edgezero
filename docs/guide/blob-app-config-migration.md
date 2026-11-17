@@ -99,7 +99,11 @@ with the same data produce blobs with identical `sha256` and different
 
 The push writes to `.edgezero/local-config-<id>.json` next to your
 `edgezero.toml`. The file is a JSON map of `{ "<key>": "<envelope_json>" }`;
-the dev server reads the envelope through `AxumConfigStore::get`. There
+the dev server reads the envelope through a shared `ConfigValue` snapshot loaded
+before listener bind. Push before startup or restart the server afterward. The
+raw `ConfigStore` API now returns `ConfigValue`; custom store implementations must
+migrate both read methods atomically. Borrow its UTF-8 bytes with `as_str()` and
+reserve `to_string()` for deliberate ownership copies. There
 is no `--local` flag because Axum's push IS always local.
 
 ### Cloudflare
@@ -184,7 +188,7 @@ non-zero on a non-TTY (per spec §8.3's four-branch UX).
 
 2. Pre-populate `[stores.secrets]`. Push doesn't write secret values
    into the config store — your handlers will fail with
-   `ConfigOutOfDate` at runtime if the operator-supplied key name
+   a `config_out_of_date` error at runtime if the operator-supplied key name
    doesn't resolve.
 
    ```sh
@@ -370,7 +374,7 @@ delete chunk keys no live pointer references.
 
 ## Troubleshooting
 
-### `ConfigOutOfDate` at runtime
+### `config_out_of_date` at runtime
 
 The runtime read either:
 

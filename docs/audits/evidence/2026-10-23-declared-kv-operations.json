@@ -1,0 +1,2056 @@
+{
+  "schema": 1,
+  "recorded_date": "2026-10-23",
+  "base_revision": "d47c8026a941a2361182c9e2042bebdcb8be4d04",
+  "source_state": "uncommitted-working-tree-characterization",
+  "qualification": false,
+  "status": "local-f8-operation-delivery-pass-whole-smoke-spin-retained-overlap-unverified",
+  "scope": "F8/EZ-20 local canonical operation delivery and exactly-once guest terminal observations; no production implementation or capability change",
+  "source_snapshot_scope": "Selected final checkout inputs, not frozen-candidate or full build-input attestation. Temporary raw artifacts are local, not durable release evidence.",
+  "frozen_api_plan": {
+    "path": "docs/superpowers/plans/2026-10-18-trusted-server-outbound-02-policies.md",
+    "bytes": 65279,
+    "sha256": "c52b4aea6b8d2793f30784e88016a3676088d344c0a5607774a5d9f1a7ffae80"
+  },
+  "approved_interfaces_sha256": "c623e7fc5b189e2d9122756f29297a92031a9936b13c6cc475484d4e028a4a7a",
+  "requirements": {
+    "path": "docs/superpowers/specs/2026-10-17-edgezero-pr275-requirements.md",
+    "bytes": 390165,
+    "sha256": "86691fe7f0dfae0e489678f01eeb4385c9acdc238778801d700c7ef8585f2fd6"
+  },
+  "source_files": [
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-core/src/lib.rs",
+      "bytes": 20997,
+      "sha256": "17e94e8af8ef6b49554a858308727aa34c4bc0676359b80642b994abad2c50be"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/runners.rs",
+      "bytes": 86933,
+      "sha256": "e2e3f032d4d707296e4b61bd98bdfc19de18a78db2444357aaa23b9d7bba9209"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/main.rs",
+      "bytes": 13357,
+      "sha256": "b8818ae4ebd1587674a17af9d642655304543e473275117d5a672c64c115ca06"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/net.rs",
+      "bytes": 30038,
+      "sha256": "723445e8bf33584832cbfc36dc04c049280bb4754c70b1f8ac22d9fa7fee6a75"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-fastly/src/lib.rs",
+      "bytes": 23839,
+      "sha256": "008c267b17b08cba63ea69a284cd9b27e9c7ec9780342b96829f4402653fada7"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/retained_app.rs",
+      "bytes": 294,
+      "sha256": "629635c72fe281cda10cb86c75329df67aa3ba53e9d6d93ffe0019eda951d27d"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-fastly/fastly.toml",
+      "bytes": 463,
+      "sha256": "4444af855e1f5db54da213ddfc6a84ea34aa52f9fd868d047521b0ab78a3fd18"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-cloudflare/src/lib.rs",
+      "bytes": 3848,
+      "sha256": "ae744bde0abe850ddbe18764e4d366ec11eb5df39c757d5ea816027b010c322a"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-cloudflare/wrangler.toml",
+      "bytes": 457,
+      "sha256": "6c2a097879b98f4d4af3e2fea139215abc9fa0bfdc058500f28fd9f7d757aab3"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-spin/src/lib.rs",
+      "bytes": 3743,
+      "sha256": "6f5cfb313ec654d68455550dab6a439c946a29935a1798d1d0f233fafdcd9b8b"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-spin/spin.toml",
+      "bytes": 555,
+      "sha256": "dfed653d283de300aea36feb4841ee731e20643dd60df83dc0907047fdb78d9c"
+    },
+    {
+      "path": "scripts/smoke_test_reusable_app.sh",
+      "bytes": 236,
+      "sha256": "5ffedd5e84ae8f8f1e8f30e0ba4b7b4032ffdea48776844619f1e354197a7c1b"
+    },
+    {
+      "path": "crates/edgezero-core/src/key_value_store.rs",
+      "bytes": 62623,
+      "sha256": "37edf3f5491193ee120aafeab74d31afc419a93dfe9e959aec5383246b8717c4"
+    },
+    {
+      "path": "crates/edgezero-adapter-fastly/src/key_value_store.rs",
+      "bytes": 12677,
+      "sha256": "dc55c32c9d7d143275dd0e025fb96b5020a4a30bfd4547f311406102993b58e4"
+    },
+    {
+      "path": "crates/edgezero-adapter-cloudflare/src/key_value_store.rs",
+      "bytes": 10745,
+      "sha256": "1ca3d1a60ac6dfdd32e0016140929d489b82b85318d609c59cf15d4ff6101407"
+    },
+    {
+      "path": "crates/edgezero-adapter-spin/src/key_value_store.rs",
+      "bytes": 7543,
+      "sha256": "19941a845fdd46b7221c7ce89f8f86c6d73e17fe96897e4ba4c995aceb9ca0ed"
+    }
+  ],
+  "locks": [
+    {
+      "path": "Cargo.lock",
+      "bytes": 96143,
+      "sha256": "ded1da41b9bd6fae689e16d277d076e975c8f3ccfa2842cd53addf30a5c3e27e",
+      "unchanged_from_base": true
+    },
+    {
+      "path": "tests/fixtures/reusable-app/Cargo.lock",
+      "bytes": 84127,
+      "sha256": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee",
+      "unchanged_from_base": true
+    },
+    {
+      "path": "examples/app-demo/Cargo.lock",
+      "bytes": 87596,
+      "sha256": "d1dad662166f73b278b4ba0c33a017f3d30f4749f6e1a6a9a43fc1287c31f423",
+      "unchanged_from_base": true
+    }
+  ],
+  "sdk_versions": {
+    "fastly": "0.13.1",
+    "worker": "0.8.5",
+    "spin_sdk": "7.0.0"
+  },
+  "runtime_identity": [
+    {
+      "adapter": "fastly",
+      "event": "runtime",
+      "executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+      "expected": "0.21.0",
+      "version": "viceroy 0.21.0"
+    },
+    {
+      "adapter": "cloudflare",
+      "event": "runtime",
+      "executable": "/Users/ag/.asdf/installs/nodejs/24.12.0/lib/node_modules/wrangler/bin/wrangler.js",
+      "version": "4.131.0"
+    },
+    {
+      "adapter": "spin",
+      "event": "runtime",
+      "executable": "/opt/homebrew/Cellar/spin/4.1.0/bin/spin",
+      "version": "spin 4.1.0 (c0b3726 2026-08-25)"
+    }
+  ],
+  "cloudflare_compatibility": {
+    "date": "2026-04-22",
+    "flags": ["enable_request_signal", "enable_weak_ref"],
+    "environment": "Wrangler local/workerd, not deployed"
+  },
+  "local_host_bound": {
+    "provider": "Viceroy",
+    "version": "0.21.0",
+    "max_followup_requests": 5,
+    "max_total_requests_per_guest": 6,
+    "source": {
+      "path": "/private/tmp/claude-501/-Users-ag-projects-iab-trusted-server/1768e0ae-8449-4497-9bcc-6cb96930a4f3/scratchpad/edgezero-analysis/dl-viceroy/viceroy-lib-0.21.0/src/sandbox.rs",
+      "bytes": 61057,
+      "sha256": "e78e94daa329ce51a2cf43b9f67eef6454cc83a32f8e1267297c3a0482c4821f"
+    },
+    "interpretation": "Pinned local host limit, not a hosted reuse guarantee. Original four-request identity proof remains mandatory; later operations allow observed natural turnover."
+  },
+  "final_run": {
+    "directory": "/private/tmp/edgezero-f8-operations-correlated",
+    "command": "scripts/smoke_test_reusable_app.sh --adapter all --suite smoke --output /private/tmp/edgezero-f8-operations-correlated",
+    "environment": "CARGO_NET_OFFLINE=true and pinned tool overrides; loopback access enabled",
+    "exit_code": 2,
+    "events": {
+      "path": "/private/tmp/edgezero-f8-operations-correlated/events.jsonl",
+      "bytes": 1843639,
+      "sha256": "334ffa74be2e06dec62e9c27904e53e1e4e9df212c27ff36b6fb8f9d961ab242"
+    },
+    "summary": {
+      "path": "/private/tmp/edgezero-f8-operations-correlated/summary.json",
+      "bytes": 483003,
+      "sha256": "f485a9a8284a3a14c4ca5a5955ff0b608acf0b40f281a99d4d2efb6305c96726"
+    },
+    "log": {
+      "path": "/private/tmp/edgezero-f8-operations-correlated.log",
+      "bytes": 7316,
+      "sha256": "8b8e5b389115c4a375f406db9107f293c8677f6b27859470cc405975acae205b"
+    },
+    "f8_request_cases": 39,
+    "failed_open_cases": 15,
+    "handler_free_cases": 6,
+    "healthy_cases": 18,
+    "operation_receipt_pairs": 33,
+    "terminal_reports": 39,
+    "post_shutdown": [
+      {
+        "adapter": "fastly",
+        "error": null,
+        "event": "declared-kv-after-shutdown",
+        "failed_instances": [
+          "18e13f67e1d94108-86fe-84",
+          "18e13f67e24b5040-86fe-8a"
+        ],
+        "instance": "18e13f67e1d94108-86fe-84",
+        "qualification": false,
+        "requests": 13,
+        "status": "pass",
+        "warnings": 2
+      },
+      {
+        "adapter": "cloudflare",
+        "error": null,
+        "event": "declared-kv-after-shutdown",
+        "failed_instances": ["18e13f6b24482b00-86fe-13b"],
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "qualification": false,
+        "requests": 13,
+        "status": "pass",
+        "warnings": 1
+      },
+      {
+        "adapter": "spin",
+        "error": null,
+        "event": "declared-kv-after-shutdown",
+        "failed_instances": ["18e13f6dce9432a0-86fe-1c9"],
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "qualification": false,
+        "requests": 13,
+        "status": "pass",
+        "warnings": 1
+      }
+    ],
+    "overlap_observations": [
+      {
+        "adapter": "cloudflare",
+        "assertion": "same_guest_overlap",
+        "attempt_limit": 3,
+        "mode": "per-request",
+        "status": "pass"
+      },
+      {
+        "adapter": "cloudflare",
+        "assertion": "same_guest_overlap",
+        "attempt_limit": 3,
+        "mode": "retained",
+        "status": "pass"
+      },
+      {
+        "adapter": "spin",
+        "assertion": "same_guest_overlap",
+        "attempt_limit": 3,
+        "mode": "per-request",
+        "status": "pass"
+      },
+      {
+        "adapter": "spin",
+        "assertion": "same_guest_overlap",
+        "attempt_limit": 3,
+        "mode": "retained",
+        "status": "unverified"
+      },
+      {
+        "adapter": "axum",
+        "assertion": "same_guest_overlap",
+        "attempt_limit": 3,
+        "mode": "retained",
+        "status": "pass"
+      }
+    ],
+    "unverified": [
+      {
+        "adapter": "spin",
+        "assertion": "same_guest_overlap",
+        "attempt_limit": 3,
+        "mode": "retained",
+        "status": "unverified"
+      }
+    ],
+    "failures": [],
+    "cases": [
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/free",
+        "token": "18e13f67e1f302c8-86fe-85",
+        "instance": "18e13f67e1d94108-86fe-84",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "281"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"00000000000000000000000000000006\",\"declared_kv\":true,\"default_kv\":true,\"inflight\":0,\"instance\":\"18e13f67e1d94108-86fe-84\",\"mutated\":false,\"native_id\":true,\"ordinal\":2,\"path\":null,\"shared\":2,\"token\":\"18e13f67e1f302c8-86fe-85\",\"unknown_kv\":false}"
+        },
+        "warnings_after_request": 0,
+        "lifecycle": {
+          "ordered_events": ["request_start", "egress_terminal"],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 281,
+          "fallback": null
+        },
+        "operation": null
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/missing/read",
+        "token": "18e13f67e2052f20-86fe-86",
+        "instance": "18e13f67e1d94108-86fe-84",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "76"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "read",
+          "outcome": "open-failed",
+          "reason": "MissingBinding"
+        }
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/missing/read",
+        "token": "18e13f67e218a398-86fe-87",
+        "instance": "18e13f67e1d94108-86fe-84",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "76"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "read",
+          "outcome": "open-failed",
+          "reason": "MissingBinding"
+        }
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/free",
+        "token": "18e13f67e227bec8-86fe-88",
+        "instance": "18e13f67e1d94108-86fe-84",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "281"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"00000000000000000000000000000009\",\"declared_kv\":true,\"default_kv\":true,\"inflight\":0,\"instance\":\"18e13f67e1d94108-86fe-84\",\"mutated\":false,\"native_id\":true,\"ordinal\":5,\"path\":null,\"shared\":5,\"token\":\"18e13f67e227bec8-86fe-88\",\"unknown_kv\":false}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": ["request_start", "egress_terminal"],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 281,
+          "fallback": null
+        },
+        "operation": null
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/missing/write",
+        "token": "18e13f67e23923e8-86fe-89",
+        "instance": "18e13f67e1d94108-86fe-84",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "76"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "write",
+          "outcome": "open-failed",
+          "reason": "MissingBinding"
+        }
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/missing/delete",
+        "token": "18e13f67e24b5040-86fe-8a",
+        "instance": "18e13f67e24b5040-86fe-8a",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "76"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 2,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "delete",
+          "outcome": "open-failed",
+          "reason": "MissingBinding"
+        }
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/missing/list",
+        "token": "18e13f67e261d5e0-86fe-8b",
+        "instance": "18e13f67e24b5040-86fe-8a",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "76"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 2,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "list",
+          "outcome": "open-failed",
+          "reason": "MissingBinding"
+        }
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/linked/write",
+        "token": "18e13f67e275c370-86fe-8c",
+        "instance": "18e13f67e24b5040-86fe-8a",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "248"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"0000000000000000000000000000000d\",\"inflight\":0,\"instance\":\"18e13f67e24b5040-86fe-8a\",\"kv_outcome\":\"written\",\"mutated\":false,\"native_id\":true,\"ordinal\":3,\"path\":null,\"shared\":3,\"token\":\"18e13f67e275c370-86fe-8c\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 248,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "write",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/linked/read",
+        "token": "18e13f67e28af538-86fe-8d",
+        "instance": "18e13f67e24b5040-86fe-8a",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "249"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"0000000000000000000000000000000e\",\"inflight\":0,\"instance\":\"18e13f67e24b5040-86fe-8a\",\"kv_outcome\":\"f8-value\",\"mutated\":false,\"native_id\":true,\"ordinal\":4,\"path\":null,\"shared\":4,\"token\":\"18e13f67e28af538-86fe-8d\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 249,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "read",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/linked/list",
+        "token": "18e13f67e29ea060-86fe-8e",
+        "instance": "18e13f67e24b5040-86fe-8a",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "249"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"0000000000000000000000000000000f\",\"inflight\":0,\"instance\":\"18e13f67e24b5040-86fe-8a\",\"kv_outcome\":[\"f8-key\"],\"mutated\":false,\"native_id\":true,\"ordinal\":5,\"path\":null,\"shared\":5,\"token\":\"18e13f67e29ea060-86fe-8e\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 249,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "list",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/linked/delete",
+        "token": "18e13f67e2b64328-86fe-8f",
+        "instance": "18e13f67e24b5040-86fe-8a",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "248"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"00000000000000000000000000000010\",\"inflight\":0,\"instance\":\"18e13f67e24b5040-86fe-8a\",\"kv_outcome\":\"deleted\",\"mutated\":false,\"native_id\":true,\"ordinal\":6,\"path\":null,\"shared\":6,\"token\":\"18e13f67e2b64328-86fe-8f\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 248,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "delete",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/linked/read",
+        "token": "18e13f67e2cc8278-86fe-90",
+        "instance": "18e13f67e2cc8278-86fe-90",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "243"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"00000000000000000000000000000011\",\"inflight\":0,\"instance\":\"18e13f67e2cc8278-86fe-90\",\"kv_outcome\":null,\"mutated\":false,\"native_id\":true,\"ordinal\":1,\"path\":null,\"shared\":1,\"token\":\"18e13f67e2cc8278-86fe-90\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 243,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "read",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "fastly",
+        "path": "/declared-kv/linked/list",
+        "token": "18e13f67e2e57530-86fe-91",
+        "instance": "18e13f67e2cc8278-86fe-90",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "241"],
+            ["date", "Fri, 23 Oct 2026 19:30:42 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"00000000000000000000000000000012\",\"inflight\":0,\"instance\":\"18e13f67e2cc8278-86fe-90\",\"kv_outcome\":[],\"mutated\":false,\"native_id\":true,\"ordinal\":2,\"path\":null,\"shared\":2,\"token\":\"18e13f67e2e57530-86fe-91\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "Completed",
+          "body_kind": "Application",
+          "bytes_written": 241,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "list",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/free",
+        "token": "18e13f6b24482b00-86fe-13b",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["Content-Length", "277"],
+            ["Content-Type", "text/plain; charset=utf-8"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6b24482b00-86fe-13b\",\"declared_kv\":true,\"default_kv\":true,\"inflight\":0,\"instance\":\"18e13f6b24482b00-86fe-13b\",\"mutated\":false,\"native_id\":false,\"ordinal\":1,\"path\":null,\"shared\":1,\"token\":\"18e13f6b24482b00-86fe-13b\",\"unknown_kv\":false}"
+        },
+        "warnings_after_request": 0,
+        "lifecycle": {
+          "ordered_events": ["request_start", "egress_terminal"],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 277,
+          "fallback": null
+        },
+        "operation": null
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/missing/read",
+        "token": "18e13f6b391f01c0-86fe-13c",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["Content-Length", "76"],
+            ["Content-Type", "application/json"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "read",
+          "outcome": "open-failed",
+          "reason": "MissingBinding"
+        }
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/missing/read",
+        "token": "18e13f6b3d51be90-86fe-13d",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["Content-Length", "76"],
+            ["Content-Type", "application/json"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "read",
+          "outcome": "open-failed",
+          "reason": "MissingBinding"
+        }
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/free",
+        "token": "18e13f6b411cc498-86fe-13e",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["Content-Length", "277"],
+            ["Content-Type", "text/plain; charset=utf-8"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6b411cc498-86fe-13e\",\"declared_kv\":true,\"default_kv\":true,\"inflight\":0,\"instance\":\"18e13f6b24482b00-86fe-13b\",\"mutated\":false,\"native_id\":false,\"ordinal\":4,\"path\":null,\"shared\":4,\"token\":\"18e13f6b411cc498-86fe-13e\",\"unknown_kv\":false}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": ["request_start", "egress_terminal"],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 277,
+          "fallback": null
+        },
+        "operation": null
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/missing/write",
+        "token": "18e13f6b449787c0-86fe-13f",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["Content-Length", "76"],
+            ["Content-Type", "application/json"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "write",
+          "outcome": "open-failed",
+          "reason": "MissingBinding"
+        }
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/missing/delete",
+        "token": "18e13f6b4830eea8-86fe-140",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["Content-Length", "76"],
+            ["Content-Type", "application/json"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "delete",
+          "outcome": "open-failed",
+          "reason": "MissingBinding"
+        }
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/missing/list",
+        "token": "18e13f6b4bc21448-86fe-141",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["Content-Length", "76"],
+            ["Content-Type", "application/json"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "list",
+          "outcome": "open-failed",
+          "reason": "MissingBinding"
+        }
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/linked/write",
+        "token": "18e13f6b4f566a50-86fe-142",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["Content-Length", "244"],
+            ["Content-Type", "text/plain; charset=utf-8"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6b4f566a50-86fe-142\",\"inflight\":0,\"instance\":\"18e13f6b24482b00-86fe-13b\",\"kv_outcome\":\"written\",\"mutated\":false,\"native_id\":false,\"ordinal\":8,\"path\":null,\"shared\":8,\"token\":\"18e13f6b4f566a50-86fe-142\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 244,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "write",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/linked/read",
+        "token": "18e13f6b53231638-86fe-143",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["Content-Length", "245"],
+            ["Content-Type", "text/plain; charset=utf-8"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6b53231638-86fe-143\",\"inflight\":0,\"instance\":\"18e13f6b24482b00-86fe-13b\",\"kv_outcome\":\"f8-value\",\"mutated\":false,\"native_id\":false,\"ordinal\":9,\"path\":null,\"shared\":9,\"token\":\"18e13f6b53231638-86fe-143\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 245,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "read",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/linked/list",
+        "token": "18e13f6b56e6d110-86fe-144",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["Content-Length", "247"],
+            ["Content-Type", "text/plain; charset=utf-8"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6b56e6d110-86fe-144\",\"inflight\":0,\"instance\":\"18e13f6b24482b00-86fe-13b\",\"kv_outcome\":[\"f8-key\"],\"mutated\":false,\"native_id\":false,\"ordinal\":10,\"path\":null,\"shared\":10,\"token\":\"18e13f6b56e6d110-86fe-144\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 247,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "list",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/linked/delete",
+        "token": "18e13f6b5a629dd8-86fe-145",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["Content-Length", "246"],
+            ["Content-Type", "text/plain; charset=utf-8"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6b5a629dd8-86fe-145\",\"inflight\":0,\"instance\":\"18e13f6b24482b00-86fe-13b\",\"kv_outcome\":\"deleted\",\"mutated\":false,\"native_id\":false,\"ordinal\":11,\"path\":null,\"shared\":11,\"token\":\"18e13f6b5a629dd8-86fe-145\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 246,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "delete",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/linked/read",
+        "token": "18e13f6b5e03dc90-86fe-146",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["Content-Length", "241"],
+            ["Content-Type", "text/plain; charset=utf-8"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6b5e03dc90-86fe-146\",\"inflight\":0,\"instance\":\"18e13f6b24482b00-86fe-13b\",\"kv_outcome\":null,\"mutated\":false,\"native_id\":false,\"ordinal\":12,\"path\":null,\"shared\":12,\"token\":\"18e13f6b5e03dc90-86fe-146\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 241,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "read",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "cloudflare",
+        "path": "/declared-kv/linked/list",
+        "token": "18e13f6b615bcda8-86fe-147",
+        "instance": "18e13f6b24482b00-86fe-13b",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["Content-Length", "239"],
+            ["Content-Type", "text/plain; charset=utf-8"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6b615bcda8-86fe-147\",\"inflight\":0,\"instance\":\"18e13f6b24482b00-86fe-13b\",\"kv_outcome\":[],\"mutated\":false,\"native_id\":false,\"ordinal\":13,\"path\":null,\"shared\":13,\"token\":\"18e13f6b615bcda8-86fe-147\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 239,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "list",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/free",
+        "token": "18e13f6dce9432a0-86fe-1c9",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "277"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6dce9432a0-86fe-1c9\",\"declared_kv\":true,\"default_kv\":true,\"inflight\":0,\"instance\":\"18e13f6dce9432a0-86fe-1c9\",\"mutated\":false,\"native_id\":false,\"ordinal\":1,\"path\":null,\"shared\":1,\"token\":\"18e13f6dce9432a0-86fe-1c9\",\"unknown_kv\":false}"
+        },
+        "warnings_after_request": 0,
+        "lifecycle": {
+          "ordered_events": ["request_start", "egress_terminal"],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 277,
+          "fallback": null
+        },
+        "operation": null
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/missing/read",
+        "token": "18e13f6dcebd9078-86fe-1ca",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "76"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "read",
+          "outcome": "open-failed",
+          "reason": "InvalidConfiguration"
+        }
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/missing/read",
+        "token": "18e13f6dcecf8620-86fe-1cb",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "76"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "read",
+          "outcome": "open-failed",
+          "reason": "InvalidConfiguration"
+        }
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/free",
+        "token": "18e13f6dcedf4948-86fe-1cc",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "277"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6dcedf4948-86fe-1cc\",\"declared_kv\":true,\"default_kv\":true,\"inflight\":0,\"instance\":\"18e13f6dce9432a0-86fe-1c9\",\"mutated\":false,\"native_id\":false,\"ordinal\":4,\"path\":null,\"shared\":4,\"token\":\"18e13f6dcedf4948-86fe-1cc\",\"unknown_kv\":false}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": ["request_start", "egress_terminal"],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 277,
+          "fallback": null
+        },
+        "operation": null
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/missing/write",
+        "token": "18e13f6dceef6260-86fe-1cd",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "76"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "write",
+          "outcome": "open-failed",
+          "reason": "InvalidConfiguration"
+        }
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/missing/delete",
+        "token": "18e13f6dcefe5298-86fe-1ce",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "76"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "delete",
+          "outcome": "open-failed",
+          "reason": "InvalidConfiguration"
+        }
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/missing/list",
+        "token": "18e13f6dcf0f0fc0-86fe-1cf",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 500,
+          "headers": [
+            ["content-type", "application/json"],
+            ["content-length", "76"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"error\":{\"kind\":\"internal\",\"message\":\"internal server error\",\"status\":500}}"
+        },
+        "warnings_after_request": 1,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 76,
+          "fallback": null
+        },
+        "operation": {
+          "store": "missing",
+          "operation": "list",
+          "outcome": "open-failed",
+          "reason": "InvalidConfiguration"
+        }
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/linked/write",
+        "token": "18e13f6dcf200398-86fe-1d0",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "244"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6dcf200398-86fe-1d0\",\"inflight\":0,\"instance\":\"18e13f6dce9432a0-86fe-1c9\",\"kv_outcome\":\"written\",\"mutated\":false,\"native_id\":false,\"ordinal\":8,\"path\":null,\"shared\":8,\"token\":\"18e13f6dcf200398-86fe-1d0\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 244,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "write",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/linked/read",
+        "token": "18e13f6dcf361408-86fe-1d1",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "245"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6dcf361408-86fe-1d1\",\"inflight\":0,\"instance\":\"18e13f6dce9432a0-86fe-1c9\",\"kv_outcome\":\"f8-value\",\"mutated\":false,\"native_id\":false,\"ordinal\":9,\"path\":null,\"shared\":9,\"token\":\"18e13f6dcf361408-86fe-1d1\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 245,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "read",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/linked/list",
+        "token": "18e13f6dcf46bda8-86fe-1d2",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "247"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6dcf46bda8-86fe-1d2\",\"inflight\":0,\"instance\":\"18e13f6dce9432a0-86fe-1c9\",\"kv_outcome\":[\"f8-key\"],\"mutated\":false,\"native_id\":false,\"ordinal\":10,\"path\":null,\"shared\":10,\"token\":\"18e13f6dcf46bda8-86fe-1d2\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 247,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "list",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/linked/delete",
+        "token": "18e13f6dcf62a248-86fe-1d3",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "246"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6dcf62a248-86fe-1d3\",\"inflight\":0,\"instance\":\"18e13f6dce9432a0-86fe-1c9\",\"kv_outcome\":\"deleted\",\"mutated\":false,\"native_id\":false,\"ordinal\":11,\"path\":null,\"shared\":11,\"token\":\"18e13f6dcf62a248-86fe-1d3\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 246,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "delete",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/linked/read",
+        "token": "18e13f6dcf742e78-86fe-1d4",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "241"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6dcf742e78-86fe-1d4\",\"inflight\":0,\"instance\":\"18e13f6dce9432a0-86fe-1c9\",\"kv_outcome\":null,\"mutated\":false,\"native_id\":false,\"ordinal\":12,\"path\":null,\"shared\":12,\"token\":\"18e13f6dcf742e78-86fe-1d4\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 241,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "read",
+          "outcome": "success",
+          "reason": null
+        }
+      },
+      {
+        "adapter": "spin",
+        "path": "/declared-kv/linked/list",
+        "token": "18e13f6dcf869568-86fe-1d5",
+        "instance": "18e13f6dce9432a0-86fe-1c9",
+        "status": "pass",
+        "wire": {
+          "status": 200,
+          "headers": [
+            ["content-type", "text/plain; charset=utf-8"],
+            ["content-length", "239"],
+            ["connection", "close"],
+            ["date", "Fri, 23 Oct 2026 19:31:07 GMT"]
+          ],
+          "body": "{\"body\":\"\",\"builds\":1,\"correlation\":\"18e13f6dcf869568-86fe-1d5\",\"inflight\":0,\"instance\":\"18e13f6dce9432a0-86fe-1c9\",\"kv_outcome\":[],\"mutated\":false,\"native_id\":false,\"ordinal\":13,\"path\":null,\"shared\":13,\"token\":\"18e13f6dcf869568-86fe-1d5\"}"
+        },
+        "warnings_after_request": null,
+        "lifecycle": {
+          "ordered_events": [
+            "request_start",
+            "declared_kv_enter",
+            "declared_kv_result",
+            "egress_terminal"
+          ],
+          "outcome": "HostHandoff",
+          "body_kind": "Application",
+          "bytes_written": 239,
+          "fallback": null
+        },
+        "operation": {
+          "store": "linked",
+          "operation": "list",
+          "outcome": "success",
+          "reason": null
+        }
+      }
+    ],
+    "build_records": [
+      {
+        "artifact": {
+          "bytes": 3632585,
+          "fnv1a64": "83bce60c991e159b",
+          "path": "/private/tmp/edgezero-f8-operations-correlated/artifacts/fixture-fastly-retained-app.wasm",
+          "purpose": "non-security build identity"
+        },
+        "config": {
+          "bytes": 463,
+          "fnv1a64": "08fc48ea1ca6c072",
+          "path": "/private/tmp/edgezero-f8-operations-correlated/fastly.toml",
+          "purpose": "non-security build identity"
+        },
+        "event": "build",
+        "repetition": 0,
+        "target": "wasm32-wasip1",
+        "variant": "c"
+      },
+      {
+        "adapter": "cloudflare",
+        "artifact": {
+          "bytes": 1780906,
+          "fnv1a64": "f260b43b08b2233c",
+          "path": "/private/tmp/edgezero-f8-operations-correlated/artifacts/build/index_bg.wasm",
+          "purpose": "non-security build identity"
+        },
+        "event": "build"
+      },
+      {
+        "adapter": "spin",
+        "artifact": {
+          "bytes": 2312993,
+          "fnv1a64": "eb35d80e88702611",
+          "path": "/private/tmp/edgezero-f8-operations-correlated/artifacts/fixture_spin.wasm",
+          "purpose": "non-security build identity"
+        },
+        "event": "build"
+      }
+    ],
+    "selected_artifacts": [
+      {
+        "path": "/private/tmp/edgezero-f8-operations-correlated/artifacts/fixture-fastly-retained-app.wasm",
+        "bytes": 3632585,
+        "sha256": "404a57f63f2103641fb1d07551d63a7e55009fe0959316ed9f65ed2f16a58eae"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-correlated/fastly.toml",
+        "bytes": 463,
+        "sha256": "4444af855e1f5db54da213ddfc6a84ea34aa52f9fd868d047521b0ab78a3fd18"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-correlated/artifacts/build/index_bg.wasm",
+        "bytes": 1780906,
+        "sha256": "1eb166a3a7534e3b457e04024962555bcb0c06b4bda0cab7edb83d764e1f1af5"
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-correlated/artifacts/fixture_spin.wasm",
+        "bytes": 2312993,
+        "sha256": "f5d5cdff5437dcd1dc37706807c2b314e33603e4afefd0935d0a08b2dad52456"
+      }
+    ]
+  },
+  "warning_attribution": {
+    "original_prefix": "One observed instance, exact 0/1/1/1 counts; not restarted or retried.",
+    "fastly": "Named-endpoint aggregate count after each request and shutdown equals distinct observed missing-operation instances. Lines lack instance tags, so late cross-instance warnings are not independently attributable.",
+    "cloudflare_spin": "Exact per-instance counts: one for observed missing-operation instances, zero for healthy/free-only instances."
+  },
+  "earlier_runs": [
+    {
+      "directory": "/private/tmp/edgezero-f8-operations-smoke",
+      "exit_code": 1,
+      "events": {
+        "path": "/private/tmp/edgezero-f8-operations-smoke/events.jsonl",
+        "bytes": 1631214,
+        "sha256": "beb99125c9ca9c07c1eed9cbe5773842e5393f28044eee3c88c8c6ff410d95ca"
+      },
+      "summary": {
+        "path": "/private/tmp/edgezero-f8-operations-smoke/summary.json",
+        "bytes": 369916,
+        "sha256": "b8e00e54495f583fd10f650b78e7a93ebbd0b1aba9c9274e39b5d9548a646b2f"
+      },
+      "log": {
+        "path": "/private/tmp/edgezero-f8-operations-smoke.log",
+        "bytes": 9564,
+        "sha256": "324e6370b2a0383b7d5b779ed4b7bfee1cca84b4065d9fd94d999e6d9e3c0384"
+      },
+      "f8_cases": 31,
+      "post_shutdown": [
+        {
+          "adapter": "fastly",
+          "error": "declared KV matrix did not execute every request",
+          "event": "declared-kv-after-shutdown",
+          "instance": "18e13e9b4c7a6618-17359-84",
+          "qualification": false,
+          "requests": 6,
+          "status": "fail",
+          "warnings": 2
+        },
+        {
+          "adapter": "cloudflare",
+          "error": null,
+          "event": "declared-kv-after-shutdown",
+          "instance": "18e13e9e993ebaa0-17359-96",
+          "qualification": false,
+          "requests": 13,
+          "status": "pass",
+          "warnings": 1
+        },
+        {
+          "adapter": "spin",
+          "error": null,
+          "event": "declared-kv-after-shutdown",
+          "instance": "18e13ea24b7722b8-17359-128",
+          "qualification": false,
+          "requests": 13,
+          "status": "pass",
+          "warnings": 1
+        }
+      ],
+      "failures": [
+        {
+          "adapter": "fastly",
+          "error": "declared KV matrix did not execute every request",
+          "event": "declared-kv-after-shutdown",
+          "instance": "18e13e9b4c7a6618-17359-84",
+          "qualification": false,
+          "requests": 6,
+          "status": "fail",
+          "warnings": 2
+        },
+        {
+          "adapter": "fastly",
+          "error": "declared KV sandbox turnover: deduplication unverified",
+          "repetition": 0,
+          "status": "fail",
+          "variant": "c"
+        }
+      ],
+      "unverified": [
+        {
+          "adapter": "spin",
+          "assertion": "same_guest_overlap",
+          "attempt_limit": 3,
+          "mode": "per-request",
+          "status": "unverified"
+        },
+        {
+          "adapter": "spin",
+          "assertion": "same_guest_overlap",
+          "attempt_limit": 3,
+          "mode": "retained",
+          "status": "unverified"
+        }
+      ],
+      "interpretation": "New seven-request same-instance assertion failed at the pinned host limit. Original four-request proof passed; no retry or provider-setting change waived it."
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-operations-final",
+      "exit_code": 2,
+      "events": {
+        "path": "/private/tmp/edgezero-f8-operations-final/events.jsonl",
+        "bytes": 1851643,
+        "sha256": "1fb9af2b663ad04e982d72451a26334e6683153886c4228045736c01bec0a9ba"
+      },
+      "summary": {
+        "path": "/private/tmp/edgezero-f8-operations-final/summary.json",
+        "bytes": 486324,
+        "sha256": "03697a119eae4cb9db847108d686ed963cd14fa75086024a51797e26877b7a4f"
+      },
+      "log": {
+        "path": "/private/tmp/edgezero-f8-operations-final.log",
+        "bytes": 7777,
+        "sha256": "74c182281b92493d9fe04e46b4ae13dea67bc965792e00a4358af08d04ce6908"
+      },
+      "f8_cases": 39,
+      "post_shutdown": [
+        {
+          "adapter": "fastly",
+          "error": null,
+          "event": "declared-kv-after-shutdown",
+          "failed_instances": [
+            "18e13ee4679143d8-22d2-84",
+            "18e13ee4681498f0-22d2-8a"
+          ],
+          "instance": "18e13ee4679143d8-22d2-84",
+          "qualification": false,
+          "requests": 13,
+          "status": "pass",
+          "warnings": 2
+        },
+        {
+          "adapter": "cloudflare",
+          "error": null,
+          "event": "declared-kv-after-shutdown",
+          "failed_instances": ["18e13ee853536c58-22d2-13b"],
+          "instance": "18e13ee853536c58-22d2-13b",
+          "qualification": false,
+          "requests": 13,
+          "status": "pass",
+          "warnings": 1
+        },
+        {
+          "adapter": "spin",
+          "error": null,
+          "event": "declared-kv-after-shutdown",
+          "failed_instances": ["18e13eeb4f383b50-22d2-1cd"],
+          "instance": "18e13eeb4f383b50-22d2-1cd",
+          "qualification": false,
+          "requests": 13,
+          "status": "pass",
+          "warnings": 1
+        }
+      ],
+      "failures": [],
+      "unverified": [
+        {
+          "adapter": "spin",
+          "assertion": "same_guest_overlap",
+          "attempt_limit": 3,
+          "mode": "per-request",
+          "status": "unverified"
+        },
+        {
+          "adapter": "spin",
+          "assertion": "same_guest_overlap",
+          "attempt_limit": 3,
+          "mode": "retained",
+          "status": "unverified"
+        }
+      ],
+      "interpretation": "Intermediate local pass before final receipt-order, nullable-field and success-body correlation assertions."
+    },
+    {
+      "directory": "/private/tmp/edgezero-f8-operations-publish",
+      "exit_code": 2,
+      "events": {
+        "path": "/private/tmp/edgezero-f8-operations-publish/events.jsonl",
+        "bytes": 1850127,
+        "sha256": "639b85f0c342c3bb5b2c214a5fbc3a3d33ec1fdcb4355823e1d9d5865c369b10"
+      },
+      "summary": {
+        "path": "/private/tmp/edgezero-f8-operations-publish/summary.json",
+        "bytes": 485078,
+        "sha256": "2cc0e7fc2c49bf3222a29def2ed0b88dc02f2ba8a07579f1ea41d46b3e125b16"
+      },
+      "log": {
+        "path": "/private/tmp/edgezero-f8-operations-publish.log",
+        "bytes": 7443,
+        "sha256": "79f449b8a4eb0dd264f2bf892357801328966a5a466ec1866ed24ccfb908f30e"
+      },
+      "f8_cases": 39,
+      "post_shutdown": [
+        {
+          "adapter": "fastly",
+          "error": null,
+          "event": "declared-kv-after-shutdown",
+          "failed_instances": [
+            "18e13f4e1d558170-753f-84",
+            "18e13f4e1de79fb0-753f-8a"
+          ],
+          "instance": "18e13f4e1d558170-753f-84",
+          "qualification": false,
+          "requests": 13,
+          "status": "pass",
+          "warnings": 2
+        },
+        {
+          "adapter": "cloudflare",
+          "error": null,
+          "event": "declared-kv-after-shutdown",
+          "failed_instances": ["18e13f514405aea0-753f-13b"],
+          "instance": "18e13f514405aea0-753f-13b",
+          "qualification": false,
+          "requests": 13,
+          "status": "pass",
+          "warnings": 1
+        },
+        {
+          "adapter": "spin",
+          "error": null,
+          "event": "declared-kv-after-shutdown",
+          "failed_instances": ["18e13f53ddc4ba48-753f-1cd"],
+          "instance": "18e13f53ddc4ba48-753f-1cd",
+          "qualification": false,
+          "requests": 13,
+          "status": "pass",
+          "warnings": 1
+        }
+      ],
+      "failures": [],
+      "unverified": [
+        {
+          "adapter": "spin",
+          "assertion": "same_guest_overlap",
+          "attempt_limit": 3,
+          "mode": "per-request",
+          "status": "unverified"
+        },
+        {
+          "adapter": "spin",
+          "assertion": "same_guest_overlap",
+          "attempt_limit": 3,
+          "mode": "retained",
+          "status": "unverified"
+        }
+      ],
+      "interpretation": "Intermediate local pass before final receipt-order, nullable-field and success-body correlation assertions."
+    }
+  ],
+  "verification": {
+    "passed": [
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T192245Z-root-fmt.log",
+        "bytes": 112,
+        "sha256": "42b9bdc49770be13a86d5573efca2f6e61a4768082527791cdc92d356bdfcf24",
+        "command": "cargo --offline --locked fmt --all -- --check",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T192245Z-root-clippy.log",
+        "bytes": 481,
+        "sha256": "b4c27f6d839eb6951bc680527551cf9fdd476a772d69249663dd583b5877835a",
+        "command": "cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T192245Z-root-test-unsandboxed.log",
+        "bytes": 184563,
+        "sha256": "b5813afb9729bbe0cb5d2b43e9b2c7ee550e2f540934500c92ce94a6ead7fd6b",
+        "command": "cargo test --offline --locked --workspace --all-targets",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T192245Z-root-check-features.log",
+        "bytes": 486,
+        "sha256": "516aacfb12291e2d23385f570688a700df65f13b6cf3e6660b58dcb963448d9f",
+        "command": "cargo check --offline --locked --workspace --all-targets --features \"fastly cloudflare spin\"",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T192245Z-root-check-spin.log",
+        "bytes": 488,
+        "sha256": "62620caa0bfd56d6c02916fcf13da20f1254ef74e3d86252e5bc5f48febe7793",
+        "command": "cargo check --offline --locked -p edgezero-adapter-spin --target wasm32-wasip2 --features spin",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T192245Z-fixture-core-test.log",
+        "bytes": 2858,
+        "sha256": "fdcada5442b128c7549c1082c5c97bf665b5eaf17d77b49ff10bbc7cf087bf90",
+        "command": "cargo test --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-core --all-targets --all-features",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T192245Z-fixture-core-clippy.log",
+        "bytes": 846,
+        "sha256": "4586db0141308c7fc61ff64602c803e73a05d2a6f10239e1b21b25da4058b213",
+        "command": "cargo clippy --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-core --all-targets --all-features -- -D warnings",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T192245Z-fixture-fastly-clippy.log",
+        "bytes": 906,
+        "sha256": "8e7275b1ec64632224eec0e3eb56c72c84d4ac666d74fd343f1e35e000cf3966",
+        "command": "cargo clippy --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-fastly --target wasm32-wasip1 --all-targets --features progress -- -D warnings",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T192245Z-fixture-cloudflare-clippy.log",
+        "bytes": 932,
+        "sha256": "c8cd86475b06fa3fa3872b1327605adab759906e920c3b60320a6af02e416675",
+        "command": "cargo clippy --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-cloudflare --target wasm32-unknown-unknown --all-targets --features qualification -- -D warnings",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T192245Z-fixture-spin-clippy.log",
+        "bytes": 905,
+        "sha256": "2e9a5e82b837a9f350322f8bf38b6417e2d1bc398201a5fe6b8118c60188d102",
+        "command": "cargo clippy --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-spin --target wasm32-wasip2 --all-targets --features qualification -- -D warnings",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T193047Z-fixture-harness-test-final84.log",
+        "bytes": 8165,
+        "sha256": "6795f4720eb394c35220c850969cd7697fff6f444f5d633223ec7c966d12cd28",
+        "command": "cargo test --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness --all-targets --all-features",
+        "exit_code": 0
+      },
+      {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T193047Z-fixture-harness-clippy-final84.log",
+        "bytes": 460,
+        "sha256": "b4f097d836d9fb9004cd8b4b255ef2ac3b1ad9f74c19d790afe7541644a24ad5",
+        "command": "cargo clippy --offline --locked --manifest-path tests/fixtures/reusable-app/Cargo.toml -p fixture-harness --all-targets --all-features -- -D warnings",
+        "exit_code": 0
+      }
+    ],
+    "workspace_tests": {
+      "passed": 2193,
+      "failed": 0,
+      "ignored": 1,
+      "binaries": 28
+    },
+    "fixture_tests": {
+      "core": 20,
+      "harness": 84,
+      "failed": 0
+    },
+    "red_green": [
+      {
+        "sentinel": "declared_kv_final_validation_rejects_late_duplicates_and_missing_cases",
+        "red": {
+          "path": "/private/tmp/edgezero-f8-operation-order-red.log",
+          "bytes": 1376,
+          "sha256": "9ecc89c3a55925e49fa1a132ec739eb5dd50c16436ac83c0f994e94824174adb"
+        },
+        "red_exit_code": 101,
+        "green": {
+          "path": "/private/tmp/edgezero-f8-operation-order-green.log",
+          "bytes": 1136,
+          "sha256": "78fd3ea05979b19ee2055e32b45746f7386b89917a6135f3850e90da1c77406d"
+        },
+        "green_exit_code": 0
+      },
+      {
+        "sentinel": "declared_kv_linked_result_requires_a_present_field_even_when_null",
+        "red": {
+          "path": "/private/tmp/edgezero-f8-operation-null-red.log",
+          "bytes": 5815,
+          "sha256": "e2624907de74cd58ed6cbc1768e6d8f2fda4c8e769ce3cf9e147178c7f191132"
+        },
+        "red_exit_code": 101,
+        "green": {
+          "path": "/private/tmp/edgezero-f8-operation-null-green.log",
+          "bytes": 1230,
+          "sha256": "6246a88fefea8563e5a7affae5cf6293a9f8ca99f17fdc4a77baaea6e9292f3e"
+        },
+        "green_exit_code": 0
+      },
+      {
+        "sentinel": "declared_kv_success_body_requires_request_and_instance_correlation",
+        "red": {
+          "path": "/private/tmp/edgezero-f8-operation-correlation-red.log",
+          "bytes": 2801,
+          "sha256": "d51726198622532a507d579ad756834bae9b2e420e7581373f954c7721bf0692"
+        },
+        "red_exit_code": 101,
+        "green": {
+          "path": "/private/tmp/edgezero-f8-operation-correlation-green.log",
+          "bytes": 1325,
+          "sha256": "74bc42dda523df892df0e055d6a079a73a734a49ca733775e8f793c0a5615d10"
+        },
+        "green_exit_code": 0
+      }
+    ],
+    "restricted_attempt": {
+      "log": {
+        "path": "/private/tmp/edgezero-f8-operations-validator-20261023T192245Z-root-test.log",
+        "bytes": 53150,
+        "sha256": "9ef6d21137f322e28dbc240a3cffed97072d23f51da094a16b065df1211279f2"
+      },
+      "exit_code": 101,
+      "interpretation": "Socket operations denied by sandbox. Unchanged escalated run passed; not a product regression or passing evidence."
+    }
+  },
+  "remaining": [
+    "Consumer-owned route acceptance and actual outage/restoration of the same declaration on a later request.",
+    "Hosted and frozen-candidate qualification; no capability promotion.",
+    "Fastly G2 and dependent head-first/eager driver migration remain open.",
+    "Fastly SDK framing parity and Cloudflare front-proxy overflow recovery remain separate failed/open gates.",
+    "Spin retained-mode overlap remains unverified. Per-request overlap observed once locally does not qualify hosted behavior."
+  ]
+}

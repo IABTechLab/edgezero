@@ -11,9 +11,31 @@ updates:
       interval: "weekly"
     cooldown:
       default-days: 7
+    groups:
+      audited-decoders:
+        patterns:
+          - "alloc-no-stdlib"
+          - "alloc-stdlib"
+          - "adler2"
+          - "async-compression"
+          - "brotli"
+          - "brotli-decompressor"
+          - "compression-codecs"
+          - "compression-core"
+          - "crc32fast"
+          - "flate2"
+          - "miniz_oxide"
+          - "simd-adler32"
 
   - package-ecosystem: "npm" # See documentation for possible values
     directory: "docs/" # Location of package manifests
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: "npm"
+    directory: "/scripts"
     schedule:
       interval: "weekly"
     cooldown:

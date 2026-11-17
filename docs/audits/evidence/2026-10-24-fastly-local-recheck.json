@@ -1,0 +1,150 @@
+{
+  "schema": 1,
+  "execution_date": "2026-10-24",
+  "timezone": "America/Los_Angeles",
+  "status": "Both local controls failed; cleanup-window overrun retained, G2 unchanged",
+  "qualification": false,
+  "edgezero_base_revision": "98a1d0e8c3ac3e0bd9e3f0986ae0390527d7a4a8",
+  "source_state": "Committed clean source at diagnostic build; local characterization, not frozen qualification. Later checker/replay changes are not part of these guest binaries.",
+  "command": "CARGO_NET_OFFLINE=true VICEROY_BIN=<explicit repaired or stock binary> scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness --output <new empty directory>",
+  "deployed": false,
+  "external_requests": false,
+  "origins": "bounded loopback only",
+  "unchanged_gate": {
+    "deadline_us": 500000,
+    "tolerance_us": 5000,
+    "maximum_completion_us": 505000,
+    "body_probes_per_run": 135,
+    "origin_requests_per_run": 147,
+    "timer_controls_per_run": 72,
+    "excluded_warmups_per_run": 3,
+    "overall_G2": "Failed",
+    "historical_evidence_rewritten": false,
+    "runtime_pins_changed": false,
+    "production_transport_changed": false
+  },
+  "runs": [
+    {
+      "id": "repaired",
+      "exit_code": 1,
+      "directory": "/private/tmp/edgezero-pr275-fastly-local-repaired-20261024-01",
+      "runtime_executable": "/private/tmp/edgezero-viceroy-0.21.0-readiness-20261023/target/debug/viceroy",
+      "runtime_version": "0.21.0",
+      "runtime_binary_sha256": "98ea0536478ce2e641f093b2619b7ac7c6c237402f140e5792d854575abc7100",
+      "guest_sha256": "fb70d997eba46e5f8b67676ae77e37a164ddba2f5b8065bd24d8761dd33d26ad",
+      "guest_bytes": 787543,
+      "events_sha256": "d7221d4c5e84047a188734da6cd132d943dbb66a4b0eb3b985aec1e81122783c",
+      "log_sha256": "57fde22ff6974e6a770703cb00cddd97f0c41ad78bd1b7bde961ba69bb5594fd",
+      "body_probes": 135,
+      "origin_requests": 147,
+      "maximum_completion_us": 505158,
+      "body_source_error_losses": 0,
+      "timer_controls": 72,
+      "late_timer_controls": [
+        {
+          "source": "native-sleep",
+          "budget_ms": 100,
+          "elapsed_us": 105010,
+          "overrun_us": 5010
+        },
+        {
+          "source": "native-sleep",
+          "budget_ms": 100,
+          "elapsed_us": 105016,
+          "overrun_us": 5016
+        }
+      ],
+      "validation_failure": "readiness: 1 readiness leg(s) failed:\ntrickle/selected/buffered/16384/1: reordered or late operation",
+      "qualification": false
+    },
+    {
+      "id": "stock",
+      "exit_code": 1,
+      "directory": "/private/tmp/edgezero-pr275-fastly-local-stock-20261024-01",
+      "runtime_executable": "/Users/ag/.asdf/installs/rust/1.98.1/bin/viceroy",
+      "runtime_version": "0.21.0",
+      "runtime_binary_sha256": "751ff2c1a83063b109bc212b95be5f52e5ab6284b9027fa03aa229087eba3f30",
+      "guest_sha256": "fb70d997eba46e5f8b67676ae77e37a164ddba2f5b8065bd24d8761dd33d26ad",
+      "guest_bytes": 787543,
+      "events_sha256": "d64bf93164028e12d8b6758601342bebb795db6a8ce1e1852d9f176f6433da80",
+      "log_sha256": "c09cb8d333f5c2a07253c22cad2eaffbd8141577ec6c74123bfbfd7f9513d4f2",
+      "body_probes": 135,
+      "origin_requests": 147,
+      "maximum_completion_us": 502445,
+      "body_source_error_losses": 24,
+      "timer_controls": 72,
+      "late_timer_controls": [
+        {
+          "source": "native-sleep",
+          "budget_ms": 100,
+          "elapsed_us": 105009,
+          "overrun_us": 5009
+        },
+        {
+          "source": "native-sleep",
+          "budget_ms": 500,
+          "elapsed_us": 505018,
+          "overrun_us": 5018
+        },
+        {
+          "source": "empty-select",
+          "budget_ms": 500,
+          "elapsed_us": 506343,
+          "overrun_us": 6343
+        }
+      ],
+      "validation_failure": "readiness: 24 readiness leg(s) failed:\ntruncated/selected/buffered/1/0: wrong case terminal\ntruncated/selected/buffered/16384/0: wrong case terminal\ntruncated/selected/streamed/1/0: wrong case terminal\ntruncated/selected/streamed/16384/0: wrong case terminal\nmalformed-body/selected/buffered/1/0: wrong case terminal\nmalformed-body/selected/buffered/16384/0: wrong case terminal\nmalformed-body/selected/streamed/1/0: wrong case terminal\nmalformed-body/selected/streamed/16384/0: wrong case terminal\ntruncated/selected/buffered/1/1: wrong case terminal\ntruncated/selected/buffered/16384/1: wrong case terminal\ntruncated/selected/streamed/1/1: wrong case terminal\ntruncated/selected/streamed/16384/1: wrong case terminal\nmalformed-body/selected/buffered/1/1: wrong case terminal\nmalformed-body/selected/buffered/16384/1: wrong case terminal\nmalformed-body/selected/streamed/1/1: wrong case terminal\nmalformed-body/selected/streamed/16384/1: wrong case terminal\ntruncated/selected/buffered/1/2: wrong case terminal\ntruncated/selected/buffered/16384/2: wrong case terminal\ntruncated/selected/streamed/1/2: wrong case terminal\ntruncated/selected/streamed/16384/2: wrong case terminal\nmalformed-body/selected/buffered/1/2: wrong case terminal\nmalformed-body/selected/buffered/16384/2: wrong case terminal\nmalformed-body/selected/streamed/1/2: wrong case terminal\nmalformed-body/selected/streamed/16384/2: wrong case terminal",
+      "qualification": false
+    }
+  ],
+  "cleanup_window": {
+    "run": "repaired",
+    "case": "trickle/selected/buffered/16384/1",
+    "abi_return_us": 502614,
+    "selection_end_us": 502621,
+    "cleanup_start_us": 502707,
+    "cleanup_end_us": 505117,
+    "completed_us": 505158,
+    "cleanup_duration_us": 2410,
+    "completion_over_bound_us": 158,
+    "anchor": "finish starts before clearing the SDK-owned handle state and ends after release; JSON construction/checksum formatting follow the end sample",
+    "cause": "SDK handle release, clock sampling and descheduling are not separated by these timestamps; no specific cause proved"
+  },
+  "interpretation": [
+    "Both runs use identical guest bytes; runtime executable hashes differ explicitly.",
+    "The repaired runtime preserves selected source errors but fails the unchanged completion bound once. A within-bound ABI return does not excuse a late terminal cleanup/completion.",
+    "Stock still loses 24 selected source errors; its empty-select 500 ms control also returns beyond +5 ms. Timer controls preserve lateness rather than changing G2 acceptance.",
+    "No backdating, timeout reduction, extra tolerance, baseline replacement or blocking-read fallback is introduced.",
+    "Neither run executes Image Optimizer, proves performance parity or supplies finite B/H(K), a provider horizon approval or hosted evidence.",
+    "Full events/logs and binaries are identified by hash, not retained release assets. Canonical controls and all body probes are retained separately below."
+  ],
+  "selected_source_files": [
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_readiness.rs",
+      "sha256": "47d3f8be81c1531ad732d12ac1d645d70deba7328a0d8ded5be12bc0b7e752eb"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/readiness.rs",
+      "sha256": "6010f19a22282cca84b675b3d3d271e3006d27a1a463c3162910d7baef73e7f8"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence/timers.rs",
+      "sha256": "07a4c42569e1403da5847d02b3b2a33380253d54f83ffd595f746ba30d7d8748"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/Cargo.lock",
+      "sha256": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee"
+    },
+    {
+      "path": "patches/viceroy/0.21.0-body-readiness.patch",
+      "sha256": "8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759"
+    }
+  ],
+  "retained_probes": {
+    "path": "docs/audits/evidence/2026-10-24-fastly-local-recheck-probes.jsonl",
+    "sha256": "0f2756c9f2b80e5ac9fa1a4a9f2b688bc833292f81f50092a5d7a36b6ba62e1b",
+    "records": 414,
+    "timer_controls": 144,
+    "body_probes": 270
+  }
+}

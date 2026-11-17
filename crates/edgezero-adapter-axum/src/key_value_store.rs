@@ -43,13 +43,20 @@
 //! - The database file path acts as the namespace identifier, similar to
 //!   how Cloudflare uses bindings and Fastly uses store names.
 
+#[path = "key_value_store_records.rs"]
+mod records;
+
 use std::ops::Bound;
 use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use edgezero_core::key_value_store::{KvError, KvPage, KvStore};
+use edgezero_core::key_value_store::{KvError, KvHandle, KvPage, KvStore};
+use edgezero_core::record_store::{
+    Record, RecordBinding, RecordLayout, RecordPage, RecordPartition, RecordWrite,
+    RecordWriteOutcome,
+};
 use redb::{Database, ReadableDatabase as _, ReadableTable as _, TableDefinition};
 use std::time::SystemTime;
 
@@ -66,6 +73,7 @@ type KvTable<'txn> = redb::Table<'txn, &'static str, (&'static [u8], Option<u128
 /// TTL-expired entries are lazily evicted (checked on read/list).
 pub struct PersistentKvStore {
     db: Database,
+    record_binding: Option<RecordBinding>,
 }
 
 impl PersistentKvStore {
@@ -161,22 +169,59 @@ impl PersistentKvStore {
     where
         P: AsRef<Path>,
     {
-        let db_path = path.as_ref().display().to_string();
-        let db = Database::create(path).map_err(|err| {
+        let db = Database::create(path).map_err(|_error| {
             KvError::Internal(anyhow::anyhow!(
-                "Failed to open KV database at {db_path}. If the file is corrupted or locked \
-                 by another process, try deleting it and restarting: {err}"
+                "KV database unavailable; release other owners or check storage permissions, capacity and integrity"
             ))
         })?;
 
         // Initialize the table
-        let store = Self { db };
+        let store = Self {
+            db,
+            record_binding: None,
+        };
         let write_txn = store.begin_write()?;
         {
             let _table = Self::open_table(&write_txn)?;
         }
         Self::commit(write_txn)?;
 
+        Ok(store)
+    }
+
+    /// Opens an explicit record format without converting ordinary-only rows.
+    ///
+    /// All ordinary methods on this binding access these record rows. Generation
+    /// history remains outside value deletion and expiry.
+    ///
+    /// # Errors
+    /// Returns an error for unavailable storage, incompatible layout or incomplete
+    /// persistent format state. Existing state is never reset to repair an error.
+    #[inline]
+    #[expect(
+        clippy::unnecessary_debug_formatting,
+        reason = "Path Debug preserves and escapes non-UTF-8 path bytes for cursor scope identity"
+    )]
+    pub fn new_records<P>(path: P, layout: RecordLayout) -> Result<Self, KvError>
+    where
+        P: AsRef<Path>,
+    {
+        let db = Database::create(path.as_ref()).map_err(|_error| KvError::Unavailable)?;
+        let absolute = path
+            .as_ref()
+            .canonicalize()
+            .map_err(|_error| KvError::Unavailable)?;
+        let record_binding = RecordBinding {
+            format: records::FORMAT.to_owned(),
+            layout,
+            max_metadata_bytes: KvHandle::MAX_VALUE_SIZE,
+            scope: format!("redb:{absolute:?}"),
+        };
+        let store = Self {
+            db,
+            record_binding: Some(record_binding),
+        };
+        records::initialize(&store)?;
         Ok(store)
     }
 
@@ -198,6 +243,9 @@ impl PersistentKvStore {
 impl KvStore for PersistentKvStore {
     #[inline]
     async fn delete(&self, key: &str) -> Result<(), KvError> {
+        if self.record_binding.is_some() {
+            return records::ordinary_delete(self, key);
+        }
         let write_txn = self.begin_write()?;
         let mut table = Self::open_table(&write_txn)?;
         table
@@ -214,6 +262,9 @@ impl KvStore for PersistentKvStore {
 
     #[inline]
     async fn get_bytes(&self, key: &str) -> Result<Option<Bytes>, KvError> {
+        if self.record_binding.is_some() {
+            return records::ordinary_lookup(self, key);
+        }
         let read_txn = self
             .db
             .begin_read()
@@ -279,6 +330,9 @@ impl KvStore for PersistentKvStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<KvPage, KvError> {
+        if self.record_binding.is_some() {
+            return records::ordinary_page(self, prefix, cursor, limit);
+        }
         let mut live_keys = Vec::with_capacity(limit.saturating_add(1));
         let mut scan_cursor = cursor.map(str::to_owned);
         let mut reached_end = false;
@@ -390,6 +444,9 @@ impl KvStore for PersistentKvStore {
 
     #[inline]
     async fn put_bytes(&self, key: &str, value: Bytes) -> Result<(), KvError> {
+        if self.record_binding.is_some() {
+            return records::ordinary_put(self, key, value.as_ref(), None);
+        }
         let write_txn = self.begin_write()?;
         let mut table = Self::open_table(&write_txn)?;
         table
@@ -406,6 +463,9 @@ impl KvStore for PersistentKvStore {
         value: Bytes,
         ttl: Duration,
     ) -> Result<(), KvError> {
+        if self.record_binding.is_some() {
+            return records::ordinary_put(self, key, value.as_ref(), Some(ttl));
+        }
         let expires_at = SystemTime::now()
             .checked_add(ttl)
             .ok_or_else(|| KvError::Internal(anyhow::anyhow!("ttl overflows system time")))?;
@@ -418,6 +478,65 @@ impl KvStore for PersistentKvStore {
             .map_err(|err| KvError::Internal(anyhow::anyhow!("failed to insert: {err}")))?;
         drop(table);
         Self::commit(write_txn)
+    }
+
+    #[inline]
+    fn record_binding(&self) -> Option<RecordBinding> {
+        self.record_binding.clone()
+    }
+
+    #[inline]
+    async fn record_delete(&self, key: &str, partition: &RecordPartition) -> Result<(), KvError> {
+        records::delete(self, key, partition)
+    }
+
+    #[inline]
+    async fn record_exists_strong(
+        &self,
+        key: &str,
+        partition: &RecordPartition,
+    ) -> Result<bool, KvError> {
+        records::exists(self, key, partition)
+    }
+
+    #[inline]
+    async fn record_insert(
+        &self,
+        key: &str,
+        partition: &RecordPartition,
+        write: RecordWrite<'_>,
+    ) -> Result<RecordWriteOutcome, KvError> {
+        records::insert(self, key, partition, write)
+    }
+
+    #[inline]
+    async fn record_list_partition(
+        &self,
+        partition: &RecordPartition,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<RecordPage, KvError> {
+        let binding = self
+            .record_binding
+            .as_ref()
+            .ok_or_else(|| KvError::Unsupported {
+                operation: "records".to_owned(),
+            })?;
+        if binding.layout.partition(partition.prefix())? != *partition {
+            return Err(KvError::Validation(
+                "record partition does not match".to_owned(),
+            ));
+        }
+        records::page(self, partition.prefix(), cursor, limit, "partition")
+    }
+
+    #[inline]
+    async fn record_lookup(
+        &self,
+        key: &str,
+        partition: &RecordPartition,
+    ) -> Result<Option<Record>, KvError> {
+        records::lookup(self, key, partition)
     }
 }
 

@@ -355,7 +355,7 @@ boot_runtime() {
     fastly)
       # DEMO_API_TOKEN_SECRET is the env var viceroy reads to
       # populate the `demo_api_token` secret-store entry seeded
-      # by seed_secret_for_adapter. viceroy 0.17+ uses `serve`
+      # by seed_secret_for_adapter. Current Viceroy uses `serve`
       # for the long-running HTTP path (`run` was renamed).
       #
       # The wasm artifact lives in the app-demo workspace's
