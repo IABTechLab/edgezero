@@ -9,11 +9,11 @@ mod tests {
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
-    use edgezero_core::http::{HeaderMap, StatusCode, Uri};
+    use edgezero_core::http::{HeaderMap, HeaderValue, StatusCode, Uri};
     use edgezero_core::{
         BudgetSource, Deadline, DispatchBudget, EdgeError, HttpClient, MonotonicClock,
         MonotonicInstant, OutboundBatch, OutboundBatchCheck, OutboundBatchDriverEvent,
-        OutboundBatchNext, OutboundBatchTermination, OutboundCollectedSlot,
+        OutboundBatchNext, OutboundBatchTermination, OutboundCachePolicy, OutboundCollectedSlot,
         OutboundDispatchRequest, OutboundExchangeOwner, OutboundFuture, OutboundHead,
         OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient, OutboundPending,
         OutboundPreparedBatch, OutboundProxyMarker, OutboundRequest, OutboundResponse,
@@ -21,6 +21,7 @@ mod tests {
     };
     use futures::executor::block_on;
     use futures_util::future::ready;
+    use futures_util::stream::poll_fn;
     use futures_util::task::{ArcWake, waker_ref};
     use futures_util::{FutureExt as _, StreamExt as _, stream};
 
@@ -55,9 +56,12 @@ mod tests {
     }
 
     struct RequestRecord {
+        body: Option<Vec<u8>>,
         budget: DispatchBudget,
+        cache_policy: OutboundCachePolicy,
         connect_timeout: Option<Duration>,
         entered_at: MonotonicInstant,
+        headers: HeaderMap,
         mode: OutboundSendMode,
         uri: Uri,
     }
@@ -164,7 +168,10 @@ mod tests {
                 )));
             }
             let record = RequestRecord {
+                body: parts.body.as_bytes().map(<[u8]>::to_vec),
                 budget,
+                cache_policy: parts.cache_policy,
+                headers: parts.headers,
                 connect_timeout,
                 entered_at,
                 mode: context.mode(),
@@ -391,6 +398,81 @@ mod tests {
             );
             assert_eq!(request.budget.cause, BudgetSource::BatchCutoff);
         }
+    }
+
+    #[test]
+    fn tagged_metadata_survives_send_begin_and_batch_preparation() {
+        let fixture = Fixture::new();
+        let client = fixture.client(false);
+        let policy = OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+            HeaderValue::from_static("example-all example-reader-0123"),
+        );
+        let request = || {
+            OutboundRequest::post("https://origin.example.com/resource?signature=literal%2Fvalue")
+                .expect("request")
+                .header("authorization", "fixture-signature")
+                .expect("signature")
+                .body("payload")
+                .cache_policy(policy.clone())
+        };
+        drop(block_on(client.send(request())).expect("send"));
+        let pending = block_on(client.begin(request())).expect("begin");
+        drop(block_on(pending.collect()).expect("begun response"));
+        let cutoff = fixture.clock.clock().deadline_after(Duration::from_secs(1));
+        drop(block_on(client.send_all_until(vec![request()], cutoff)).expect("batch"));
+        let recording = fixture.state.lock().expect("recording");
+        assert_eq!(recording.requests.len(), 3);
+        for (record, mode) in recording.requests.iter().zip([
+            OutboundSendMode::Send,
+            OutboundSendMode::Begin,
+            OutboundSendMode::Batch,
+        ]) {
+            assert_eq!(record.mode, mode);
+            assert_eq!(record.cache_policy, policy);
+            assert_eq!(record.headers["authorization"], "fixture-signature");
+            assert!(!record.headers.contains_key("surrogate-key"));
+            assert_eq!(record.body.as_deref(), Some(b"payload".as_slice()));
+            assert_eq!(record.uri.scheme_str(), Some("https"));
+            assert_eq!(
+                record.uri.authority().expect("authority").as_str(),
+                "origin.example.com"
+            );
+            assert_eq!(record.uri.query(), Some("signature=literal%2Fvalue"));
+        }
+        assert_eq!(recording.exchanges_released, 3);
+    }
+
+    #[test]
+    fn tagged_optimizer_preflight_has_no_upload_or_provider_io_in_any_mode() {
+        let fixture = Fixture::new();
+        let client = fixture.client(false);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let request = || {
+            let observed = Arc::clone(&polls);
+            OutboundRequest::get("https://origin.example.com/image")
+                .expect("request")
+                .cache_policy(OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                    HeaderValue::from_static("example-all"),
+                ))
+                .image_optimizer(
+                    edgezero_core::OutboundImageOptimizerOptions::new()
+                        .region(edgezero_core::OutboundImageOptimizerRegion::Asia),
+                )
+                .body(edgezero_core::Body::from_stream(poll_fn(move |_cx| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    Poll::Pending
+                })))
+        };
+        block_on(client.send(request())).expect_err("tagged optimizer send");
+        block_on(client.begin(request())).expect_err("tagged optimizer begin");
+        let cutoff = fixture.clock.clock().deadline_after(Duration::from_secs(1));
+        let batch =
+            block_on(client.send_all_until(vec![request()], cutoff)).expect("batch outcomes");
+        assert!(
+            matches!(&batch.slots()[0], OutboundCollectedSlot::Resolved(slot) if slot.outcome.is_err())
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert!(fixture.state.lock().expect("recording").requests.is_empty());
     }
 
     #[test]
