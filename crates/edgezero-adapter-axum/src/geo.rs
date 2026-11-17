@@ -4,7 +4,9 @@
 //! is not proof of an ALB credential rule or a particular `CloudFront` distribution.
 //! See the native Geo guide for the required network, header and cache controls.
 //!
-//! Off is valid and is the default, with no ambient Geo selector:
+//! Off is valid and is the default. Without an explicit selection the runner reads
+//! `EDGEZERO__ADAPTER__GEO__*` settings, then the app's `[adapters.axum.geo]` manifest table.
+//! An explicit selection overrides both:
 //! ```
 //! use edgezero_adapter_axum::dev_server::AxumRunOptions;
 //! use edgezero_adapter_axum::geo::{NativeGeoCapability, NativeGeoSelection};
@@ -106,11 +108,13 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use edgezero_core::env_config::EnvConfig;
 use edgezero_core::geo::{
     GeoAssertion, GeoInput, GeoOutcome, GeoProvider, GeoProviderId, GeoResolution, GeoSource,
     GeoStatus, GeoTrustBasis, GeoUnavailableReason,
 };
 use edgezero_core::http::{HeaderMap, HeaderName};
+use edgezero_core::manifest::{BakedManifest, ManifestAdapterGeo, ManifestGeoProvider};
 
 use crate::peer_networks::PeerNetworks;
 
@@ -125,6 +129,8 @@ pub enum NativeGeoConfigError {
     UnavailableCloudFront,
     #[error("native_geo: reserved supplied provider identity")]
     ReservedProviderId,
+    #[error("native_geo: invalid provider selection")]
+    InvalidSelection,
 }
 
 /// An operator declaration of a credential-gated, isolated CloudFront/ALB path.
@@ -238,6 +244,76 @@ pub enum NativeGeoCapability {
         source: GeoSource,
         trust_basis: GeoTrustBasis,
     },
+}
+
+/// Resolves the startup selection: an explicit [`AxumRunOptions::with_geo`] wins,
+/// then `EDGEZERO__ADAPTER__GEO__*` settings, then the baked `[adapters.axum.geo]`
+/// table. With none of them geo stays off.
+///
+/// [`AxumRunOptions::with_geo`]: crate::run_options::AxumRunOptions::with_geo
+pub(crate) fn resolve(
+    explicit: Option<&NativeGeoSelection>,
+    env: &EnvConfig,
+    manifest: &BakedManifest,
+) -> Result<NativeGeo, NativeGeoConfigError> {
+    match explicit {
+        Some(selection) => NativeGeo::validate(selection),
+        None => NativeGeo::validate(&configured_selection(env, manifest_geo(manifest))?),
+    }
+}
+
+fn manifest_geo(baked: &BakedManifest) -> Option<&ManifestAdapterGeo> {
+    // An absent or malformed manifest selects nothing; app building rejects malformed.
+    let BakedManifest::Present(manifest) = baked else {
+        return None;
+    };
+    let (_name, adapter) = manifest.adapter_entry("axum")?;
+    adapter.geo.as_ref()
+}
+
+fn configured_selection(
+    env: &EnvConfig,
+    manifest: Option<&ManifestAdapterGeo>,
+) -> Result<NativeGeoSelection, NativeGeoConfigError> {
+    let env_provider = env.get(&["adapter", "geo", "provider"]);
+    let env_networks = env.get(&["adapter", "geo", "alb_peer_cidrs"]);
+    let env_header = env.get(&["adapter", "geo", "origin_credential_header_name"]);
+    let provider = match env_provider {
+        Some("cloudfront") => Some(ManifestGeoProvider::CloudFront),
+        Some("off") => Some(ManifestGeoProvider::Off),
+        Some(_) => return Err(NativeGeoConfigError::InvalidSelection),
+        None => manifest.and_then(|geo| geo.provider),
+    };
+    match provider {
+        Some(ManifestGeoProvider::CloudFront) => {
+            let networks: Vec<&str> = match env_networks {
+                Some(raw) => raw.split(',').map(str::trim).collect(),
+                None => manifest
+                    .and_then(|geo| geo.alb_peer_cidrs.as_deref())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(String::as_str)
+                    .collect(),
+            };
+            let header = env_header
+                .or_else(|| manifest?.origin_credential_header_name.as_deref())
+                .ok_or(NativeGeoConfigError::InvalidCredentialHeader)?;
+            let policy = ProtectedCloudFrontAlb::new(networks, header)?;
+            Ok(NativeGeoSelection::CloudFront { policy })
+        }
+        // Policy without a selected provider is a misconfiguration, not a silent
+        // off. A manifest CloudFront default may still be overridden to off.
+        _ if env_networks.is_some()
+            || env_header.is_some()
+            || (provider.is_none()
+                && manifest.is_some_and(|geo| {
+                    geo.alb_peer_cidrs.is_some() || geo.origin_credential_header_name.is_some()
+                })) =>
+        {
+            Err(NativeGeoConfigError::InvalidSelection)
+        }
+        _ => Ok(NativeGeoSelection::Off),
+    }
 }
 
 /// Validated runner-owned composition, never installed in public extensions.
@@ -359,13 +435,171 @@ fn assertion<const N: usize>(headers: &HeaderMap, name: &'static str) -> GeoAsse
 mod tests {
     use super::*;
     use crate::run_options::AxumRunOptions;
+    use edgezero_core::app::Hooks;
+    use edgezero_core::error::EdgeError;
     use edgezero_core::geo::{CountryCode, GeoError, GeoLocation};
     use edgezero_core::http::HeaderValue;
+    use edgezero_core::manifest::Manifest;
+    use edgezero_core::router::RouterService;
     use std::iter::empty;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn policy() -> ProtectedCloudFrontAlb {
         ProtectedCloudFrontAlb::new(["127.0.0.1/32"], "x-origin-verify-fixture").unwrap()
+    }
+
+    fn resolved(
+        explicit: Option<&NativeGeoSelection>,
+        vars: &[(&str, &str)],
+        manifest: &BakedManifest,
+    ) -> Result<NativeGeoCapability, NativeGeoConfigError> {
+        let env = EnvConfig::from_vars(vars.iter().copied());
+        resolve(explicit, &env, manifest).map(|geo| geo.capability())
+    }
+
+    fn baked(geo: &'static str) -> BakedManifest {
+        let json: &'static str =
+            Box::leak(format!(r#"{{"adapters":{{"axum":{{"geo":{geo}}}}}}}"#).into_boxed_str());
+        let baked = Manifest::from_baked_json(json);
+        assert!(matches!(baked, BakedManifest::Present(_)), "{json}");
+        baked
+    }
+
+    #[test]
+    fn geo_settings_resolve_explicit_then_env_then_manifest() {
+        const CIDRS: &str = "EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS";
+        const HEADER: &str = "EDGEZERO__ADAPTER__GEO__ORIGIN_CREDENTIAL_HEADER_NAME";
+        const PROVIDER: &str = "EDGEZERO__ADAPTER__GEO__PROVIDER";
+        let none = BakedManifest::Absent;
+        let cloudfront = baked(
+            r#"{"provider":"cloudfront","alb_peer_cidrs":["10.0.0.0/24"],"origin_credential_header_name":"x-origin-verify"}"#,
+        );
+        let header_only =
+            baked(r#"{"provider":"cloudfront","origin_credential_header_name":"x-origin-verify"}"#);
+        let off = Ok(NativeGeoCapability::Off);
+
+        // Nothing selected stays off; an explicit selection beats settings and manifest.
+        assert_eq!(resolved(None, &[], &none), off);
+        assert_eq!(
+            resolved(
+                Some(&NativeGeoSelection::Off),
+                &[(PROVIDER, "cloudfront")],
+                &cloudfront
+            ),
+            off
+        );
+        // Settings override the manifest provider and fill deployment-only values.
+        assert_eq!(resolved(None, &[(PROVIDER, "off")], &cloudfront), off);
+        assert_eq!(
+            resolved(None, &[], &header_only),
+            Err(NativeGeoConfigError::InvalidProtectedPolicy),
+            "manifest without networks needs the setting"
+        );
+        assert_eq!(
+            resolved(
+                None,
+                &[(PROVIDER, "cloudfront"), (CIDRS, "10.0.0.0/24")],
+                &none
+            ),
+            Err(NativeGeoConfigError::InvalidCredentialHeader)
+        );
+        assert_eq!(
+            resolved(
+                None,
+                &[
+                    (CIDRS, "10.0.0.0/24, 10.0.1.0/24"),
+                    (HEADER, "x-forwarded-for")
+                ],
+                &header_only
+            ),
+            Err(NativeGeoConfigError::InvalidCredentialHeader),
+            "setting header replaces the manifest header and is validated"
+        );
+        // Misconfiguration never falls back to off.
+        for (vars, manifest) in [
+            (vec![(PROVIDER, "maxmind")], &none),
+            (vec![(CIDRS, "10.0.0.0/24")], &none),
+            (
+                vec![(PROVIDER, "off"), (HEADER, "x-origin-verify")],
+                &cloudfront,
+            ),
+        ] {
+            assert_eq!(
+                resolved(None, &vars, manifest),
+                Err(NativeGeoConfigError::InvalidSelection),
+                "{vars:?}"
+            );
+        }
+        assert_eq!(
+            resolved(None, &[], &baked(r#"{"alb_peer_cidrs":["10.0.0.0/24"]}"#)),
+            Err(NativeGeoConfigError::InvalidSelection)
+        );
+        assert_eq!(resolved(None, &[], &baked(r#"{"provider":"off"}"#)), off);
+
+        let selected = [
+            resolved(None, &[], &cloudfront),
+            resolved(None, &[(CIDRS, "10.0.0.0/24, 10.0.1.0/24")], &header_only),
+            resolved(
+                None,
+                &[
+                    (PROVIDER, "cloudfront"),
+                    (CIDRS, "10.0.0.0/24"),
+                    (HEADER, "x-origin-verify"),
+                ],
+                &none,
+            ),
+        ];
+        for result in selected {
+            #[cfg(feature = "geo-cloudfront")]
+            assert!(
+                matches!(&result, Ok(NativeGeoCapability::Selected { provider, .. }) if provider == &GeoProviderId::cloudfront()),
+                "{result:?}"
+            );
+            #[cfg(not(feature = "geo-cloudfront"))]
+            assert_eq!(result, Err(NativeGeoConfigError::UnavailableCloudFront));
+        }
+    }
+
+    #[test]
+    fn geo_capability_for_applies_the_app_manifest() {
+        struct GeoApp;
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "fixture retains unused Hooks defaults"
+        )]
+        impl Hooks for GeoApp {
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().build())
+            }
+            fn manifest() -> BakedManifest {
+                Manifest::from_baked_json(
+                    r#"{"adapters":{"axum":{"geo":{"provider":"cloudfront","alb_peer_cidrs":["10.0.0.0/24"],"origin_credential_header_name":"x-origin-verify"}}}}"#,
+                )
+            }
+        }
+        let options = AxumRunOptions::new("127.0.0.1:8080".parse().unwrap()).unwrap();
+        assert_eq!(options.geo_capability(), Ok(NativeGeoCapability::Off));
+        #[cfg(feature = "geo-cloudfront")]
+        assert!(matches!(
+            options.geo_capability_for::<GeoApp>(),
+            Ok(NativeGeoCapability::Selected { .. })
+        ));
+        #[cfg(not(feature = "geo-cloudfront"))]
+        assert_eq!(
+            options.geo_capability_for::<GeoApp>(),
+            Err(NativeGeoConfigError::UnavailableCloudFront)
+        );
+        // Settings feed only the runner view; the explicit-only view never errors on them.
+        let partial =
+            AxumRunOptions::from_vars([("EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS", "10.0.1.0/24")])
+                .unwrap();
+        assert_eq!(partial.geo_capability(), Ok(NativeGeoCapability::Off));
+        let disabled =
+            AxumRunOptions::from_vars([("EDGEZERO__ADAPTER__GEO__PROVIDER", "off")]).unwrap();
+        assert_eq!(
+            disabled.geo_capability_for::<GeoApp>(),
+            Ok(NativeGeoCapability::Off)
+        );
     }
 
     #[test]
