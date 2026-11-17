@@ -12,7 +12,7 @@ use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::punctuated::Punctuated;
 use syn::{
-    Attribute, Data, DeriveInput, Expr, ExprLit, Field, Fields, GenericArgument, Ident, Lit, Meta,
+    Attribute, Data, DeriveInput, Expr, Field, Fields, GenericArgument, Ident, Lit, Meta,
     MetaNameValue, Path, PathArguments, Type, parse_macro_input,
 };
 
@@ -475,10 +475,8 @@ fn parse_secret_kind(attr: &Attribute) -> Result<SecretAnnotation, syn::Error> {
             // Try `store_ref = "field"` first (name-value form).
             if let Ok(nv) = syn::parse2::<MetaNameValue>(list.tokens.clone())
                 && nv.path.is_ident("store_ref")
-                && let Expr::Lit(ExprLit {
-                    lit: Lit::Str(str_lit),
-                    ..
-                }) = nv.value
+                && let Expr::Lit(literal) = nv.value
+                && let Lit::Str(str_lit) = literal.lit
             {
                 return Ok(SecretAnnotation::KeyInNamedStore {
                     store_ref_field: str_lit.value(),
