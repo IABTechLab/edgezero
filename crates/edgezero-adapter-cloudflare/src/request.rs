@@ -23,7 +23,7 @@ use edgezero_core::ingress::{
     IngressFraming, IngressHeadAccounting, IngressHeadParts, OriginSource, PreparedIngress,
     Preservation, RequestIngress, TargetSource,
 };
-use edgezero_core::key_value_store::KvHandle;
+use edgezero_core::key_value_store::{KvError, KvHandle};
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::response_egress::ResponseEgressEnvelope;
 use edgezero_core::secret_store::SecretHandle;
@@ -843,17 +843,13 @@ where
     if !app.record_store_requirements().is_empty() {
         let validation = kv_registry
             .as_ref()
-            .ok_or_else(|| {
-                edgezero_core::key_value_store::KvError::Validation(
-                    "required record registry missing".to_owned(),
-                )
-            })
+            .ok_or_else(|| KvError::Validation("required record registry missing".to_owned()))
             .and_then(|registry| {
                 registry.validate_record_requirements(app.record_store_requirements())
             });
         if let Err(error) = validation {
             return deliver(app.admitted_error_egress(prepared, error.into()))
-                .map_err(|error| edge_error_to_worker(&error));
+                .map_err(|delivery_error| edge_error_to_worker(&delivery_error));
         }
     }
     if let Some(registry) = config_registry {
