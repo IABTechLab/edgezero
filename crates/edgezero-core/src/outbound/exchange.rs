@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::fmt;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -7,6 +9,60 @@ use futures_util::future::poll_fn;
 use super::{OutboundFuture, OutboundTime};
 use crate::error::EdgeError;
 use crate::time::{Deadline, MonotonicClock, MonotonicInstant};
+
+/// First provider-observed exchange failure and its original observation instant.
+///
+/// Obtain the shared handle from `OutboundResponseContext::exchange_failure` before
+/// scheduling provider work. Record only terminal exchange failures, using that context's
+/// clock after the provider operation. Clones share one error; taking it never erases its
+/// timestamp or permits replacement. This is not a second transport or cancellation owner.
+#[derive(Clone, Default)]
+pub struct OutboundExchangeFailure(Rc<RefCell<Option<ObservedExchangeFailure>>>);
+
+struct ObservedExchangeFailure {
+    at: MonotonicInstant,
+    error: Option<EdgeError>,
+}
+
+impl OutboundExchangeFailure {
+    /// Returns the first observation instant, including after its error was consumed.
+    #[must_use]
+    #[inline]
+    pub fn observed_at(&self) -> Option<MonotonicInstant> {
+        self.0.borrow().as_ref().map(|failure| failure.at)
+    }
+
+    /// Retains the first terminal failure unchanged; later records cannot replace it.
+    #[inline]
+    pub fn record(&self, at: MonotonicInstant, error: EdgeError) {
+        let mut saved = self.0.borrow_mut();
+        if saved.is_none() {
+            *saved = Some(ObservedExchangeFailure {
+                at,
+                error: Some(error),
+            });
+        }
+    }
+
+    /// Consumes the first error at most once, without resetting its observation instant.
+    #[must_use]
+    #[inline]
+    pub fn take(&self) -> Option<EdgeError> {
+        self.0
+            .borrow_mut()
+            .as_mut()
+            .and_then(|failure| failure.error.take())
+    }
+}
+
+impl fmt::Debug for OutboundExchangeFailure {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OutboundExchangeFailure")
+            .field("observed_at", &self.observed_at())
+            .finish_non_exhaustive()
+    }
+}
 
 impl OutboundTime {
     /// Returns the clock supplied to both this pair and its timer factory.
