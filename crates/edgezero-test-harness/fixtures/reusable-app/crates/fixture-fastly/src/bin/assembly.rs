@@ -12,33 +12,47 @@ use fixture_core::assembly::{ConfigurationFailureApp, InternalFailureApp, RetryA
 fn main() -> Result<(), fastly::Error> {
     fixture_fastly::initialize_launch(env!("CARGO_BIN_NAME"));
     fastly::init();
-    fixture_core::init_fixture_logging(|line| println!("{line}"))?;
     let case = fastly::ConfigStore::open("assembly")
         .get("case")
         .ok_or_else(|| fastly::Error::msg("missing assembly case"))?;
+    if case.starts_with("managed-logging-") {
+        let level = fastly::ConfigStore::open("assembly")
+            .get("expected_level")
+            .ok_or_else(|| fastly::Error::msg("missing logging expectation"))?
+            .parse()?;
+        return fixture_fastly::managed_logging::run(&case, level);
+    }
+    fixture_core::init_fixture_logging(|line| println!("{line}"))?;
     let serve = Serve::new()
         .with_max_requests(4)
         .with_timeout(Duration::from_secs(5));
-    match case.as_str() {
-        "standard-retained" => {
-            fixture_fastly::finish(edgezero_adapter_fastly::serve_app::<RetryApp<false>>(serve))
-        }
-        "custom-retained" => {
-            fixture_fastly::finish(serve_custom(serve, |req, retained: &mut Sandbox<App>| {
-                let token = req
-                    .get_header_str("x-request-token")
-                    .filter(|value| {
-                        !value.is_empty()
-                            && value.len() <= 64
-                            && value
-                                .bytes()
-                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                    })
-                    .map(str::to_owned);
-                let clock = MonotonicClock::default();
-                let start = clock.now();
-                let delivered =
-                    match retained.initialize(|| App::build::<RetryApp<true>>(FASTLY_PLATFORM)) {
+    let identity = fixture_core::launch::value()
+        .ok_or_else(|| fastly::Error::msg("missing assembly launch identity"))?;
+    edgezero_adapter_fastly::response::testing::with_diagnostic_header(
+        fixture_core::launch::HEADER.parse()?,
+        identity.parse()?,
+        || match case.as_str() {
+            "standard-retained" => {
+                fixture_fastly::finish(edgezero_adapter_fastly::serve_app::<RetryApp<false>>(serve))
+            }
+            "custom-retained" => fixture_fastly::finish(serve_custom::<RetryApp<true>, _, _, _>(
+                serve,
+                |req, retained: &mut Sandbox<App>| {
+                    let token = req
+                        .get_header_str("x-request-token")
+                        .filter(|value| {
+                            !value.is_empty()
+                                && value.len() <= 64
+                                && value
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                        })
+                        .map(str::to_owned);
+                    let clock = MonotonicClock::default();
+                    let start = clock.now();
+                    let delivered = match retained
+                        .initialize(|| App::build::<RetryApp<true>>(FASTLY_PLATFORM))
+                    {
                         Ok(()) => send_request_with_registries_and_hooks(
                             retained
                                 .state()
@@ -50,10 +64,10 @@ fn main() -> Result<(), fastly::Error> {
                         ),
                         Err(error) => send_assembly_error(req, error, start, clock),
                     };
-                if let Some(delivery) = delivered.delivery() {
-                    println!(
-                        "{}",
-                        serde_json::json!({"event":"assembly-delivery","token":token,
+                    if let Some(delivery) = delivered.delivery() {
+                        println!(
+                            "{}",
+                            serde_json::json!({"event":"assembly-delivery","token":token,
                     "attempts":retained.initialization_attempts(),
                     "retained":retained.state().is_some(),
                     "disposition":if matches!(delivered, edgezero_adapter_fastly::delivery::FastlyRequestDelivery::Detached(_)) { "detached" } else { "routed" },
@@ -61,27 +75,28 @@ fn main() -> Result<(), fastly::Error> {
                     "outcome":format!("{:?}",delivery.report().outcome),
                     "fallback":delivery.report().fallback_disposition.is_some(),
                     "may_send_native":delivered.may_send_native_response()})
-                    );
-                }
-                fixture_fastly::strict_delivery(delivered)
-            }))
-        }
-        "single-routes" => edgezero_adapter_fastly::run_app::<RetryApp<false>>(),
-        "single-config" => edgezero_adapter_fastly::run_app::<ConfigurationFailureApp>(),
-        "single-internal" => edgezero_adapter_fastly::run_app::<InternalFailureApp>(),
-        "single-hooks" => {
-            edgezero_adapter_fastly::run_app_with_hooks::<ConfigurationFailureApp, _, _, ()>(
-                |_, _| panic!("prepare must not run after failed assembly"),
-                |_| panic!("finalize must not run after failed assembly"),
-            )
-            .map(|_| ())
-        }
-        "single-config-explicit" => {
-            edgezero_adapter_fastly::run_app_with_config::<ConfigurationFailureApp>(
-                &FastlyLogging::from(ConfigurationFailureApp::logging_for("fastly")),
-                None,
-            )
-        }
-        _ => Err(fastly::Error::msg("unknown assembly case")),
-    }
+                        );
+                    }
+                    fixture_fastly::strict_delivery(delivered)
+                },
+            )),
+            "single-routes" => edgezero_adapter_fastly::run_app::<RetryApp<false>>(),
+            "single-config" => edgezero_adapter_fastly::run_app::<ConfigurationFailureApp>(),
+            "single-internal" => edgezero_adapter_fastly::run_app::<InternalFailureApp>(),
+            "single-hooks" => {
+                edgezero_adapter_fastly::run_app_with_hooks::<ConfigurationFailureApp, _, _, ()>(
+                    |_, _| panic!("prepare must not run after failed assembly"),
+                    |_| panic!("finalize must not run after failed assembly"),
+                )
+                .map(|_| ())
+            }
+            "single-config-explicit" => {
+                edgezero_adapter_fastly::run_app_with_config::<ConfigurationFailureApp>(
+                    &FastlyLogging::from(ConfigurationFailureApp::logging_for("fastly")),
+                    None,
+                )
+            }
+            _ => Err(fastly::Error::msg("unknown assembly case")),
+        },
+    )?
 }

@@ -343,6 +343,11 @@ impl ManifestLoader {
 #[derive(Debug, Deserialize, Serialize, Validate)]
 #[serde(deny_unknown_fields)]
 #[validate(schema(function = "validate_manifest_adapter_keys_case_unique"))]
+#[validate(schema(function = "validate_manifest_adapter_geo_placement"))]
+#[validate(schema(
+    function = "validate_manifest_fastly_logging",
+    skip_on_field_errors = false
+))]
 #[expect(
     clippy::partial_pub_fields,
     reason = "deserialized fields are pub for the public API; internal state is private"
@@ -678,8 +683,13 @@ pub struct ManifestAdapter {
     #[serde(default)]
     #[validate(nested)]
     pub commands: ManifestAdapterCommands,
-    /// Catch-all for any sub-table other than the four canonical ones
-    /// (`adapter`, `build`, `commands`, `logging`). The pre-rewrite
+    /// `[adapters.axum.geo]`: native geo selection. Only Axum reads it; other
+    /// adapters use their platform's geo and reject the table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[validate(nested)]
+    pub geo: Option<ManifestAdapterGeo>,
+    /// Catch-all for any sub-table other than the canonical ones
+    /// (`adapter`, `build`, `commands`, `geo`, `logging`). The pre-rewrite
     /// `[adapters.<name>.stores.*]` tables land here and are rejected by
     /// `validate_manifest_adapter` with the migration-guide message.
     #[serde(flatten)]
@@ -687,6 +697,64 @@ pub struct ManifestAdapter {
     #[serde(default)]
     #[validate(nested)]
     pub logging: ManifestLoggingConfig,
+}
+
+/// `[adapters.axum.geo]`. Each key is a default that the matching
+/// `EDGEZERO__ADAPTER__GEO__*` variable overrides at startup, so deployment-only
+/// values such as ALB networks can stay out of the compiled manifest. The
+/// merged selection is validated before the server listens.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, Validate)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+#[validate(schema(function = "validate_manifest_adapter_geo"))]
+pub struct ManifestAdapterGeo {
+    /// ALB peer networks admitted as the protected `CloudFront` source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alb_peer_cidrs: Option<Vec<String>>,
+    /// Aggregate per-request KV lookup deadline in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup_timeout_ms: Option<u32>,
+    /// Count of concurrent lookups allowed to start on this instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_in_flight: Option<usize>,
+    /// Header the ALB strips after checking the origin credential. Never the credential value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_credential_header_name: Option<String>,
+    /// Atomic generation and manifest digest pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ManifestGeoProvider>,
+    /// Reader provenance required by this listener's deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_ip: Option<String>,
+    /// Declared logical KV binding, not a backend resource name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_id: Option<String>,
+}
+
+impl ManifestAdapterGeo {
+    /// Whether any KV-specific settings were supplied.
+    #[inline]
+    #[must_use]
+    pub fn has_kv_fields(&self) -> bool {
+        self.store_id.is_some()
+            || self.pin.is_some()
+            || self.reader_ip.is_some()
+            || self.lookup_timeout_ms.is_some()
+            || self.max_in_flight.is_some()
+    }
+}
+
+/// Geo provider an Axum deployment selects.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum ManifestGeoProvider {
+    #[serde(rename = "cloudfront")]
+    CloudFront,
+    Kv,
+    Off,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, Validate)]
@@ -1445,6 +1513,42 @@ fn validate_manifest_adapter_definition(
     Ok(())
 }
 
+fn validate_manifest_adapter_geo(geo: &ManifestAdapterGeo) -> Result<(), ValidationError> {
+    let assertion = geo.alb_peer_cidrs.is_some() || geo.origin_credential_header_name.is_some();
+    let kv = geo.has_kv_fields();
+    if geo.provider == Some(ManifestGeoProvider::Off) && (assertion || kv) {
+        let mut error = ValidationError::new("geo_off_with_policy");
+        error.message = Some(
+            "`[adapters.axum.geo]` with `provider = \"off\"` must not set source policy fields"
+                .into(),
+        );
+        return Err(error);
+    }
+    if (assertion && (kv || geo.provider == Some(ManifestGeoProvider::Kv)))
+        || (kv && geo.provider == Some(ManifestGeoProvider::CloudFront))
+    {
+        return Err(ValidationError::new("geo_mixed_provider_fields"));
+    }
+    Ok(())
+}
+
+fn validate_manifest_adapter_geo_placement(manifest: &Manifest) -> Result<(), ValidationError> {
+    for (name, adapter) in &manifest.adapters {
+        if adapter.geo.is_some() && !name.eq_ignore_ascii_case("axum") {
+            let mut error = ValidationError::new("geo_adapter_unsupported");
+            error.message = Some(
+                format!(
+                    "`[adapters.{name}.geo]` is not supported; only Axum selects geo, \
+                     other adapters use their platform's geo"
+                )
+                .into(),
+            );
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 /// Validates a single `[adapters.<name>]` block. The portable manifest model
 /// has no per-adapter store / runtime tuning surface — all of that moved to
 /// `EDGEZERO__*` env vars. The pre-rewrite
@@ -1513,6 +1617,43 @@ fn validate_manifest_adapter_keys_case_unique(manifest: &Manifest) -> Result<(),
         }
     }
     Ok(())
+}
+
+fn validate_manifest_fastly_logging(manifest: &Manifest) -> Result<(), ValidationError> {
+    let effective = manifest
+        .adapter_entry("fastly")
+        .filter(|(_, adapter)| adapter.logging.is_specified())
+        .map(|(name, adapter)| (name, &adapter.logging, true))
+        .or_else(|| {
+            manifest
+                .logging
+                .adapters
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("fastly"))
+                .map(|(name, config)| (name, config, false))
+        });
+    let Some((name, config, per_adapter)) = effective else {
+        return Ok(());
+    };
+    let Some(endpoint) = config.endpoint.as_deref() else {
+        return Ok(());
+    };
+    let reason = if endpoint.is_empty() || endpoint.contains(['\n', ':']) {
+        "endpoint name is malformed"
+    } else if matches!(endpoint, "stdout" | "stderr") {
+        "endpoint name is reserved"
+    } else {
+        return Ok(());
+    };
+    let field = if per_adapter {
+        format!("adapters.{name}.logging")
+    } else {
+        format!("logging.{name}")
+    };
+    let mut error = ValidationError::new("fastly_logging_endpoint");
+    error.message =
+        Some(format!("[{field}].endpoint: invalid Fastly logging configuration; {reason}").into());
+    Err(error)
 }
 
 /// Validates a single `[stores.<kind>]` declaration against the portable
@@ -2839,6 +2980,101 @@ level = "off"
 
     // Logging configuration tests
     #[test]
+    fn fastly_logging_endpoint_rejects_invalid_effective_names_with_the_declared_field() {
+        for section in ["adapters.Fastly.logging", "logging.FASTLY"] {
+            for endpoint in ["", "ts:log", "line\nbreak", "stdout", "stderr"] {
+                let mut document = toml::Value::Table(toml::Table::new());
+                let mut current = &mut document;
+                for key in section.split('.') {
+                    current = current
+                        .as_table_mut()
+                        .expect("section")
+                        .entry(key.to_owned())
+                        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                }
+                current.as_table_mut().expect("logging section").insert(
+                    "endpoint".to_owned(),
+                    toml::Value::String(endpoint.to_owned()),
+                );
+                let source = toml::to_string(&document).expect("valid TOML");
+                let error = ManifestLoader::try_load_from_str(&source)
+                    .err()
+                    .expect("invalid effective Fastly endpoint must fail");
+                let message = error.to_string();
+                assert!(
+                    message.contains(&format!("[{section}].endpoint")),
+                    "{message}"
+                );
+                if !endpoint.is_empty() {
+                    assert!(
+                        !message.contains(endpoint),
+                        "endpoint must not be echoed: {message}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fastly_logging_endpoint_preserves_whole_section_shadowing_and_other_adapters() {
+        for override_section in [
+            "level = \"off\"",
+            "echo_stdout = false",
+            "endpoint = \"valid_logs\"",
+        ] {
+            let source = format!(
+                "[logging.FASTLY]\nendpoint = \"shadowed:invalid\"\n[adapters.Fastly.logging]\n{override_section}\n"
+            );
+            ManifestLoader::try_load_from_str(&source)
+                .expect("specified section shadows global logging");
+        }
+        for section in ["", "[adapters.Fastly.logging]\n"] {
+            let source = format!("[logging.FASTLY]\nendpoint = \"bad:inherited\"\n{section}");
+            let error = ManifestLoader::try_load_from_str(&source)
+                .err()
+                .expect("global endpoint is effective");
+            assert!(error.to_string().contains("[logging.FASTLY].endpoint"));
+        }
+        for endpoint in ["valid_logs", "STDOUT", "has space", "carriage\rreturn"] {
+            let document = toml::toml! { [logging.fastly] endpoint = endpoint };
+            ManifestLoader::try_load_from_str(&toml::to_string(&document).unwrap())
+                .expect("no speculative name restrictions");
+        }
+        ManifestLoader::try_load_from_str(
+            "[logging.axum]\nendpoint = \"https://logs.example.com\"\n",
+        )
+        .expect("Fastly rules must not affect other adapters");
+    }
+
+    #[test]
+    fn fastly_logging_endpoint_accumulates_independent_manifest_errors() {
+        for other in ["[app]\nname = \"\"\n", "[adapters.Axum]\n[adapters.axum]\n"] {
+            let source = format!("[logging.fastly]\nendpoint = \"bad:logs\"\n{other}");
+            let manifest: Manifest = toml::from_str(&source).expect("valid TOML");
+            let errors = manifest.validate().expect_err("both validations must run");
+            let message = errors.to_string();
+            assert!(message.contains("[logging.fastly].endpoint"), "{message}");
+            if other.starts_with("[app]") {
+                assert!(
+                    matches!(errors.errors().get("app"),
+                        Some(validator::ValidationErrorsKind::Struct(app))
+                            if app.field_errors().contains_key("name")),
+                    "{errors:?}"
+                );
+            } else {
+                assert!(
+                    errors.field_errors().get("__all__").is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|error| error.code == "adapters_case_duplicate")
+                    }),
+                    "{errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn logging_or_default_returns_default_when_missing() {
         let manifest = r#"
 [app]
@@ -2903,16 +3139,13 @@ endpoint = "fastly_logs"
         let manifest = r#"
 [adapters.fastly.logging]
 level = "error"
-endpoint = "https://fastly-logs.example.com"
+endpoint = "fastly_logs"
 "#;
         let loader = ManifestLoader::load_from_str(manifest);
         let mfest = loader.manifest();
         let logging = mfest.logging_for("fastly").unwrap();
         assert_eq!(logging.level, LogLevel::Error);
-        assert_eq!(
-            logging.endpoint.as_deref(),
-            Some("https://fastly-logs.example.com")
-        );
+        assert_eq!(logging.endpoint.as_deref(), Some("fastly_logs"));
     }
 
     #[test]
@@ -3401,6 +3634,66 @@ ids = ["default"]
                     .contains("docs/guide/manifest-store-migration.md"),
                 "legacy adapter-subtable error must reference the migration guide, got: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn axum_geo_table_loads_partial_defaults() {
+        let loaded = ManifestLoader::try_load_from_str(
+            "[adapters.axum.geo]\nprovider = \"cloudfront\"\norigin_credential_header_name = \"x-origin-verify\"\n",
+        )
+        .expect("axum geo table");
+        let geo = loaded.manifest().adapters["axum"].geo.clone().expect("geo");
+        assert_eq!(geo.provider, Some(ManifestGeoProvider::CloudFront));
+        assert_eq!(geo.alb_peer_cidrs, None);
+        assert_eq!(
+            geo.origin_credential_header_name.as_deref(),
+            Some("x-origin-verify")
+        );
+        // `app!` bakes the serialized manifest; the geo table must survive the round trip.
+        let json: &'static str = Box::leak(
+            serde_json::to_string(loaded.manifest())
+                .expect("serialize")
+                .into_boxed_str(),
+        );
+        let BakedManifest::Present(baked) = Manifest::from_baked_json(json) else {
+            panic!("baked manifest with geo must load: {json}");
+        };
+        assert_eq!(baked.adapters["axum"].geo.as_ref(), Some(&geo));
+        assert!(
+            ManifestLoader::try_load_from_str("[adapters.axum]\n")
+                .expect("no geo")
+                .manifest()
+                .adapters["axum"]
+                .geo
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn axum_geo_table_rejects_invalid_shapes() {
+        for (manifest, expected) in [
+            (
+                "[adapters.axum.geo]\nprovider = \"off\"\nalb_peer_cidrs = []\n",
+                "must not set source policy fields",
+            ),
+            (
+                "[adapters.axum.geo]\nprovider = \"maxmind\"\n",
+                "unknown variant",
+            ),
+            (
+                "[adapters.axum.geo]\nregion_header = \"x\"\n",
+                "unknown field",
+            ),
+            (
+                "[adapters.fastly.geo]\nprovider = \"cloudfront\"\n",
+                "only Axum selects geo",
+            ),
+        ] {
+            let err = ManifestLoader::try_load_from_str(manifest)
+                .err()
+                .unwrap_or_else(|| panic!("must reject: {manifest}"));
+            assert!(err.to_string().contains(expected), "{manifest}: {err}");
         }
     }
 

@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::mem::take;
 use std::task::Poll;
 
@@ -7,7 +8,7 @@ use futures_util::future::poll_fn;
 use super::{
     HttpClient, Method, OutboundDispatchRequest, OutboundRequest, OutboundRequestParts,
     OutboundResponseContext, OutboundScope, OutboundSendMode, OutboundTime, ResponseBodyPolicy,
-    normalize_for_dispatch, validate_for_dispatch,
+    ResponseHeaderLimiter, normalize_for_dispatch, validate_for_dispatch,
 };
 use crate::error::EdgeError;
 use crate::http::StatusCode;
@@ -115,8 +116,11 @@ pub(super) fn prepare(
         body_policy,
         budget,
         entered_at,
-        max_response_header_bytes: request.max_response_header_bytes,
-        max_response_header_count: request.max_response_header_count,
+        exchange_failure: OnceCell::new(),
+        header_limiter: ResponseHeaderLimiter::new(
+            request.max_response_header_bytes,
+            request.max_response_header_count,
+        ),
         mode,
         #[cfg(feature = "test-utils")]
         native_body_recorder: request.native_body_witness.as_ref().map(|witness| {

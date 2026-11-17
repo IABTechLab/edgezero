@@ -66,7 +66,7 @@ static FASTLY_BLUEPRINT: AdapterBlueprint = AdapterBlueprint {
         serve: "fastly compute serve -C {crate_dir}",
     },
     logging: LoggingDefaults {
-        endpoint: Some("stdout"),
+        endpoint: None,
         level: "info",
         echo_stdout: Some(true),
     },
@@ -5433,15 +5433,12 @@ fn deploy_with_context(
 ) -> Result<(), String> {
     let manifest_path = resolve_deploy_manifest_path(context)?;
     validate_deploy_service_id_for_manifest(context, &manifest_path)?;
-    let manifest_dir = manifest_path.parent().ok_or_else(|| {
-        format!(
-            "fastly manifest path {} has no parent directory",
-            manifest_path.display()
-        )
-    })?;
-    let without_manifest = args_without_flag_value(extra_args, "--manifest-path");
-    let mut forwarded = args_without_flag_value(&without_manifest, "--service-id");
-    scan_reserved_deploy_args(&forwarded)?;
+    let (manifest_dir, environment) = native_manifest_selection(&manifest_path)?;
+    validate_pinned_fastly_args(AdapterAction::Deploy, extra_args)?;
+    let mut forwarded = extra_args.to_vec();
+    if let Some(selected_environment) = environment {
+        forwarded.extend(["--env".to_owned(), selected_environment.to_owned()]);
+    }
     if let Some(service_id) = context.service_id.as_deref() {
         forwarded.extend(["--service-id".to_owned(), service_id.to_owned()]);
     }
@@ -5553,40 +5550,12 @@ pub fn serve(extra_args: &[String]) -> Result<(), String> {
 }
 
 fn serve_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), String> {
-    if extra_args.iter().any(|arg| {
-        ["--dir", "--env", "--file"].iter().any(|flag| {
-            arg == flag
-                || arg
-                    .strip_prefix(flag)
-                    .is_some_and(|suffix| suffix.starts_with('='))
-        }) || arg == "-C"
-            || (arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2)
-    }) {
-        return Err(
-            "pinned Fastly serve forbids source overrides and combined short options".to_owned(),
-        );
-    }
-    let manifest_dir = manifest
-        .parent()
-        .ok_or_else(|| "fastly manifest has no parent directory".to_owned())?;
-    let filename = manifest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("invalid Fastly manifest filename")?;
+    validate_pinned_fastly_args(AdapterAction::Serve, extra_args)?;
+    let (manifest_dir, environment) = native_manifest_selection(manifest)?;
     let mut command = Command::new("fastly");
     command.args(["compute", "serve"]);
-    if filename != "fastly.toml" {
-        let environment = filename
-            .strip_prefix("fastly.")
-            .and_then(|name| name.strip_suffix(".toml"))
-            .filter(|name| {
-                !name.is_empty()
-                    && name
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-            })
-            .ok_or("Fastly serve supports only fastly.toml or fastly.<environment>.toml")?;
-        command.args(["--env", environment]);
+    if let Some(selected_environment) = environment {
+        command.args(["--env", selected_environment]);
     }
     let status = command
         .args(extra_args)
@@ -5598,6 +5567,144 @@ fn serve_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), Str
     }
 
     Ok(())
+}
+
+fn native_manifest_selection(manifest: &Path) -> Result<(&Path, Option<&str>), String> {
+    if !manifest.is_file() {
+        return Err("pinned Fastly manifest is not a regular file".to_owned());
+    }
+    let directory = manifest
+        .parent()
+        .ok_or("Fastly manifest has no parent directory")?;
+    let filename = manifest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("invalid Fastly manifest filename")?;
+    let environment =
+        if filename == "fastly.toml" {
+            None
+        } else {
+            Some(filename
+            .strip_prefix("fastly.")
+            .and_then(|name| name.strip_suffix(".toml"))
+            .filter(|name| {
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+            .ok_or("Fastly native commands support only fastly.toml or fastly.<environment>.toml")?)
+        };
+    Ok((directory, environment))
+}
+
+fn validate_pinned_fastly_args(action: AdapterAction, args: &[String]) -> Result<(), String> {
+    let invalid = || {
+        "pinned Fastly native arguments must retain the selected source, manifest and service"
+            .to_owned()
+    };
+    let mut remaining = args.iter();
+    while let Some(argument) = remaining.next() {
+        let Some(long) = argument.strip_prefix("--") else {
+            let short = argument.strip_prefix('-').ok_or_else(invalid)?;
+            if action == AdapterAction::Serve
+                && let Some((prefix, token)) = short.split_once('t')
+            {
+                if !prefix
+                    .bytes()
+                    .all(|byte| matches!(byte, b'd' | b'y' | b'i' | b'q' | b'v'))
+                {
+                    return Err(invalid());
+                }
+                if token.is_empty() {
+                    let value = remaining.next().ok_or_else(invalid)?;
+                    if value.is_empty() || value.starts_with('-') {
+                        return Err(invalid());
+                    }
+                }
+                continue;
+            }
+            if short.is_empty()
+                || !short
+                    .bytes()
+                    .all(|byte| matches!(byte, b'd' | b'y' | b'i' | b'q' | b'v'))
+            {
+                return Err(invalid());
+            }
+            continue;
+        };
+        let (name, inline) = long
+            .split_once('=')
+            .map_or((long, None), |(name, value)| (name, Some(value)));
+        if pinned_fastly_boolean(action, name) {
+            if inline.is_some_and(|value| !matches!(value, "true" | "false")) {
+                return Err(invalid());
+            }
+            continue;
+        }
+        let scalar = (action == AdapterAction::Deploy
+            && matches!(
+                name,
+                "comment"
+                    | "domain"
+                    | "status-check-code"
+                    | "status-check-path"
+                    | "status-check-timeout"
+            ))
+            || (action == AdapterAction::Serve
+                && matches!(
+                    name,
+                    "token"
+                        | "addr"
+                        | "language"
+                        | "metadata-filter-envvars"
+                        | "package-name"
+                        | "pushpin-path"
+                        | "pushpin-proxy-port"
+                        | "pushpin-publish-port"
+                        | "profile-guest-dir"
+                        | "timeout"
+                        | "viceroy-args"
+                        | "viceroy-path"
+                        | "watch-dir"
+                ));
+        if !scalar {
+            return Err(invalid());
+        }
+        if inline.is_none() {
+            let value = remaining.next().ok_or_else(invalid)?;
+            if value.is_empty() || value.starts_with('-') {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pinned_fastly_boolean(action: AdapterAction, name: &str) -> bool {
+    matches!(
+        name,
+        "help"
+            | "accept-defaults"
+            | "auto-yes"
+            | "debug-mode"
+            | "non-interactive"
+            | "quiet"
+            | "verbose"
+    ) || (action == AdapterAction::Deploy
+        && matches!(name, "no-default-domain" | "status-check-off"))
+        || (action == AdapterAction::Serve
+            && matches!(
+                name,
+                "include-source"
+                    | "metadata-disable"
+                    | "metadata-show"
+                    | "experimental-enable-pushpin"
+                    | "profile-guest"
+                    | "skip-build"
+                    | "viceroy-check"
+                    | "watch"
+            ))
 }
 
 // ===================================================================
@@ -5638,27 +5745,6 @@ fn arg_value<'args>(args: &'args [String], flag: &str) -> Option<&'args str> {
 /// Whether a boolean `flag` (e.g. `--staging`) is present in `args`.
 fn arg_flag(args: &[String], flag: &str) -> bool {
     args.iter().any(|arg| arg == flag)
-}
-
-/// Copy of `args` with `--flag value` removed (both tokens). Used to
-/// forward operator passthrough (e.g. `--comment`) to `fastly compute
-/// update` without re-passing `--service-id`, which is threaded
-/// explicitly.
-fn args_without_flag_value(args: &[String], flag: &str) -> Vec<String> {
-    let mut out = Vec::with_capacity(args.len());
-    let mut skip = false;
-    for arg in args {
-        if skip {
-            skip = false;
-            continue;
-        }
-        if arg == flag {
-            skip = true;
-            continue;
-        }
-        out.push(arg.clone());
-    }
-    out
 }
 
 fn scan_reserved_deploy_args(args: &[String]) -> Result<(), String> {
@@ -6889,6 +6975,11 @@ mod tests {
     const TEST_SECRET_ID: &str = "default";
 
     #[test]
+    fn logging_blueprint_leaves_named_endpoint_to_generator() {
+        assert!(FASTLY_BLUEPRINT.logging.endpoint.is_none());
+    }
+
+    #[test]
     fn adapter_capability_matrix_matches_contracts() {
         adapter_capability_matrix_matches_outbound_spec();
     }
@@ -7081,20 +7172,6 @@ mod tests {
         let args = vec!["--staging".to_owned()];
         assert!(arg_flag(&args, "--staging"));
         assert!(!arg_flag(&args, "--nope"));
-    }
-
-    #[test]
-    fn args_without_flag_value_strips_pair() {
-        let args = vec![
-            "--service-id".to_owned(),
-            "SVC1".to_owned(),
-            "--comment".to_owned(),
-            "ci".to_owned(),
-        ];
-        assert_eq!(
-            args_without_flag_value(&args, "--service-id"),
-            vec!["--comment".to_owned(), "ci".to_owned()]
-        );
     }
 
     #[test]
@@ -13314,9 +13391,7 @@ echo 'unexpected' >&2; exit 1
         }
     }
 
-    /// Fake `fastly` on `$PATH` that records `<cwd>\t<argv>` for every
-    /// invocation. Used to prove the production deploy runs in the
-    /// manifest-selected app directory.
+    /// Records the cwd followed by individual argv tokens, preserving value boundaries.
     #[cfg(unix)]
     fn fake_fastly_cwd_recorder() -> (tempfile::TempDir, PathBuf) {
         use std::os::unix::fs::PermissionsExt as _;
@@ -13325,7 +13400,7 @@ echo 'unexpected' >&2; exit 1
         let record = dir.path().join("argv.log");
         let script_path = dir.path().join("fastly");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\t%s\\n' \"$PWD\" \"$*\" >> '{}'\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > '{}'\nexit 0\n",
             record.display(),
         );
         fs::write(&script_path, script).expect("write fake fastly");
@@ -13354,10 +13429,9 @@ echo 'unexpected' >&2; exit 1
                 .execute_target(AdapterAction::Serve, &target, &[])
                 .unwrap();
             let recorded = fs::read_to_string(&record).unwrap();
-            assert_eq!(
-                recorded.trim_end(),
-                format!("{}\t{expected}", root.display())
-            );
+            let mut expected_tokens = vec![root.to_str().unwrap()];
+            expected_tokens.extend(expected.split_whitespace());
+            assert_eq!(recorded.lines().collect::<Vec<_>>(), expected_tokens);
             fs::remove_file(&record).unwrap();
             for selector in [
                 "--env",
@@ -13388,6 +13462,98 @@ echo 'unexpected' >&2; exit 1
 
     #[cfg(unix)]
     #[test]
+    fn pinned_native_deploy_preserves_review_manifest_and_rejects_raw_selectors() {
+        let _lock = path_mutation_guard().lock().unwrap();
+        let (fake, record) = fake_fastly_cwd_recorder();
+        let _path = PathPrepend::new(fake.path());
+        let app = tempdir().unwrap();
+        let root = app.path().canonicalize().unwrap();
+        let manifest = root.join("fastly.review.toml");
+        fs::write(
+            root.join("fastly.toml"),
+            "name = \"wrong\"\nservice_id = \"WRONG\"\n",
+        )
+        .unwrap();
+        fs::write(
+            &manifest,
+            "name = \"selected\"\nservice_id = \"SELECTED\"\n",
+        )
+        .unwrap();
+        let context = AdapterDeployContext {
+            execution_target: Some(AdapterExecutionTarget::new(
+                root.clone(),
+                None,
+                Some(manifest),
+            )),
+            service_id: Some("SVC1".to_owned()),
+            ..AdapterDeployContext::default()
+        };
+        FastlyCliAdapter
+            .deploy(
+                &context,
+                &["-vqi".to_owned(), "--comment=review".to_owned()],
+            )
+            .unwrap();
+        let recorded = fs::read_to_string(&record).unwrap();
+        assert_eq!(
+            recorded.lines().collect::<Vec<_>>(),
+            [
+                root.to_str().unwrap(),
+                "compute",
+                "deploy",
+                "-vqi",
+                "--comment=review",
+                "--env",
+                "review",
+                "--service-id",
+                "SVC1",
+                "--non-interactive"
+            ]
+        );
+        fs::remove_file(&record).unwrap();
+        for raw_args in [
+            vec!["--dir", "elsewhere"],
+            vec!["-Celsewhere"],
+            vec!["-vCelsewhere"],
+            vec!["--env=other"],
+            vec!["--package", "other.tar.gz"],
+            vec!["-pother.tar.gz"],
+            vec!["-vsOTHER"],
+            vec!["--", "other.tar.gz"],
+            vec!["--unknown=value"],
+        ] {
+            let args = raw_args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert!(
+                FastlyCliAdapter.deploy(&context, &args).is_err(),
+                "{args:?}"
+            );
+            assert!(!record.exists(), "rejected argv cannot launch Fastly");
+        }
+    }
+
+    #[test]
+    fn pinned_fastly_guard_preserves_ordinary_groups_and_serve_token_values() {
+        for raw_args in [
+            vec!["-vqi", "--addr", "127.0.0.1:8000"],
+            vec!["-vtcredential"],
+            vec!["-t", "credential"],
+            vec!["--token=credential", "--watch"],
+        ] {
+            let args = raw_args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            validate_pinned_fastly_args(AdapterAction::Serve, &args).unwrap();
+        }
+        for raw_args in [
+            vec!["-vtcredential"],
+            vec!["--token=credential"],
+            vec!["--comment", "--env=other"],
+        ] {
+            let args = raw_args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert!(validate_pinned_fastly_args(AdapterAction::Deploy, &args).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn deploy_uses_pinned_root_when_adapter_manifest_is_not_explicit() {
         let _lock = path_mutation_guard().lock().expect("guard");
         let (fake, record) = fake_fastly_cwd_recorder();
@@ -13411,18 +13577,22 @@ echo 'unexpected' >&2; exit 1
             .expect("deploy must run against the pinned root");
 
         let recorded = fs::read_to_string(&record).expect("fastly was invoked");
-        let (cwd, recorded_argv) = recorded
-            .trim_end()
-            .split_once('\t')
-            .expect("recorded `<cwd>\\t<argv>`");
+        let mut recorded_tokens = recorded.lines();
+        let cwd = recorded_tokens.next().expect("recorded cwd");
         assert_eq!(
             fs::canonicalize(cwd).expect("cwd"),
             fs::canonicalize(app.path()).expect("app dir"),
             "deploy must run in the manifest-selected app directory"
         );
         assert_eq!(
-            recorded_argv,
-            "compute deploy --service-id SVC1 --non-interactive"
+            recorded_tokens.collect::<Vec<_>>(),
+            [
+                "compute",
+                "deploy",
+                "--service-id",
+                "SVC1",
+                "--non-interactive"
+            ]
         );
     }
 

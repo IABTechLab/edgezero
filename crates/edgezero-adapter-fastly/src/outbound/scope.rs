@@ -77,6 +77,7 @@ impl Stream for Scheduled {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        let mut replacement = Some(cx.waker().clone());
         pump(&this.driver, cx);
         let observation = {
             let mut driver = this.driver.borrow_mut();
@@ -97,14 +98,15 @@ impl Stream for Scheduled {
         if terminal {
             this.unregister();
         }
+        if observation.is_ready() {
+            drop(replacement.take());
+        }
         let previous = {
             let mut driver = this.driver.borrow_mut();
-            mem::replace(
-                &mut driver.waker,
-                observation.is_pending().then(|| cx.waker().clone()),
-            )
+            mem::replace(&mut driver.waker, replacement.take())
         };
         drop(previous);
+        drop(replacement);
         observation
     }
 
@@ -128,7 +130,8 @@ where
     let clock = progress.clock();
     let source = async_stream::stream! {
         let outcome = driver.drive(future).await.and_then(identity);
-        yield OutboundBatchDriverEvent::Item { index: 0, completed_at: clock.now(), outcome };
+        let completed_at = driver.observed_exchange_failure_at().unwrap_or_else(|| clock.now());
+        yield OutboundBatchDriverEvent::Item { index: 0, completed_at, outcome };
     };
     let mut receiver = schedule_batch(scope, source, progress, time, entered);
     Ok(OutboundPending::new(
@@ -353,10 +356,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::super::testing;
-    use super::{Drivers, bind_batch, capture};
+    use super::{Driver, Drivers, Scheduled, bind_batch, capture};
     use crate::lifecycle::with_callback;
     use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use std::future::Future as _;
+    use std::pin::Pin;
+    use std::ptr;
     use std::rc::Rc;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -403,6 +409,7 @@ mod tests {
 
     std::thread_local! {
         static CLOSE_ON_WAKER_DROP: RefCell<Option<OutboundScopeOwner>> = const { RefCell::new(None) };
+        static CLONE_ACTION: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
     }
 
     #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
@@ -430,6 +437,73 @@ mod tests {
         fn wake_by_ref(arc_self: &Arc<Self>) {
             arc_self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    #[expect(
+        unsafe_code,
+        reason = "Test-only data-free RawWaker exercises reentrant clone callbacks"
+    )]
+    fn reentrant_clone_waker() -> Waker {
+        use std::task::{RawWaker, RawWakerVTable};
+
+        fn clone_waker(data: *const ()) -> RawWaker {
+            let action = CLONE_ACTION.with(|stored| stored.borrow_mut().take());
+            if let Some(callback) = action {
+                callback();
+            }
+            RawWaker::new(data, &TABLE)
+        }
+        fn ignore(_data: *const ()) {}
+        static TABLE: RawWakerVTable = RawWakerVTable::new(clone_waker, ignore, ignore, ignore);
+
+        // SAFETY: the static vtable owns no data and never dereferences the null pointer.
+        unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &TABLE)) }
+    }
+
+    #[test]
+    fn scheduled_waker_clone_runs_before_any_driver_borrow_or_poll() {
+        let polls = Rc::new(Cell::new(0_usize));
+        let observed = Rc::clone(&polls);
+        let driver = Rc::new(RefCell::new(Driver {
+            abandoned: false,
+            polling: false,
+            ready: VecDeque::default(),
+            stream: Some(
+                poll_fn(move |_| {
+                    observed.set(observed.get().saturating_add(1));
+                    Poll::Pending
+                })
+                .boxed_local(),
+            ),
+            waker: None,
+        }));
+        let mut receiver = Scheduled {
+            driver: Rc::clone(&driver),
+            registration: None,
+        };
+        let cancelled = Rc::clone(&driver);
+        CLONE_ACTION.with(|stored| {
+            stored.replace(Some(Box::new(move || {
+                let mut state = cancelled.borrow_mut();
+                state.abandoned = true;
+                let source = state.stream.take();
+                drop(state);
+                drop(source);
+            })))
+        });
+        let waiting = reentrant_clone_waker();
+        assert!(
+            Pin::new(&mut receiver)
+                .poll_next(&mut Context::from_waker(&waiting))
+                .is_ready()
+        );
+        assert_eq!(
+            polls.get(),
+            0,
+            "clone callback cancels before the producer can poll"
+        );
+        assert!(driver.borrow().abandoned);
+        assert!(CLONE_ACTION.with(|stored| stored.borrow().is_none()));
     }
 
     #[test]
@@ -779,6 +853,40 @@ mod tests {
             block_on(retained.next()).unwrap_err(),
             EdgeError::Internal { .. }
         ));
+    }
+
+    #[test]
+    fn partially_consumed_batch_is_revoked_without_poisoning_the_next_callback() {
+        let mut previous = None;
+        for _ in 0_u8..2 {
+            let callback = OutboundScopeOwner::callback();
+            let mut retained = callback.with(|| {
+                if let Some(mut stale) = previous.take() {
+                    closed(
+                        &block_on(OutboundBatch::next(&mut stale)).unwrap_err(),
+                        OutboundScopeKind::Callback,
+                    );
+                }
+                batch(2, iter([item(0)]).chain(pending_stream()))
+            });
+            callback.with(|| super::poll_current(&mut Context::from_waker(Waker::noop())));
+            assert!(matches!(
+                block_on(retained.next()).unwrap(),
+                OutboundBatchNext::Item(_)
+            ));
+            assert!(
+                Box::pin(retained.next())
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            callback.close();
+            previous = Some(retained);
+        }
+        closed(
+            &block_on(previous.unwrap().next()).unwrap_err(),
+            OutboundScopeKind::Callback,
+        );
     }
 
     #[test]

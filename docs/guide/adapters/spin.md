@@ -236,7 +236,7 @@ schema and `INSERT … ON CONFLICT DO UPDATE` statement vendored from
 spinframework/spin's `crates/key-value-spin/src/store.rs`. A contract
 test in `edgezero-adapter-spin/src/cli/push_sqlite.rs` asserts
 byte-equality against the upstream Spin 4.1.0 strings. The workspace's
-exact SDK 7 Git revision, shared with the demo, reusable fixture and generator,
+exact registry SDK 8.0.0 pin, shared with the demo, reusable fixture and generator,
 makes every SDK upgrade explicit. The
 [dependency audit](../../audits/2026-10-27-spin-sdk-eager-progress.md) records the executor
 repair and upstream PR; callers use the SDK's `wasip3::spawn_local` re-export.
@@ -296,17 +296,34 @@ surfaces before `provision` / `config push` run.
 
 ## Logging
 
-`edgezero_adapter_spin::init_logger()` is a no-op; `run_app` calls it before application
-configuration unless your app sets `owns_logging = true`. An
-`[adapters.spin.logging]` table in `edgezero.toml` is not consumed by the Spin runtime.
-View output through `spin up` or your Spin host's log files.
+`run_app` installs a Rust `log` stderr backend before assembly unless `owns_logging = true`.
+It resolves `EDGEZERO__LOGGING__LEVEL` from the runtime environment: absent or invalid means
+`Info`, and valid values are case-insensitive. The manifest's `[adapters.spin.logging]` table
+is not consumed by the runtime. View stderr through `spin up` or your host's log files.
+`edgezero::boot` preserves Error/Warn independently of ordinary Error/Off.
 
-::: tip Logging status
-Host stdout/stderr capture does not install a Rust `log` backend. Install yours before the
-adapter entrypoint and set `owns_logging = true` if you need facade output. Resolve ordinary
-levels with `edgezero_core::resolve_logging_level(&EnvConfig)` and apply both backend and facade
-filters; the adapter does not promise boot-target visibility without that backend.
-:::
+Manual lifecycle owners call `init_logger(level)?`; the parameterless no-op API is removed.
+Repeated same-level setup is idempotent. Changed instance configuration or a foreign installed
+logger returns a typed error instead of replacing filters during concurrent work.
+
+To own logging, install your backend before entering the runner and set `owns_logging = true`.
+Apply both backend and facade filters, using `resolve_logging_level(&EnvConfig)` and the boot
+constants as appropriate. EdgeZero makes no logging-state changes in that mode.
+
+Inside a hand-written `Hooks` implementation, obtain the same compile-time logging
+metadata as `app!` without generating routes:
+
+```rust
+fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+    edgezero_core::logging_config!("edgezero.toml", adapter)
+}
+```
+
+The path is relative to the consuming crate's `CARGO_MANIFEST_DIR` (for example,
+`"../../edgezero.toml"` in scaffolded core crates). This lookup performs no runtime
+manifest I/O or parsing. It does not initialize a logger, configure filters, read
+runtime overrides or change `owns_logging`. Existing runner and application-owned
+logging responsibilities remain unchanged.
 
 ## Context Access
 
@@ -401,9 +418,9 @@ the raw WASI response, not a collected SDK response. Each invocation resolves fr
 registries and runs admission and response egress; the adapter's coordinator owns
 the body writer and transmission-result observation through terminal delivery.
 
-The pinned SDK 7 macro exports a P3 HTTP interface. The `wasm32-wasip2` Rust target
+The pinned SDK 8 macro exports a P3 HTTP interface. The `wasm32-wasip2` Rust target
 name does not establish the component's HTTP lifecycle. Verify the emitted
-interface and host together. SDK 7 requires Spin 4.1 or later. See Spin's
+interface and host together. SDK 8 requires Spin 4.1 or later. See Spin's
 [instance-reuse documentation](https://spinframework.dev/v4/http-trigger#controlling-instance-reuse)
 for the reuse and concurrency controls your host version supports.
 

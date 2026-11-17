@@ -22,9 +22,102 @@ are removed rather than retained as compatibility aliases. Provider limitations 
 separately from the portable API and must be considered when declaring required capabilities.
 The current outbound migration is summarized first. Earlier checkpoint entries below describe
 their scope when introduced; the current summary supersedes their then-pending API work.
+For adoption, start with [the outbound migration guide](docs/guide/proxying.md#hard-cut-adoption),
+then [dependency coordination](docs/guide/dependency-majors-migration.md) and
+[target capabilities](docs/guide/capabilities.md). The entries below retain the historical
+checkpoints and unverified qualification gates rather than presenting them as new guarantees.
 
 ### Head-First Outbound Hard Cut
 
+- Destroy rejected scoped outputs and uncalled action captures under their original owner,
+  including provider-runtime rejection and unwind. Manual response bodies recheck revocation
+  after source polling and release the source before exposing a terminal scope error.
+- Clone and retire Fastly progress/driver wakers outside mutable borrows. Reuse only slots
+  relinquished by their unique leases; retain live indices, captured outcomes and rotating service.
+- Supervise all Axum fixture Cargo builds through the harness's existing process-group owner,
+  retaining separate stdout/diagnostics and proving controller cancellation also reaps descendants.
+- Pin native Cloudflare and Fastly deploy/serve passthrough to the selected source, manifest and
+  destination. Preserve ordinary option values and validated typed service IDs; Fastly named
+  manifests select their exact environment. Declared application shell-command policy is unchanged.
+- Replace private Fastly response ABI integers with non-Copy owned handles. Streaming sends retain
+  guest body ownership; terminal cleanup relinquishes it once, without retrying uncertain host work.
+- Align demo and generated URL configuration failures as sanitized server errors while retaining
+  client-path errors and redirect-policy denials. Clarify route-aware admission precedes the
+  pre-dispatch hook on canonical application ingress.
+- Retain Fastly body failures as well as head failures at their original observation time,
+  even when another producer advances their shared clock before collection. Later timer
+  observations cannot replace an already-terminal typed error. Replace the Fastly-private
+  receipt with core `OutboundExchangeFailure`, lazily shared through
+  `OutboundResponseContext::exchange_failure()` for plain Send, Begin and batches. Preserve
+  scope/clock checks, original-chain deadlines, timeout equality and provider diagnostics.
+- Add `OutboundHead::with_body_checkpoint` for adapters requiring real host-event fairness
+  in the shared finalizer. Cloudflare checkpoints decoded output every 64 items and all
+  body-terminal/cap decisions under the original timer and clock history, without a second
+  decoder or transport. Streamed handoff remains lazy; cancellation releases owned work.
+- Notify every revoked outbound waiter after payload release even when another payload's
+  destructor unwinds. Preserve the original panic and exactly-once cleanup.
+- Replay persisted redirect cases through the existing ordered wire matrix for all adapters,
+  rejecting missing reports, substituted cases and corrupted receipts despite matching totals.
+- Attest Fastly assembly fixtures on their original first canonical error response using
+  scoped, bounded `test-utils` diagnostic headers at the existing commit boundary. Preserve
+  standard entrypoint coverage, failed-app isolation and all response/deadline/cleanup checks;
+  production serving behavior and provider qualification claims are unchanged.
+- Preserve Fastly head failures and their original observation instant when another driver
+  advances the shared family past that exchange's deadline. Keep timer-first arbitration for
+  unfinished work and reject genuinely late results.
+- Share one response-field counter across normalized final headers, the synthetic proxy
+  marker and SDK-exposed Spin trailers. Buffered overflow fails before returning a response;
+  streamed overflow is a terminal body error, without acknowledging successful completion.
+- Return Spin upload source/cap failures immediately, dropping the request writers with their
+  failure defaults instead of awaiting a peer's completion acknowledgment. Successful uploads
+  still follow the existing two-way completion protocol.
+- Anchor Axum inbound and response-egress native timers before sampling the paired clock,
+  including empty-stream validation. Clock sampling cannot extend the absolute native target.
+- Retain authoritative framework `Allow` and config `Retry-After` headers through final egress
+  normalization, even when custom renderers nominate them as hop-by-hop. Invalid framing is
+  still rejected before those fields are restored.
+- Reject invalid effective Fastly logging endpoint names during manifest loading and
+  `app!` expansion, with field-specific, value-free diagnostics. Preserve whole-section
+  logging overrides and other adapters' endpoint formats.
+- Add `edgezero_core::logging_config!("edgezero.toml", adapter)` (#504) for
+  hand-written `Hooks`, sharing `app!`'s compile-time logging resolution without
+  runtime manifest parsing or generated routes. Logger ownership, filters and
+  runtime overrides are unchanged.
+- Deliver a bounded, redacted 500 when managed Fastly logging fails before a custom
+  callback, suppress HEAD payloads and return the original typed setup error even if
+  delivery fails. Report secondary delivery degradation without relying on that logger.
+  Callback errors never trigger an automatic response or a second send.
+- Require the application Hooks type on Fastly `serve_custom` and `run_custom`, with
+  callback errors convertible from `ManagedLoggerError`. Standard/custom lifecycles
+  now share managed setup. Fastly lines include targets; complete endpoint/level/stdout
+  settings are idempotent and immutable. Manual initialization uses shared typed errors
+  and off-target calls return UnsupportedTarget rather than silently succeeding.
+  The optional logging-only `edgezero_logging` Config Store accepts a 16-byte level
+  override, allowing local Debug from the same production wasm. Absent overrides keep
+  the manifest level; invalid values use Info. No compatibility signature remains.
+- Generalize `ManagedLoggerInstallation<Configuration>` to compare complete settings;
+  Cloudflare and Spin explicitly use their level as the identity.
+- Replace Cloudflare/Spin no-op log initializers with fallible `init_logger(level)`: Workers
+  console and Spin stderr backends apply the resolved runtime filter and independent Warn boot
+  filter before assembly. Same-level initialization is idempotent; changed instance configuration
+  and foreign loggers fail explicitly. Application-owned logging remains untouched.
+  Align the reusable test fixture's bindings with the production lock so one CLI validates
+  ingress and reusable runtime probes; provider SDK/runtime and audited decoder pins stay intact.
+- Preserve an eligible inbound streamed Content-Length as body-owned scalar metadata before
+  stripping raw framing. Spin reconstructs that length without Transfer-Encoding and validates
+  observed chunks/clean EOF against it. Replacement bodies clear it; unknown streams remain
+  unknown, and early responses abandon unread upload bytes without a validation drain.
+  The scalar declaration adds 16 inline bytes: measured Body layouts are 56 native / 40 WASM
+  bytes with Rust 1.98.1. Recalculate application structure charges; this is not a stable ABI size.
+- Require an explicit `AxumOutboundExecutorHandle` in native outbound client constructors
+  and request conversion. Standard servers own one LocalSet; missing, dropped or foreign
+  ownership returns Internal without panic probing, including in abort-profile builds.
+  Preserve eager dispatch, callback/body cancellation, pooling and paired time semantics.
+- Replace the Spin SDK fork with exact published SDK 8.0.0 across root, demo, fixtures and
+  generated projects. Revalidate resource/executor behavior without borrowing historical
+  qualification. Keep exact decoder pins and registry source/checksum guards.
+- Make the watchdog EOF assertion retry interrupted reads without changing timing bounds
+  or cleanup assertions. Document the standalone harness in the contributor gate list.
 - Restore isolated CLI-only compilation by enabling the adapter's CLI helpers explicitly;
   check that feature selection independently of provider feature unification.
 - Keep qualification lifecycle JSON unwrapped at the fixture telemetry sink, permitting Info
@@ -471,12 +564,11 @@ their scope when introduced; the current summary supersedes their then-pending A
 - Add exact connect-setting, partial-range, facade-upload and same-client marker conformance
   proofs using existing private clients. Bind seven complete core legs through the existing
   grouped CI guard, preserving all provider legs, frozen source identities and qualification gates.
-- Pin the coordinated Spin SDK executor upgrade to immutable Stackpop fork revision
-  `6c59ed5b4fcb377072763aee0b27a3abdd8edb72`; propose it upstream in
+- Pin the coordinated Spin SDK executor upgrade to published `spin-sdk = "=8.0.0"`, including
   [spin-rust-sdk#169](https://github.com/spinframework/spin-rust-sdk/pull/169).
   Hard-migrate SDK spawn calls to `spawn_local`, using WASIp3 0.10.0 / wit-bindgen 0.63.0
   through one SDK executor. Align the root, demo, reusable/request-fidelity fixtures and generated manifests;
-  compare Git source and revision as well as package version in dependency guards.
+  compare registry source, checksum and package version in dependency guards.
   Preserve absolute deadlines, cutoffs and all limits; scheduler-latency and hosted qualification
   remain separate gates. See the [dependency audit](docs/audits/2026-10-27-spin-sdk-eager-progress.md).
 - Adapt to the reviewed SDK's join-handle return at one private provider launcher, keeping

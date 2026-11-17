@@ -18,7 +18,9 @@ mod scope_tests;
 mod task;
 #[cfg(feature = "test-utils")]
 pub mod test_support;
+mod upload;
 
+use std::cell::{OnceCell, RefCell};
 use std::net::IpAddr;
 use std::num::NonZeroU64;
 use std::rc::Rc;
@@ -62,6 +64,7 @@ pub use batch::{
     OutboundCollectedSlot, OutboundPreparedBatch,
 };
 pub(crate) use dispatch::ForwardedReadDeadline;
+pub use exchange::OutboundExchangeFailure;
 pub use redirect::{
     OutboundFollowFailure, OutboundFollowResult, OutboundRedirectAction, OutboundRedirectContext,
     OutboundRedirectLimit, OutboundRedirectStopReason,
@@ -72,6 +75,7 @@ pub use scope::{
     OutboundScopeOwner,
 };
 pub use task::OutboundTask;
+pub use upload::OutboundUploadCounter;
 
 pub const DEFAULT_MAX_DECODER_BYTES: u64 = 32 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
@@ -157,8 +161,8 @@ pub struct OutboundResponseContext {
     body_policy: ResponseBodyPolicy,
     budget: DispatchBudget,
     entered_at: MonotonicInstant,
-    max_response_header_bytes: Option<u64>,
-    max_response_header_count: Option<u64>,
+    exchange_failure: OnceCell<OutboundExchangeFailure>,
+    header_limiter: ResponseHeaderLimiter,
     mode: OutboundSendMode,
     #[cfg(feature = "test-utils")]
     native_body_recorder: Option<test_support::NativeBodyRecorder>,
@@ -200,6 +204,7 @@ pub struct OutboundLocationEvidence {
 /// to a live streamed response without starting another transport exchange.
 #[must_use]
 pub struct OutboundHead {
+    checkpoint: Option<head::BodyCheckpoint>,
     context: OutboundResponseContext,
     encoded: BodyStream,
     headers: HeaderMap,
@@ -420,8 +425,9 @@ pub enum OutboundCachePolicy {
     PlatformDefault,
     /// Fastly cache metadata, not an outbound `Surrogate-Key` request header.
     ///
-    /// The value may contain space-separated keys. Fastly ignores individual
-    /// keys outside printable ASCII 0x21..=0x7e; no additional key policy is imposed.
+    /// The value may contain space-separated keys. The Fastly adapter discards
+    /// individual keys outside printable ASCII 0x21..=0x7e before calling the SDK,
+    /// preserving valid neighboring keys. No additional key policy is imposed.
     /// Image Optimizer cannot retain this metadata and rejects this variant.
     PlatformDefaultWithSurrogateKey(HeaderValue),
 }
@@ -523,11 +529,23 @@ pub struct ResponseHeadNormalization {
     pub content_type_provenance: ContentTypeProvenance,
 }
 
-pub struct ResponseHeaderLimiter {
+struct RequestHeadNormalization {
+    forwarded_content_length: Option<u64>,
+    invalidates_forwarded_length: bool,
+}
+
+#[derive(Debug)]
+struct ResponseHeaderCounter {
     max_bytes: Option<u64>,
     max_count: Option<u64>,
     observed_bytes: u64,
     observed_count: u64,
+}
+
+/// Local handles retain one cumulative response-field budget, never a reset or per-section allowance.
+#[derive(Clone, Debug)]
+pub struct ResponseHeaderLimiter {
+    counter: Rc<RefCell<ResponseHeaderCounter>>,
 }
 
 impl ResponseHeaderLimiter {
@@ -535,10 +553,12 @@ impl ResponseHeaderLimiter {
     #[inline]
     pub fn new(max_bytes: Option<u64>, max_count: Option<u64>) -> Self {
         Self {
-            max_bytes,
-            max_count,
-            observed_bytes: 0,
-            observed_count: 0,
+            counter: Rc::new(RefCell::new(ResponseHeaderCounter {
+                max_bytes,
+                max_count,
+                observed_bytes: 0,
+                observed_count: 0,
+            })),
         }
     }
 
@@ -556,24 +576,34 @@ impl ResponseHeaderLimiter {
     }
 
     fn observe_field(&mut self, name: &HeaderName, value: &HeaderValue) -> Result<(), EdgeError> {
-        let next_count = self
+        self.observe_raw_field(name.as_str().as_bytes(), value.as_bytes())
+    }
+
+    /// Charges an adapter-visible raw field without constructing another header map.
+    ///
+    /// # Errors
+    /// Returns the cumulative typed count/byte overflow before accepting the field.
+    #[inline]
+    pub fn observe_raw_field(&mut self, name: &[u8], value: &[u8]) -> Result<(), EdgeError> {
+        let mut counter = self.counter.borrow_mut();
+        let next_count = counter
             .observed_count
             .checked_add(1)
             .ok_or_else(|| response_limit_error(ResponseLimitReason::HeaderCount))?;
-        self.observed_count = next_count;
-        if self.max_count.is_some_and(|max| next_count > max) {
+        counter.observed_count = next_count;
+        if counter.max_count.is_some_and(|max| next_count > max) {
             return Err(response_limit_error(ResponseLimitReason::HeaderCount));
         }
 
-        let name_bytes = u64::try_from(name.as_str().len()).unwrap_or(u64::MAX);
-        let value_bytes = u64::try_from(value.as_bytes().len()).unwrap_or(u64::MAX);
-        let next_bytes = self
+        let name_bytes = u64::try_from(name.len()).unwrap_or(u64::MAX);
+        let value_bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
+        let next_bytes = counter
             .observed_bytes
             .checked_add(name_bytes)
             .and_then(|total| total.checked_add(value_bytes))
             .ok_or_else(|| response_limit_error(ResponseLimitReason::HeaderBytes))?;
-        self.observed_bytes = next_bytes;
-        if self.max_bytes.is_some_and(|max| next_bytes > max) {
+        counter.observed_bytes = next_bytes;
+        if counter.max_bytes.is_some_and(|max| next_bytes > max) {
             return Err(response_limit_error(ResponseLimitReason::HeaderBytes));
         }
         Ok(())
@@ -1078,6 +1108,7 @@ impl OutboundRequest {
         BodyValue: Into<Body>,
     {
         self.body = body.into();
+        self.body.set_forwarded_content_length(None);
         self
     }
 
@@ -1178,6 +1209,9 @@ impl OutboundRequest {
 
     /// Creates an outbound request from an inbound request while removing framing and
     /// hop-by-hop metadata.
+    /// A single valid, non-nominated Content-Length without Transfer-Encoding is retained
+    /// separately on a streamed body, never as an unchecked forwarded header. Replacing
+    /// the body clears that declaration. Provider upload validation remains demand-driven.
     ///
     /// # Errors
     /// Returns [`EdgeError::BadRequest`] when the target is invalid or a `connection`
@@ -1192,7 +1226,10 @@ impl OutboundRequest {
             .get::<ForwardedReadDeadline>()
             .map(ForwardedReadDeadline::deadline);
         outbound.headers = parts.headers;
-        normalize_request_headers(&mut outbound.headers)?;
+        let normalized = normalize_request_headers(&mut outbound.headers)?;
+        outbound
+            .body
+            .set_forwarded_content_length(normalized.forwarded_content_length);
         Ok(outbound)
     }
 
@@ -1772,7 +1809,11 @@ pub fn limit_encoded_stream(stream: BodyStream, max: Option<u64>) -> BodyStream 
 /// Returns [`EdgeError::BadRequest`] when a `connection` nomination is malformed.
 #[inline]
 pub fn normalize_for_dispatch(request: &mut OutboundRequest) -> Result<(), EdgeError> {
-    normalize_request_headers(&mut request.headers)
+    let normalized = normalize_request_headers(&mut request.headers)?;
+    if normalized.invalidates_forwarded_length {
+        request.body.set_forwarded_content_length(None);
+    }
+    Ok(())
 }
 
 /// Normalizes raw upstream metadata before response-body policy is selected.
@@ -2112,11 +2153,35 @@ fn ensure_deadline_live(deadline: Deadline, clock: &MonotonicClock) -> Result<()
     }
 }
 
-fn normalize_request_headers(headers: &mut HeaderMap) -> Result<(), EdgeError> {
+fn normalize_request_headers(
+    headers: &mut HeaderMap,
+) -> Result<RequestHeadNormalization, EdgeError> {
     let nominated = connection_nominations(headers, false)?;
+    let invalidates_forwarded_length =
+        headers.contains_key(TRANSFER_ENCODING) || nominated.contains(&CONTENT_LENGTH);
+    let forwarded_content_length = if invalidates_forwarded_length {
+        None
+    } else {
+        let mut lengths = headers.get_all(CONTENT_LENGTH).iter();
+        lengths.next().and_then(|value| {
+            if lengths.next().is_some() {
+                return None;
+            }
+            let raw = str::from_utf8(value.as_bytes())
+                .ok()?
+                .trim_matches([' ', '\t']);
+            if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            raw.parse().ok()
+        })
+    };
     retain_utf8_header_values(headers, false);
     strip_hop_by_hop(headers, nominated, true);
-    Ok(())
+    Ok(RequestHeadNormalization {
+        forwarded_content_length,
+        invalidates_forwarded_length,
+    })
 }
 
 fn connection_nominations(

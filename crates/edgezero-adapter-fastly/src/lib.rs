@@ -43,6 +43,9 @@ use edgezero_core::error::EdgeError;
 #[cfg(feature = "fastly")]
 use edgezero_core::http::{Extensions, Response};
 #[cfg(any(feature = "fastly", test))]
+use edgezero_core::key_value_store::KvError;
+use edgezero_core::logging::ManagedLoggerError;
+#[cfg(any(feature = "fastly", test))]
 use edgezero_core::manifest::ResolvedLoggingConfig;
 #[cfg(feature = "fastly")]
 use edgezero_core::time::MonotonicClock;
@@ -104,7 +107,18 @@ fn build_target_app<A>() -> Result<App, EdgeError>
 where
     A: Hooks,
 {
-    App::build::<A>(FASTLY_PLATFORM)
+    let app = App::build::<A>(FASTLY_PLATFORM)?;
+    let metadata = A::stores().kv;
+    if app
+        .record_store_requirements()
+        .keys()
+        .any(|id| !metadata.is_some_and(|meta| meta.ids.contains(&id.as_str())))
+    {
+        return Err(
+            KvError::Validation("record declaration uses an undeclared ID".to_owned()).into(),
+        );
+    }
+    Ok(app)
 }
 
 #[cfg(feature = "fastly")]
@@ -113,30 +127,28 @@ fn init_fastly_abi() {
 }
 
 /// # Errors
-/// Returns [`logger::InitLoggerError::Build`] if the underlying logger
-/// builder rejects its inputs (e.g. an empty endpoint), or
-/// [`logger::InitLoggerError::SetLogger`] if a global logger is already
-/// installed.
+/// Returns a fixed managed-logger error for invalid settings, a foreign backend,
+/// or changed instance settings. Identical repeated initialization succeeds.
 #[cfg(feature = "fastly")]
 #[inline]
 pub fn init_logger(
     endpoint: &str,
     level: log::LevelFilter,
     echo_stdout: bool,
-) -> Result<(), logger::InitLoggerError> {
+) -> Result<(), ManagedLoggerError> {
     logger::init_logger(endpoint, level, echo_stdout)
 }
 
 /// # Errors
-/// Never; this is a no-op stub on builds without the `fastly` feature.
+/// Returns `UnsupportedTarget` without changing logger state.
 #[cfg(not(feature = "fastly"))]
 #[inline]
 pub fn init_logger(
     _endpoint: &str,
     _level: log::LevelFilter,
     _echo_stdout: bool,
-) -> Result<(), log::SetLoggerError> {
-    Ok(())
+) -> Result<(), ManagedLoggerError> {
+    Err(ManagedLoggerError::UnsupportedTarget)
 }
 
 /// Entry point for a Fastly Compute application.
@@ -180,11 +192,7 @@ where
 {
     init_fastly_abi();
     let stores = A::stores();
-    let logging = FastlyLogging::from(A::logging_for("fastly"));
-    if logging.use_fastly_logger && !A::owns_logging() {
-        let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");
-        init_logger(endpoint, logging.level, logging.echo_stdout)?;
-    }
+    logger::initialize_for_app::<A>()?;
     let req = fastly::Request::from_client();
     let clock = MonotonicClock::default();
     let request_start = clock.now();
@@ -234,38 +242,30 @@ where
 {
     init_fastly_abi();
     let stores = A::stores();
-    let logging = FastlyLogging::from(A::logging_for("fastly"));
-    lifecycle::serve_custom(serve, move |req, retained: &mut lifecycle::Sandbox<App>| {
-        retained.setup_once(|| {
-            if logging.use_fastly_logger && !A::owns_logging() {
-                init_logger(
-                    logging.endpoint.as_deref().unwrap_or("stdout"),
-                    logging.level,
-                    logging.echo_stdout,
-                )?;
+    lifecycle::serve_custom::<A, _, _, _>(
+        serve,
+        move |req, retained: &mut lifecycle::Sandbox<App>| {
+            let clock = MonotonicClock::default();
+            let request_start = clock.now();
+            if let Err(error) = retained.initialize(build_target_app::<A>) {
+                return request::send_assembly_error(req, error, request_start, clock)
+                    .into_standard_result()
+                    .map(|_state| ());
             }
-            Ok::<(), fastly::Error>(())
-        })?;
-        let clock = MonotonicClock::default();
-        let request_start = clock.now();
-        if let Err(error) = retained.initialize(build_target_app::<A>) {
-            return request::send_assembly_error(req, error, request_start, clock)
-                .into_standard_result()
-                .map(|_state| ());
-        }
-        let app = retained.state().ok_or_else(|| {
-            fastly::Error::msg("application initialization did not retain an app")
-        })?;
-        request::send_request_with_registries_and_hooks(
-            app,
-            stores,
-            req,
-            &mut prepare,
-            &mut finalize,
-        )
-        .into_standard_result()
-        .map(|_state| ())
-    })
+            let app = retained.state().ok_or_else(|| {
+                fastly::Error::msg("application initialization did not retain an app")
+            })?;
+            request::send_request_with_registries_and_hooks(
+                app,
+                stores,
+                req,
+                &mut prepare,
+                &mut finalize,
+            )
+            .into_standard_result()
+            .map(|_state| ())
+        },
+    )
 }
 
 /// Dispatch with an explicitly wired config store. Its name comes from the caller,
@@ -285,10 +285,7 @@ where
     A: Hooks,
 {
     init_fastly_abi();
-    if logging.use_fastly_logger && !A::owns_logging() {
-        let endpoint = logging.endpoint.as_deref().unwrap_or("stdout");
-        init_logger(endpoint, logging.level, logging.echo_stdout)?;
-    }
+    logger::configure::<A>(logging)?;
     let req = fastly::Request::from_client();
     let clock = MonotonicClock::default();
     let request_start = clock.now();
@@ -338,6 +335,71 @@ mod fastly_logging_tests {
         assert_eq!(logging.endpoint, None);
         assert!(!logging.use_fastly_logger);
         assert!(logging.echo_stdout);
+    }
+}
+
+#[cfg(test)]
+mod record_requirement_tests {
+    use edgezero_core::app::{App, Hooks, StoreMetadata, StoresMetadata};
+    use edgezero_core::key_value_store::KvError;
+    use edgezero_core::router::RouterService;
+    use edgezero_core::{EdgeError, RecordKeyLayout};
+
+    struct Layout;
+    impl RecordKeyLayout for Layout {
+        fn id(&self) -> &'static str {
+            "platform.record-test"
+        }
+
+        fn partition_prefix<'key>(&self, _key: &'key str) -> Result<&'key str, KvError> {
+            Ok("group/")
+        }
+
+        fn validate(&self) -> Result<(), KvError> {
+            Ok(())
+        }
+
+        fn validate_partition(&self, prefix: &str) -> Result<(), KvError> {
+            if prefix == "group/" {
+                Ok(())
+            } else {
+                Err(KvError::Validation("incomplete partition".to_owned()))
+            }
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+    }
+
+    struct Required<const DECLARED: bool>;
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "record startup fixture retains unrelated Hooks defaults"
+    )]
+    impl<const DECLARED: bool> Hooks for Required<DECLARED> {
+        fn configure(app: &mut App) -> Result<(), EdgeError> {
+            app.require_record_store("identity", Layout)?;
+            Ok(())
+        }
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
+        }
+        fn stores() -> StoresMetadata {
+            StoresMetadata {
+                kv: DECLARED.then_some(StoreMetadata {
+                    ids: &["identity"],
+                    default: "identity",
+                }),
+                ..StoresMetadata::default()
+            }
+        }
+    }
+
+    #[test]
+    fn record_layouts_must_name_declared_ids_without_opening_a_provider() {
+        super::build_target_app::<Required<true>>().unwrap();
+        assert!(super::build_target_app::<Required<false>>().is_err());
     }
 }
 

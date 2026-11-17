@@ -10,6 +10,11 @@
 #[path = "fastly_response_abi.rs"]
 mod fastly_abi;
 
+/// Scoped emission diagnostics for instrumented fixtures, not production response policy.
+#[cfg(any(test, feature = "test-utils"))]
+#[path = "response_testing.rs"]
+pub mod testing;
+
 #[cfg(feature = "fastly")]
 use core::convert::identity;
 use std::task::Poll;
@@ -113,36 +118,34 @@ trait EgressCommitter {
 
 #[cfg(feature = "fastly")]
 mod platform {
+    use super::fastly_abi::{self, BodyHandle, FastlyAbiError, ResponseHandle};
     use super::{
         BufferedBody, DeliveryError, EgressCommitter, EgressSink, FastlyResponseDelivery,
         HeaderMap, ResponseEgressEnvelope, StatusCode, manual_stream_framing, send_egress_with,
     };
-    use std::mem;
-
-    use fastly_shared::{INVALID_BODY_HANDLE, INVALID_RESPONSE_HANDLE};
-    use fastly_sys::{BodyHandle as FastlyBodyHandle, ResponseHandle as FastlyResponseHandle};
-
-    use super::fastly_abi::{self, FastlyAbiError};
 
     pub(super) struct FastlyPrepared {
-        body: FastlyBodyHandle,
-        response: FastlyResponseHandle,
+        body: Option<BodyHandle>,
+        response: Option<ResponseHandle>,
         streaming: bool,
     }
 
     impl FastlyPrepared {
         fn commit(mut self) -> Result<FastlyBodySink, FastlyAbiError> {
-            let response = mem::replace(&mut self.response, INVALID_RESPONSE_HANDLE);
-            let body = mem::replace(&mut self.body, INVALID_BODY_HANDLE);
+            let response = self.response.take().ok_or(FastlyAbiError)?;
+            let Some(body) = self.body.take() else {
+                let _result = fastly_abi::close_response(response);
+                return Err(FastlyAbiError);
+            };
             if self.streaming {
-                if fastly_abi::send_streaming(response, body).is_err() {
+                if fastly_abi::send_streaming(response, &body).is_err() {
                     let _result = fastly_abi::abandon_body(body);
                     return Err(FastlyAbiError);
                 }
-                Ok(FastlyBodySink(body))
+                Ok(FastlyBodySink(Some(body)))
             } else {
                 fastly_abi::send_buffered(response, body)?;
-                Ok(FastlyBodySink(INVALID_BODY_HANDLE))
+                Ok(FastlyBodySink(None))
             }
         }
 
@@ -152,30 +155,32 @@ mod platform {
             transmits_body: bool,
             buffered_body: Option<BufferedBody<'_>>,
         ) -> Result<Self, DeliveryError> {
-            let response =
+            let owned_response =
                 fastly_abi::new_response().map_err(|_error| DeliveryError::Conversion)?;
             let mut prepared = Self {
-                body: INVALID_BODY_HANDLE,
-                response,
+                body: None,
+                response: Some(owned_response),
                 streaming: buffered_body.is_none(),
             };
-            prepared.body = fastly_abi::new_body().map_err(|_error| DeliveryError::Conversion)?;
-            fastly_abi::set_status(prepared.response, status.as_u16())
+            prepared.body =
+                Some(fastly_abi::new_body().map_err(|_error| DeliveryError::Conversion)?);
+            let response = prepared
+                .response
+                .as_ref()
+                .ok_or(DeliveryError::Conversion)?;
+            fastly_abi::set_status(response, status.as_u16())
                 .map_err(|_error| DeliveryError::Conversion)?;
             for (name, value) in headers {
-                fastly_abi::append_header(
-                    prepared.response,
-                    name.as_str().as_bytes(),
-                    value.as_bytes(),
-                )
-                .map_err(|_error| DeliveryError::Conversion)?;
+                fastly_abi::append_header(response, name.as_str().as_bytes(), value.as_bytes())
+                    .map_err(|_error| DeliveryError::Conversion)?;
             }
             if manual_stream_framing(headers, transmits_body, prepared.streaming) {
-                fastly_abi::set_manual_framing(prepared.response)
+                fastly_abi::set_manual_framing(response)
                     .map_err(|_error| DeliveryError::Conversion)?;
             }
             if let Some(buffered) = buffered_body {
-                buffered.stage(|remaining| fastly_abi::write_body(prepared.body, remaining))?;
+                let body = prepared.body.as_ref().ok_or(DeliveryError::Conversion)?;
+                buffered.stage(|remaining| fastly_abi::write_body(body, remaining))?;
             }
             Ok(prepared)
         }
@@ -187,18 +192,16 @@ mod platform {
     )]
     impl Drop for FastlyPrepared {
         fn drop(&mut self) {
-            if self.body != INVALID_BODY_HANDLE {
-                let _result = fastly_abi::close_body(self.body);
-                self.body = INVALID_BODY_HANDLE;
+            if let Some(body) = self.body.take() {
+                let _result = fastly_abi::close_body(body);
             }
-            if self.response != INVALID_RESPONSE_HANDLE {
-                let _result = fastly_abi::close_response(self.response);
-                self.response = INVALID_RESPONSE_HANDLE;
+            if let Some(response) = self.response.take() {
+                let _result = fastly_abi::close_response(response);
             }
         }
     }
 
-    pub(super) struct FastlyBodySink(FastlyBodyHandle);
+    pub(super) struct FastlyBodySink(Option<BodyHandle>);
 
     #[expect(
         clippy::missing_trait_methods,
@@ -206,9 +209,8 @@ mod platform {
     )]
     impl Drop for FastlyBodySink {
         fn drop(&mut self) {
-            if self.0 != INVALID_BODY_HANDLE {
-                let _result = fastly_abi::abandon_body(self.0);
-                self.0 = INVALID_BODY_HANDLE;
+            if let Some(body) = self.0.take() {
+                let _result = fastly_abi::abandon_body(body);
             }
         }
     }
@@ -217,26 +219,15 @@ mod platform {
         type Error = FastlyAbiError;
 
         fn abandon(&mut self) -> Result<(), Self::Error> {
-            if self.0 == INVALID_BODY_HANDLE {
-                return Ok(());
-            }
-            let handle = mem::replace(&mut self.0, INVALID_BODY_HANDLE);
-            fastly_abi::abandon_body(handle)
+            self.0.take().map_or(Ok(()), fastly_abi::abandon_body)
         }
 
         fn finish(&mut self) -> Result<(), Self::Error> {
-            if self.0 == INVALID_BODY_HANDLE {
-                return Err(FastlyAbiError);
-            }
-            let handle = mem::replace(&mut self.0, INVALID_BODY_HANDLE);
-            fastly_abi::close_body(handle)
+            fastly_abi::close_body(self.0.take().ok_or(FastlyAbiError)?)
         }
 
         fn write(&mut self, bytes: &[u8]) -> Result<usize, Self::Error> {
-            if self.0 == INVALID_BODY_HANDLE {
-                return Err(FastlyAbiError);
-            }
-            fastly_abi::write_body(self.0, bytes)
+            fastly_abi::write_body(self.0.as_ref().ok_or(FastlyAbiError)?, bytes)
         }
     }
 
@@ -268,6 +259,69 @@ mod platform {
     /// deadline failures first attempt the bounded fallback on the same response-egress attempt.
     pub(crate) fn send_egress_response(egress: ResponseEgressEnvelope) -> FastlyResponseDelivery {
         send_egress_with(egress, &mut FastlyCommitter)
+    }
+
+    #[cfg(test)]
+    #[cfg(target_arch = "wasm32")]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn partial_preparation_releases_only_the_handles_it_owns_once() {
+            for body in [false, true] {
+                drop(fastly_abi::take_cleanup_calls());
+                let prepared = FastlyPrepared {
+                    body: body.then(|| fastly_abi::new_body().expect("body")),
+                    response: Some(fastly_abi::new_response().expect("response")),
+                    streaming: true,
+                };
+                drop(prepared);
+                assert_eq!(
+                    fastly_abi::take_cleanup_calls(),
+                    if body {
+                        vec!["close-body", "close-response"]
+                    } else {
+                        vec!["close-response"]
+                    }
+                );
+            }
+        }
+
+        #[test]
+        fn missing_body_commit_releases_the_taken_response_without_retry() {
+            drop(fastly_abi::take_cleanup_calls());
+            let prepared = FastlyPrepared {
+                body: None,
+                response: Some(fastly_abi::new_response().expect("response")),
+                streaming: true,
+            };
+            assert!(matches!(prepared.commit(), Err(FastlyAbiError)));
+            assert_eq!(fastly_abi::take_cleanup_calls(), ["close-response"]);
+        }
+
+        #[test]
+        fn sink_terminal_operations_relinquish_ownership_before_any_host_result() {
+            for finish in [false, true] {
+                drop(fastly_abi::take_cleanup_calls());
+                let mut sink = FastlyBodySink(Some(fastly_abi::new_body().expect("body")));
+                let _terminal = if finish {
+                    sink.finish()
+                } else {
+                    sink.abandon()
+                };
+                assert_eq!(sink.write(b"after terminal"), Err(FastlyAbiError));
+                assert_eq!(sink.finish(), Err(FastlyAbiError));
+                assert_eq!(sink.abandon(), Ok(()));
+                drop(sink);
+                assert_eq!(
+                    fastly_abi::take_cleanup_calls(),
+                    [if finish { "close-body" } else { "abandon-body" }]
+                );
+            }
+            drop(fastly_abi::take_cleanup_calls());
+            drop(FastlyBodySink(Some(fastly_abi::new_body().expect("body"))));
+            assert_eq!(fastly_abi::take_cleanup_calls(), ["abandon-body"]);
+        }
     }
 }
 
@@ -409,8 +463,14 @@ where
         clock,
         deadline: policy.write_deadline,
     });
+    #[cfg(feature = "test-utils")]
+    let diagnostic_headers = testing::headers(&parts.headers);
+    #[cfg(feature = "test-utils")]
+    let headers = diagnostic_headers.as_ref();
+    #[cfg(not(feature = "test-utils"))]
+    let headers = &parts.headers;
     let prepared_head =
-        match committer.prepare(parts.status, &parts.headers, transmits_body, buffered_body) {
+        match committer.prepare(parts.status, headers, transmits_body, buffered_body) {
             Ok(prepared_head) => prepared_head,
             Err(error) => {
                 log::error!("response-egress Fastly head preparation failed");
@@ -761,7 +821,9 @@ mod tests {
     use bytes::Bytes;
     use edgezero_core::app::App;
     use edgezero_core::context::RequestContext;
-    use edgezero_core::http::{Version, request_builder, response_builder};
+    use edgezero_core::http::{
+        HeaderName, HeaderValue, Version, request_builder, response_builder,
+    };
     use edgezero_core::ingress::{IngressDispatchOutcome, IngressFraming, IngressHeadAccounting};
     use edgezero_core::response_egress::{
         ResponseEgressBodyKind, ResponseEgressCompletion, ResponseEgressHead,
@@ -942,6 +1004,155 @@ mod tests {
 
     fn stable_clock(now: MonotonicInstant) -> MonotonicClock {
         MonotonicClock::new(move || now)
+    }
+
+    #[test]
+    #[cfg(feature = "test-utils")]
+    fn assembly_emission_diagnostics_preserve_canonical_delivery() {
+        let start = MonotonicInstant::now();
+        for method in [Method::GET, Method::HEAD] {
+            for category in ["service", "config", "internal"] {
+                let deliver = || {
+                    let error = match category {
+                        "service" => EdgeError::service_unavailable("state unavailable"),
+                        "config" => EdgeError::config_out_of_date("configuration unavailable", ""),
+                        _ => EdgeError::internal(anyhow::anyhow!("private-token=secret")),
+                    };
+                    let envelope = App::assembly_error_egress(
+                        error,
+                        method.clone(),
+                        start,
+                        stable_clock(start),
+                    );
+                    let state = Rc::new(RefCell::new(SinkState::default()));
+                    let delivered =
+                        send_egress_with(envelope, &mut MockCommitter::new(Rc::clone(&state)));
+                    assert_eq!(delivered.commitment(), FastlyResponseCommitState::Committed);
+                    assert_eq!(delivered.report().outcome, ResponseEgressOutcome::Completed);
+                    assert!(delivered.report().fallback_disposition.is_none());
+                    (state, delivered)
+                };
+                let (baseline_state, baseline_delivery) = deliver();
+                let (stamped_state, stamped_delivery) = super::testing::with_diagnostic_header(
+                    HeaderName::from_static("x-test-launch"),
+                    HeaderValue::from_static("guest-build-identity"),
+                    deliver,
+                )
+                .unwrap();
+                assert_eq!(stamped_delivery.report(), baseline_delivery.report());
+                let mut stamped = stamped_state.borrow_mut();
+                let baseline = baseline_state.borrow();
+                assert_eq!(stamped.commits.len(), 1);
+                assert_eq!(baseline.commits.len(), 1);
+                assert_eq!(
+                    stamped.commits[0].1.remove("x-test-launch").unwrap(),
+                    "guest-build-identity"
+                );
+                assert_eq!(stamped.commits, baseline.commits);
+                assert_eq!(stamped.staged, baseline.staged);
+                assert_eq!(stamped.accepted, baseline.accepted);
+                assert_eq!(stamped.events, baseline.events);
+                assert!(!String::from_utf8_lossy(&stamped.accepted).contains("private-token"));
+                if method == Method::HEAD {
+                    assert!(stamped.accepted.is_empty());
+                } else {
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&stamped.accepted).unwrap();
+                    assert_eq!(body["error"]["status"], stamped.commits[0].0.as_u16());
+                }
+                assert_eq!(
+                    stamped.commits[0].1.get("retry-after").is_some(),
+                    category == "config"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "test-utils")]
+    fn emission_diagnostics_preserve_fallback_and_deadline_outcomes() {
+        use edgezero_core::response_egress::ResponseEgressDeadline;
+
+        let start = MonotonicInstant::now();
+        for expired in [false, true] {
+            let deliver = || {
+                let mut envelope = App::assembly_error_egress(
+                    EdgeError::service_unavailable("state unavailable"),
+                    Method::GET,
+                    start,
+                    stable_clock(start),
+                );
+                if expired {
+                    envelope
+                        .response_mut()
+                        .extensions_mut()
+                        .insert(ResponseEgressDeadline::at(Deadline::at_instant(start)));
+                }
+                let state = Rc::new(RefCell::new(SinkState::default()));
+                let mut committer = MockCommitter::new(Rc::clone(&state));
+                if !expired {
+                    committer.prepare_plan = VecDeque::from([Err(()), Ok(())]);
+                }
+                let delivered = send_egress_with(envelope, &mut committer);
+                assert_eq!(delivered.error(), None);
+                assert_eq!(delivered.commitment(), FastlyResponseCommitState::Committed);
+                assert_eq!(
+                    delivered.report().fallback_disposition,
+                    Some(ResponseEgressFallbackDisposition::Completed)
+                );
+                assert_eq!(
+                    delivered.report().outcome,
+                    if expired {
+                        ResponseEgressOutcome::DeadlineExceeded
+                    } else {
+                        ResponseEgressOutcome::ConversionError
+                    }
+                );
+                (state, delivered)
+            };
+            let (baseline_state, baseline_delivery) = deliver();
+            let (stamped_state, stamped_delivery) = super::testing::with_diagnostic_header(
+                HeaderName::from_static("x-test-launch"),
+                HeaderValue::from_static("guest-build-identity"),
+                deliver,
+            )
+            .unwrap();
+            assert_eq!(stamped_delivery.report(), baseline_delivery.report());
+            let baseline = baseline_state.borrow();
+            let mut stamped = stamped_state.borrow_mut();
+            assert_eq!(stamped.commits.len(), 1);
+            assert_eq!(
+                stamped.commits[0].1.remove("x-test-launch").unwrap(),
+                "guest-build-identity"
+            );
+            assert_eq!(stamped.commits, baseline.commits);
+            assert_eq!(stamped.accepted, baseline.accepted);
+            assert_eq!(stamped.events, baseline.events);
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "test-utils"))]
+    fn default_emission_never_applies_diagnostic_metadata() {
+        let start = MonotonicInstant::now();
+        let envelope = App::assembly_error_egress(
+            EdgeError::service_unavailable("state unavailable"),
+            Method::GET,
+            start,
+            stable_clock(start),
+        );
+        let state = Rc::new(RefCell::new(SinkState::default()));
+        let delivered = super::testing::with_diagnostic_header(
+            HeaderName::from_static("x-test-launch"),
+            HeaderValue::from_static("guest-build-identity"),
+            || send_egress_with(envelope, &mut MockCommitter::new(Rc::clone(&state))),
+        )
+        .unwrap();
+        assert_eq!(delivered.error(), None);
+        assert_eq!(delivered.report().outcome, ResponseEgressOutcome::Completed);
+        let snapshot = state.borrow();
+        assert_eq!(snapshot.commits.len(), 1);
+        assert!(!snapshot.commits[0].1.contains_key("x-test-launch"));
     }
 
     fn attempt(observer: &RecordingObserver, now: MonotonicInstant) -> ResponseEgressAttempt {

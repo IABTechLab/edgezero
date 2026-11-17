@@ -104,10 +104,19 @@ lost writes. For example, two requests that both read `counter = 5` and write `6
 will end with `counter = 6` instead of `7`.
 
 Use it only when approximate values are acceptable (e.g. visit counters, feature flags).
-For strict correctness, use a transactional data store.
+For atomic Add/CAS on supported bindings, use [conditional records](./kv-records).
+The read/merge/conflict policy remains application-owned.
 :::
 
 Key listing is paginated by design. This avoids buffering an unbounded number of keys in memory and matches the underlying provider APIs. The Spin adapter materialises `Store::get_keys()` and pages client-side; a `max_list_keys` cap (configurable via `EDGEZERO__STORES__KV__<ID>__MAX_LIST_KEYS`, default `1000`) guards against runaway lists and yields `KvError::LimitExceeded` when exceeded.
+
+## Conditional records
+
+[Record-capable bindings](./kv-records) add generation lookup, atomic conditional
+replacement, exact authoritative existence and strong partition pages. Declare the
+application's key layout before provider preparation. Ordinary and record methods
+then access the same value rows; `require_records()` cannot upgrade an already
+prepared ordinary-only provider.
 
 ## Declared Store Failures
 
@@ -195,7 +204,9 @@ provision --adapter fastly` creates the remote store and writes only the
 
 ### Consistency
 
-Both Fastly and Cloudflare KV stores are **eventually consistent**.
+Ordinary Fastly and Cloudflare value lookups are **eventually consistent**.
+[Record operations](./kv-records) make separate, explicit promises for authoritative
+existence and partition pages on supported bindings.
 
 - A value written at one edge location may not be immediately visible at another.
 - `read_modify_write()` is **not atomic**. Concurrent updates to the same key may result in lost writes.
@@ -203,13 +214,14 @@ Both Fastly and Cloudflare KV stores are **eventually consistent**.
 
 ## Limits & Validation
 
-To ensure portability across all providers, `KvHandle` enforces the
-strictest common limits:
+`KvHandle` enforces the following shared validation. Providers may impose smaller
+limits, such as DynamoDB's 384 KiB payload budget. Record metadata limits are
+listed in [conditional records](./kv-records).
 
 | Rule          | Limit                                |
 | ------------- | ------------------------------------ |
 | Key size      | Max **512 bytes** (Cloudflare limit) |
-| Value size    | Max **25 MB**                        |
+| Value size    | Max **25 MiB**                       |
 | TTL minimum   | **60 seconds**                       |
 | TTL maximum   | **1 year**                           |
 | List page max | **1000 keys**                        |

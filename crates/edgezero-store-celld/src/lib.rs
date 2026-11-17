@@ -1,10 +1,11 @@
-//! Scoped native celld stores. Settings are available without runtime features.
+//! Native live KV through the `EdgeZero` store service deployed on stock celld.
+//! Settings are available without runtime features.
 //!
-//! Config is an immutable startup snapshot; KV is live. Owned errors retain no
+//! The service lives in `services/celld-store/`. Owned errors retain no
 //! endpoint, credential, resource, remote body or underlying transport error.
 
 #![cfg_attr(
-    all(not(target_arch = "wasm32"), feature = "_transport"),
+    all(not(target_arch = "wasm32"), feature = "kv"),
     expect(
         clippy::pub_use,
         reason = "the supported preparation API is re-exported at the crate root; this lint is module-scoped"
@@ -13,20 +14,18 @@
 
 pub mod settings;
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "_transport"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 mod client;
-#[cfg(all(not(target_arch = "wasm32"), feature = "config"))]
-mod config;
 #[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 mod kv;
-#[cfg(all(not(target_arch = "wasm32"), feature = "_transport"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 mod preparation;
 #[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
-pub mod records;
+mod records;
 #[cfg(test)]
-#[cfg(all(not(target_arch = "wasm32"), feature = "_transport"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 mod test_support;
-#[cfg(all(not(target_arch = "wasm32"), feature = "_transport"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 pub use preparation::{CelldPreparation, PreparationStats};
 
 /// Closed failure categories, never transport error chains or server text.
@@ -52,17 +51,22 @@ pub enum PreparationError {
     Forbidden,
     #[error("missing resource")]
     Missing,
-    #[cfg(feature = "records")]
-    #[error("write precondition failed")]
-    PreconditionFailed,
     #[error("size limit")]
     SizeLimit,
     #[error("malformed response")]
     Malformed,
     #[error("unsupported version")]
     UnsupportedVersion,
+    #[error("store instance changed")]
+    InstanceChanged,
     #[error("provider unavailable")]
     Unavailable,
     #[error("deadline exceeded")]
     Deadline,
+    #[cfg(feature = "records")]
+    #[error("write precondition failed")]
+    PreconditionFailed,
+    #[cfg(feature = "records")]
+    #[error("mutation may have committed")]
+    MutationUncertain,
 }

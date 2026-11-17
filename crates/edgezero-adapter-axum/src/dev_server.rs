@@ -25,9 +25,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::diagnostics::{NativeDiagnosticsHandle, NativeSession};
+use crate::outbound_executor::{AxumOutboundExecutor, AxumOutboundExecutorHandle};
 pub use crate::run_options::AxumRunOptions;
 use crate::run_options::{
-    JsonBodyLimit, config_path, failure, native_limit_setting, native_settings, shutdown_grace,
+    JsonBodyLimit, config_path, failure, geo_setting, native_limit_setting, native_settings,
+    shutdown_grace,
 };
 use crate::trusted_proxy::TrustedProxyPolicy;
 use anyhow::Context as _;
@@ -41,7 +43,7 @@ use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::signal;
 use tokio::sync::oneshot::{Receiver as ShutdownReceiver, Sender as ShutdownSender, channel};
 use tokio::sync::watch;
-use tokio::task::{LocalSet, spawn_blocking};
+use tokio::task::spawn_blocking;
 use tokio::time::sleep;
 
 use edgezero_core::addr;
@@ -50,12 +52,14 @@ use edgezero_core::config_store::{ConfigStoreError, ConfigStoreHandle, ConfigSto
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::logging::{BOOT_LOG_LEVEL, BOOT_LOG_TARGET, resolve_logging_level};
+use edgezero_core::manifest::BakedManifest;
 #[cfg(test)]
 use edgezero_core::router::RouterService;
 use edgezero_core::secret_store::SecretHandle;
 use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
 };
+use edgezero_core::{RecordLayout, RecordStoreRequirements};
 use log::{Level, LevelFilter};
 use simple_logger::SimpleLogger;
 use tokio::task::yield_now;
@@ -64,7 +68,7 @@ use tokio::time::{Instant as NativeInstant, sleep_until};
 use crate::config_store::AxumConfigStore;
 use crate::config_store_limits::ConfigStoreLimits;
 use crate::connection::{ConnectionExit, serve_http1_with_shutdown};
-use crate::geo::NativeGeo;
+use crate::geo::{self, NativeGeo};
 use crate::ingress_config::AxumIngressConfig;
 use crate::key_value_store::PersistentKvStore;
 use crate::native_stores::{self, NativeSourcePlan, NativeStoreOverrides, NativeStoreSource};
@@ -403,11 +407,24 @@ fn stable_store_name_hash(store_name: &str) -> u64 {
     hash
 }
 
+#[cfg(test)]
 fn kv_handle_from_path(kv_path: &Path) -> anyhow::Result<KvHandle> {
+    kv_handle_from_path_with_records(kv_path, None)
+}
+
+fn kv_handle_from_path_with_records(
+    kv_path: &Path,
+    layout: Option<&RecordLayout>,
+) -> anyhow::Result<KvHandle> {
     if let Some(parent) = kv_path.parent() {
         fs::create_dir_all(parent).context("failed to create KV store directory")?;
     }
-    let kv_store = Arc::new(PersistentKvStore::new(kv_path).context("failed to create KV store")?);
+    let store = match layout {
+        Some(declared_layout) => PersistentKvStore::new_records(kv_path, declared_layout.clone()),
+        None => PersistentKvStore::new(kv_path),
+    }
+    .context("failed to create KV store")?;
+    let kv_store = Arc::new(store);
     log::info!("KV store: {}", kv_path.display());
     Ok(KvHandle::new(kv_store))
 }
@@ -655,8 +672,9 @@ where
             );
             failure("runtime", "local runner", "creation failed")
         })?;
-    let local = LocalSet::new();
-    runtime.block_on(local.run_until(async move {
+    let mut executor = AxumOutboundExecutor::new();
+    let executor_handle = executor.handle();
+    runtime.block_on(executor.run_until(async move {
         let mut signals = Signals::register(enable_signals).inspect_err(|_error| {
             log_native_lifecycle(
                 LifecyclePhase::Starting,
@@ -676,6 +694,7 @@ where
             &mut signals,
             &phase,
             reader,
+            executor_handle,
         )
         .await;
         phase.send_replace(LifecyclePhase::Stopped);
@@ -714,6 +733,7 @@ async fn run_owned<Prepare, Stop>(
     signals: &mut Option<Signals>,
     phase: &watch::Sender<LifecyclePhase>,
     reader: watch::Receiver<LifecyclePhase>,
+    executor: AxumOutboundExecutorHandle,
 ) -> anyhow::Result<()>
 where
     Prepare: Future<Output = anyhow::Result<PreparedApp>>,
@@ -752,6 +772,7 @@ where
     let mut service = AxumServiceState::with_native_transport(
         app,
         transport,
+        executor,
         json_body_limit,
         session,
         native.policy,
@@ -1040,7 +1061,10 @@ where
     A: Hooks,
     F: FnOnce() -> anyhow::Result<()>,
 {
-    let (env, json_body_limit, native) = capture_dev_environment(vars_os())?;
+    let (env, json_body_limit, mut native) = capture_dev_environment(vars_os())?;
+    // The dev server ignores the manifest table: its deployment-only values are
+    // usually absent locally. Settings alone opt a dev run into geo.
+    let geo = geo::resolve(None, &env, &BakedManifest::Absent)?;
     if !A::owns_logging() {
         app_logger(&env)
             .init()
@@ -1066,10 +1090,17 @@ where
                 log::warn!(target: BOOT_LOG_TARGET, "{warning}");
             }
             let stores = PreparedStores {
-                kv: build_kv_registry(metadata.kv, &env, kv_init_requirement(metadata))?,
+                kv: build_kv_registry(
+                    metadata.kv,
+                    &env,
+                    kv_init_requirement(metadata),
+                    app.record_store_requirements(),
+                )?,
                 config: build_config_registry(metadata.config, &env, config_limits)?,
                 secrets: build_secret_registry(metadata.secrets, &env),
             };
+            let max_object_bytes = geo.max_object_bytes(None)?;
+            native.geo = geo.prepare(stores.kv(), max_object_bytes).await?;
             prepare_transport(app, stores, json_body_limit, native)
         },
     )
@@ -1096,7 +1127,7 @@ where
                     ["adapter", "trusted_proxy_cidrs"] => Some("TRUSTED_PROXY_CIDRS"),
                     ["adapter", "forwarding_header_family"] => Some("FORWARDING_HEADER_FAMILY"),
                     ["logging", "request_records"] => Some("LOGGING__REQUEST_RECORDS"),
-                    _ => None,
+                    _ => geo_setting(&path),
                 }
             })
         });
@@ -1295,12 +1326,12 @@ where
         &'startup PreparedStores,
     ) -> LocalStartupFuture<'startup>,
 {
-    let geo = options.native_geo()?;
-    let native = NativeHosting {
+    let geo = options.native_geo(&A::manifest())?;
+    let mut native = NativeHosting {
         diagnostics: options.diagnostics(),
         policy: options.trusted_proxy_policy(),
         request_records: options.request_records(),
-        geo,
+        geo: NativeGeo::default(),
     };
     run_local(
         ListenerSource::Bind(options.addr()),
@@ -1311,10 +1342,18 @@ where
         async move {
             let metadata = A::stores();
             let sources = NativeSourcePlan::validate(metadata, &options, overrides)?;
+            let max_object_bytes = geo.max_object_bytes(Some(&sources))?;
             init_logging::<A>(options.logging_level())?;
             let mut app = App::build::<A>(crate::AXUM_PLATFORM)
                 .map_err(|_error| anyhow::anyhow!("application configuration failed"))?;
-            let stores = build_production_stores(metadata, &options, sources).await?;
+            let stores = build_production_stores_with_records(
+                metadata,
+                &options,
+                sources,
+                app.record_store_requirements(),
+            )
+            .await?;
+            native.geo = geo.prepare(stores.kv(), max_object_bytes).await?;
             let transport = AxumOutboundClient::try_transport()
                 .map_err(|_error| failure("transport", "HTTP client", "initialization failed"))?;
             initialize(&mut app, &stores).await.map_err(|error| {
@@ -1357,15 +1396,32 @@ fn check_data_write_access(root: &Path) -> anyhow::Result<()> {
     Err(failure("stores", "DATA_DIR", "write-probe unavailable"))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "keep all sequential staging in one ownership scope before atomic publication"
-)]
+#[cfg(test)]
 async fn build_production_stores(
     metadata: StoresMetadata,
     options: &AxumRunOptions,
     sources: NativeSourcePlan,
 ) -> anyhow::Result<PreparedStores> {
+    build_production_stores_with_records(
+        metadata,
+        options,
+        sources,
+        &RecordStoreRequirements::new(),
+    )
+    .await
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "keep all sequential staging in one ownership scope before atomic publication"
+)]
+async fn build_production_stores_with_records(
+    metadata: StoresMetadata,
+    options: &AxumRunOptions,
+    sources: NativeSourcePlan,
+    requirements: &RecordStoreRequirements,
+) -> anyhow::Result<PreparedStores> {
+    sources.validate_record_requirements(requirements, options)?;
     let mut config = BTreeMap::new();
     let mut kv = BTreeMap::new();
     let mut secrets = BTreeMap::new();
@@ -1434,7 +1490,11 @@ async fn build_production_stores(
     }
     for (id, source) in sources.kv {
         let handle = match source {
-            NativeStoreSource::BuiltIn(builtin) => sessions.prepare_kv(builtin, id).await?,
+            NativeStoreSource::BuiltIn(builtin) => {
+                sessions
+                    .prepare_kv(builtin, id, requirements.get(id))
+                    .await?
+            }
             local @ (NativeStoreSource::Local
             | NativeStoreSource::Ready(_)
             | NativeStoreSource::Prepare(_)) => {
@@ -1446,8 +1506,12 @@ async fn build_production_stores(
                     if let Some(handle) = handles.get(&name) {
                         return Ok(handle.clone());
                     }
-                    let store = PersistentKvStore::new(root.join(kv_store_file_name(&name)))
-                        .map_err(|_error| failure("kv", id, "database unavailable or locked"))?;
+                    let path = root.join(kv_store_file_name(&name));
+                    let store = match requirements.get(id) {
+                        Some(layout) => PersistentKvStore::new_records(path, layout.clone()),
+                        None => PersistentKvStore::new(path),
+                    }
+                    .map_err(|_error| failure("kv", id, "database unavailable or locked"))?;
                     let handle = KvHandle::new(Arc::new(store));
                     handles.insert(name, handle.clone());
                     Ok(handle)
@@ -1457,6 +1521,7 @@ async fn build_production_stores(
         };
         kv.insert(id.to_owned(), handle);
     }
+    validate_prepared_record_bindings(&kv, requirements)?;
     let environment_secrets = SecretHandle::new(Arc::new(EnvSecretStore::new()));
     for (id, source) in sources.secrets {
         let binding = match source {
@@ -1480,6 +1545,40 @@ async fn build_production_stores(
         kv: finish_registry(metadata.kv, kv, "kv")?,
         secrets: finish_registry(metadata.secrets, secrets, "secrets")?,
     })
+}
+
+fn validate_prepared_record_bindings(
+    handles: &BTreeMap<String, KvHandle>,
+    requirements: &RecordStoreRequirements,
+) -> anyhow::Result<()> {
+    for (id, layout) in requirements {
+        let records = handles
+            .get(id)
+            .ok_or_else(|| failure("kv", id, "required record binding missing"))?
+            .require_records()
+            .map_err(|error| failure("kv", id, native_stores::record_capability_failure(&error)))?;
+        if records.binding().layout != *layout {
+            return Err(failure("kv", id, "supplied record layout mismatch"));
+        }
+    }
+    let mut scopes = BTreeMap::new();
+    for (id, handle) in handles {
+        if let Ok(records) = handle.require_records() {
+            let binding = records.binding();
+            let scope = (binding.scope.clone(), binding.format.clone());
+            if scopes
+                .insert(scope, binding.layout.clone())
+                .is_some_and(|previous| previous != binding.layout)
+            {
+                return Err(failure(
+                    "kv",
+                    id,
+                    "shared backing store has conflicting record layouts",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn finish_registry<H>(
@@ -1507,7 +1606,9 @@ fn build_kv_registry(
     kv_meta: Option<StoreMetadata>,
     env: &EnvConfig,
     init: KvInitRequirement,
+    requirements: &RecordStoreRequirements,
 ) -> anyhow::Result<Option<KvRegistry>> {
+    validate_local_record_declarations(kv_meta, env, requirements)?;
     let Some(meta) = kv_meta else {
         return Ok(None);
     };
@@ -1521,14 +1622,15 @@ fn build_kv_registry(
             continue;
         }
         let kv_path = kv_store_path(&store_name);
-        let handle = match kv_handle_from_path(&kv_path) {
+        let layout = requirements.get(*id);
+        let handle = match kv_handle_from_path_with_records(&kv_path, layout) {
             Ok(handle) => handle,
             Err(_error) => match init {
-                KvInitRequirement::Optional => {
+                KvInitRequirement::Optional if layout.is_none() => {
                     log::warn!(target: BOOT_LOG_TARGET, "KV store id `{id}` unavailable; omitting optional binding");
                     continue;
                 }
-                KvInitRequirement::Required => {
+                KvInitRequirement::Required | KvInitRequirement::Optional => {
                     return Err(failure("KV", id, "declared database unavailable or locked"));
                 }
             },
@@ -1546,6 +1648,41 @@ fn build_kv_registry(
         );
     }
     Ok(StoreRegistry::from_parts(by_id, default_id))
+}
+
+fn validate_local_record_declarations(
+    metadata: Option<StoreMetadata>,
+    env: &EnvConfig,
+    requirements: &RecordStoreRequirements,
+) -> anyhow::Result<()> {
+    for id in requirements.keys() {
+        if !metadata.is_some_and(|meta| meta.ids.contains(&id.as_str())) {
+            return Err(failure(
+                "kv",
+                id,
+                "record declaration uses an undeclared ID",
+            ));
+        }
+    }
+    // None requests the ordinary table, not an inherited record format. Mixing
+    // it with a declared layout would silently redirect one alias's value rows.
+    let mut layouts = BTreeMap::new();
+    if let Some(meta) = metadata {
+        for id in meta.ids {
+            let layout = requirements.get(*id);
+            if layouts
+                .insert(env.store_name("kv", id), layout)
+                .is_some_and(|previous| previous != layout)
+            {
+                return Err(failure(
+                    "kv",
+                    id,
+                    "shared backing store has conflicting record layouts",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Build the per-request config registry from the per-id local-file stores.
@@ -4147,6 +4284,270 @@ mod integration_tests {
         ));
 
         server.handle.abort();
+    }
+}
+
+#[cfg(test)]
+mod record_preparation_tests {
+    use std::cell::Cell;
+    use std::fs;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use edgezero_core::RecordKeyLayout;
+    use edgezero_core::key_value_store::{KvError, NoopKvStore};
+    use edgezero_core::record_store::contract::assert_record_contract;
+    use edgezero_store_aws::settings::DynamoDbKvSettings;
+    use futures::executor::block_on;
+
+    use super::*;
+    use crate::native_stores::{NativeKvSource, NativeStoreOverrides};
+
+    struct Groups(u32);
+
+    impl RecordKeyLayout for Groups {
+        fn id(&self) -> &'static str {
+            "native.record-groups"
+        }
+
+        fn partition_prefix<'key>(&self, key: &'key str) -> Result<&'key str, KvError> {
+            key.split_once('/')
+                .and_then(|(_, suffix)| key.strip_suffix(suffix))
+                .ok_or_else(|| KvError::Validation("unknown group".to_owned()))
+        }
+
+        fn validate(&self) -> Result<(), KvError> {
+            Ok(())
+        }
+
+        fn validate_partition(&self, prefix: &str) -> Result<(), KvError> {
+            if prefix.ends_with('/') && prefix.matches('/').count() == 1 {
+                Ok(())
+            } else {
+                Err(KvError::Validation("incomplete group".to_owned()))
+            }
+        }
+
+        fn version(&self) -> u32 {
+            self.0
+        }
+    }
+
+    fn metadata() -> StoresMetadata {
+        StoresMetadata {
+            kv: Some(StoreMetadata {
+                ids: &["first", "second"],
+                default: "first",
+            }),
+            ..StoresMetadata::default()
+        }
+    }
+
+    fn requirements() -> RecordStoreRequirements {
+        RecordStoreRequirements::from([("first".to_owned(), RecordLayout::new(Groups(1)).unwrap())])
+    }
+
+    fn options() -> AxumRunOptions {
+        AxumRunOptions::new("127.0.0.1:19001".parse().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn local_record_preparation_publishes_the_declared_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let options = options().with_data_dir(root.path()).unwrap();
+        let plan =
+            NativeSourcePlan::validate(metadata(), &options, NativeStoreOverrides::default())
+                .unwrap();
+        let stores = block_on(build_production_stores_with_records(
+            metadata(),
+            &options,
+            plan,
+            &requirements(),
+        ))
+        .unwrap();
+        let records = stores.kv().unwrap().named("first").unwrap();
+        assert_eq!(
+            records
+                .require_records()
+                .unwrap()
+                .binding()
+                .layout
+                .version(),
+            1
+        );
+        stores
+            .kv()
+            .unwrap()
+            .named("second")
+            .unwrap()
+            .require_records()
+            .unwrap_err();
+        block_on(assert_record_contract(&records, "group/"));
+    }
+
+    #[test]
+    fn unknown_record_id_fails_before_opening_local_files() {
+        let root = tempfile::tempdir().unwrap();
+        let options = options().with_data_dir(root.path()).unwrap();
+        let plan =
+            NativeSourcePlan::validate(metadata(), &options, NativeStoreOverrides::default())
+                .unwrap();
+        let unknown = RecordStoreRequirements::from([(
+            "unknown".to_owned(),
+            RecordLayout::new(Groups(1)).unwrap(),
+        )]);
+        assert!(
+            block_on(build_production_stores_with_records(
+                metadata(),
+                &options,
+                plan,
+                &unknown
+            ))
+            .is_err()
+        );
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn shared_local_backing_names_cannot_mix_layouts_or_formats() {
+        let root = tempfile::tempdir().unwrap();
+        let options = AxumRunOptions::from_vars([
+            ("EDGEZERO__STORES__KV__FIRST__NAME", "shared"),
+            ("EDGEZERO__STORES__KV__SECOND__NAME", "shared"),
+        ])
+        .unwrap()
+        .with_data_dir(root.path())
+        .unwrap();
+        let mut required = requirements();
+        for second in [None, Some(RecordLayout::new(Groups(2)).unwrap())] {
+            if let Some(layout) = second {
+                required.insert("second".to_owned(), layout);
+            }
+            let plan =
+                NativeSourcePlan::validate(metadata(), &options, NativeStoreOverrides::default())
+                    .unwrap();
+            assert!(
+                block_on(build_production_stores_with_records(
+                    metadata(),
+                    &options,
+                    plan,
+                    &required
+                ))
+                .is_err()
+            );
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+        }
+        required.insert("second".to_owned(), RecordLayout::new(Groups(1)).unwrap());
+        let plan =
+            NativeSourcePlan::validate(metadata(), &options, NativeStoreOverrides::default())
+                .unwrap();
+        let stores = block_on(build_production_stores_with_records(
+            metadata(),
+            &options,
+            plan,
+            &required,
+        ))
+        .unwrap();
+        stores
+            .kv()
+            .unwrap()
+            .named("second")
+            .unwrap()
+            .require_records()
+            .unwrap();
+    }
+
+    #[test]
+    fn ready_mismatch_is_rejected_before_deferred_work_is_polled() {
+        let polled = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&polled);
+        let mut overrides = NativeStoreOverrides::default();
+        overrides
+            .insert_kv("first", KvHandle::new(Arc::new(NoopKvStore)))
+            .unwrap();
+        overrides
+            .prepare_kv("second", async move {
+                observed.set(true);
+                Ok(KvHandle::new(Arc::new(NoopKvStore)))
+            })
+            .unwrap();
+        let options = options();
+        let plan = NativeSourcePlan::validate(metadata(), &options, overrides).unwrap();
+        assert!(
+            block_on(build_production_stores_with_records(
+                metadata(),
+                &options,
+                plan,
+                &requirements()
+            ))
+            .is_err()
+        );
+        assert!(!polled.get());
+    }
+
+    #[test]
+    fn deferred_handles_must_already_be_record_capable_before_publication() {
+        let mut overrides = NativeStoreOverrides::default();
+        overrides
+            .prepare_kv("first", async { Ok(KvHandle::new(Arc::new(NoopKvStore))) })
+            .unwrap();
+        overrides
+            .insert_kv("second", KvHandle::new(Arc::new(NoopKvStore)))
+            .unwrap();
+        let options = options();
+        let plan = NativeSourcePlan::validate(metadata(), &options, overrides).unwrap();
+        assert!(
+            block_on(build_production_stores_with_records(
+                metadata(),
+                &options,
+                plan,
+                &requirements()
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn raw_builtin_is_not_implicitly_upgraded_and_record_mode_requires_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let options = options().with_data_dir(root.path()).unwrap();
+        let settings: DynamoDbKvSettings = toml::from_str(
+            "region='us-east-1'\ntable='record-fixture'\nnamespace='record-fixture'",
+        )
+        .unwrap();
+        let mut raw_plan =
+            NativeSourcePlan::validate(metadata(), &options, NativeStoreOverrides::default())
+                .unwrap();
+        raw_plan.kv.insert(
+            "first",
+            NativeStoreSource::BuiltIn(NativeKvSource::DynamoDb(settings.clone())),
+        );
+        assert!(
+            block_on(build_production_stores_with_records(
+                metadata(),
+                &options,
+                raw_plan,
+                &requirements()
+            ))
+            .is_err()
+        );
+        let mut record_plan =
+            NativeSourcePlan::validate(metadata(), &options, NativeStoreOverrides::default())
+                .unwrap();
+        record_plan.kv.insert(
+            "first",
+            NativeStoreSource::BuiltIn(NativeKvSource::DynamoDbRecords(settings)),
+        );
+        assert!(
+            block_on(build_production_stores_with_records(
+                metadata(),
+                &options,
+                record_plan,
+                &RecordStoreRequirements::new()
+            ))
+            .is_err()
+        );
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }
 

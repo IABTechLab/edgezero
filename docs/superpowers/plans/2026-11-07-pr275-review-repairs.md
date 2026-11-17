@@ -33,6 +33,55 @@ minimal repairs over suggested changes that conflict with approved contracts.
 
 ## Execution
 
+### November 16 Scoped Follow-up
+
+The requester approved the next repair checkpoint after read-only investigation
+of review 5928381619 and the older body-only feedback. Preserve the contracts and
+qualification gates above; do not infer approval for new public defaults or policy.
+
+- [x] Keep rejected outputs, action captures and manual-body cleanup in their captured scope.
+- [x] Retire Fastly wakers outside mutable borrows and reuse only relinquished progress slots.
+- [x] Supervise the remaining Axum Cargo captures through the existing process owner.
+- [x] Pin native Cloudflare/Fastly invocations to the selected source and manifest.
+- [x] Make private Fastly response ABI ownership non-Copy and document transfer semantics.
+- [x] Align demo/template configuration errors and correct the macro field pattern.
+- [x] Qualify hook-order documentation and refresh review/migration navigation.
+- [x] Run failing-before regressions, the complete suite and exact CI lint variants.
+- [x] Prepare verified changes and separate thread dispositions. Pushed commit references,
+      replies and independent acceptance are tracked in the original PR review threads;
+      CREATOR does not resolve them.
+
+Failing-before runs reproduced captured output destruction under a foreign owner,
+manual-body bytes escaping reentrant closure, Fastly waker borrow panic and append-only
+slot growth, unsupervised Cargo cancellation, Cloudflare source retargeting, ignored
+Fastly environment selection, and a demo configuration failure returning 400. Focused
+green runs cover the corrected paths, including runtime-error/readiness rejection,
+unwind restoration, retained outcome/cursor reuse, direct-controller cancellation,
+separate Cargo diagnostics, CLI option arities, and real ABI cleanup under pinned Viceroy.
+Final local verification on 2026-11-16: `bash scripts/run_tests.sh < /dev/null`
+exited 0, including 1,181 core tests, 675 active harness tests (four opt-in ignored),
+all four adapter CI integration suites, generated consumers, demo tests and WASM
+checks. Exact CI formatting and strict Clippy variants, including CLI-only and
+provider/fixture target combinations, passed. Documentation lint, format and build
+also passed. These are local checks, not hosted qualification or review acceptance.
+
+Retain failed attempts rather than treating the green rerun as their explanation:
+one cancellation helper intermittently retained its live-group registration; its
+isolated and later complete harness runs passed, and the cause remains unconfirmed.
+A separate empty PID-file read was reproduced and repaired with atomic publication.
+One workerd shutdown exceeded the unchanged five-second TERM grace; fresh complete
+Cloudflare integration passed without changing shutdown code or tolerance. Neither
+unconfirmed failure is claimed repaired or waived. The generated-project gate also
+caught template formatting and test-binding lint errors, both corrected before the
+final complete run. Existing dependency future-incompatibility warnings remain
+unsuppressed. All manual hosted, parity and resource qualification gates stay open.
+
+Review roots 4592084333, 4592084348, 4592084356 and 4592084363 receive independent
+replies. The native-target finding and older body-only review receive itemized linked
+dispositions. Exact decoder/SDK pins, current opt-in response-header caps, advanced
+scaffold examples, atomic hard migration and historical evidence remain intentional;
+none is silently removed in response to a policy suggestion.
+
 - [x] Add regression tests for confirmed defects and observe their failures.
 - [x] Repair HTTP normalization, including TE+CL protocol rejection before caps
       and bounded empty-member handling. Preserve nomination/bodyless precedence.
@@ -63,40 +112,40 @@ above have focused local evidence; full-suite and pinned-runtime verification ar
 still required before a pushed-head handoff. Fixing commits and final dispositions
 will be recorded in each original review thread.
 
-| Thread | Validated scope and planned response |
-| --- | --- |
-| 4483656372 | Keep audited decoder pins; do not substitute the root lockfile for a downstream dependency contract. Assess other shared-library pins separately. |
-| 4483656377 | Retain allocator/checksum anchors required by source audits; document their purpose and linked update policy. |
-| 4483656381 | Approved bounded empty-Connection standards correction at shared normalization boundaries. |
-| 4483656386 | Already fixed and explicitly accepted by the reviewer; verify current coverage, no second cancellation implementation. |
-| 4483656396 | Clarify explicit driver Cutoff obligation and test late observation plus EOF; preserve fail-closed EOF and partial results. |
-| 4483656406 | Clarify cooperative helper overrun explicitly; test observed expiry precedence without a second timer. |
-| 4483656417 | Document blocking service-wide backend quota as a hard operator constraint; a sandbox-local cap cannot prove global availability. |
-| 4483656422 | Link immutable SDK source to its eager-progress audit/upstream exit condition; preserve coordinated pins. |
-| 4492016684 | Preserve exact Spin selected file; map supported Fastly native filename selectors or refuse before launch. |
-| 4492016690 | Align demo helper/import cfg with the CLI-gated module; verify both no-default-feature combinations. |
-| 4492016695 | Follow explicitly selected Cargo-config symlinks and hash target contents; retain source-tree symlink rejection. |
-| 4492016701 | Parse socket inode as nonzero u64, not a bounded duration; preserve stable-identity checks. |
-| 4492016710 | Replace remaining removed RequestContext methods and compile the corrected examples. |
-| 4492016717 | Disable inherited commit/tag signing in synthetic test repositories only. |
-| 4492016728 | Correct the current-file digest assertion to the actual approved current interface file, not another historical digest. |
-| 4492016740 | Replace deleted check commands and old fixture location in active verification instructions. |
-| 4492016748 | Distinguish absent root-key field path from safe secret-schema field path; preserve redaction. |
-| 4492016759 | Classify explicit connect timeouts only when the setter actually accepted them; retain aggregate expiry priority. |
+| Thread     | Validated scope and planned response                                                                                                                      |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 4483656372 | Keep audited decoder pins; do not substitute the root lockfile for a downstream dependency contract. Assess other shared-library pins separately.         |
+| 4483656377 | Retain allocator/checksum anchors required by source audits; document their purpose and linked update policy.                                             |
+| 4483656381 | Approved bounded empty-Connection standards correction at shared normalization boundaries.                                                                |
+| 4483656386 | Already fixed and explicitly accepted by the reviewer; verify current coverage, no second cancellation implementation.                                    |
+| 4483656396 | Clarify explicit driver Cutoff obligation and test late observation plus EOF; preserve fail-closed EOF and partial results.                               |
+| 4483656406 | Clarify cooperative helper overrun explicitly; test observed expiry precedence without a second timer.                                                    |
+| 4483656417 | Document blocking service-wide backend quota as a hard operator constraint; a sandbox-local cap cannot prove global availability.                         |
+| 4483656422 | Link immutable SDK source to its eager-progress audit/upstream exit condition; preserve coordinated pins.                                                 |
+| 4492016684 | Preserve exact Spin selected file; map supported Fastly native filename selectors or refuse before launch.                                                |
+| 4492016690 | Align demo helper/import cfg with the CLI-gated module; verify both no-default-feature combinations.                                                      |
+| 4492016695 | Follow explicitly selected Cargo-config symlinks and hash target contents; retain source-tree symlink rejection.                                          |
+| 4492016701 | Parse socket inode as nonzero u64, not a bounded duration; preserve stable-identity checks.                                                               |
+| 4492016710 | Replace remaining removed RequestContext methods and compile the corrected examples.                                                                      |
+| 4492016717 | Disable inherited commit/tag signing in synthetic test repositories only.                                                                                 |
+| 4492016728 | Correct the current-file digest assertion to the actual approved current interface file, not another historical digest.                                   |
+| 4492016740 | Replace deleted check commands and old fixture location in active verification instructions.                                                              |
+| 4492016748 | Distinguish absent root-key field path from safe secret-schema field path; preserve redaction.                                                            |
+| 4492016759 | Classify explicit connect timeouts only when the setter actually accepted them; retain aggregate expiry priority.                                         |
 | 4494112256 | Do not silently replace approved workspace discovery with ancestor-only lookup; document/test current selection and surface any policy change separately. |
-| 4494112523 | Reject ordinary upstream payloads with surviving ambiguous TE+CL before content-length/cap decisions; preserve bodyless precedence. |
-| 4494112817 | Require the complete canonical response-egress schedule in the sole Rust validator, with coherent-subset negative tests. |
-| 4494113120 | First prove pinned Spin wire framing; derive any buffered length from actual bytes, never stale caller framing or prebuffered streams. |
-| 4494113388 | Preserve typed host-read failures under EZ-1.4; characterize malformed uploads and do not blanket-map arbitrary failures to 400. |
-| 4494113685 | Fully qualify generated Result/Ok paths and test caller aliases/shadowing. |
-| 4494113946 | Investigate adapter-owned blocking KV operations; no unapproved offload-overload/shutdown policy. |
-| 4494114314 | Existing proxy-environment behavior is not a new regression; document it rather than silently disabling deployed proxy setups. |
-| 4494114613 | Preserve the single shared opaque-SDK readiness pulse and cache semantics; do not add unqualified backoff or bypass the SDK transport. |
-| 4494114967 | Document JSON 8 MiB and form 1 MiB defaults, 413 behavior and explicit-limit alternatives. |
-| 4494115310 | Document the intentional breaking target-aware adapter migration; do not restore unsafe execute fallback. |
-| 4494115611 | Verify pinned forbidden-header behavior; normalize connection-specific HTTP2-Settings centrally. Response Host policy needs an explicit decision. |
-| 4494115844 | Preserve RFC-permitted strict outbound comma-CL rejection and intentional egress normalization; explain the distinction. |
-| 4494116079 | Verify existing B31 versioned identity/golden coverage and strengthen only missing policy-version documentation. |
+| 4494112523 | Reject ordinary upstream payloads with surviving ambiguous TE+CL before content-length/cap decisions; preserve bodyless precedence.                       |
+| 4494112817 | Require the complete canonical response-egress schedule in the sole Rust validator, with coherent-subset negative tests.                                  |
+| 4494113120 | First prove pinned Spin wire framing; derive any buffered length from actual bytes, never stale caller framing or prebuffered streams.                    |
+| 4494113388 | Preserve typed host-read failures under EZ-1.4; characterize malformed uploads and do not blanket-map arbitrary failures to 400.                          |
+| 4494113685 | Fully qualify generated Result/Ok paths and test caller aliases/shadowing.                                                                                |
+| 4494113946 | Investigate adapter-owned blocking KV operations; no unapproved offload-overload/shutdown policy.                                                         |
+| 4494114314 | Existing proxy-environment behavior is not a new regression; document it rather than silently disabling deployed proxy setups.                            |
+| 4494114613 | Preserve the single shared opaque-SDK readiness pulse and cache semantics; do not add unqualified backoff or bypass the SDK transport.                    |
+| 4494114967 | Document JSON 8 MiB and form 1 MiB defaults, 413 behavior and explicit-limit alternatives.                                                                |
+| 4494115310 | Document the intentional breaking target-aware adapter migration; do not restore unsafe execute fallback.                                                 |
+| 4494115611 | Verify pinned forbidden-header behavior; normalize connection-specific HTTP2-Settings centrally. Response Host policy needs an explicit decision.         |
+| 4494115844 | Preserve RFC-permitted strict outbound comma-CL rejection and intentional egress normalization; explain the distinction.                                  |
+| 4494116079 | Verify existing B31 versioned identity/golden coverage and strengthen only missing policy-version documentation.                                          |
 
 ## Verification And Handoff
 
@@ -245,6 +294,7 @@ predicate is relaxed.
 Two read-only verification agents rechecked the process/logging/identity and Spin
 resource/framing changes. Their follow-up reviews found no remaining issues after
 the version-probe ownership, pre-cleanup observation and immutable-header fixes.
+
 ### Final Local Validation
 
 - All five primary Rust gates pass on Rust 1.98.1. The workspace run reports 2,700
@@ -295,3 +345,668 @@ complete four-adapter/demo/generated-project and hosted gates remain separate.
 Inactive fixture build output was removed to recover working space. Only this
 task's disposable validation/build outputs may be removed after remote-head
 verification; preserve source, the active worktrees and runtime/test evidence.
+
+## Approved Review Followup (2026-11-12)
+
+AG approved these repairs in the existing PR, without compatibility wrappers or
+changes to logical deadlines, body suppression, limits, admission or batch semantics:
+
+- [x] Replace the watchdog test's signal-sensitive single read with `read_exact`;
+      assert EOF after joining the origin and retain the original timing/cleanup checks.
+- [x] Migrate root, demo, both fixtures and generator to exact published SDK 8.0.0;
+      retain registry checksum/source guards and the prior decoder pins.
+- [x] Re-audit SDK interfaces and execute resource, wire and progress checks.
+- [x] Replace Axum's ambient local-spawn panic probe with explicit executor ownership;
+      migrate all callers and prove missing/dead/foreign ownership fails before polling work.
+- [x] Document the standalone harness gate and exact-pin tradeoffs.
+- [ ] Run the prescribed validation, push and reply separately to each finding.
+
+The unchanged baseline `scripts/run_tests.sh` failed the Axum pending-upload TCP
+gate: the complete response took 105.035167 ms against a 105 ms maximum. Retain
+that failed attempt, all original assertions and the separate hosted qualification
+gates. CI's compiler-cache publication also failed after three attempts; its log
+does not establish a source cause. No tolerance, exclusion or cache check is waived.
+
+## Authorized Rebuild (2026-11-13)
+
+AG directed rebuilding from `a7d7fd0f2face027e3810ed67e80f6341fcf68b6`
+and approved including the scoped `b97efec1` repairs and the saved SDK 8,
+Axum ownership and watchdog changes. This supersedes the earlier publication
+instruction to retain `410a1623`; that paragraph remains historical evidence.
+The rebuild is isolated on `prfection/275-a7-rebuild`. The original PR worktree,
+its uncommitted diff, untracked source and a backup ref at `14a6ca8b` are retained.
+No remote rewrite or merge is part of the local rebuild authorization.
+
+- [x] Replay only the approved repairs from `b97efec1`, with `a7d7fd0f` as
+      their direct parent (`ac5a6aaa`). Do not carry the unused received-head
+      preparation API from `410a1623`: no approved consumer or adapter call site
+      requires it. Existing normalization and outbound provenance remain intact.
+- [x] Restore the saved published SDK 8, watchdog and explicit Axum ownership
+      repairs. Declare the connection runtime before its executor so executor
+      tasks are released while the runtime remains alive, including on unwind.
+- [x] Independently repair evidence capacity: retain one reader, the 4 MiB
+      artifact limit and 512 records for general CI evidence; use an explicit
+      1,024-record limit for wire captures. Reject overflow before parsing an
+      excess record, without truncation. The expanded-inventory regression first
+      failed at 518 records and passes with the separate wire bound.
+- [x] Independently repair framing receipt formatting. A counting writer proved
+      that formatting the JSON value produced 24 writes. Serialize the complete
+      record and newline before writing, retaining short-write/error handling.
+      This is not a provider-level atomic-write guarantee.
+- [x] Independently remove host-I/O timing from the callback-scope test. A
+      never-ready upload supplies pending work; a separate deterministic
+      item-then-pending driver verifies partial-consumption revocation across
+      callbacks. Retain typed Internal failures and fresh-scope assertions.
+- [x] Complete current-tree validation, including the reviewed local Viceroy
+      repair, all adapter/runtime gates, demo/generated projects and docs.
+- [x] Complete independent verification and report any residual failures before
+      requesting authorization to replace the PR branch.
+
+### Retained Baseline Evidence
+
+The unchanged `a7d7fd0f` full-suite run passes its workspace, 653 harness tests
+and Axum integration stages, but exits 134 in the Fastly SDK timeout-readback
+test under stock Viceroy 0.21.0. That runtime lacks the already tracked repair;
+the assertion and runtime pins are not relaxed. Rebuild the exact reviewed
+patch for local verification, recording its source and executable identity.
+
+The replayed repairs pass root tests, formatting and strict Clippy. The first
+harness run reports 659 passes and one socket-close assertion failure in
+unchanged `net/wire.rs`; its focused rerun and full 660-test rerun pass. The
+cause is unproven. Retain all attempts rather than relabeling the initial
+failure as passing or weakening its assertions.
+
+### Rebuild Verification Checkpoint
+
+Two fresh read-only verification agents found no further issues in their
+non-overlapping scopes: explicit Axum ownership/shutdown, and SDK/fixture/tooling
+contracts. The abort-profile fixture proves rejection and queue ownership; it
+does not independently prove successful I/O or shutdown with active producers.
+Keep those runtime checks separate. The chosen repairs use one existing runtime,
+transport and evidence reader rather than carrying the three excluded commits.
+
+The rebuilt tree passes all five primary Rust gates, all 661 harness tests,
+80 qualification-fixture tests, strict root/harness/fixture Clippy and the docs
+contract. The Axum scoped run passes 329 tests. An initial harness failure caught
+the CI dispatch fingerprint changed solely by supplying the wire record bound;
+explicit review updated that one fingerprint, with all controllers/predicates
+unchanged. The initial Clippy import-style error and docs constructor-signature
+guard failure were repaired without suppressions or compatibility overloads.
+
+Docs lint/build pass. Two modified Markdown files required formatting; the
+formatting rerun passes. The standalone tooling invocation initially lacked
+`EDGEZERO_TEST_HARNESS_BIN`; build and supply the actual harness executable before
+rerunning, as the prescribed full suite already does. The attempted native
+Fastly-SDK test cannot link provider imports; only actual WASM/runtime execution
+can establish that SDK callback case. These attempts are not runtime passes.
+
+### Completed Local Rebuild Validation
+
+`scripts/run_tests.sh` passes on the unchanged rebuilt source with Rust 1.98.1,
+reviewed patched Viceroy 0.21.0, Wasmtime 48.0.2, Spin 4.1.0 and matching
+wasm-bindgen 0.2.128 tools. All four adapter CI suites, native feature matrices,
+dependency/forwarding guards, the full ignored generated-project build,
+demo tests and all three demo WASM builds pass. The workspace reports 2,708
+passing tests across 33 binaries, the harness 661, fixture core 80 and demo 66.
+Strict WASM all-targets Clippy passes for Fastly, Cloudflare and Spin, in addition
+to the five primary Rust gates and strict harness/fixture Clippy. The standalone
+170-test tooling rerun also passes with the actual harness executable supplied.
+
+The first full rebuild run stopped at the browser probe after selecting Safari
+and receiving a WebDriver HTTP 500. Retain it. The same five ingress tests pass
+with matching Chrome/ChromeDriver 157.0.8103.52; the subsequent complete run
+passes with that explicit selection. No source, assertion, deadline or capability
+changed between these attempts. Logs are retained at
+`/private/tmp/pr275-a7-rebuild-NdW5Yx/`.
+
+Latest supporting captures beneath the reusable fixture's `.runs/` are:
+
+- Axum: `18e7ab63cdd89c08-106dc-0`.
+- Fastly: `18e7ab6d05568830-10e61-0`, including both callback regressions
+  in the 324-test SDK runtime run and the complete 518-record wire artifact.
+- Cloudflare: `18e7ab85f9d628d0-12164-0`.
+- Spin: `18e7ab9fd9ee4970-13909-0`.
+
+These are working-tree supporting captures, not a frozen-candidate or hosted
+qualification claim. Keep all `qualification:false` dispositions and manual
+hosted gates open. The original PR branch and dirty worktree remain unchanged;
+remote replacement, new-head hosted checks and independent review acceptance
+are still outstanding.
+
+## Approved Managed Logging And Upload Framing Repairs (2026-11-13)
+
+AG approved both findings in PR comment `6863865880`, including the scoped
+stream-framing amendment, then explicitly requested a hard migration without
+compatibility wrappers. The starting head is `1467e28a`. Work stays in PR #275.
+
+Two read-only investigation/proposal agents independently mapped the logging
+and upload paths. Choose immutable per-instance managed logging, not concurrent
+filter reload. Associate a validated forwarding declaration with its Body, not
+request-only metadata that can become stale when public `Parts.body` is replaced.
+This adds scalar Body storage, whose native/WASM layout must be measured; it adds
+no buffer, allocation, identity token, transport, executor or public length setter.
+
+### Task 1: Managed Platform Logging
+
+Files: Cloudflare/Spin `src/logger.rs`, `src/lib.rs`, adapter manifests/locks;
+existing reusable assembly fixtures and Rust `src/runners/assembly.rs`.
+
+- [x] Add a failing isolated backend-installation/sink regression before implementation.
+- [x] Hard-cut to `init_logger(level)` with explicit errors. Reuse the existing
+      resolver, fern filtering and separate boot Warn target. Workers use the
+      console; Spin uses stderr. Identical repeated setup succeeds, changed
+      configuration or a foreign logger fails explicitly without reconfiguration.
+- [x] Resolve environment policy before assembly, reuse the snapshot for dispatch,
+      and propagate initialization failure. `owns_logging=true` changes neither
+      installation nor filters. No no-op compatibility initializer remains.
+- [x] Prove every level, boot warnings/errors under ordinary Off, repeated calls,
+      conflicts and owned logging. Extend existing Rust fixture supervision for
+      actual local Wrangler and Spin sink evidence, not an owned-fixture substitute.
+- [x] Update adapter/configuration guides, the guide-only four-backend table,
+      demo/templates and changelog. Add no manifest capability.
+
+### Task 2: Validated Forwarded Stream Length
+
+Files: core `src/body.rs`, `src/outbound.rs`, a co-located upload counter;
+Spin `src/outbound.rs`, `tests/sdk_resources.rs`; existing forwarding fixtures
+and Rust wire runner/origin.
+
+- [x] Reproduce loss of a 4096-byte declaration through actual SDK field preparation.
+- [x] Capture one valid streamed Content-Length only without Transfer-Encoding or
+      Connection nomination. Keep stripping raw CL/TE. Ambiguous/malformed input
+      supplies no declaration; retain existing ingress rejection and buffered
+      stale-framing behavior. Later normalization can invalidate, never recapture.
+- [x] Keep the declaration with its payload through ownership-only wrappers and
+      unchanged Parts round-trips. Replacement, JSON, transformations, raw payload
+      extraction and redirect rewrites must not retain stale declarations.
+- [x] Set Spin's wire CL from this metadata and replace its byte counter with one
+      shared scalar validator. Preserve upload-cap 413 precedence and typed source
+      errors; observed overrun fails before writing its chunk, short clean EOF fails
+      as local BadRequest without invented provider detail. Abort without a new drain.
+- [x] Preserve early response/ReaderGone semantics: unconsumed abandoned bytes have
+      no equality guarantee. No new prebuffering, stream eligibility for Begin/Batch,
+      or change to GET/HEAD rules, deadlines, cancellation or resource ownership.
+- [x] Add separately bounded 4096-byte known/unknown-length wire controls, short/long
+      synthetic sources and incremental/abort evidence. Do not enlarge the old
+      8-byte tests' limits or weaken their validators.
+- [x] Update the normative framing paragraphs/API approval record and current guides,
+      examples/templates and changelog; no provider qualification promotion.
+
+### Task 3: Verification And Publication
+
+- [x] Run focused red/green tests after each coherent code change, all five primary
+      Rust gates, strict harness/fixture/provider lint and `scripts/run_tests.sh`.
+      Run the local logging and forwarding controls through the existing Rust harness.
+- [x] Complete independent read-only verification and retain failed attempts and exact
+      runtime identities.
+- [ ] Commit and push normally to the existing PR branch; record the published SHA
+      in the separate replies below. Publication follows this validation checkpoint.
+- [ ] Reply separately to both findings with executed evidence. Leave review
+      acceptance, manual hosted qualification and deployment authorization separate.
+
+Baseline: the prior rebuilt source passed the complete prescribed suite and all
+three WASM Clippy targets. Its retained captures are supporting evidence, not a
+new execution or hosted qualification for this follow-up.
+
+### Focused Verification And Review
+
+Both original defects were reproduced before implementation: an isolated Spin logger emitted
+neither requested message, and actual Spin SDK field preparation omitted CL=4096. The repaired
+tests pass. Native/WASM Body measurements are 56/40 bytes respectively, with 16 inline bytes
+for the declaration and no metadata allocation. This is not a stable ABI promise.
+
+Two read-only reviewers checked separate logging/framing scopes. They found fixture ownership,
+saved-artifact coverage and live-peer test gaps; those were corrected and re-reviewed without
+remaining concrete defects. Overlapping-initialization and declared-redirect regressions pass.
+The full prescribed validation below was executed independently of these read-only reviews.
+
+Local supporting runs passed Spin assembly (including ten stderr logging cases), Cloudflare
+assembly (ten actual Wrangler logging cases) and the full Spin wire suite, including known /
+unknown 4096-byte uploads and five gated live-pump probes. Retain captures under
+`/private/tmp/pr275-logging-length-z2L3MA/`; all remain `qualification:false`.
+
+Retain earlier failures: missing first-response attestation on headerless Spin assembly errors;
+an unmatched wasm-bindgen CLI; a stale local Wrangler shim; an invalid test module-root path;
+and the runtime prohibition on intra-component resource-bearing future transfers. The assembly
+test now attests a healthy response first, without bypassing identity checks. Logging launches
+Wrangler's current generated index, not the compatibility shim. Local pump tests never read the
+unsupported completion future: length errors return while its peer remains live/unpolled, and
+real origin exchanges separately prove HTTP completion. No runtime/dependency pin, production
+framing guarantee, deadline, suppression rule or hosted gate was weakened.
+
+Full-suite validation also exposed incompatible test-workspace binding locks (ingress and
+production 0.2.128 versus reusable fixture 0.2.129). Align only the reusable fixture's nine-package
+binding family with the production lock, using Cargo's resolver and removing temporary resolver
+constraints afterward. Keep provider SDK/runtime and decoder pins unchanged; add no tool router,
+duplicate transport, permanent dependency or skipped gate. Re-run the complete prescribed suite
+and the actual logging controls with matching 0.2.128 tools. The earlier mismatched attempt is
+retained, not counted as passing.
+
+### Completed Validation Checkpoint
+
+The complete `scripts/run_tests.sh` run with production-aligned bindings exits zero:
+2,722 root workspace tests, 662 standalone harness tests, all four adapter CI integration
+suites, the generated project, the demo's 66 tests and three WASM checks, and outbound
+documentation contracts. The existing ignored tests retain their prescribed separate gates;
+no test was skipped to obtain this result. The fresh Cloudflare assembly run also exits zero
+with all ten actual Wrangler logging controls on the aligned binding graph.
+
+All five primary Rust gates pass. Strict standalone harness/fixture Clippy and all three
+provider WASM Clippy targets pass; final root Clippy, root formatting, new Spin wire-fixture
+WASM Clippy and `git diff --check` pass after alignment. Documentation format, lint and build
+pass. Retain the existing dependency audit warnings and `proc-macro-error2` future-compatibility
+notice; neither was suppressed or changed by this repair.
+
+Evidence remains under `/private/tmp/pr275-logging-length-z2L3MA/`, especially
+`full-suite-production-bindings.log`, `cloudflare-assembly-production-controller.log` and
+the `*-publication.log` final checks. The full-suite supporting runtime captures are
+`18e7be32ca9bea90-7390-0` (Axum), `18e7be4190994b08-81f0-0` (Fastly),
+`18e7be6772b8bad0-a470-0` (Cloudflare) and `18e7be70ac817d70-aeed-0` (Spin).
+These remain local supporting evidence with `qualification:false`, not deployment,
+hosted delivery certification or independent review acceptance. Publication and replies
+are the remaining steps at this checkpoint; their actual SHA belongs in the PR handoff.
+
+## Approved Fastly Logging And Timing Review Repairs (2026-11-13)
+
+AG approved this scoped plan in conversation after reviewing comments `6869073346`,
+`6869468283` and inline thread `4570088506`, starting from `737f8452`. Preserve
+all outbound deadlines, error provenance, suppression and resource ownership. Do not
+restore general runtime selector stores or introduce compatibility wrappers.
+
+- [x] Add failing co-located regressions for target-bearing Fastly records, immutable
+      complete configuration identity and bounded runtime level resolution. Run
+      `cargo test --offline --locked -p edgezero-adapter-fastly --lib logger` and
+      `cargo test --offline --locked -p edgezero-core logging::tests` (expected red
+      before implementation, green afterward).
+- [x] Generalize core's existing managed installation guard to compare an immutable
+      configuration value. Migrate Cloudflare/Spin callers explicitly. Use it in
+      Fastly with endpoint/level/stdout identity and the shared typed errors. Add a
+      bounded logging-only optional Config Store lookup as specified in the logging
+      design. Never buffer arbitrary values or call the growing SDK lookup helper.
+- [x] Hard-cut Fastly custom lifecycle signatures to name the app Hooks type; share
+      managed setup with standard entrypoints, before user callbacks/assembly, while
+      leaving `owns_logging` completely untouched. Migrate all native/WASM contracts,
+      fixtures, demo, templates and documentation without alternative entrypoints.
+- [ ] Extend the existing Rust assembly runner with actual Viceroy endpoint receipts:
+      one immutable production-Info wasm, multiple runtime-only overrides, target
+      formatting, boot filtering, application ownership, retained-instance identity,
+      repeated setup and rejected configuration changes. Keep capture sizes bounded.
+      Run `scripts/test_integration.sh --adapter fastly --suite assembly`.
+- [x] Share the existing Axum pending-forward TCP exercise. Keep exact status,
+      original deadline/lower bounds, no-origin and exactly-once cleanup assertions.
+      Separate a functional CI test with finite scheduling headroom from the unchanged
+      strict +5 ms qualification sentinel. Correct the criterion's binding so a
+      functional pass cannot certify 205/105 ms, retain measured failures, and do not
+      mark the entire correctness proof ignored. Update requirements/approval records
+      only within this approved separation.
+- [x] Run focused tests after coherent changes, the five primary Rust gates, strict
+      harness/fixture and provider WASM Clippy, `RUST_TEST_THREADS=2 bash scripts/run_tests.sh`,
+      and docs format/lint/build. Independent read-only review must check ownership,
+      reused-instance policy, bounded lookup and qualification separation.
+- [ ] Commit and push normally to PR #275, reply separately to each original finding
+      with exact executed evidence, and request current-head re-review. Reviewer
+      acceptance, formal approval/one-account exception and manual hosted qualification
+      remain separate. Never resolve reviewer threads or merge prematurely.
+
+### Review And Partial Verification Checkpoint
+
+Two read-only investigation/proposal lanes compared an explicit policy argument with
+an app Hooks generic. Choose the generic: it preserves direct ownership/manifest provenance
+without another policy object, while retained `T` and convertible callback errors remain
+independent. One worker implemented only the disjoint Axum test/inventory slice; the
+coordinator implemented logging and integrated the combined changes.
+
+The new target regression failed with exit 101 and showed a Fastly line missing the target.
+The full-settings guard regression also failed before its API change; both repaired groups
+pass. Fastly native logger, bounded fixture logging validation, configuration identity and
+foreign-backend tests pass. The qualification-fixture logger test exposed global sink
+interference with a different telemetry protocol; isolate that test in a subprocess rather
+than filtering its assertions or changing production telemetry. Its complete fixture suite
+then passes. Retain all failed attempts.
+
+Independent read-only logging and evidence reviewers checked the changed source. The evidence
+review found missing settled-output revalidation, incomplete stdout/facade conflict checks and
+an unbounded settlement reread. Corrections use one shared settlement algorithm with bounded
+parsed logging events on success/failure, validate all tokens/owners after shutdown, reject
+unexpected stdout echoes and sample facade state after every conflict. Mutation/oversize tests
+pass; re-review found no remaining concrete issue. These reviews did not run validation.
+
+The explicit strict Axum qualification command was executed with `RUST_TEST_NOCAPTURE=1`:
+exit 0, `28 passed; 0 failed; 0 ignored`. Both original 5 ms and functional 50 ms tests pass
+in that run; raw 504/408 observations remain in `axum-strict-qualification.log`. This does
+not establish a scheduler guarantee or a frozen/hosted qualification record.
+
+The final full-suite run found the shell guard's existing JavaScript regression matrix still
+selected the old combined Axum command. Split that matrix into the actual ordinary and strict
+commands and assert each has nonempty required sentinels, preventing vacuous missing-test loops.
+The corrected guard suite exits 0: `135 tests`, `135 pass`, `0 fail`. An interactive-stdin
+full-suite attempt then correctly failed the CLI's non-interactive consent tests and poisoned
+their shared test mutex; retain that attempt and rerun with stdin closed, matching CI. Neither
+failure is hidden by skipping an assertion or broadening the test selection.
+
+The non-interactive full run passed Axum CI and Fastly SDK/runtime/feature/ingress checks,
+then exposed the older negative-logger validator still matching the removed facade-error
+message. The fixture correctly rejected changed complete settings. Update its co-located
+test first: the old message must fail and the exact fixed configuration-change message must
+pass. That test failed with exit 101 against the old validator; migrate the validator without
+accepting both protocols. Retain that smoke failure. Narrow CLI/no-feature Clippy also caught
+an off-target doc-markdown error; add its missing backticks without a lint suppression.
+
+The new actual Viceroy logging controls pass all 27 cases, using one wasm and runtime-only
+changes. However, the complete Fastly assembly suite exits 1 on seven older cases: canonical
+assembly-failure responses intentionally lack application headers, while the first prescribed
+response must attest its launch identity. Running the identical assembly command against exact
+unchanged `737f8452` also exits 1 on those same seven cases. Its temporary base worktree was
+removed only after ownership verification; the failed logs are retained. Do not call the
+combined assembly suite passing or weaken startup identity to hide the incompatibility.
+A supported bootstrap-attestation design retaining exact standard-entrypoint coverage is a
+separate unresolved fixture/harness boundary, not a demonstrated logging regression.
+
+Retain captures and logs in the local run directory `pr275-fastly-logging-67jhji/`, including
+`fastly-assembly`, `fastly-assembly-final`, `fastly-assembly-baseline` and the explicit timing
+log. An intermediate full-suite attempt was interrupted to incorporate evidence-review fixes;
+it is not a pass. Two later chat interruptions also stopped validation; neither is counted
+as completed evidence. No deployment, reviewer acceptance or merge has occurred.
+
+### Final Local Validation Checkpoint
+
+The uninterrupted `RUST_TEST_THREADS=2 bash scripts/run_tests.sh < /dev/null` run exits 0:
+`All tests completed successfully.` Workspace results total 2,725 passed, zero failed and
+two ignored across 33 result records; the standalone harness has `667 passed; 0 failed;
+3 ignored`. The ignored strict Axum test retains its separately executed 28-test qualification
+run above. The shell contracts have 140 passing tests, zero failures. All four adapter CI
+integration suites, the fresh generated all-adapter application, the demo tests and three
+demo WASM checks, dependency audits and outbound documentation contracts pass.
+
+Fourteen final checks have exit 0 in `final-checks.tsv`: the complete suite; root, harness
+and fixture formatting; workspace, harness and native-fixture strict Clippy; workspace feature
+and Spin WASM compilation; Fastly CLI-only and no-feature strict Clippy; docs format, lint and
+build. The provider WASM feature Clippy runs and Fastly progress-fixture strict Clippy also pass.
+No dependency lock or SDK/runtime pin changes. Existing dependency audit/future-compatibility
+notices remain unsuppressed.
+
+The exact negative-logger validator test passes after its red run, and Fastly smoke now passes
+that real runtime case. Final read-only review of the selector split, exact negative protocol
+and doc correction found no concrete regression or weakened check. The authoritative inventory
+still has 514 legs (299 ready, 215 planned); the suite guide no longer copies a stale total.
+
+Supporting CI captures are `18e7d11e28174e00-8c44-0` (Axum),
+`18e7d12b2d29c8c0-964a-0` (Fastly), `18e7d1502e4a4098-b597-0` (Cloudflare)
+and `18e7d1fec7eb0e68-ce54-0` (Spin). These are local functional evidence, not hosted or
+frozen-candidate qualification. The separate seven-case Fastly assembly-attestation blocker
+above remains open despite all 27 new logging cases passing. Publication records the actual
+commit and per-finding replies in the PR handoff; it does not grant merge approval or resolve
+reviewer-owned threads.
+
+## Approved Issues 506 And 505 Repairs (2026-11-15)
+
+AG answered "Please do it" after the recommendation to fix both issues in PR #275:
+manifest rejection first, then bounded pre-callback failure delivery, preserving
+typed error propagation and the no-second-response rule. Starting head is `e9ffaa8f`,
+fast-forwarded from the prior repair; the merge changes only the docs dependency lock.
+Focused baseline tests pass: 85 core manifest tests and 185 native Fastly tests.
+The prior full-suite evidence and separate seven-case assembly blocker remain retained.
+
+### Task 1: Effective Fastly Endpoint Validation (#506)
+
+Files: `crates/edgezero-core/src/manifest.rs`,
+`crates/edgezero-macros/src/app.rs`,
+`crates/edgezero-cli/tests/generated_project_builds.rs`, and the Fastly CLI blueprint.
+
+- [x] Add co-located regressions for effective global/per-adapter endpoint selection,
+      declared casing, whole-section shadowing, invalid names, unaffected non-Fastly
+      endpoints, exact offending field and accumulation with unrelated validation errors.
+- [x] Run `cargo test --offline --locked -p edgezero-core --lib fastly_logging_endpoint`
+      and macro parser regressions; expect rejection assertions to fail before the fix.
+- [x] Add one independent manifest schema hook with `skip_on_field_errors = false`,
+      using existing adapter lookup and `is_specified()`. Reject empty/LF/colon and
+      exact reserved names without host calls or raw-value diagnostics. Leave
+      `finalize()` and all adapter logging resolution unchanged.
+- [x] Replace only the old URL-shaped Fastly positive fixture with a valid endpoint
+      name. Keep URL-shaped non-Fastly configuration valid.
+- [x] Remove the unused reserved blueprint endpoint; the generator still supplies
+      its existing project-specific name. Cover both facts without a new runner.
+- [x] Reuse the existing generated-workspace test for an actual `app!` compile-failure
+      probe with an invalid Fastly endpoint and a field-specific diagnostic. No new
+      published binary, script, CI job or independent runner.
+- [x] Run the core/macro regressions, compiled app macro coverage and generated project
+      gate; expected result is zero failures, with the negative probe failing compilation
+      for its intended validation diagnostic rather than a missing file or handler.
+
+### Task 2: Pre-Callback Failure Delivery (#505)
+
+Files: `crates/edgezero-adapter-fastly/src/lifecycle.rs`, existing
+`fixtures/reusable-app/crates/fixture-fastly/src/managed_logging.rs` and
+`src/runners/assembly/managed_logging.rs` under `crates/edgezero-test-harness`.
+
+- [x] Add private-gate native regressions before implementation: every logger error,
+      one rejection/zero callback invocations, request release and exact error retention;
+      successful initialization directly preserves callback errors without rejection.
+- [x] Share a private setup/reject/handler function inside the existing `Sandbox::handle`
+      scope. On setup failure call `send_assembly_error` once, inspect its terminal result
+      and fallback report, then report secondary typed degradation with a fallible,
+      non-panicking, bounded stderr write without replacing the logger error. Never
+      classify a callback result as setup failure or request another native send.
+- [x] Add native delivery-diagnostic coverage for failed/unknown/committed and fallback
+      results; all retain original logger error and one terminal delivery attempt.
+- [x] Extend the existing assembly fixture/runner with attested healthy-then-failure
+      GET and HEAD controls for both custom entrypoints and a committed callback-error
+      control. Retained serving must terminate due to the setup error, not request limit.
+      A fixture-only SDK loop may supply received requests to the real `run_custom`;
+      it cannot replace the production helper or render a second response.
+      The healthy retained callback arms changed Hooks settings (`ConfigurationChanged`);
+      the single-request control installs a foreign logger (`AlreadyInstalled`). Require
+      same-instance witnesses, summary count two, maximum requests greater than two and
+      the existing raw wire capture's clean EOF/framing checks, with `qualification:false`.
+      The committed callback control returns the same logger-error type.
+- [x] Run the six new wire controls separately through the co-located opt-in test;
+      before the fix all four setup cases returned an unredacted host-generated 500
+      without JSON Content-Type, while both committed callback-error controls passed.
+      After wiring both runners, all six controls pass in one selected test.
+- [x] Run `cargo test --offline --locked -p edgezero-adapter-fastly --lib lifecycle::tests`
+      and `scripts/test_integration.sh --adapter fastly --suite assembly`. Record new-case
+      results separately from the unchanged seven pre-existing attestation failures.
+
+### Task 3: Documentation, Review And Publication
+
+- [x] Update Fastly logging/custom-serving docs and changelog with static validation,
+      redacted pre-callback response/error precedence and unchanged post-callback behavior.
+      Check the existing demo and generator remain on valid endpoint names.
+- [x] Run focused tests after coherent changes, `RUST_TEST_THREADS=2 bash scripts/run_tests.sh`
+      with non-interactive stdin, all five Rust gates, standalone harness/fixture and
+      provider WASM lint, and docs format/lint/build. Expected passing output is not
+      executed evidence until the commands finish. Preserve all failures and hosted gates.
+- [x] Perform two read-only contract reviews. Publication is recorded in PR #275's
+      current-head handoff and separate evidence-backed issue replies after pushing.
+      Reviewer acceptance, issue closure on merge, hosted qualification and merge
+      approval remain separate.
+
+## Six-Thread Follow-Up (2026-11-15)
+
+The requester approved this scoped repair in the conversation. Keep the original outbound
+contracts and actual Fastly SDK readback assertions; do not implement issue #504, introduce
+compatibility APIs, promote capabilities, deploy, merge or resolve reviewer-owned threads.
+Three read-only investigations covered core/Axum, Spin and Fastly; minimal proposals were
+compared before central implementation.
+
+- [x] Reproduce Axum clock-sampling deadline extension with paused native time. Anchor
+      inbound, connection-egress and empty-stream timers before paired-clock sampling.
+- [x] Reproduce Spin source/cap failure waiting on a live, unpolled request completion peer
+      in the existing async component. Return the original failure by dropping failed writers;
+      retain successful two-way completion and early-response ownership rules.
+- [x] Restore required framework Allow/config Retry-After fields after successful final
+      normalization. Exercise real 405 fallback draining and config 503 rendering, plus malformed
+      Connection/length/trailer negative controls that must still fail.
+- [x] Reproduce an independently driven Fastly head failing at 5 ms before a sibling advances
+      shared time to 150 ms. Retain one owned failure and its observation instant per exchange;
+      consume it once through the existing deadline arbiter and use its instant for batch/begin
+      receipt timing. Do not make successful heads terminal or accept late results.
+- [x] Prove the pinned Spin host exposes duplicate nonempty trailers before repairing caps.
+      Share the final-head/marker counter with exposed trailer fields and reject before clean
+      completion acknowledgment. Add exact-cap, first-excess and persisted-evidence controls.
+      Review/update only the wire runner's executable-owner binding for the added five-case
+      cohort; preserve all existing selectors, provider ownership and prior inventories.
+- [x] Reproduce timeout getter failure on stock Viceroy and success with the already tracked
+      repair. Preserve SDK assertions and document the explicit repaired-runtime prerequisite;
+      do not silently alter the installed pin or claim hosted parity.
+- [x] Run the focused regressions, complete prescribed suite, adapter/fixture/demo matrices,
+      strict Clippy and documentation checks on the final source tree. Retain every failed run.
+- [ ] Commit/push the verified changes, reply separately in all six original threads with
+      actual fixing SHA/evidence, and request re-review. Reviewer acceptance and hosted evidence
+      remain separate from implementation.
+
+| Original thread | Planned disposition                                                                                                                                                                              |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 4580379395      | Disagree with removing SDK readback. Stock 0.21.0 lacks hostcalls; the explicitly selected tracked repair passes the identical guest assertions. Clarify prerequisite and preserve both results. |
+| 4580597424      | Fix absolute native deadline anchoring; pending-source and early-wake controls retain cleanup assertions.                                                                                        |
+| 4580597430      | Fix local upload failure rendezvous; verify real async peers held open until the original source/cap failure returns.                                                                            |
+| 4580597433      | Fix required wire headers through final normalization without hiding invalid framing.                                                                                                            |
+| 4580597437      | Fix original terminal head error/timestamp across independent family drivers, preserving timeout precedence for unfinished/late work.                                                            |
+| 4580597442      | Fix one cumulative trailer/head budget after proving the pinned host exposes trailers; no claim about earlier provider allocation.                                                               |
+
+This snapshot precedes publication. The fixing commit, publication readback and final
+per-thread dispositions are recorded in the original threads and PR #275's current checkpoint.
+
+### Earlier Logging Repair Results (Historical)
+
+The core and macro rejection regressions failed before validation was added. The
+actual fresh-unit compiler probe also failed because the invalid endpoint compiled;
+it now passes through the existing nonzero-test guard. The blueprint regression
+failed before its unused reserved default was removed. Native setup-gate tests
+preceded the implementation, and the frozen-source Viceroy red run independently
+exposed host-generated, non-JSON 500 bodies containing WASI execution diagnostics.
+All four pre-callback cases failed that red run; both already-committed callback
+controls retained their application response. All six pass with the shared gate.
+
+Focused results: 88 core manifest tests, 120 macro unit tests, nine app-macro tests,
+189 native Fastly tests, 24 generator tests and the selected blueprint regression
+pass. The fresh generated-workspace gate executes one test and passes both the valid
+and invalid compilation controls. Initial formatting failures, a zero-test selection
+and a source-change/identity mismatch are retained as non-credit attempts; corrected
+runs use the nonzero guard and unchanged sources during wire captures.
+
+`RUST_TEST_THREADS=2 bash scripts/run_tests.sh < /dev/null` exits 0: 2,737 workspace
+tests across 33 binaries, zero failures and two ignored; 670 harness tests, zero
+failures and four opt-in ignored. All four adapter CI suites, the fresh generated
+project, demo tests and three demo WASM checks pass. The 35 additional workflow
+format/lint/build/docs checks all exit 0, including every adapter feature selection,
+provider/ingress fixture lint, standalone harness, demo and documentation. Strict
+workspace Clippy also exits 0. Existing dependency/future-compatibility and syntax
+highlighting notices are not suppressed.
+
+The broader Fastly assembly command still exits 1. Its 27 existing logging controls
+and six new controls pass; all seven separate first-response attestation cases retain
+`missing launch identity on required prescribed response`. No gate was relaxed or
+failure credited. Its local capture is
+`fixtures/reusable-app/.runs/18e84c266f7a83d8-9501-0` under the harness. The four CI
+captures are `18e84b562c580bc8-143ef-0` (Axum), `18e84b7f337a0860-178e5-0` (Fastly),
+`18e84bb2a1fc6bd8-1be5-0` (Cloudflare) and `18e84bcd49a52040-3496-0` (Spin).
+These are local functional captures, not frozen or hosted qualification artifacts.
+
+The two read-only reviews found no remaining concrete functional or security defect
+in this scope. Production changes are confined to early manifest validation, unused
+scaffold metadata and the shared pre-callback rejection gate. Outbound APIs, body
+suppression, limits, deadlines, dependency pins, capabilities and hosted/manual
+qualification gates remain unchanged. The separate assembly blocker and independent
+current-head acceptance still prevent a merge-ready claim.
+
+### Six-Thread Repair Results
+
+The final repair tree passes `RUST_TEST_THREADS=2 bash scripts/run_tests.sh < /dev/null`
+with exit 0: 2,746 workspace tests across 33 binaries, zero failures and two ignored;
+672 standalone harness tests, zero failures and four opt-in ignored. All four runtime
+CI suites, the fresh generated workspace, demo tests and three demo WASM checks pass.
+All 36 additional format/lint/build/docs commands exit 0, including strict workspace
+Clippy, CLI-only Fastly compilation, every provider/fixture WASM selection and the docs
+format/lint/build gates. The diff remained unchanged throughout this run.
+
+The three paused-time Axum regressions fail with the former anchoring and pass with
+the earlier native anchor. The independent public TCP probe's delayed sample 3 changes
+from 170.618 ms to 102.035 ms for the original 100 ms budget; its ten repaired observations
+range from 101.072 to 102.773 ms. These observations do not establish a scheduler bound.
+The renderer nomination regressions also fail before the marker repair; successful final
+normalization now retains canonical headers while malformed framing still fails first.
+
+The live Spin upload control fails with the former awaited failure publication and passes
+when source/cap errors drop the writers while completion readers stay open. The pinned host
+also exposes two real trailer fields totaling 24 name/value bytes. The repaired framework
+accepts cumulative count 4 / bytes 73 exactly, rejects count cap 3 during buffered send and
+byte cap 72 during streamed collection, and releases the source in every case. Core tests
+add filtered-head and synthetic-marker charges to that same budget. The persisted validator
+rejects missing/duplicate/altered trailer evidence and a wholly omitted companion cohort.
+
+The independent Fastly drivers establish A's actual error observation at 5 ms before B
+advances shared time to 150 ms, retaining A's original typed error and 5 ms elapsed value
+through late collection. Disabling capture is a failing negative control. The production
+deadline arbiter separately preserves a consumed receipt and still rejects unfinished success
+at deadline equality. No successful buffered head becomes terminal early.
+
+The unchanged actual SDK getter test aborts with exit 134 under stock Viceroy 0.21.0 and
+passes with exit 0 under the explicitly selected tracked repair. The shared version text
+is not binary identity; the repair implements the missing getters but does not enforce
+network connect timeouts. Compile-only mistakes, an invalid synchronous WASI test placement,
+an omitted direct-test runner, and an incorrect test expectation after a transferred batch
+receipt are retained as failed/non-credit attempts, not weakened contracts or passing evidence.
+
+Local CI captures under the harness are `18e8655911411010-e7a-0` (Axum),
+`18e865845ede0258-3e59-0` (Fastly), `18e865b5de48c2b8-68ec-0` (Cloudflare), and
+`18e865c63e8bd4c0-75dd-0` (Spin). They are functional repair-tree evidence, not frozen or
+hosted qualification. The separate Fastly assembly command still exits 1 with seven
+`missing launch identity on required prescribed response` failures, retained in capture
+`18e864212f89b920-54cb-0`. Their origin is not established by a base/head comparison here.
+No assembly gate, issue #504 behavior, provider capability or hosted/manual checkbox is changed.
+
+### Focused Assembly Attestation Repair (2026-11-15)
+
+The user approved diagnosing and repairing the seven Fastly assembly attestation failures,
+retaining their original first-response, sticky-failure, deadline and cleanup requirements.
+No warmup/retry, replacement entrypoint, deployment or capability promotion is authorized.
+
+- [x] Reproduce all seven failures on `fe32185f` with the unchanged assembly command.
+- [x] Trace controller and guest independently, then compare two read-only solution proposals.
+- [x] Add scoped test-only diagnostic header instrumentation at the existing commit boundary,
+      without exposing response/body/status/deadline mutation or invoking failed-app hooks.
+- [x] Prove bounds, collisions, nested/unwind/thread isolation and unchanged canonical delivery.
+- [x] Attest the original first GET in all seven existing cases; preserve subsequent recovery,
+      HEAD, partial-state release, header exclusion, terminal reports and teardown assertions.
+- [ ] Run the complete prescribed suite and feature/format/lint/documentation gates, then
+      commit, push and request independent acceptance at the new head.
+
+The raw baseline responses retain canonical JSON, redaction and retry policy but lack the
+fixture identity. Assembly fails before fixture middleware can run. A production callback or
+static-header facility would broaden the API solely for instrumentation; modifying the failed
+app renderer would violate isolation. Both read-only proposals selected a bounded additive
+test-only snapshot, installed before the existing entrypoints and applied immediately before
+their existing committer. It proves the instrumented guest emitted the observed response, not
+that production builds emit launch headers or that hosted delivery is qualified. Production
+assembly rendering, outbound APIs, timers, limits, pins and capability claims stay unchanged.
+
+The failed reproduction is retained under the harness at
+`fixtures/reusable-app/.runs/18e86e2ba4ce8288-112d0-0`; it is not credited as acceptance.
+
+The repaired assembly command exits 0. Capture `18e86f1d26dc5fb0-87e0-0` contains all seven
+`canonical-assembly-delivery` passes, seven matching startup identities after successful teardown,
+one failed-state release witness, 27 logging passes and six logging-failure-boundary passes,
+with no failed events. Every record remains `qualification: false`. No warmup or deferred
+assembly exception was added. This is local functional evidence for the repair tree, not
+frozen-candidate or hosted qualification.
+
+Forty native Fastly response tests pass, including unchanged canonical GET/HEAD payloads,
+statuses, retry fields, commitment and complete terminal reports with/without instrumentation;
+fallback and expired-deadline comparisons preserve their original causes. The initial no-op
+instrumentation produces two failing missing-header regressions. The controller's 672 tests
+pass with four opt-in ignored; workspace, Fastly WASM, fixture and harness Clippy pass. Initial
+compiler/lint mistakes are retained as failed attempts, not passing evidence. Both independent
+read-only reviews found no remaining blocking issue after feature coverage and documentation
+were aligned. Full-suite validation and current-head review remain required below.
+
+The November 16 continuation rebuilt the tracked Viceroy repair in isolation from
+the same upstream revision and lockfile; all 136 runtime-library tests passed.
+The current assembly repeat, `18e898da0b851c20-9738-0`, exits 0 with no failed events.
+The complete prescribed suite, primary Rust gates, strict rustdoc, all twelve
+adapter Clippy configurations and excluded-workspace/fixture lint gates pass on
+the combined working tree. This does not promote hosted capabilities or close
+manual qualification. The separately approved #504 scope is tracked in
+[its implementation plan](2026-11-15-compile-time-logging.md), including the
+disclosed initial harness-cancellation failure and successful unchanged reruns.
+Publication and independent current-head acceptance remain pending.

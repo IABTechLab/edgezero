@@ -154,7 +154,9 @@ let policy = request.cache_policy_setting();
 
 Fastly extends origin response surrogate keys without a TTL/stale override. Origin
 `private`/`no-store` remains origin policy; tags are not permission to cache a private response.
-Fastly ignores invalid individual keys outside printable ASCII `0x21..=0x7e`; this API adds no
+The Fastly adapter discards individual space-delimited keys outside printable ASCII
+`0x21..=0x7e` before calling the SDK, preserving valid neighboring keys. SDK 0.13.1 would
+otherwise discard the whole list when its text conversion fails. This API adds no
 key-size/count or extra ASCII policy. Parse application strings into `HeaderValue` at their
 boundary. A caller whose purge contract requires a tag must fail closed, such as selecting
 `Bypass`, if that conversion fails rather than silently sending an untagged default request.
@@ -380,6 +382,24 @@ establish emptiness: only EOF does. The first nonempty byte returns 400 before o
 Settlement races the captured outbound deadline against the admitted inbound read deadline,
 retaining 408/504 provenance and original source errors without restarting the outbound budget.
 Batch still requires buffered uploads; buffer under an application cap before adding a slot.
+
+For streamed uploads, `from_request` captures exactly one valid decimal `Content-Length`
+only when no `Transfer-Encoding` or `Connection: content-length` nomination is present.
+The immutable declaration belongs to the Body, not the sanitized header map. Raw CL/TE
+remain removed. Replacement/JSON bodies and extraction into a new raw stream clear it;
+unchanged Parts round-trips and ownership-only wrapping retain it. Later normalization
+can invalidate the declaration but cannot recover it from an unchecked header insertion.
+
+Spin uses that declaration for its native upload length, without sending Transfer-Encoding.
+Its incremental counter rejects an observed overrun before writing the offending chunk and
+rejects short clean EOF as local 400. Upload-cap 413 still takes precedence, and typed source
+errors retain their category. Unknown-length streams remain unknown (HTTP/1 chunked).
+An early upstream response or closed upload reader abandons unread bytes promptly: equality
+is checked only for observed chunks/clean EOF, never by draining an abandoned upload.
+
+The declaration adds 16 inline bytes without a metadata allocation. Under Rust 1.98.1 the
+measured Body layout is 56 bytes on native aarch64 and 40 on wasm32. These are measurements,
+not stable ABI promises; memory envelopes must account for the current structure layout.
 Do not discard an inbound body to bypass validation. Other methods retain streamed uploads.
 
 Fastly separately preserves actual SDK body absence: only `try_take_body() == None` becomes core

@@ -901,3 +901,121 @@ comparison flag, original 140 test titles and 223 scenarios.
 | Requirements before clarification | `7212a3baeedf32598b1bd7eedf019554e2f7749334689c0202ef237af9843bff` |
 | Clarified requirements            | `45f265a199a91ccaf7bb08dc5bff6ff5d62fa27915437d7058c7aaddd2394c21` |
 | Reviewed 514-leg identity set     | `4c2ca209d21e88c30ca11317ef5d39b81423ea06788c3199a5a36dceec3acae4` |
+
+## Axum Executor Ownership Repair (2026-11-12)
+
+AG approved replacing the missing-LocalSet panic probe with explicit executor ownership,
+including a hard migration of constructors, converters, service wiring and test clients.
+This supersedes only the earlier Axum constructor rows, not the portable outbound trait,
+clock pairing, limits, admission, scope ownership or batch termination contracts.
+
+| Surface                                   | Hard-Cut Contract                                                                                                          |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `outbound_executor::AxumOutboundExecutor` | `new()`, `handle()`, `run_until(&mut self, future)`; owns one LocalSet on its creating thread, not another runtime         |
+| `AxumOutboundClient`                      | `try_new(handle)`, `try_with_time(handle, time)`; clients retain only revocable identity and never keep the executor alive |
+| `request::into_core_request`              | Requires the executor handle; converted requests retain it in native extensions                                            |
+| Standard server                           | Creates and drives the sole owner; app-provided clients still bypass default transport initialization                      |
+
+Scheduling resolves the explicit live owner and calls its actual `LocalSet::spawn_local`.
+Foreign or dropped ownership fails before request work is polled. No ambient-local-set
+panic recovery, compatibility constructor, unsafe Send implementation or second executor
+is introduced. The existing runtime must still enable I/O and timers; disabled-driver
+misuse is outside this repair's abort-safe guarantee. A binary fixture compiled with
+`panic=abort` exercises live scheduling without an ambient LocalSet and invalid ownership.
+This approval does not promote a capability, waive a timing failure or authorize deployment.
+
+## Managed Logging And Stream Framing Repair (2026-11-13)
+
+AG approved the scoped repairs to PR comment `6863865880`, then directed a hard migration
+without compatibility wrappers. Cloudflare/Spin replace the parameterless no-op initializer
+with `init_logger(LevelFilter) -> Result<(), ManagedLoggerError>`, initialized before assembly
+unless application-owned. Identical instance configuration is idempotent; changed or foreign
+configuration is an explicit error, not live global reconfiguration.
+
+`from_request` captures an eligible streamed Content-Length as immutable Body-owned scalar
+metadata before stripping raw CL/TE. Replacement/JSON/transformed/raw-extracted bodies lose
+the fact. Spin reconstructs native length and validates observed bytes with the shared scalar
+upload counter; unknown lengths remain unknown. Upload-cap precedence, typed source errors,
+deadlines, GET/HEAD and Begin/Batch restrictions stay intact. Early response/ReaderGone never
+forces a validation drain; equality is limited to observed chunks and clean EOF.
+
+This scoped amendment supersedes the former blanket statement that every streamed upload
+omits CL. No second transport, reader, buffer, executor, compatibility path, runtime pin,
+capability promotion or deployment authorization is introduced. Existing hosted gates remain open.
+
+## Scoped Fastly Logging And Timing-Test Separation (2026-11-13)
+
+AG answered "Approve scoped repair plan" to the review-repair proposal for comments
+`6869073346`, `6869468283` and thread `4570088506`, starting from `737f8452`.
+
+Fastly custom lifecycles now name `A: Hooks` alongside their independently retained `T`:
+`serve_custom<A, T, F, E>(Serve, F)` and `run_custom<A, T, E, F>(Request, F)`.
+Callback errors must implement `From<ManagedLoggerError>`. This makes manifest/ownership
+provenance explicit without another policy type or compatibility entrypoint. Standard and
+custom setup share one implementation. `ManagedLoggerInstallation<Configuration>` compares
+borrowed complete settings, cloned only on first successful installation. Fastly uses
+endpoint/level/stdout identity; Cloudflare and Spin use their explicit LevelFilter identity.
+
+The optional logging-only `edgezero_logging` Config Store supplies at most 16 bytes for
+`EDGEZERO__LOGGING__LEVEL`: absent store/key preserves the manifest, invalid/oversized strings
+select Info, unexpected host failures yield a fixed typed error. There is no automatic
+hostname-based Debug mode, general runtime selector store, growing read or live filter reload.
+`owns_logging` skips lookup and installation. The override is snapshotted once per instance,
+not reread on reused callbacks; changes apply to new instances. Explicit initialization
+with different complete settings is rejected without filter mutation.
+
+The Axum functional TCP regression keeps its original absolute deadlines, typed 408/504,
+no-early terminal/client ordering, source Pending/no-origin and exactly-once cleanup checks,
+with a finite 50 ms CI scheduling allowance. This allowance is not production budget or
+qualification credit. The existing strict +5 ms sentinel and 205/105 ms criterion remain
+unchanged and require a separate explicit timing run/artifact. Ordinary CI excludes only
+that strict timing run, not the functional proof. Missing execution remains unverified;
+strict overruns remain failed evidence. No source digest, criterion identity or expected
+timing is rewritten to claim a pass. Historical failed captures remain retained.
+
+This approval permits implementation, full validation and normal publication in PR #275;
+it grants neither reviewer-thread acceptance, a merge exception nor hosted qualification.
+
+## Scoped Shared-Finalizer Repair Approval (2026-11-16)
+
+AG answered "Approve scoped four-finding repairs" for review `5925848646`, starting from
+`b65e7144`. The approval explicitly includes a minimal shared-finalizer fairness hook:
+
+```rust,ignore
+impl OutboundHead {
+    pub fn with_body_checkpoint<F>(self, checkpoint: F) -> Self
+    where F: Fn() -> OutboundFuture<()> + 'static;
+}
+```
+
+This is one adapter-owned host-event attachment, not a second response pipeline. Core owns
+quota/terminal arbitration under the original paired timer, clock history, scope and limits.
+Cloudflare supplies its existing real host-event future. Other adapters retain their ordinary
+finalizer path. Streamed handoff transfers the factory lazily; discarded heads never run it.
+Supported unwind notification, Fastly retained body failures and persisted evidence replay are
+the other three repairs. No compatibility wrappers, provider capability promotions, deployment,
+hosted qualification, reviewer acceptance or merge exception are authorized by this approval.
+
+AG subsequently answered "Approve shared core receipt" to complete the same Fastly repair
+for plain Send, not only Begin/Batch. The approved additive implementer API is:
+
+```rust,ignore
+#[derive(Clone, Default)]
+pub struct OutboundExchangeFailure { /* private first-observation state */ }
+impl OutboundExchangeFailure {
+    pub fn observed_at(&self) -> Option<MonotonicInstant>;
+    pub fn record(&self, at: MonotonicInstant, error: EdgeError);
+    pub fn take(&self) -> Option<EdgeError>;
+}
+impl OutboundResponseContext {
+    pub fn exchange_failure(&self) -> OutboundExchangeFailure;
+}
+```
+
+One lazy context-owned receipt replaces the adapter-private receipt. First observation wins;
+consumption preserves its timestamp. Core checks it at finalizer entry, before timer/source
+polling and after source polling, under the same scope and monotonic clock checks. Only errors
+strictly before the effective deadline retain their original outcome; equality/later selects
+the governing timeout with provider detail. Other adapters do not allocate a receipt unless
+they request it. This approval changes no transport, compatibility API, resource limit,
+deadline, deployment or qualification gate.

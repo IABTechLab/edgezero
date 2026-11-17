@@ -58,7 +58,7 @@ impl Args {
         while let Some(key) = args.next() {
             if key == "--help" || key == "-h" {
                 println!(
-                    "edgezero-test-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|outbound-readiness|outbound-client-progress|outbound-progress|outbound-overflow|outbound-wire|outbound-lifetimes|response-framing|synthesized-headers|ingress-fidelity|ci] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10] [--readiness-timeout 40] [--record-observations]"
+                    "edgezero-test-harness [--adapter fastly|cloudflare|spin|axum|all] [--suite smoke|benchmark|assembly|record-contract|outbound-readiness|outbound-client-progress|outbound-progress|outbound-overflow|outbound-wire|outbound-lifetimes|response-framing|synthesized-headers|ingress-fidelity|ci] [--output EMPTY_DIR] [--requests 100] [--repetitions 3] [--seed 856] [--construction-rounds 0] [--max-requests 10] [--readiness-timeout 40] [--record-observations]"
                 );
                 std::process::exit(0);
             }
@@ -94,6 +94,7 @@ impl Args {
                 "smoke",
                 "benchmark",
                 "assembly",
+                "record-contract",
                 "outbound-readiness",
                 "outbound-client-progress",
                 "outbound-progress",
@@ -107,6 +108,10 @@ impl Args {
             ]
             .contains(&a.suite.as_str()),
             "unknown suite",
+        )?;
+        require(
+            a.suite != "record-contract" || a.adapter == "fastly",
+            "record contract requires --adapter fastly",
         )?;
         require(
             !matches!(
@@ -209,9 +214,10 @@ impl Records {
     }
 }
 pub fn logs(path: &Path) -> Vec<Value> {
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
+    parse_logs(&fs::read_to_string(path).unwrap_or_default())
+}
+pub fn parse_logs(text: &str) -> Vec<Value> {
+    text.lines()
         .filter(|l| l.starts_with('{'))
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect()
@@ -426,9 +432,25 @@ impl Process {
         Ok(p)
     }
     pub fn start(command: &mut Command, log: &Path, port: u16) -> Result<Self> {
+        Self::start_logged(command, log, None, port)
+    }
+    pub fn start_with_stdout(
+        command: &mut Command,
+        log: &Path,
+        stdout: &Path,
+        port: u16,
+    ) -> Result<Self> {
+        Self::start_logged(command, log, Some(stdout), port)
+    }
+    fn start_logged(
+        command: &mut Command,
+        log: &Path,
+        stdout: Option<&Path>,
+        port: u16,
+    ) -> Result<Self> {
         let deadline = Instant::now() + Duration::from_secs(45);
         startup::require_configured(command)?;
-        let mut p = Self::spawn(command, log)?;
+        let mut p = Self::spawn_logged(command, log, stdout)?;
         p.1.launch = Some(startup::register(command, p.0.clone(), log, port, deadline));
         loop {
             p.check_running()?;
@@ -1043,6 +1065,16 @@ mod argument_tests {
     }
 
     #[test]
+    fn record_contract_suite_selects_only_fastly() {
+        for adapter in ["fastly", "axum", "cloudflare", "spin", "all"] {
+            let result = Args::parse_from(
+                ["--adapter", adapter, "--suite", "record-contract"].map(str::to_owned),
+            );
+            assert_eq!(result.is_ok(), adapter == "fastly", "{adapter}");
+        }
+    }
+
+    #[test]
     fn client_progress_suite_is_explicit_and_fastly_only() {
         for adapter in ["fastly", "axum", "cloudflare", "spin", "all"] {
             let result = Args::parse_from(
@@ -1462,7 +1494,10 @@ mod process_tests {
             exit_result(run(arguments));
         }
         if mode == "acceptance-blocked-git" {
-            fs::write(path.join("git-started"), std::process::id().to_string()).unwrap();
+            let ready = path.join("git-started");
+            let pending = path.join("git-started.pending");
+            fs::write(&pending, std::process::id().to_string()).unwrap();
+            fs::rename(pending, ready).unwrap();
             thread::sleep(Duration::from_secs(30));
             return;
         }
@@ -1542,7 +1577,10 @@ mod process_tests {
             let error = child.wait_success().unwrap_err();
             assert!(error.to_string().contains("interrupted"), "{error}");
             assert!(child.0.try_wait().unwrap().is_some());
-            assert!(!LIVE_GROUPS.lock().unwrap().contains_key(&child.0.id()));
+            assert!(
+                !LIVE_GROUPS.lock().unwrap().contains_key(&child.0.id()),
+                "cleanup remained registered: {error}"
+            );
             fs::write(path.join("cancellation-reaped"), b"complete").unwrap();
             std::mem::forget(fixture);
             return;
@@ -1824,7 +1862,7 @@ mod process_tests {
         }
     }
 
-    fn assert_progress_cargo_cancellation(adapter: &str) {
+    fn assert_cargo_cancellation(adapter: &str, suite: &str) {
         use std::os::unix::fs::PermissionsExt;
 
         let fixture = Fixture::new();
@@ -1846,15 +1884,7 @@ esac
         command
             .env(
                 "EDGEZERO_STATIC_CHECK_ARGS",
-                json!([
-                    "--adapter",
-                    adapter,
-                    "--suite",
-                    "outbound-progress",
-                    "--output",
-                    output,
-                ])
-                .to_string(),
+                json!(["--adapter", adapter, "--suite", suite, "--output", output,]).to_string(),
             )
             .env("EDGEZERO_TEST_HELPER", std::env::current_exe().unwrap())
             .env("CARGO", &cargo)
@@ -1922,12 +1952,19 @@ esac
 
     #[test]
     fn progress_build_cancellation_reaps_cargo_and_descendants() {
-        assert_progress_cargo_cancellation("axum");
+        assert_cargo_cancellation("axum", "outbound-progress");
     }
 
     #[test]
     fn progress_metadata_cancellation_reaps_cargo_and_descendants() {
-        assert_progress_cargo_cancellation("cloudflare");
+        assert_cargo_cancellation("cloudflare", "outbound-progress");
+    }
+
+    #[test]
+    fn axum_fixture_build_cancellation_reaps_cargo_and_descendants() {
+        for suite in ["smoke", "benchmark", "assembly"] {
+            assert_cargo_cancellation("axum", suite);
+        }
     }
 
     #[test]

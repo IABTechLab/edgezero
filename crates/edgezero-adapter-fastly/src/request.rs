@@ -3,15 +3,17 @@ use std::fmt::Display;
 #[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
 use std::io::Cursor;
 use std::io::Read;
+use std::net::IpAddr;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::Poll;
 
 use bytes::Bytes;
-use edgezero_core::app::{App, StoreMetadata, StoresMetadata};
+use edgezero_core::app::{App, FrameworkErrorDetail, StoreMetadata, StoresMetadata};
 use edgezero_core::body::Body;
 use edgezero_core::config_store::{ConfigStoreHandle, ConfigStoreOpenFailure};
 use edgezero_core::error::EdgeError;
+use edgezero_core::geo::{GeoOutcome, GeoSource};
 use edgezero_core::http::header::HOST;
 use edgezero_core::http::{
     Extensions, HeaderValue, Method, Request, Response, Uri, request_builder,
@@ -29,6 +31,7 @@ use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
 };
 use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
+use fastly::geo::{Geo, geo_lookup};
 use fastly::{Error as FastlyError, Request as FastlyRequest};
 use futures::executor;
 use futures_util::stream;
@@ -179,7 +182,11 @@ impl<'app> FastlyService<'app> {
             ConfigSource::None => None,
         };
         let kv = match self.kv {
-            Some(source) => resolve_kv_handle(&source.name, source.required)?,
+            Some(source) => resolve_kv_handle(
+                &source.name,
+                source.required,
+                self.app.record_store_requirements().get("default"),
+            )?,
             None => None,
         };
         let secrets = match self.secrets {
@@ -402,6 +409,7 @@ fn dispatch_core_request(
     mut core_request: Request,
     stores: Stores,
     prepared: PreparedIngress,
+    geo: GeoOutcome,
 ) -> DispatchOutcome {
     // Hard-cutoff: legacy bare handles are no longer
     // inserted into request extensions. `with_config_handle`
@@ -412,6 +420,17 @@ fn dispatch_core_request(
     // use `ctx.{config,kv,secret}_store_default()` or the
     // `Kv` / `Config` / `Secrets` extractors.
     let (config_registry, kv_registry, secret_registry) = synthesise_store_registries(stores);
+    if !app.record_store_requirements().is_empty() {
+        let validation = kv_registry
+            .as_ref()
+            .ok_or_else(|| KvError::Validation("required record registry missing".to_owned()))
+            .and_then(|registry| {
+                registry.validate_record_requirements(app.record_store_requirements())
+            });
+        if let Err(error) = validation {
+            return DispatchOutcome::Detached(app.admitted_error_egress(prepared, error.into()));
+        }
+    }
     if let Some(registry) = config_registry {
         core_request.extensions_mut().insert(registry);
     }
@@ -425,7 +444,12 @@ fn dispatch_core_request(
     let entered = prepared.request_start();
     let method = prepared.request_method().clone();
     match executor::block_on(drive_callback(
-        Box::pin(app.dispatch_admitted(prepared, core_request)),
+        Box::pin(app.dispatch_admitted_with_geo(
+            prepared,
+            core_request,
+            FrameworkErrorDetail::Default,
+            geo,
+        )),
         clock,
         entered,
     )) {
@@ -464,6 +488,7 @@ where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
 {
     let ingress = capture_request_ingress(&req);
+    let geo = request_geo(&req);
     let mut scratch = apply_request_prepare(&mut req, prepare);
     scratch.remove::<RequestIngress>();
     let synthesized_headers = scratch.remove::<edgezero_core::SynthesizedResponseHeaders>();
@@ -475,9 +500,10 @@ where
             )
         })?;
     head_request.extensions_mut().extend(scratch);
-    let outcome = dispatch_ingress_reader(app, head_request, stores, request_start, move || {
-        Ok(req.try_take_body())
-    });
+    let outcome =
+        dispatch_ingress_reader(app, head_request, stores, request_start, geo, move || {
+            Ok(req.try_take_body())
+        });
     Ok(match (outcome, synthesized_headers) {
         (DispatchOutcome::Detached(envelope), Some(headers)) => {
             DispatchOutcome::Detached(envelope.with_synthesized_response_headers(headers))
@@ -494,6 +520,7 @@ fn dispatch_ingress_reader<Source, MakeSource>(
     mut head_request: Request,
     stores: Stores,
     request_start: MonotonicInstant,
+    geo: GeoOutcome,
     make_source: MakeSource,
 ) -> DispatchOutcome
 where
@@ -539,7 +566,22 @@ where
         source,
         Some((prepared.read_deadline(), prepared.monotonic_clock())),
     );
-    dispatch_core_request(app, head_request, stores, prepared)
+    dispatch_core_request(app, head_request, stores, prepared, geo)
+}
+
+/// Fastly's own geolocation for the downstream client address. `Geo::region` is
+/// already the subdivision part of the ISO 3166-2 code (`CA`, not `US-CA`).
+fn request_geo(req: &FastlyRequest) -> GeoOutcome {
+    client_geo(req.get_client_ip_addr())
+}
+
+fn client_geo(client_ip: Option<IpAddr>) -> GeoOutcome {
+    let geo = client_ip.and_then(geo_lookup);
+    GeoOutcome::platform(
+        GeoSource::Fastly,
+        geo.as_ref().map(Geo::country_code),
+        geo.as_ref().and_then(Geo::region),
+    )
 }
 
 /// Dispatch with per-id store registries built from baked metadata and closed lifecycle hooks.
@@ -602,10 +644,47 @@ where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
     Finalize: FnOnce(&mut Response) -> State,
 {
+    request_with_registries_and_delivery(app, stores, req, prepare, finalize, send_egress_response)
+}
+
+/// Exercises production registry construction with an injected delivery boundary.
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+#[inline]
+pub fn run_request_with_registries_and_hooks_for_test<State, Prepare, Finalize, Deliver>(
+    app: &App,
+    stores: StoresMetadata,
+    req: FastlyRequest,
+    prepare: Prepare,
+    finalize: Finalize,
+    deliver: Deliver,
+) -> FastlyRequestDelivery<State>
+where
+    Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+    Finalize: FnOnce(&mut Response) -> State,
+    Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
+{
+    request_with_registries_and_delivery(app, stores, req, prepare, finalize, deliver)
+}
+
+fn request_with_registries_and_delivery<State, Prepare, Finalize, Deliver>(
+    app: &App,
+    stores: StoresMetadata,
+    req: FastlyRequest,
+    prepare: Prepare,
+    finalize: Finalize,
+    deliver: Deliver,
+) -> FastlyRequestDelivery<State>
+where
+    Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+    Finalize: FnOnce(&mut Response) -> State,
+    Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
+{
     with_callback(|| {
         init_fastly_abi();
         let request_start = app.monotonic_now();
-        let kv_registry = build_kv_registry(stores.kv);
+        let kv_registry =
+            build_kv_registry_with_records(stores.kv, app.record_store_requirements());
         let config_registry = build_config_registry(stores.config);
         let secret_registry = build_secret_registry(stores.secrets);
         let outcome = dispatch_with_handles(
@@ -620,7 +699,7 @@ where
             request_start,
             prepare,
         );
-        finish_request(outcome, finalize, send_egress_response)
+        finish_request(outcome, finalize, deliver)
     })
 }
 
@@ -688,13 +767,24 @@ fn synthesise_store_registries(
     (config_registry, kv_registry, secret_registry)
 }
 
+#[cfg(test)]
 fn build_kv_registry(kv_meta: Option<StoreMetadata>) -> Option<KvRegistry> {
+    build_kv_registry_with_records(kv_meta, &edgezero_core::RecordStoreRequirements::new())
+}
+
+fn build_kv_registry_with_records(
+    kv_meta: Option<StoreMetadata>,
+    requirements: &edgezero_core::RecordStoreRequirements,
+) -> Option<KvRegistry> {
     let meta = kv_meta?;
     let mut by_id: BTreeMap<String, KvHandle> = BTreeMap::new();
     for id in meta.ids {
         by_id.insert(
             (*id).to_owned(),
-            KvHandle::new(Arc::new(FastlyKvStore::declared(id))),
+            KvHandle::new(Arc::new(match requirements.get(*id) {
+                Some(layout) => FastlyKvStore::declared_records(id, layout.clone()),
+                None => FastlyKvStore::declared(id),
+            })),
         );
     }
     let default_id = meta.default.to_owned();
@@ -952,6 +1042,7 @@ where
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
         move || Ok(Some(source)),
     )
     .into_envelope()
@@ -987,6 +1078,7 @@ where
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
         move || make_source().map(Some),
     );
     match outcome {
@@ -1020,6 +1112,7 @@ pub fn dispatch_ingress_source_error_for_test(
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
         || -> Result<Option<Cursor<Vec<u8>>>, EdgeError> {
             Err(EdgeError::internal(anyhow::anyhow!(
                 "fastly source construction failed"
@@ -1036,11 +1129,18 @@ fn map_edge_error(err: &EdgeError) -> FastlyError {
 fn resolve_kv_handle(
     kv_store_name: &str,
     kv_required: bool,
+    layout: Option<&edgezero_core::RecordLayout>,
 ) -> Result<Option<KvHandle>, FastlyNoAttempt> {
-    match FastlyKvStore::open(kv_store_name) {
+    let opened = match layout {
+        Some(declared_layout) => {
+            FastlyKvStore::open_records(kv_store_name, declared_layout.clone())
+        }
+        None => FastlyKvStore::open(kv_store_name),
+    };
+    match opened {
         Ok(store) => Ok(Some(KvHandle::new(Arc::new(store)))),
         Err(err) => {
-            if kv_required {
+            if kv_required || layout.is_some() {
                 let reason = if let KvError::OpenFailed { reason } = &err {
                     *reason
                 } else {
@@ -1166,6 +1266,58 @@ mod synthesis_tests {
 
     fn secret_handle() -> SecretHandle {
         SecretHandle::new(Arc::new(NoopSecretStore))
+    }
+
+    #[test]
+    fn declared_record_registry_keeps_the_configured_layout_without_provider_io() {
+        struct Layout;
+        impl edgezero_core::RecordKeyLayout for Layout {
+            fn id(&self) -> &'static str {
+                "fastly.record-registry"
+            }
+
+            fn partition_prefix<'key>(&self, _key: &'key str) -> Result<&'key str, KvError> {
+                Ok("group/")
+            }
+
+            fn validate(&self) -> Result<(), KvError> {
+                Ok(())
+            }
+
+            fn validate_partition(&self, prefix: &str) -> Result<(), KvError> {
+                if prefix == "group/" {
+                    Ok(())
+                } else {
+                    Err(KvError::Validation("incomplete partition".to_owned()))
+                }
+            }
+
+            fn version(&self) -> u32 {
+                3
+            }
+        }
+        let requirements = edgezero_core::RecordStoreRequirements::from([(
+            "record_binding_not_opened".to_owned(),
+            edgezero_core::RecordLayout::new(Layout).unwrap(),
+        )]);
+        let registry = build_kv_registry_with_records(
+            Some(StoreMetadata {
+                default: "record_binding_not_opened",
+                ids: &["record_binding_not_opened", "ordinary_binding_not_opened"],
+            }),
+            &requirements,
+        )
+        .unwrap();
+        registry
+            .validate_record_requirements(&requirements)
+            .unwrap();
+        let records = registry.default().unwrap().require_records().unwrap();
+        assert_eq!(records.binding().layout.version(), 3);
+        registry
+            .named("ordinary_binding_not_opened")
+            .unwrap()
+            .require_records()
+            .unwrap_err();
     }
 
     #[test]
@@ -1638,6 +1790,49 @@ mod synthesis_tests {
     #[test]
     fn resolve_secret_handle_builds_handle_when_required_true_matches_require_secrets() {
         let _handle = resolve_secret_handle(true);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn client_geo_reads_fastly_country_and_region() {
+        use edgezero_core::geo::{
+            GeoOutcome, GeoSource, GeoStatus, GeoUnavailableReason, SubdivisionCode,
+        };
+
+        // Viceroy answers loopback lookups with its default San Francisco record.
+        let loopback = client_geo(Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(
+            loopback,
+            GeoOutcome::platform(GeoSource::Fastly, Some("US"), Some("CA"))
+        );
+        let GeoOutcome::Selected {
+            provider,
+            status: GeoStatus::Located { location, .. },
+        } = loopback
+        else {
+            panic!("loopback must be located: {loopback:?}");
+        };
+        assert_eq!(provider.as_str(), "fastly");
+        assert_eq!(location.country().as_str(), "US");
+        assert_eq!(
+            location.subdivision().map(SubdivisionCode::as_str),
+            Some("CA")
+        );
+
+        let unavailable = GeoOutcome::platform(GeoSource::Fastly, None, None);
+        assert!(matches!(
+            &unavailable,
+            GeoOutcome::Selected {
+                status: GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata),
+                ..
+            }
+        ));
+        assert_eq!(client_geo(None), unavailable, "no client address");
+        assert_eq!(
+            client_geo(Some("192.0.2.1".parse().unwrap())),
+            unavailable,
+            "address without geolocation data"
+        );
     }
 }
 

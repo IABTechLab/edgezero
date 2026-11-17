@@ -42,7 +42,7 @@ mod tests {
     };
     use edgezero_core::context::{BodyKind, RequestContext};
     use edgezero_core::error::EdgeError;
-    use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoStatus};
+    use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoSource, GeoStatus};
     use edgezero_core::http::{HeaderMap, Method, Response, StatusCode, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
     use edgezero_core::outbound::{
@@ -148,9 +148,14 @@ mod tests {
         }
     }
 
+    /// Test requests have no downstream client address, so Fastly geo is selected but unavailable.
+    fn platform_geo() -> GeoOutcome {
+        GeoOutcome::platform(GeoSource::Fastly, None, None)
+    }
+
     fn build_test_app() -> App {
         async fn capture_uri(ctx: RequestContext) -> Result<Response, EdgeError> {
-            assert_eq!(ctx.geo(), &GeoOutcome::NoSelection);
+            assert_eq!(ctx.geo(), &platform_geo());
             assert_eq!(ctx.extensions().get::<GeoOutcome>(), Some(&forged_geo()));
             let body = Body::text(ctx.uri().to_string());
             let response = response_builder()
@@ -535,11 +540,14 @@ mod tests {
                 assert_eq!(scope.check().is_ok(), wrapped);
                 assert_ne!(timers_started.load(Ordering::SeqCst), 0);
                 assert_eq!(released.load(Ordering::SeqCst), usize::from(!wrapped));
-                Ok::<(), ()>(())
+                Ok::<(), fastly::Error>(())
             };
             let request = fastly_request(FastlyMethod::GET, "/uri", None);
             if wrapped {
-                run_custom::<(), (), _>(request, |raw, _state| invoke(raw)).unwrap();
+                run_custom::<FailingConfiguration, (), fastly::Error, _>(request, |raw, _state| {
+                    invoke(raw)
+                })
+                .unwrap();
             } else {
                 invoke(request).unwrap();
             }
@@ -601,7 +609,7 @@ mod tests {
                 let request_events = Arc::clone(&handler_events);
                 async move {
                     request_events.lock().expect("events").push("handler");
-                    assert_eq!(ctx.geo(), &GeoOutcome::NoSelection);
+                    assert_eq!(ctx.geo(), &platform_geo());
                     assert_eq!(ctx.extensions().get::<GeoOutcome>(), Some(&forged_geo()));
                     let value = ctx
                         .extensions()

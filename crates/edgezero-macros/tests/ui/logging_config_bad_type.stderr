@@ -1,0 +1,7 @@
+error: failed to parse tests/fixtures/logging_config_bad_type.toml: invalid type: string "yes", expected a boolean
+       in `logging`
+
+ --> tests/ui/logging_config_bad_type.rs:2:44
+  |
+2 |     let _ = edgezero_core::logging_config!("tests/fixtures/logging_config_bad_type.toml", "fastly");
+  |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

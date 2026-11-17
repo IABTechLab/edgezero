@@ -285,10 +285,10 @@ mod fastly_impl {
     };
     use edgezero_core::outbound::{
         OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundDispatchRequest,
-        OutboundExchangeOwner, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
-        OutboundHeaderInput, OutboundHttpClient, OutboundPending, OutboundPreparedBatch,
-        OutboundProgressRuntime, OutboundRequest, OutboundRequestParts, OutboundResponse,
-        OutboundResponseContext, OutboundScope, OutboundSendMode, OutboundTime,
+        OutboundExchangeFailure, OutboundExchangeOwner, OutboundFuture, OutboundHead,
+        OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient, OutboundPending,
+        OutboundPreparedBatch, OutboundProgressRuntime, OutboundRequest, OutboundRequestParts,
+        OutboundResponse, OutboundResponseContext, OutboundScope, OutboundSendMode, OutboundTime,
     };
     use edgezero_core::time::{
         DEADLINE_FAR_FUTURE, DispatchBudget, MonotonicClock, MonotonicInstant,
@@ -677,6 +677,7 @@ mod fastly_impl {
             Ok(backend)
         }
 
+        #[cfg(test)]
         fn configure(
             &self,
             request: OutboundDispatchRequest,
@@ -792,9 +793,11 @@ mod fastly_impl {
 
         fn pipeline(
             plan: RequestPlan,
-            progress: NativeProgress,
+            progress: &NativeProgress,
         ) -> OutboundFuture<OutboundResponse> {
+            let failure = plan.context.exchange_failure();
             let client = Self::with_time(plan.context.time().clone());
+            let exchange_progress = progress.with_exchange_failure(failure.clone());
             Box::pin(async move {
                 let budget = plan.context.budget();
                 let time = plan.context.time().clone();
@@ -802,7 +805,7 @@ mod fastly_impl {
                     async {
                         let prepared = client.configure_plan(plan)?;
                         client
-                            .execute_head(prepared, &progress)
+                            .execute_head(prepared, &exchange_progress)
                             .boxed_local()
                             .await?
                             .finish()
@@ -810,6 +813,7 @@ mod fastly_impl {
                     },
                     budget,
                     &time,
+                    &failure,
                 )
                 .await
             })
@@ -852,17 +856,20 @@ mod fastly_impl {
                 request.entered_at(),
             );
             Box::pin(async move {
-                let progress = selected_progress?;
-                let budget = request.budget();
-                let time = request.time().clone();
+                let plan = RequestPlan::new(request);
+                let failure = plan.context.exchange_failure();
+                let progress = selected_progress?.with_exchange_failure(failure.clone());
+                let budget = plan.context.budget();
+                let time = plan.context.time().clone();
                 progress
                     .drive(race_deadline(
                         async {
-                            let prepared = client.configure(request)?;
+                            let prepared = client.configure_plan(plan)?;
                             client.execute_head(prepared, &progress).boxed_local().await
                         },
                         budget,
                         &time,
+                        &failure,
                     ))
                     .await?
             })
@@ -874,10 +881,13 @@ mod fastly_impl {
             scope.check()?;
             let time = request.time().clone();
             let entered = request.entered_at();
-            let progress = super::scope::native_progress(&scope, &time, entered)?;
+            let plan = RequestPlan::new(request);
+            let failure = plan.context.exchange_failure();
+            let progress = super::scope::native_progress(&scope, &time, entered)?
+                .with_exchange_failure(failure.clone());
             super::scope::begin(
                 &scope,
-                Self::pipeline(RequestPlan::new(request), progress.clone()),
+                Self::pipeline(plan, &progress),
                 &progress,
                 &time,
                 entered,
@@ -935,11 +945,12 @@ mod fastly_impl {
                 .into_iter()
                 .map(|(index, plan)| {
                     let budget = plan.context.budget();
-                    let future = Self::pipeline(plan, progress.clone());
+                    let failure = plan.context.exchange_failure();
+                    let future = Self::pipeline(plan, &progress);
                     let clock = time.clock().clone();
                     async move {
                         let outcome = future.await;
-                        let completed_at = clock.now();
+                        let completed_at = failure.observed_at().unwrap_or_else(|| clock.now());
                         let beyond_cutoff = cutoff.is_expired_at(completed_at)
                             && !budget.own_deadline_expired_before(cutoff, completed_at);
                         (
@@ -1133,10 +1144,39 @@ mod fastly_impl {
             OutboundCachePolicy::Bypass => request.set_pass(true),
             OutboundCachePolicy::PlatformDefault => {}
             OutboundCachePolicy::PlatformDefaultWithSurrogateKey(value) => {
-                request.set_surrogate_key(value);
+                request.set_surrogate_key(filter_surrogate_keys(value));
             }
         }
         request
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "space-separated printable ASCII keys always form a valid HeaderValue"
+    )]
+    fn filter_surrogate_keys(value: HeaderValue) -> HeaderValue {
+        let bytes = value.as_bytes();
+        if bytes
+            .iter()
+            .all(|byte| *byte == b' ' || byte.is_ascii_graphic())
+        {
+            return value;
+        }
+        // SDK 0.13.1 converts the entire value to text, so one opaque token would
+        // otherwise discard valid neighboring keys as well.
+        let mut filtered = Vec::with_capacity(bytes.len());
+        for key in bytes.split(|byte| *byte == b' ') {
+            if key.is_empty() || !key.iter().all(u8::is_ascii_graphic) {
+                continue;
+            }
+            if !filtered.is_empty() {
+                filtered.push(b' ');
+            }
+            filtered.extend_from_slice(key);
+        }
+        let mut normalized = HeaderValue::from_bytes(&filtered).expect("printable ASCII keys");
+        normalized.set_sensitive(value.is_sensitive());
+        normalized
     }
 
     fn ceil_millis(duration: Duration) -> u64 {
@@ -1651,72 +1691,68 @@ mod fastly_impl {
             .body(native, budget)
     }
 
-    async fn race_deadline<Output>(
+    pub(super) async fn race_deadline<Output>(
         future: impl Future<Output = Result<Output, EdgeError>>,
         budget: DispatchBudget,
         time: &OutboundTime,
+        failure: &OutboundExchangeFailure,
     ) -> Result<Output, EdgeError> {
         let mut timer = time.wait_until(budget.deadline);
         let mut previous = time.clock().now();
-        race_with_timer(future, budget, time, &mut timer, &mut previous, |result| {
-            result
-                .as_ref()
-                .err()
-                .and_then(EdgeError::provider_failure_detail)
-                .copied()
+        futures_util::pin_mut!(future);
+        poll_fn(|cx| {
+            checked_now(time, &mut previous, failure)?;
+            if let Some(error) = failure.take() {
+                return Poll::Ready(Err(error));
+            }
+            if let Poll::Ready(result) = timer.as_mut().poll(cx) {
+                return Poll::Ready(Err(result
+                    .err()
+                    .unwrap_or_else(|| timeout_error(budget.cause))));
+            }
+            if budget
+                .deadline
+                .is_expired_at(checked_now(time, &mut previous, failure)?)
+            {
+                return Poll::Ready(Err(timeout_error(budget.cause)));
+            }
+            let output = future.as_mut().poll(cx);
+            let observed = checked_now(time, &mut previous, failure)?;
+            if let Some(error) = failure.take() {
+                return Poll::Ready(Err(error));
+            }
+            if failure.observed_at().is_some() && matches!(&output, Poll::Ready(Err(_))) {
+                return output;
+            }
+            if budget.deadline.is_expired_at(observed) {
+                let mut error = timeout_error(budget.cause);
+                if let EdgeError::GatewayTimeout {
+                    provider_detail, ..
+                } = &mut error
+                    && let Poll::Ready(Err(source)) = &output
+                {
+                    *provider_detail = source.provider_failure_detail().copied();
+                }
+                return Poll::Ready(Err(error));
+            }
+            output
         })
-        .await?
+        .await
     }
 
     fn checked_now(
         time: &OutboundTime,
         previous: &mut MonotonicInstant,
+        failure: &OutboundExchangeFailure,
     ) -> Result<MonotonicInstant, EdgeError> {
         let observed = time.clock().now();
-        if observed < *previous {
+        if observed < *previous || failure.observed_at().is_some_and(|at| at > observed) {
             return Err(EdgeError::internal(anyhow::anyhow!(
                 "outbound clock moved backwards during I/O"
             )));
         }
         *previous = observed;
         Ok(observed)
-    }
-
-    async fn race_with_timer<Output>(
-        future: impl Future<Output = Output>,
-        budget: DispatchBudget,
-        time: &OutboundTime,
-        timer: &mut OutboundFuture<()>,
-        previous: &mut MonotonicInstant,
-        detail: impl FnOnce(&Output) -> Option<edgezero_core::ProviderFailureDetail>,
-    ) -> Result<Output, EdgeError> {
-        let mut extract_detail = Some(detail);
-        futures_util::pin_mut!(future);
-        poll_fn(|cx| {
-            checked_now(time, previous)?;
-            if let Poll::Ready(result) = timer.as_mut().poll(cx) {
-                return Poll::Ready(Err(result
-                    .err()
-                    .unwrap_or_else(|| timeout_error(budget.cause))));
-            }
-            if budget.deadline.is_expired_at(checked_now(time, previous)?) {
-                return Poll::Ready(Err(timeout_error(budget.cause)));
-            }
-            let output = future.as_mut().poll(cx);
-            if budget.deadline.is_expired_at(checked_now(time, previous)?) {
-                let mut error = timeout_error(budget.cause);
-                if let EdgeError::GatewayTimeout {
-                    provider_detail, ..
-                } = &mut error
-                    && let Poll::Ready(value) = &output
-                {
-                    *provider_detail = extract_detail.take().and_then(|extract| extract(value));
-                }
-                return Poll::Ready(Err(error));
-            }
-            output.map(Ok)
-        })
-        .await
     }
 
     fn validate_request_body_length(bytes: &Bytes, maximum: u64) -> Result<(), EdgeError> {
@@ -1777,6 +1813,7 @@ mod fastly_impl {
         use std::thread;
 
         use super::super::testing;
+        use super::OutboundExchangeFailure;
         use edgezero_core::error::{BudgetSource, ResponseLimitReason};
         use edgezero_core::http::header::{
             CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
@@ -1790,6 +1827,144 @@ mod fastly_impl {
         use futures_util::stream;
 
         use super::*;
+
+        #[test]
+        fn retained_head_failure_precedes_later_deadline_without_polling_io() {
+            let start = MonotonicInstant::now();
+            let failure = OutboundExchangeFailure::default();
+            failure.record(
+                start + Duration::from_millis(5),
+                EdgeError::bad_gateway("early failure"),
+            );
+            let time = OutboundTime::new(
+                MonotonicClock::new(move || start + Duration::from_millis(150)),
+                |_, _| panic!("completed failure must not start a new host wait"),
+            );
+            let budget = DispatchBudget {
+                deadline: Deadline::at_instant(start + Duration::from_millis(100)),
+                duration: Duration::from_millis(100),
+                cause: BudgetSource::PerCallTimeout,
+            };
+            let error = block_on(super::race_deadline::<()>(
+                async { panic!("completed failure must not poll fresh I/O") },
+                budget,
+                &time,
+                &failure,
+            ))
+            .unwrap_err();
+            assert!(matches!(error, EdgeError::BadGateway { .. }));
+            assert_eq!(
+                failure.observed_at(),
+                Some(start + Duration::from_millis(5))
+            );
+            assert!(failure.take().is_none());
+        }
+
+        #[test]
+        fn retained_failure_never_hides_regression_before_race_entry() {
+            for consumed in [false, true] {
+                let start = MonotonicInstant::now();
+                let failure = OutboundExchangeFailure::default();
+                failure.record(
+                    start + Duration::from_millis(5),
+                    EdgeError::bad_gateway("original failure"),
+                );
+                if consumed {
+                    drop(failure.take().unwrap());
+                }
+                let time = OutboundTime::new(MonotonicClock::new(move || start), |_, _| {
+                    panic!("invalid clock must not arm a provider wait");
+                });
+                let budget = DispatchBudget {
+                    deadline: Deadline::at_instant(start + Duration::from_millis(100)),
+                    duration: Duration::from_millis(100),
+                    cause: BudgetSource::PerCallTimeout,
+                };
+                let error = block_on(super::race_deadline::<()>(
+                    async {
+                        panic!("invalid clock must not poll fresh I/O");
+                    },
+                    budget,
+                    &time,
+                    &failure,
+                ))
+                .unwrap_err();
+                assert!(matches!(error, EdgeError::Internal { .. }));
+            }
+        }
+
+        #[test]
+        fn head_failure_consumed_inside_poll_retains_original_classification() {
+            let start = MonotonicInstant::now();
+            let observed = Arc::new(Mutex::new(start));
+            let sampled = Arc::clone(&observed);
+            let time = OutboundTime::new(
+                MonotonicClock::new(move || *sampled.lock().unwrap()),
+                |_, _| Box::pin(pending()),
+            );
+            let failure = OutboundExchangeFailure::default();
+            let budget = DispatchBudget {
+                deadline: Deadline::at_instant(start + Duration::from_millis(100)),
+                duration: Duration::from_millis(100),
+                cause: BudgetSource::PerCallTimeout,
+            };
+            let future = async {
+                failure.record(
+                    start + Duration::from_millis(5),
+                    EdgeError::gateway_timeout_caused(
+                        "early connect failure",
+                        BudgetSource::ConnectTimeout,
+                    ),
+                );
+                let error = failure.take().expect("one owned terminal failure");
+                *observed.lock().unwrap() = start + Duration::from_millis(150);
+                Err::<(), _>(error)
+            };
+            let error =
+                block_on(super::race_deadline(future, budget, &time, &failure)).unwrap_err();
+            assert!(matches!(
+                error,
+                EdgeError::GatewayTimeout {
+                    cause: BudgetSource::ConnectTimeout,
+                    ..
+                }
+            ));
+            assert_eq!(
+                failure.observed_at(),
+                Some(start + Duration::from_millis(5))
+            );
+        }
+
+        #[test]
+        fn unfinished_success_at_deadline_equality_is_not_a_retained_head_failure() {
+            let start = MonotonicInstant::now();
+            let observed = Arc::new(Mutex::new(start));
+            let sampled = Arc::clone(&observed);
+            let time = OutboundTime::new(
+                MonotonicClock::new(move || *sampled.lock().unwrap()),
+                |_, _| Box::pin(pending()),
+            );
+            let failure = OutboundExchangeFailure::default();
+            let budget = DispatchBudget {
+                deadline: Deadline::at_instant(start + Duration::from_millis(100)),
+                duration: Duration::from_millis(100),
+                cause: BudgetSource::PerCallTimeout,
+            };
+            let future = async {
+                *observed.lock().unwrap() = start + Duration::from_millis(100);
+                Ok(())
+            };
+            let error =
+                block_on(super::race_deadline(future, budget, &time, &failure)).unwrap_err();
+            assert!(matches!(
+                error,
+                EdgeError::GatewayTimeout {
+                    cause: BudgetSource::PerCallTimeout,
+                    ..
+                }
+            ));
+            assert!(failure.observed_at().is_none());
+        }
 
         std::thread_local! {
             static NATIVE_ENCODED_CREATED: Cell<usize> = const { Cell::new(0) };
@@ -2104,6 +2279,62 @@ mod fastly_impl {
                     policy,
                 );
                 assert!(format!("{native:?}").contains(expected));
+                assert!(native.get_header("surrogate-key").is_none());
+            }
+        }
+
+        #[test]
+        fn surrogate_key_filter_preserves_text_and_sensitivity() {
+            for (keys, expected) in [
+                (b"first bad-\xff last".as_slice(), "first last"),
+                (b"  first last  ".as_slice(), "  first last  "),
+                (b"bad-\xff".as_slice(), ""),
+            ] {
+                for sensitive in [false, true] {
+                    let mut value = HeaderValue::from_bytes(keys).expect("header bytes");
+                    value.set_sensitive(sensitive);
+                    let filtered = filter_surrogate_keys(value);
+                    assert_eq!(filtered.to_str().expect("SDK text conversion"), expected);
+                    assert_eq!(filtered.is_sensitive(), sensitive);
+                }
+            }
+        }
+
+        #[test]
+        fn tagged_cache_metadata_filters_invalid_keys_without_losing_valid_neighbors() {
+            for (keys, expected) in [
+                (b"first bad-\xff last".as_slice(), "first last"),
+                ("first caf\u{e9} last".as_bytes(), "first last"),
+                (b"first bad\tkey last".as_slice(), "first last"),
+                (b"bad-\xff".as_slice(), ""),
+                (b"".as_slice(), ""),
+                (b"   ".as_slice(), "   "),
+                (
+                    b"  !   ~ duplicate duplicate  ".as_slice(),
+                    "  !   ~ duplicate duplicate  ",
+                ),
+            ] {
+                let native = build_fastly_request(
+                    &Method::GET,
+                    &"https://origin.example.com/resource".parse().expect("URI"),
+                    &HeaderMap::new(),
+                    OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                        HeaderValue::from_bytes(keys).expect("valid header bytes"),
+                    ),
+                );
+                let rendered = format!("{native:?}");
+                assert!(
+                    rendered.contains(&format!("surrogate_key: Some({expected:?})")),
+                    "{rendered}"
+                );
+                assert!(rendered.contains("cache_override: Override"), "{rendered}");
+                assert!(rendered.contains("ttl: None"), "{rendered}");
+                assert!(
+                    rendered.contains("stale_while_revalidate: None"),
+                    "{rendered}"
+                );
+                assert!(rendered.contains("stale_if_error: None"), "{rendered}");
+                assert!(!rendered.contains("cache_override: Pass"), "{rendered}");
                 assert!(native.get_header("surrogate-key").is_none());
             }
         }

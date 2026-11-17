@@ -142,6 +142,8 @@ export async function main() {
     console.log("Pinned local AWS services ready; running generated consumer contracts");
     const env = {
       ...process.env,
+      // Generated builds and service tables have one command owner per suite.
+      RUST_TEST_THREADS: "1",
       TMPDIR: work,
       EDGEZERO_AWS_TEST_DYNAMODB_ENDPOINT: endpoints.dynamo,
       EDGEZERO_AWS_TEST_SECRETS_ENDPOINT: endpoints.moto,
@@ -151,22 +153,40 @@ export async function main() {
       EDGEZERO_AWS_TEST_AGENT_TOKEN: "local-agent-token",
     };
     // The nonzero runner rejects misspelled filters and accidental cfg exclusion.
-    await new Promise((resolve, reject) => {
-      testProcess = spawn(join(root, "scripts/run_test_nonzero.sh"), [
-        "--ignored", "generated_native_aws_emulator_contracts", "cargo", "test",
-        "--offline", "--locked", "-p", "edgezero-cli", "--test", "native_aws_emulator_proof",
-      ], { cwd: root, env, stdio: "inherit", detached: true });
-      testGroup = testProcess.pid;
-      let timedOut = false;
-      const timer = setTimeout(() => { timedOut = true; signalTest("SIGKILL"); }, 20 * 60_000);
-      testProcess.once("error", (error) => { clearTimeout(timer); reject(error); });
-      testProcess.once("close", (code, signal) => {
-        clearTimeout(timer);
-        testProcess = undefined;
-        if (code === 0 && !timedOut && !interrupted) resolve();
-        else reject(new Error(`Native AWS integration failed: ${timedOut ? "20 minute timeout" : interrupted ?? signal ?? `exit ${code}`}`));
+    const suites = [
+      {
+        name: "generated ordinary and record AWS consumers",
+        required: ["generated_native_aws_emulator_contracts", "generated_native_aws_emulator_contracts_records"],
+        args: ["--offline", "--locked", "-p", "edgezero-cli", "--test", "native_aws_emulator_proof"],
+      },
+      {
+        name: "record provider against DynamoDB Local",
+        required: ["dynamodb_records_local_contract", "dynamodb_records_local_simulated_expiry_reopen"],
+        args: ["--offline", "--locked", "-p", "edgezero-store-aws", "--no-default-features",
+          "--features", "dynamodb-records", "--test", "dynamodb_records_local"],
+      },
+    ];
+    for (const suite of suites) {
+      checkInterrupted();
+      console.log(`Running ${suite.name}`);
+      await new Promise((resolve, reject) => {
+        testProcess = spawn(join(root, "scripts/run_test_nonzero.sh"), [
+          "--ignored", suite.required.join("\n"), "cargo", "test", ...suite.args,
+        ], { cwd: root, env, stdio: "inherit", detached: true });
+        testGroup = testProcess.pid;
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; signalTest("SIGKILL"); }, 20 * 60_000);
+        testProcess.once("error", (error) => { clearTimeout(timer); reject(error); });
+        testProcess.once("close", (code, signal) => {
+          clearTimeout(timer);
+          testProcess = undefined;
+          if (code === 0 && !timedOut && !interrupted) resolve();
+          else reject(new Error(`Native AWS integration failed: ${timedOut ? "20 minute timeout" : interrupted ?? signal ?? `exit ${code}`}`));
+        });
       });
-    });
+      signalTest("SIGKILL");
+      testGroup = undefined;
+    }
   } catch (error) {
     failure = error;
     for (const container of Object.values(names)) {

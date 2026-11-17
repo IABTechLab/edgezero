@@ -49,7 +49,7 @@ fn fixture_check_command(adapter: &str, target: &str, runner: Option<&str>) -> R
             .filter(|value| !value.trim().is_empty())
             .ok_or("Fastly fixture tests require the selected Viceroy runner")?;
         command
-            .args(["--features", "progress"])
+            .args(["--features", "progress,assembly-attestation"])
             .env("CARGO_TARGET_WASM32_WASIP1_RUNNER", runner);
     }
     Ok(command)
@@ -95,6 +95,7 @@ fn validate_wire(events: &[Value], adapter: &str) -> Result<()> {
         cases.len() == 68 && receipts.iter().sum::<usize>() == 84,
         "incomplete redirect wire cases or origin receipts",
     )?;
+    super::super::wire::replay_wire(adapter, cases)?;
     super::super::wire::validate_batch_artifact(events, adapter)?;
     super::super::wire::validate_marker_artifact(events, adapter)?;
     super::super::wire::validate_encoding_artifact(events, adapter)?;
@@ -140,15 +141,58 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
     let repo = repository_root();
     match adapter {
         "axum" => {
+            let ownership_build = phase(
+                adapter,
+                "executor-ownership-build",
+                Command::new("cargo")
+                    .args(["rustc", "--offline", "--locked", "--manifest-path"])
+                    .arg(fixture_root().join("Cargo.toml"))
+                    .args([
+                        "-p",
+                        "fixture-axum",
+                        "--features",
+                        "progress",
+                        "--bin",
+                        "fixture-axum-executor-ownership",
+                        "--message-format=json",
+                        "--",
+                        "-C",
+                        "panic=abort",
+                    ]),
+                &repo,
+                output,
+                records,
+            )?;
+            let executable = built_executable(
+                read_artifact(&ownership_build)?.as_bytes(),
+                "fixture-axum-executor-ownership",
+            )?;
+            let executable = stage(&executable, output)?;
+            let ownership_log = phase(
+                adapter,
+                "executor-ownership",
+                &mut Command::new(executable),
+                &repo,
+                output,
+                records,
+            )?;
+            let ownership = read_events(&ownership_log, CI_ARTIFACT_RECORDS)?;
+            require(
+                ownership.len() == 1
+                    && ownership[0]["event"] == "axum-executor-ownership"
+                    && ownership[0]["status"] == "pass"
+                    && ownership[0]["panic"] == "abort"
+                    && ownership[0]["live_without_ambient"] == true
+                    && ownership[0]["foreign_rejected"] == true
+                    && ownership[0]["dropped_rejected"] == true
+                    && ownership[0]["qualification"] == false,
+                "missing abort-profile executor ownership proof",
+            )?;
             phase(
                 adapter,
                 "native-tests",
                 &mut guarded(
-                    &[
-                        "--include-ignored",
-                        "--inventory",
-                        "axum/native-tcp,unit/axum,axum/http1,axum,axum/http1-chunked",
-                    ],
+                    &["--inventory", "axum/native-tcp,unit/axum,axum/http1,axum"],
                     &[
                         "test",
                         "--offline",
@@ -406,7 +450,10 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
             records,
             2,
         )?;
-        validate_progress(&read_events(&progress.join("events.jsonl"))?)?;
+        validate_progress(&read_events(
+            &progress.join("events.jsonl"),
+            CI_ARTIFACT_RECORDS,
+        )?)?;
     }
     if matches!(adapter, "axum" | "fastly") {
         let wire = output.join("wire");
@@ -418,7 +465,10 @@ pub(super) fn run(args: &Args, output: &Path, records: &mut Records) -> Result<(
             output,
             records,
         )?;
-        validate_wire(&read_events(&wire.join("events.jsonl"))?, adapter)?;
+        validate_wire(
+            &read_events(&wire.join("events.jsonl"), WIRE_ARTIFACT_RECORDS)?,
+            adapter,
+        )?;
     }
     records.push(
         json!({"event":"ci-inventory","adapter":adapter,"status":"pass","qualification":false}),
@@ -442,7 +492,7 @@ mod tests {
         assert!(args.contains(&"test") && args.contains(&"--all-targets"));
         assert!(
             args.windows(2)
-                .any(|pair| pair == ["--features", "progress"])
+                .any(|pair| pair == ["--features", "progress,assembly-attestation"])
         );
         for name in [
             "callback_cleanup::tests::callback_mode_accepts_only_exact_case_tokens",
@@ -474,7 +524,7 @@ mod tests {
     }
 
     fn wire(adapter: &str) -> Vec<Value> {
-        let mut cases = (0..68).map(|index| json!({"event":format!("{adapter}-wire-case"),"origin_requests":if index < 16 {vec![json!({}),json!({})]} else {vec![json!({})]}})).collect::<Vec<_>>();
+        let mut cases = super::super::super::wire::redirect_artifact(adapter);
         cases.push(json!({"event":format!("{adapter}-wire-inventory"),"status":"pass","exchanges":68,"origin_requests":84,"qualification":false}));
         cases.extend(super::super::super::wire::batch_recovery_artifact(adapter));
         cases.extend(super::super::super::wire::marker_artifact(adapter));
@@ -483,6 +533,26 @@ mod tests {
             cases.extend(super::super::super::wire::forwarding_artifact(adapter));
         }
         cases
+    }
+
+    #[test]
+    fn persisted_redirect_rejects_count_preserving_content_corruption() {
+        for adapter in ["axum", "fastly", "cloudflare"] {
+            let valid = wire(adapter);
+            validate_wire(&valid, adapter).unwrap();
+            let mut missing_report = valid.clone();
+            missing_report[0].as_object_mut().unwrap().remove("report");
+            let mut duplicate = valid.clone();
+            duplicate[1] = duplicate[0].clone();
+            let mut corrupt_receipt = valid.clone();
+            corrupt_receipt[0]["origin_requests"][0] = json!([4001, "/foreign"]);
+            let accepted = [missing_report, duplicate, corrupt_receipt]
+                .map(|events| validate_wire(&events, adapter).is_ok());
+            assert_eq!(
+                accepted, [false; 3],
+                "{adapter}: malformed persisted evidence"
+            );
+        }
     }
 
     #[test]

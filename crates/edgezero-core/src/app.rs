@@ -15,9 +15,11 @@ use crate::ingress::{
     IngressDispatchOutcome, IngressFraming, IngressHead, IngressHeadAccounting, IngressHeadLimits,
     IngressHeadParts, PreparedIngress, apply_admission_policy, default_admission_policy,
 };
+use crate::key_value_store::KvError;
 use crate::logging::BOOT_LOG_TARGET;
 use crate::manifest::{BakedManifest, ResolvedLoggingConfig};
 use crate::platform::PlatformMetadata;
+use crate::record_store::{RecordKeyLayout, RecordLayout, RecordStoreRequirements};
 use crate::response_egress::{
     DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision,
     DetachedResponseEgressDecisionFactory, DetachedResponseEgressHead, ResponseEgressCompletion,
@@ -25,7 +27,9 @@ use crate::response_egress::{
     ResponseEgressHead, ResponseEgressObserver, ResponseEgressObserverHandle, ResponseEgressPolicy,
     ResponseEgressPolicyCallback, ResponseEgressRequestMetadata, default_response_egress_policy,
 };
-use crate::response_headers::{SynthesizedResponseHeaders, SynthesizedResponseHeadersError};
+use crate::response_headers::{
+    RequiredErrorResponseHeaders, SynthesizedResponseHeaders, SynthesizedResponseHeadersError,
+};
 use crate::router::{RouteErrorKind, RouteMetadata, RouterService};
 use crate::time::{MonotonicClock, MonotonicInstant};
 
@@ -65,6 +69,8 @@ pub struct App {
     monotonic_clock: MonotonicClock,
     name: String,
     platform: PlatformMetadata,
+    record_store_requirements: RecordStoreRequirements,
+    record_store_requirements_sealed: bool,
     response_egress_observer: ResponseEgressObserverHandle,
     response_egress_policy: ResponseEgressPolicyCallback,
     router: RouterService,
@@ -447,6 +453,7 @@ impl App {
                 "application configuration changed adapter-selected platform metadata"
             )));
         }
+        app.record_store_requirements_sealed = true;
         Ok(app)
     }
 
@@ -521,6 +528,13 @@ impl App {
         self.router.prepare_received_head(headers, extensions);
     }
 
+    /// Borrow immutable requirements for store preparation and ready-handle validation.
+    #[must_use]
+    #[inline]
+    pub fn record_store_requirements(&self) -> &RecordStoreRequirements {
+        &self.record_store_requirements
+    }
+
     fn render_error_response(&self, error: EdgeError) -> Response {
         self.render_error_response_with_message(error, None)
     }
@@ -543,7 +557,10 @@ impl App {
             ErrorResponseRenderer::Custom(renderer) => renderer(error),
         };
         *response.status_mut() = status;
-        response.headers_mut().extend(required_headers);
+        response.headers_mut().extend(required_headers.clone());
+        response
+            .extensions_mut()
+            .insert(RequiredErrorResponseHeaders::new(required_headers));
         response
             .extensions_mut()
             .remove::<RequestBodyOverflowResponse>();
@@ -552,6 +569,39 @@ impl App {
         }
         suppress_overflow_retry_after(&mut response);
         response
+    }
+
+    /// Declare a record layout once during configuration, before provider preparation.
+    /// Declarations cannot be replaced or added after hook-based construction finishes.
+    /// Low-level constructors leave configuration open until the caller prepares stores.
+    ///
+    /// # Errors
+    /// Rejects duplicate/empty logical IDs, invalid layouts or post-configuration changes.
+    #[inline]
+    pub fn require_record_store<Id, KeyLayout>(
+        &mut self,
+        id: Id,
+        layout: KeyLayout,
+    ) -> Result<(), KvError>
+    where
+        Id: Into<String>,
+        KeyLayout: RecordKeyLayout + 'static,
+    {
+        if self.record_store_requirements_sealed {
+            return Err(KvError::Validation(
+                "record store declarations are already sealed".to_owned(),
+            ));
+        }
+        let logical_id = id.into();
+        if logical_id.is_empty() || self.record_store_requirements.contains_key(&logical_id) {
+            return Err(KvError::Validation(
+                "record store ID is empty or already declared".to_owned(),
+            ));
+        }
+        let declaration = RecordLayout::new(layout)?;
+        self.record_store_requirements
+            .insert(logical_id, declaration);
+        Ok(())
     }
 
     fn response_egress_envelope(
@@ -778,6 +828,8 @@ impl App {
             monotonic_clock: MonotonicClock::default(),
             name: name.into(),
             platform,
+            record_store_requirements: RecordStoreRequirements::new(),
+            record_store_requirements_sealed: false,
             response_egress_observer: ResponseEgressObserverHandle::default(),
             response_egress_policy: Arc::new(default_response_egress_policy),
             router,
@@ -831,7 +883,17 @@ pub trait Hooks {
     ///
     /// Macro-generated applications override this with the matching
     /// `[adapters.<name>.logging]` or `[logging.<name>]` configuration. A
-    /// handwritten implementation receives the portable defaults.
+    /// handwritten implementation receives the portable defaults unless it
+    /// delegates to [`crate::logging_config!`]:
+    ///
+    /// ```ignore
+    /// fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+    ///     edgezero_core::logging_config!("edgezero.toml", adapter)
+    /// }
+    /// ```
+    ///
+    /// The helper supplies compile-time metadata only; logger initialization,
+    /// ownership, filters and runtime overrides are unchanged.
     #[must_use]
     #[inline]
     fn logging_for(_adapter: &str) -> ResolvedLoggingConfig {
@@ -3567,6 +3629,145 @@ mod tests {
                 b"bounded error"
             );
         }
+    }
+
+    #[test]
+    fn custom_renderer_nominations_cannot_remove_required_config_retry_after() {
+        let mut app = App::new(empty_router());
+        app.set_error_response_renderer(|_| {
+            response_builder()
+                .status(StatusCode::ACCEPTED)
+                .header("connection", "rEtRy-AfTeR, x-renderer-hop")
+                .header("retry-after", "1")
+                .header("x-renderer-hop", "private")
+                .body(Body::from("bounded error"))
+                .expect("renderer response")
+        });
+        for error in [
+            EdgeError::config_out_of_date("stale", "field"),
+            EdgeError::store_extraction(StoreExtractionReason::MissingSecret, "missing", None),
+        ] {
+            let response = complete_dispatch(app.detached_ingress_error_egress(
+                error,
+                Method::POST,
+                app.monotonic_now(),
+            ));
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers().get_all("retry-after").iter().count(), 1);
+            assert_eq!(response.headers()["retry-after"], "60");
+            assert!(
+                response
+                    .extensions()
+                    .get::<RequiredErrorResponseHeaders>()
+                    .is_none()
+            );
+            assert!(!response.headers().contains_key("connection"));
+            assert!(!response.headers().contains_key("x-renderer-hop"));
+            assert_eq!(response.body().as_bytes().expect("body"), b"bounded error");
+        }
+    }
+
+    #[test]
+    fn custom_renderer_required_headers_do_not_hide_invalid_framing() {
+        use crate::response_egress_framing::{
+            ResponseEgressFramingError, ResponseEgressFramingMode, prepare_response_egress,
+        };
+        for (headers, expected) in [
+            (
+                vec![("connection", "retry-after, bad name")],
+                ResponseEgressFramingError::InvalidConnectionHeader,
+            ),
+            (
+                vec![
+                    ("connection", "content-length"),
+                    ("content-length", "bogus"),
+                ],
+                ResponseEgressFramingError::InvalidContentLength,
+            ),
+            (
+                vec![
+                    ("connection", "content-length"),
+                    ("content-length", "1"),
+                    ("content-length", "2"),
+                ],
+                ResponseEgressFramingError::InvalidContentLength,
+            ),
+            (
+                vec![("connection", "trailer"), ("trailer", "x-end")],
+                ResponseEgressFramingError::UnsupportedTrailers,
+            ),
+        ] {
+            let mut app = App::new(empty_router());
+            app.set_error_response_renderer(move |_| {
+                let mut builder = response_builder();
+                for (name, value) in &headers {
+                    builder = builder.header(*name, *value);
+                }
+                builder.body(Body::from("error")).expect("renderer")
+            });
+            let response =
+                app.render_error_response(EdgeError::config_out_of_date("stale", "field"));
+            let actual = prepare_response_egress(
+                ResponseEgressFramingMode::ExplicitBufferedLength,
+                &Method::GET,
+                response,
+            )
+            .err()
+            .expect("invalid renderer framing");
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn fallback_drain_renderer_nominations_cannot_remove_required_allow() {
+        let (mut app, handler_calls, middleware_calls) = guarded_fallback_app();
+        let grant_drops = Arc::new(AtomicUsize::new(0));
+        configure_fallback_policy(
+            &mut app,
+            &grant_drops,
+            4,
+            Deadline::after(Duration::from_secs(1)),
+            buffered_terminal(StatusCode::PAYLOAD_TOO_LARGE, "exceeded", b"over"),
+            buffered_terminal(StatusCode::REQUEST_TIMEOUT, "timeout", b"late"),
+        );
+        app.set_error_response_renderer(|_| {
+            response_builder()
+                .status(StatusCode::ACCEPTED)
+                .header("connection", "aLlOw")
+                .header("connection", "x-renderer-hop")
+                .header("allow", "DELETE")
+                .header("x-renderer-hop", "private")
+                .body(Body::from("bounded error"))
+                .expect("renderer response")
+        });
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        app.set_response_egress_observer(AppEgressObserver(Arc::clone(&reports)));
+        let polls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&polls);
+        let retained = Arc::clone(&grant_drops);
+        let mut chunks = [Bytes::from_static(b"ab"), Bytes::from_static(b"cd")].into_iter();
+        let body = Body::stream(poll_fn(move |_| {
+            assert_eq!(retained.load(Ordering::SeqCst), 0);
+            counted.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(chunks.next())
+        }));
+        let response = dispatch_fallback(&app, body);
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+        assert_eq!(grant_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(response.headers().get_all("allow").iter().count(), 1);
+        assert_eq!(response.headers()["allow"], "GET");
+        assert!(
+            response
+                .extensions()
+                .get::<RequiredErrorResponseHeaders>()
+                .is_none()
+        );
+        assert!(!response.headers().contains_key("connection"));
+        assert!(!response.headers().contains_key("x-renderer-hop"));
+        assert_eq!(response.body().as_bytes().expect("body"), b"bounded error");
+        assert_eq!(reports.lock().expect("reports").len(), 1);
+        assert_no_fallback_dispatch(&handler_calls, &middleware_calls);
     }
 
     #[test]

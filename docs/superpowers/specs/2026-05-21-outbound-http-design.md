@@ -3,7 +3,7 @@
 > **Status:** Normative baseline for non-superseded contracts. The head-first API supersession below replaces historical implementer and batch-construction sketches without compatibility wrappers. Earlier Phases 1a-7 and owned response-egress integration are implemented on PR 275; the current adoption tracker distinguishes implementation, remaining scope/redirect work and qualification. Response-egress capabilities remain `BestEffort` pending deployed proof. · **Baseline Date:** 2026-09-15
 > **Branch:** `docs/outbound-http-spec` · **Audience:** EdgeZero maintainers
 > **Driving pattern:** fan-out HTTP workloads — N outbound requests under a shared wall-clock deadline, terminal results observed in completion order while preserving input indices. The spec is written against this pattern as a portable substrate; it deliberately does not name a specific consumer.
-> **Historical target baseline:** [`stackpop/edgezero` PR #269](https://github.com/stackpop/edgezero/pull/269) (`feature/extensible-cli`, rev `b4c80e9`) — **now merged into `main`** (squash-merged as `e483723`). Relevant baseline changes were the `edgezero_cli::adapter::execute(..)` shell-or-registry dispatcher, expanded runtime `AdapterAction` variants, the then-current Spin SDK 6 / wasip2 integration, the contributor-only `demo` command replacing `dev`, and the app-demo integration crate. The current implementation pins Spin SDK 7.0.0. Non-outbound store/config lifecycle changes remain outside this design.
+> **Historical target baseline:** [`stackpop/edgezero` PR #269](https://github.com/stackpop/edgezero/pull/269) (`feature/extensible-cli`, rev `b4c80e9`) — **now merged into `main`** (squash-merged as `e483723`). Relevant baseline changes were the `edgezero_cli::adapter::execute(..)` shell-or-registry dispatcher, expanded runtime `AdapterAction` variants, the then-current Spin SDK 6 / wasip2 integration, the contributor-only `demo` command replacing `dev`, and the app-demo integration crate. The current implementation pins registry Spin SDK 8.0.0. Non-outbound store/config lifecycle changes remain outside this design.
 > **Current checkout (post-#269 and staging-deploy work):** the CLI surface includes `Command::{Build, Serve, Deploy, Auth, Provision, Config, Demo, New}`; `Action` / `AdapterAction` additionally include `DeployStaging`, `EmitVersion`, `Healthcheck`, and `Rollback`; and adapter dispatch has both `execute(..)` and `execute_capture(..)` entry points. `dev` is gone. This outbound spec gates construction/deployment of the current runtime: `build` / `serve` / `deploy` / `deploy --staging` through both dispatch entry points, plus `demo` before Axum starts. Operational auth/version/health/rollback actions and provisioning/config/store lifecycle policy are exempt or belong to their owning specifications (§3.5.3).
 > **Where rebase claims live (authoritative surfaces):** §3.5.3 build-enforcement, §3.5.2 `Adapter` trait shape, §5.4 capability tests, and the §7 `edgezero-cli` migration bullet. The §3.5.3 + §7 active text is authoritative.
 
@@ -72,6 +72,33 @@ scheduled work. Original caps, codecs, provenance, typed errors, cutoff semantic
 remain requirements. See the [implementation tracker](../plans/2026-10-18-trusted-server-outbound-implementation.md)
 for incomplete lifecycle, redirect, provider and qualification work rather than inferring
 completion from these interfaces or from local test results.
+
+### Shared-Finalizer Review Repairs (2026-11-16)
+
+`OutboundHead::with_body_checkpoint` attaches one lazy adapter host-event factory to the
+existing finalizer. Cloudflare uses it for decoded-output quotas (64 items, including empty
+items), EOF/errors, bodyless/205 settlement, eager payload-policy failures and buffered cap
+errors. Raw-input fairness remains before decoding. The shared absolute waiter, clock
+high-water mark, governing timeout cause and observed provider detail survive these waits;
+terminal cleanup precedes the event and cancellation drops the checkpoint. Discarded heads
+do not run it, and streamed handoff transfers it without polling the payload. Other adapters
+retain their existing no-hook path. This adds no decoder, executor or alternate transport.
+
+`OutboundResponseContext::exchange_failure()` lazily shares one core `OutboundExchangeFailure`
+with provider progress and finalization. Fastly uses it for Send, Begin and batches, replacing
+its private receipt. First failure wins, and taking its owned error retains the observation
+instant across independent producer progress. Core checks it before timer/source polling and
+after source polling, without bypassing scope closure or clock-regression checks. A failure
+first observed at or after the effective deadline still selects its governing timeout and
+retains provider detail. Providers record in the captured clock domain; future-dated
+observations are Internal. No receipt is allocated for adapters that do not request one.
+Supported cleanup unwinding releases
+each payload before waking its revoked waiter, including unvisited siblings, and propagates
+the original panic. No panic-abort cleanup guarantee is implied.
+
+The CI harness replays saved redirect evidence through the same ordered matrix as live runs;
+matching case/receipt counts alone are insufficient. These repairs do not promote capabilities,
+alter original deadlines, weaken suppression, or close hosted/parity qualification gates.
 
 ### Fastly B31 Existing-Path Policy (2026-10-25)
 
@@ -753,9 +780,9 @@ impl OutboundRequest {
  /// `host` from `req.headers`. `normalize_for_dispatch` re-strips
  /// `host` defensively as a safety net for callers that reached past
  /// `header(..)` via `headers_mut`;
- /// - `content-length` is dropped — the adapter sets it from the new body
- /// for `Body::Once`, or omits it (relying on chunked transfer) for
- /// `Body::Stream`.
+ /// - raw `content-length` is dropped. Buffered lengths are recomputed. A single valid,
+ /// non-nominated declaration without Transfer-Encoding is retained separately on a streamed
+ /// Body; Spin uses it for bounded native upload validation rather than forwarding raw framing.
  ///
  /// All other headers are preserved verbatim. Validates `uri` per `new`.
     pub fn from_request(request: Request, uri: Uri) -> Result<Self, EdgeError>;
@@ -1119,11 +1146,17 @@ pub fn rechunk_stream(stream: BodyStream, max: Option<NonZeroU64>) -> BodyStream
 /// Cumulative adapter-visible upstream field-section accounting retained from the first
 /// exposed informational block through final headers and exposed trailers, before EdgeZero
 /// normalization, plus synthetic fields inserted by EdgeZero after normalization.
-pub struct ResponseHeaderLimiter { /* private checked-u64 counters and limits */ }
+#[derive(Clone)]
+pub struct ResponseHeaderLimiter { /* shared private checked-u64 counters and limits */ }
 impl ResponseHeaderLimiter {
     pub fn new(max_bytes: Option<u64>, max_count: Option<u64>) -> Self;
     pub fn observe(&mut self, headers: &HeaderMap) -> Result<(), EdgeError>;
+    pub fn observe_raw_field(&mut self, name: &[u8], value: &[u8]) -> Result<(), EdgeError>;
 }
+
+// `OutboundResponseContext::header_limiter()` clones this response's captured budget.
+// Adapters retain that handle for exposed trailer sections; cloning never resets totals.
+// Raw-field charging avoids constructing a second HeaderMap for SDK-owned trailer fields.
 
 /// Disassembled form of an `OutboundRequest`. Adapter-facing only.
 #[non_exhaustive]
@@ -1165,9 +1198,10 @@ must clone the policy deliberately.
 not an outbound request header or TTL/freshness override. It extends origin response surrogate
 keys without making private/no-store responses cacheable. The typed enum cannot also select
 Bypass, whose pass mode would be cleared by Fastly's tag setter. Space-separated keys are
-permitted; SDK 0.13.1 ignores invalid individual keys outside printable ASCII 0x21..=0x7e.
-No extra key-size/count/ASCII restriction is added. Callers preserve their own fail-closed
-policy if a string cannot become HeaderValue. Axum/Spin ignore this metadata and Cloudflare
+permitted; the Fastly adapter discards invalid individual space-delimited keys outside
+printable ASCII 0x21..=0x7e before calling SDK 0.13.1, whose whole-value text conversion
+would otherwise discard valid neighboring keys too. No extra key-size/count/ASCII restriction
+is added. Callers preserve their own fail-closed policy if a string cannot become HeaderValue. Axum/Spin ignore this metadata and Cloudflare
 keeps platform-default caching without purge emulation; other capabilities remain unchanged.
 Image Optimizer still requires exactly PlatformDefault because the pinned SDK overrides tags
 on its optimizer path. Tagged+optimizer fails preflight before body polling/provider I/O.
@@ -1901,9 +1935,23 @@ rules end-to-end:
    override through Fetch headers but remains BestEffort until the deployed host-observation gate
    passes under the pinned SDK and compatibility date. `from_request` (§3.1.3) also drops raw
    `host`, so only the typed override can create a URI/wire-authority difference.
-5. Remove `content-length` — the adapter sets it from the body (length for
-   `Body::Once`; omitted for `Body::Stream`).
+5. Remove raw `content-length` — adapters derive buffered lengths from the body. Before
+   filtering, `from_request` alone may capture one decimal u64 declaration (optional SP/HTAB
+   around digits) for a streamed Body, provided no Transfer-Encoding or Content-Length
+   Connection nomination exists. Duplicates, comma lists, invalid/non-text/overflow values
+   supply no declaration; this does not replace ingress framing validation. Ordinary builder
+   headers cannot create the fact. Later normalization may clear it, never recapture it.
 6. Remove `transfer-encoding` — the adapter sets it per body type and HTTP version.
+
+The declaration is scalar, immutable public metadata owned by the Body. Unchanged Parts
+round-trips and ownership-only wrappers preserve it. Body replacement, JSON, raw payload/stream
+extraction into a new Body and redirect body rewrites cannot retain stale lengths. Spin emits
+the declared CL without TE and uses the shared `OutboundUploadCounter` before writes and at
+clean EOF. Upload overflow remains typed 413 with OutboundUpload origin; observed length
+overrun/short EOF is local BadRequest without fabricated provider details. Unknown streams
+remain unknown. No prebuffer or validation drain is introduced: an early response/ReaderGone
+abandons unread bytes, so equality applies only to observed chunks and clean EOF. Begin/Batch,
+GET/HEAD, paired deadlines, typed source errors and cancellation contracts do not change.
 
 Apps can therefore use `headers_mut()` and `from_request` freely; portability and
 framing safety are guaranteed by this final sweep, not by individual callers
@@ -3333,6 +3381,10 @@ and host copies can all exist outside it. When an adapter exposes informational 
 trailers to guest code, it applies the configured header count/byte totals cumulatively
 across every exposed field section and final completion; it never claims that this prevents
 an earlier host allocation. When those fields are not exposed, their allocation is opaque.
+The counter is one shared guest allocation per prepared response context. Spin charges exposed
+trailers against that same counter before acknowledging clean response completion. Overflow
+returns the typed count/byte error: buffered calls fail during finalization, while streamed
+calls emit a terminal body error. Trailer fields are not added to the normalized final head.
 The `outbound-complete-resource-accounting` capability is therefore `Unsupported` for every
 current adapter. This is a deliberate fail-closed statement, not a reason to weaken the
 narrower limits below.
@@ -7100,13 +7152,12 @@ was inspected. The implementation phases pin `async-compression = "=0.4.43"`,
 gzip/deflate decoder graph. The fixed flate decoder charge and checksum/source contract are
 recorded in `docs/audits/2026-09-29-flate-decoder-memory-accounting.md` and enforced by the
 separate flate dependency audit.
-`reqwest = "=0.13.4"`, `worker = "=0.8.5"`, `spin-sdk = "=7.0.0"`, `fastly = "=0.13.1"`,
+`reqwest = "=0.13.4"`, `worker = "=0.8.5"`, `spin-sdk = "=8.0.0"`, `fastly = "=0.13.1"`,
 `fastly-shared = "=0.13.1"`, `fastly-sys = "=0.13.1"`, and
 `log-fastly = "=0.13.1"` in the workspace manifests that own those dependencies, refresh
 both the root and excluded app-demo lockfiles, and assert both resolved graphs. Spin uses the
-SDK's `wasip3` re-export rather than a second direct dependency. SDK 7 is pinned to
-`https://github.com/stackpop/spin-rust-sdk.git` at
-`6c59ed5b4fcb377072763aee0b27a3abdd8edb72`, selecting `wasip3 0.10.0+wasi-0.3.2` and the
+SDK's `wasip3` re-export rather than a second direct dependency. Registry SDK 8.0.0
+includes the upstream eager-progress repair, selecting `wasip3 0.10.0+wasi-0.3.2` and the
 corrected `wit-bindgen 0.63.0` executor. See the
 [SDK dependency audit](../../audits/2026-10-27-spin-sdk-eager-progress.md) and
 [upstream change](https://github.com/spinframework/spin-rust-sdk/pull/169).
