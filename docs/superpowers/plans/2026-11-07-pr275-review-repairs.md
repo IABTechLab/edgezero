@@ -33,6 +33,55 @@ minimal repairs over suggested changes that conflict with approved contracts.
 
 ## Execution
 
+### November 16 Scoped Follow-up
+
+The requester approved the next repair checkpoint after read-only investigation
+of review 5928381619 and the older body-only feedback. Preserve the contracts and
+qualification gates above; do not infer approval for new public defaults or policy.
+
+- [x] Keep rejected outputs, action captures and manual-body cleanup in their captured scope.
+- [x] Retire Fastly wakers outside mutable borrows and reuse only relinquished progress slots.
+- [x] Supervise the remaining Axum Cargo captures through the existing process owner.
+- [x] Pin native Cloudflare/Fastly invocations to the selected source and manifest.
+- [x] Make private Fastly response ABI ownership non-Copy and document transfer semantics.
+- [x] Align demo/template configuration errors and correct the macro field pattern.
+- [x] Qualify hook-order documentation and refresh review/migration navigation.
+- [x] Run failing-before regressions, the complete suite and exact CI lint variants.
+- [x] Prepare verified changes and separate thread dispositions. Pushed commit references,
+      replies and independent acceptance are tracked in the original PR review threads;
+      CREATOR does not resolve them.
+
+Failing-before runs reproduced captured output destruction under a foreign owner,
+manual-body bytes escaping reentrant closure, Fastly waker borrow panic and append-only
+slot growth, unsupervised Cargo cancellation, Cloudflare source retargeting, ignored
+Fastly environment selection, and a demo configuration failure returning 400. Focused
+green runs cover the corrected paths, including runtime-error/readiness rejection,
+unwind restoration, retained outcome/cursor reuse, direct-controller cancellation,
+separate Cargo diagnostics, CLI option arities, and real ABI cleanup under pinned Viceroy.
+Final local verification on 2026-11-16: `bash scripts/run_tests.sh < /dev/null`
+exited 0, including 1,181 core tests, 675 active harness tests (four opt-in ignored),
+all four adapter CI integration suites, generated consumers, demo tests and WASM
+checks. Exact CI formatting and strict Clippy variants, including CLI-only and
+provider/fixture target combinations, passed. Documentation lint, format and build
+also passed. These are local checks, not hosted qualification or review acceptance.
+
+Retain failed attempts rather than treating the green rerun as their explanation:
+one cancellation helper intermittently retained its live-group registration; its
+isolated and later complete harness runs passed, and the cause remains unconfirmed.
+A separate empty PID-file read was reproduced and repaired with atomic publication.
+One workerd shutdown exceeded the unchanged five-second TERM grace; fresh complete
+Cloudflare integration passed without changing shutdown code or tolerance. Neither
+unconfirmed failure is claimed repaired or waived. The generated-project gate also
+caught template formatting and test-binding lint errors, both corrected before the
+final complete run. Existing dependency future-incompatibility warnings remain
+unsuppressed. All manual hosted, parity and resource qualification gates stay open.
+
+Review roots 4592084333, 4592084348, 4592084356 and 4592084363 receive independent
+replies. The native-target finding and older body-only review receive itemized linked
+dispositions. Exact decoder/SDK pins, current opt-in response-header caps, advanced
+scaffold examples, atomic hard migration and historical evidence remain intentional;
+none is silently removed in response to a policy suggestion.
+
 - [x] Add regression tests for confirmed defects and observe their failures.
 - [x] Repair HTTP normalization, including TE+CL protocol rejection before caps
       and bounded empty-member handling. Preserve nomination/bodyless precedence.
