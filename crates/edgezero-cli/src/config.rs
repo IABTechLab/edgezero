@@ -1575,6 +1575,7 @@ fn load_validated_native_bindings(
             appconfig_agent: true,
             secrets_manager: true,
             dynamodb: true,
+            celld_kv: true,
         },
         limits,
         None,
@@ -2246,6 +2247,8 @@ mod tests {
     use std::borrow::Cow;
 
     use std::fs;
+    use std::io::ErrorKind;
+    use std::net::TcpListener;
     use tempfile::TempDir;
 
     struct FixedConfigKeyAdapter;
@@ -2979,6 +2982,80 @@ default = "remote"
             assert_eq!(
                 run_config_push_typed::<FixtureConfig>(&push).expect_err("invalid bindings"),
                 expected,
+            );
+            assert!(!dir.path().join(".edgezero").exists());
+        }
+    }
+
+    #[cfg(feature = "edgezero-adapter-axum")]
+    const CELLD_BINDINGS_FIXTURE: &str = r#"version = 1
+[kv.state]
+provider = "celld-kv"
+endpoint = "https://127.0.0.1:7780"
+store = "checkout-state"
+[kv.state.access]
+mode = "authenticated"
+token_env = "CELLD_TEST_TOKEN_MUST_NOT_BE_RESOLVED"
+"#;
+
+    #[cfg(feature = "edgezero-adapter-axum")]
+    const CELLD_MANIFEST_STORES: &str = "[stores.kv]\nids = [\"state\"]\ndefault = \"state\"\n";
+
+    #[cfg(feature = "edgezero-adapter-axum")]
+    #[test]
+    fn celld_bindings_only_validation_does_not_resolve_tokens_features_or_endpoints() {
+        let manifest_text = format!("{PUSH_MANIFEST}{CELLD_MANIFEST_STORES}");
+        let (dir, manifest, app_config) = setup_project(&manifest_text, VALID_APP_CONFIG);
+        fs::remove_file(app_config).expect("structural validation needs no local app config");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("probe sentinel");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking sentinel");
+        let endpoint = format!(
+            "https://{}",
+            listener.local_addr().expect("sentinel address")
+        );
+        let bindings = dir.path().join("celld.toml");
+        fs::write(
+            &bindings,
+            CELLD_BINDINGS_FIXTURE.replace("https://127.0.0.1:7780", &endpoint),
+        )
+        .expect("write celld bindings");
+        let mut args = args_for(&manifest);
+        args.adapter = Some("axum".to_owned());
+        args.store_bindings = Some(bindings);
+        args.target_features = vec!["a-feature-that-does-not-exist".to_owned()];
+        args.target_no_default_features = true;
+        run_config_validate(&args).expect("valid structure has unknown target availability");
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock));
+        assert!(!dir.path().join(".edgezero").exists());
+    }
+
+    #[cfg(feature = "edgezero-adapter-axum")]
+    #[test]
+    fn celld_validation_and_push_share_strict_structural_rejection() {
+        let manifest_text = format!("{PUSH_MANIFEST}{CELLD_MANIFEST_STORES}");
+        let (dir, manifest, app_config) = setup_project(&manifest_text, FIXTURE_APP_CONFIG);
+        fs::remove_file(app_config).expect("structural errors need no app TOML");
+        let bindings = dir.path().join("celld.toml");
+        let mut validate = args_for(&manifest);
+        validate.adapter = Some("axum".to_owned());
+        validate.store_bindings = Some(bindings.clone());
+        let mut push = push_args(&manifest, "axum");
+        push.store_bindings = Some(bindings.clone());
+        for input in [
+            CELLD_BINDINGS_FIXTURE.replace("[kv.state]", "[kv.undeclared]"),
+            CELLD_BINDINGS_FIXTURE.replace("celld-kv", "celld-secret"),
+            CELLD_BINDINGS_FIXTURE
+                .replace("[kv.state]", "[config.app_config]")
+                .replace("celld-kv", "celld-config"),
+            CELLD_BINDINGS_FIXTURE.replace("checkout-state", "bad/store"),
+        ] {
+            fs::write(&bindings, input).expect("invalid document");
+            let validation = run_config_validate(&validate).expect_err("invalid bindings");
+            assert_eq!(
+                run_config_push_typed::<FixtureConfig>(&push).expect_err("invalid push bindings"),
+                validation
             );
             assert!(!dir.path().join(".edgezero").exists());
         }

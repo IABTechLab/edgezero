@@ -1,0 +1,4 @@
+.celld/
+.dev.vars
+wrangler.jsonc
+wrangler.json

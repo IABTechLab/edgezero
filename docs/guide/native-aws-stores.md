@@ -37,8 +37,8 @@ edgezero config validate \
 ```
 
 The bindings path must be absolute. Target controls include
-`--target-all-features`, `--target-no-default-features`, and `--target <triple>`. If Cargo's
-resolved target feature graph is unavailable or ambiguous offline, the command reports
+`--target-all-features`, `--target-no-default-features`, and `--target <triple>`. The command
+normalizes these controls without resolving Cargo's target feature graph. It always reports
 structural validation only and says provider availability is unknown. This check does not
 load credentials, contact AWS or the Agent, prove resource access, or validate remote
 contents. Runtime startup validates the actual selected inputs again. Set
