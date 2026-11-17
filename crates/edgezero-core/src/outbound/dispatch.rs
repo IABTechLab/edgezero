@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::mem::take;
 use std::task::Poll;
 
@@ -115,6 +116,7 @@ pub(super) fn prepare(
         body_policy,
         budget,
         entered_at,
+        exchange_failure: OnceCell::new(),
         header_limiter: ResponseHeaderLimiter::new(
             request.max_response_header_bytes,
             request.max_response_header_count,

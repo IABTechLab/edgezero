@@ -2,6 +2,7 @@
 //! Synchronous filesystem calls here are NOT a production async KV backend.
 use std::{
     fs,
+    io::{ErrorKind, Write as _},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
@@ -38,7 +39,7 @@ impl ArtifactStore {
     }
 
     fn path(&self, key: &str) -> Result<PathBuf, KvError> {
-        if !key.starts_with("geo/p1/")
+        if !key.starts_with("geo/v1/")
             || Path::new(key)
                 .components()
                 .any(|p| !matches!(p, Component::Normal(_)))
@@ -87,29 +88,24 @@ impl KvStore for ArtifactStore {
 
     async fn put_bytes(&self, key: &str, value: Bytes) -> Result<(), KvError> {
         let path = self.path(key)?;
-        fs::create_dir_all(
-            path.parent()
-                .ok_or_else(|| KvError::Validation("missing parent".into()))?,
-        )
-        .map_err(|e| KvError::Internal(e.into()))?;
-        // A rerun may repeat the same immutable publication, never replace different bytes.
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                use std::io::Write;
-                file.write_all(&value)
-                    .map_err(|e| KvError::Internal(e.into()))?;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+        let parent = path
+            .parent()
+            .ok_or_else(|| KvError::Validation("missing parent".into()))?;
+        fs::create_dir_all(parent).map_err(|e| KvError::Internal(e.into()))?;
+        // Finish writing before exposing the immutable object at its final key.
+        let mut temp =
+            tempfile::NamedTempFile::new_in(parent).map_err(|e| KvError::Internal(e.into()))?;
+        temp.write_all(&value)
+            .map_err(|e| KvError::Internal(e.into()))?;
+        match temp.persist_noclobber(&path) {
+            Ok(_) => {}
+            Err(e) if e.error.kind() == ErrorKind::AlreadyExists => {
                 let old = fs::read(path).map_err(|e| KvError::Internal(e.into()))?;
                 if old != value {
                     return Err(KvError::Validation("immutable artifact differs".into()));
                 }
             }
-            Err(e) => return Err(KvError::Internal(e.into())),
+            Err(e) => return Err(KvError::Internal(e.error.into())),
         }
         self.writes.fetch_add(1, Ordering::Relaxed);
         self.write_bytes
@@ -125,5 +121,31 @@ impl KvStore for ArtifactStore {
     }
     async fn put_bytes_with_ttl(&self, _: &str, _: Bytes, _: Duration) -> Result<(), KvError> {
         Err(unsupported("put_bytes_with_ttl"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_keys_are_local_and_immutable() {
+        futures::executor::block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let store = ArtifactStore::new(root.path());
+            let key = "geo/v1/fixture/manifest";
+            assert!(store.get_bytes(key).await.unwrap().is_none());
+            assert!(store.get_bytes("geo/v1/../invalid").await.is_err());
+            let original = Bytes::from_static(b"same");
+            store.put_bytes(key, original.clone()).await.unwrap();
+            store.put_bytes(key, original.clone()).await.unwrap();
+            assert!(
+                store
+                    .put_bytes(key, Bytes::from_static(b"different"))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(store.get_bytes(key).await.unwrap(), Some(original));
+        });
     }
 }

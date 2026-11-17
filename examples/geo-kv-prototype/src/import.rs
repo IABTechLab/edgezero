@@ -1,12 +1,20 @@
 //! CSV import and independent, unmerged CIDR oracle for the format experiment.
 use std::{collections::HashMap, fs::File, io::Read, net::IpAddr, path::Path};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::index::{Location, Range, Source, address, hex};
+use crate::index::{Location, Range, Source, hex};
+
+// CSV family membership is literal. Request lookup normalizes mapped IPv4 separately.
+fn address(ip: IpAddr) -> (u8, u128) {
+    match ip {
+        IpAddr::V4(ip) => (4, u32::from(ip).into()),
+        IpAddr::V6(ip) => (6, u128::from(ip)),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct LocationRow {
@@ -51,6 +59,13 @@ pub struct Imported {
     pub locations: usize,
     pub raw4: Vec<SourceRange>,
     pub raw6: Vec<SourceRange>,
+}
+
+impl Imported {
+    pub fn oracle(&self, ip: IpAddr) -> Option<Location> {
+        let ip = ip.to_canonical();
+        oracle(if ip.is_ipv4() { &self.raw4 } else { &self.raw6 }, ip)
+    }
 }
 
 fn locations(reader: impl Read) -> Result<HashMap<u32, Option<Location>>> {
@@ -129,7 +144,7 @@ struct HashedReader {
 impl HashedReader {
     fn open(path: &Path) -> Result<Self> {
         Ok(Self {
-            file: File::open(path)?,
+            file: File::open(path).with_context(|| format!("open CSV {}", path.display()))?,
             hash: Sha256::new(),
         })
     }
@@ -147,10 +162,17 @@ impl Read for HashedReader {
 }
 
 pub fn load(directory: &Path) -> Result<Imported> {
-    let edition = if directory.join("GeoLite2-City-Locations-en.csv").is_file() {
-        "GeoLite2-City"
-    } else {
-        "GeoLite2-Country"
+    let city = directory
+        .join("GeoLite2-City-Locations-en.csv")
+        .try_exists()?;
+    let country = directory
+        .join("GeoLite2-Country-Locations-en.csv")
+        .try_exists()?;
+    let edition = match (city, country) {
+        (true, false) => "GeoLite2-City",
+        (false, true) => "GeoLite2-Country",
+        (false, false) => bail!("expected City or Country Locations-en CSV"),
+        (true, true) => bail!("City and Country Locations-en CSV files are both present"),
     };
     let files: Vec<String> = ["Locations-en.csv", "Blocks-IPv4.csv", "Blocks-IPv6.csv"]
         .iter()
@@ -193,13 +215,14 @@ pub fn project(raw: &[SourceRange]) -> (Vec<Range>, FamilyStats) {
             continue;
         };
         if !location.core_country_supported() {
-            let code = std::str::from_utf8(&location.0[..2]).expect("validated source country");
+            let codes = location.json();
+            let code = codes["country"].as_str().expect("validated source country");
             *stats
                 .unsupported_core_country_networks
                 .entry(code.into())
                 .or_default() += 1;
         }
-        if location.0[2] == 0 {
+        if location.json()["subdivision"].is_null() {
             stats.country_only += 1;
         }
         let start = row.start();

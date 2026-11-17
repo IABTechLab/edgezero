@@ -493,7 +493,14 @@ impl AxumServiceState {
                 .await;
             }
         };
-        let geo = self.geo.resolve(remote_addr, &parts.headers);
+        let geo = self
+            .geo
+            .resolve_request(
+                remote_addr,
+                &parts.headers,
+                parts.extensions.get::<NativeIngressMetadata>(),
+            )
+            .await;
         Ok(self
             .dispatch_prepared(prepared, parts, native_body, connection, guard, geo)
             .await)
