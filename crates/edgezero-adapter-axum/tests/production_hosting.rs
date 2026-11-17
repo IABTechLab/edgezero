@@ -2201,6 +2201,31 @@ mod tests {
     }
 
     #[test]
+    fn explicit_production_initializer_uses_owned_options_and_prepared_stores() {
+        let roots = Roots::new();
+        let addr = address();
+        let mut configured = command("explicit-initializer", &roots, addr);
+        configured
+            .env("EDGEZERO__ADAPTER__HOST", "IGNORED_HOST_SENTINEL")
+            .env("EDGEZERO__ADAPTER__PORT", "0")
+            .env("EDGEZERO__ADAPTER__CONFIG_DIR", "IGNORED_ROOT_SENTINEL")
+            .env("EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES", "0");
+        let mut server = Server::spawn(configured, addr);
+        server.ready();
+        assert!(
+            raw_request(
+                addr,
+                "GET /state HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .contains("configured-greeting")
+        );
+        server.signal("TERM");
+        assert!(server.wait().success());
+        assert_eq!(server.log().matches("INITIALIZED").count(), 1);
+        assert!(!server.log().contains("SENTINEL"));
+    }
+
+    #[test]
     fn embedding_does_not_install_process_signal_handlers() {
         let roots = Roots::new();
         let addr = address();

@@ -19,7 +19,7 @@ use bytes::Bytes;
 use edgezero_adapter_axum::context::AxumRequestContext;
 use edgezero_adapter_axum::dev_server::{
     AxumRunOptions, run_app, run_app_with_options_and_initializer, run_production_app,
-    run_production_app_with_initializer,
+    run_production_app_with_initializer, run_production_app_with_options_and_initializer,
 };
 use edgezero_adapter_axum::diagnostics::{
     IngressDisposition, NativeDiagnosticsHandle, NativeDiagnosticsSnapshot, NativeIngressMetadata,
@@ -814,6 +814,35 @@ async fn stop(State(state): State<Arc<StopState>>) -> Result<&'static str, EdgeE
     Ok("stopping")
 }
 
+fn run_explicit_initializer_fixture() -> anyhow::Result<()> {
+    let options = AxumRunOptions::new(env::var("FIXTURE_BIND")?.parse()?)?
+        .with_config_dir(env::var("FIXTURE_CONFIG_ROOT")?)?
+        .with_data_dir(env::var("FIXTURE_DATA_ROOT")?)?;
+    run_production_app_with_options_and_initializer::<FixtureApp, _>(options, |app, stores| {
+        Box::pin(async move {
+            let binding = stores
+                .config()
+                .and_then(|registry| registry.default_ref())
+                .ok_or_else(|| {
+                    EdgeError::service_unavailable("required fixture binding missing")
+                })?;
+            let config = AppConfig::<fixture::FixtureConfig>::from_binding(
+                binding,
+                None,
+                stores.secrets(),
+                app.config_extraction_limits(),
+                app.monotonic_clock(),
+            )
+            .await?;
+            app.insert_state(Arc::new(fixture::HostState {
+                greeting: config.greeting,
+            }));
+            println!("INITIALIZED");
+            Ok(())
+        })
+    })
+}
+
 #[expect(
     clippy::panic_in_result_fn,
     reason = "test-only executable asserts initializer ownership and call counts"
@@ -823,11 +852,11 @@ fn main() -> anyhow::Result<()> {
     if selected.starts_with("diagnostics") {
         return run_native_fixture(&selected);
     }
-    if matches!(selected.as_str(), "development" | "bare-dev") {
-        return run_app::<FixtureApp>();
-    }
-    if matches!(selected.as_str(), "framework" | "bare" | "hook-error") {
-        return run_production_app::<FixtureApp>();
+    match selected.as_str() {
+        "development" | "bare-dev" => return run_app::<FixtureApp>(),
+        "framework" | "bare" | "hook-error" => return run_production_app::<FixtureApp>(),
+        "explicit-initializer" => return run_explicit_initializer_fixture(),
+        _ => {}
     }
     if selected == "starting" {
         return run_production_app_with_initializer::<FixtureApp, _>(|_app, _stores| {
