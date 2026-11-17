@@ -109,6 +109,30 @@ For strict correctness, use a transactional data store.
 
 Key listing is paginated by design. This avoids buffering an unbounded number of keys in memory and matches the underlying provider APIs. The Spin adapter materialises `Store::get_keys()` and pages client-side; a `max_list_keys` cap (configurable via `EDGEZERO__STORES__KV__<ID>__MAX_LIST_KEYS`, default `1000`) guards against runaway lists and yields `KvError::LimitExceeded` when exceeded.
 
+## Declared Store Failures
+
+Fastly, Cloudflare and Spin install every declared logical KV ID without opening its
+provider binding. Named/default lookups remain present even if the provider store is
+missing; an undeclared ID remains absent. KV-free routes do not open these stores.
+
+The first operation opens the binding and retains its result only for that request.
+Concurrent Spin operations share initialization, but do not hold the initialization lock
+during the operation. Cancelling a pending open leaves initialization retryable. A new
+request always gets fresh initialization, so provider availability is never cached globally.
+
+Opening failures return `KvError::OpenFailed { reason: KvStoreOpenFailure }` from
+`edgezero_core::key_value_store`. `MissingBinding` and `InvalidConfiguration` become
+HTTP 500; `Unavailable` becomes 503. Reasons retain no provider payload or resolved
+binding name. Spin maps a disallowed label to invalid configuration, not missing data.
+Its TTL operation still returns `Unsupported` after a successful open, without writing.
+
+Warnings use `edgezero::boot` and contain only the compiled logical ID and fixed reason.
+Each ID warns at most once per sandbox; the deduplication set is bounded by compiled
+declarations and never evicts IDs or retains handles/errors. Explicit low-level eager
+opening remains fallible. Fastly/Cloudflare `require_kv()` still fails before dispatch;
+Axum's startup-time store opening is unchanged. This is not a KV allocation or deadline
+guarantee; config-store extraction has its own independent bounds.
+
 ## Operation Timing / Observability
 
 `KvHandle` emits debug-level timing logs for backend KV operations across all adapters. Logs include safe metadata such as operation name, elapsed milliseconds, success/error status, key or prefix length, hit/miss, byte counts, TTL seconds, and list page counts.

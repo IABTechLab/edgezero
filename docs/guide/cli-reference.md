@@ -405,7 +405,7 @@ flags and exits `2` with a pointer to the typed CLI — it cannot push (see
 
 **Per-adapter behaviour:** every adapter writes the **single blob envelope** as one `(key, envelope_json)` config-store entry — with one exception: on Fastly, an oversized envelope is split into multiple content-addressed chunk entries plus a root pointer, all under the one logical key. Fastly's documented per-entry cap is 8,000 **characters**; EdgeZero splits at 8,000 **bytes**, a deliberately conservative v1 threshold (bytes are always ≥ characters, so it never over-stores) that is fixed so previously stored values stay readable.
 
-Reclaiming the superseded chunks differs by target: a **`--local`** re-push prunes the prior generation as part of the same file rewrite, whereas a **cloud** push only ever writes — it never deletes. Cloud orphans are reclaimed by running [`config gc`](#config-gc) explicitly.
+Reclaiming the superseded chunks differs by target: a **`--local`** re-push prunes the prior generation as part of the same file rewrite, whereas a **cloud** push only ever writes — it never deletes. Cloud orphans are reclaimed by running [`config gc`](#edgezero-config-gc) explicitly.
 
 The store-resolution and shell mechanics below are unchanged; see [the blob migration guide](./blob-app-config-migration.md#per-adapter-mechanics) for the authoritative per-adapter blob details, including Fastly's oversized-envelope chunking.
 
@@ -585,7 +585,7 @@ edgezero provision --adapter <name> [--manifest <path>] [--dry-run]
 
 | `--adapter`  | Behaviour                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `axum`       | Local-only — prints one note per declared store id and exits 0 (KV in-memory; config in `.edgezero/local-config-<id>.json`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `axum`       | Local-only — prints one note per declared store id and exits 0 (KV persists in `.edgezero/kv-<slug>-<hash>.redb`; config in `.edgezero/local-config-<id>.json`; secrets read env vars).                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `cloudflare` | For each KV id + config id: shells out to `wrangler kv namespace create <platform-name>` (where `<platform-name>` resolves from `EDGEZERO__STORES__<KIND>__<ID>__NAME` or falls back to the logical `<id>`), parses the namespace id from stdout, appends `[[kv_namespaces]] binding = "<platform-name>", id = "<extracted>"` to `wrangler.toml` (idempotent on the binding name; preserves existing entries and comments). Secrets are runtime-managed via `wrangler secret put` — no-op.                                                                                                                                         |
 | `fastly`     | Creates the selected physical KV / Config / Secret Store. When physical and logical names match, it appends `[setup.<kind>_stores.<logical-id>]`. A different physical name requires an existing service because Fastly setup cannot express a physical-to-logical mapping; provision then leaves `fastly.toml` unchanged and prints the audited `service resource-link create` command with the physical resource id and logical alias. Provision writes no local-server data; `config push --local` writes local Config Store data. Managed deploy resolves physical stores and reconciles logical resource links automatically. |
 | `spin`       | Pure `spin.toml` editing — no shell-out (Spin KV stores are runtime-resolved). For each declared KV id AND each declared `[stores.config]` id (both KV-backed at runtime), appends the platform-resolved label to the resolved `[component.<component>].key_value_stores = [...]` array (idempotent on the label). Secret variables are still manual: `[stores.secrets]` ids get a `nothing to do here` status line and the operator declares `[variables].<name> = { secret = true }` + the per-component binding by hand.                                                                                                        |
@@ -670,19 +670,30 @@ not from a remote auth provider.
 
 The CLI respects these environment variables:
 
-| Variable            | Description                                                                                                                                                                                                                                                                                                                  |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `EDGEZERO_MANIFEST` | Path to manifest (default: `edgezero.toml`). Honoured by `build`, `deploy`, `serve`, and `auth` (which has no `--manifest` flag, so this is its only manifest selector); `provision` and the `config` subcommands take `--manifest` instead; `active-version`, `healthcheck`, and `rollback` load no manifest and ignore it. |
-| `FASTLY_API_TOKEN`  | Fastly API token. Required by the Fastly lifecycle commands (`deploy`, `active-version`, `rollback`, and a **staging** `healthcheck`); they fail closed without it.                                                                                                                                                          |
-| `FASTLY_SERVICE_ID` | Default Fastly service id, used when `--service-id` is not passed. Only `deploy` makes the flag optional; `active-version`, `healthcheck`, and `rollback` require it.                                                                                                                                                        |
+| Variable            | Description                                                                                                                                                                                                                                                                                     |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `EDGEZERO_MANIFEST` | Explicit manifest path. Without it, `build`, `deploy`, and `serve` use the discovery rules below; `auth` has a separate discovery path and no `--manifest` flag. `provision` and the `config` subcommands take `--manifest` instead; `active-version`, `healthcheck`, and `rollback` ignore it. |
+| `FASTLY_API_TOKEN`  | Fastly API token. Required by the Fastly lifecycle commands (`deploy`, `active-version`, `rollback`, and a **staging** `healthcheck`); they fail closed without it.                                                                                                                             |
+| `FASTLY_SERVICE_ID` | Default Fastly service id, used when `--service-id` is not passed. Only `deploy` makes the flag optional; `active-version`, `healthcheck`, and `rollback` require it.                                                                                                                           |
 
 ## Working Directory
 
-Manifest-driven commands expect to run from the project root where `edgezero.toml` is located. If
-the file is missing, `build`, `deploy`, `serve`, and `auth` fall back to built-in adapters (when
-compiled in) instead of manifest-driven commands; `provision` and the `config` subcommands error
-instead. `active-version`, `healthcheck`, and `rollback` load no manifest at all and can run from
-any directory.
+For `build`, `deploy`, and `serve`, an explicit `EDGEZERO_MANIFEST` selects the contract.
+Without it, discovery checks ancestors and then application candidates under the workspace;
+a unique sibling application can therefore be selected. Use an explicit manifest when working
+in a multi-application workspace rather than assuming a local handwritten platform manifest
+wins. The selected contract and execution target stay paired, and ambiguous or escaping
+selections fail before launch. Genuine manifestless targets can use built-in adapters.
+`auth` retains its separate discovery path. `provision` and the `config` subcommands require
+their own manifest selection. `active-version`, `healthcheck`, and `rollback` load no manifest
+and can run from any directory.
+
+Spin's native serve/deploy invocation receives the exact selected file through `--from`.
+Fastly serve supports `fastly.toml` and `fastly.<environment>.toml`, selecting the latter with
+native `--env`; other filenames fail before launch instead of silently using a sibling file.
+Pinned invocations reject native source/directory/environment overrides and combined short
+options that could hide such an override. Pass other short options separately or use their
+long spellings. Declared application shell commands retain their selected manifest root.
 
 ## Adapter Discovery
 

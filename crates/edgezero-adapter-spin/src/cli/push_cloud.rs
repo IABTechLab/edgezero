@@ -249,7 +249,7 @@ pub(crate) fn write_batch(
 mod tests {
     use super::*;
     #[cfg(unix)]
-    use edgezero_core::test_env::PathPrepend;
+    use edgezero_core::test_env::{PathPrepend, env_lock};
 
     #[cfg(unix)]
     use std::fs;
@@ -259,8 +259,6 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     #[cfg(unix)]
     use std::path::Path as StdPath;
-    #[cfg(unix)]
-    use std::sync::{Mutex, OnceLock};
     #[cfg(unix)]
     use tempfile::{TempDir, tempdir};
 
@@ -470,18 +468,10 @@ exit {exit}
         dir
     }
 
-    /// A process-wide mutex serialising `PATH`-mutating tests in
-    /// this module so two parallel tests don't race on the env.
-    #[cfg(unix)]
-    fn path_mutation_guard() -> &'static Mutex<()> {
-        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-        GUARD.get_or_init(|| Mutex::new(()))
-    }
-
     #[cfg(unix)]
     #[test]
     fn write_batch_assembles_app_label_keyvalue_argv_against_a_mock_spin() {
-        let _lock = path_mutation_guard().lock().expect("guard");
+        let _lock = env_lock().lock().expect("guard");
         let out_dir = tempdir().expect("out dir");
         let argv_log = out_dir.path().join("argv.txt");
         let fake_dir = fake_spin(&argv_log, None, 0);
@@ -515,7 +505,7 @@ exit {exit}
     #[cfg(unix)]
     #[test]
     fn write_batch_translates_not_logged_in_stderr_to_actionable_error() {
-        let _lock = path_mutation_guard().lock().expect("guard");
+        let _lock = env_lock().lock().expect("guard");
         let out_dir = tempdir().expect("out dir");
         let argv_log = out_dir.path().join("argv.txt");
         let fake_dir = fake_spin(&argv_log, Some("error: not logged in to Fermyon Cloud"), 1);
@@ -532,7 +522,7 @@ exit {exit}
     #[cfg(unix)]
     #[test]
     fn write_batch_translates_unlinked_stderr_to_actionable_link_hint() {
-        let _lock = path_mutation_guard().lock().expect("guard");
+        let _lock = env_lock().lock().expect("guard");
         let out_dir = tempdir().expect("out dir");
         let argv_log = out_dir.path().join("argv.txt");
         let fake_dir = fake_spin(
@@ -582,7 +572,7 @@ exit {exit}
     #[cfg(unix)]
     #[test]
     fn write_batch_chunks_large_batch_into_multiple_invocations_against_mock_spin() {
-        let _lock = path_mutation_guard().lock().expect("guard");
+        let _lock = env_lock().lock().expect("guard");
         let out_dir = tempdir().expect("out dir");
         let argv_log = out_dir.path().join("argv.txt");
         let fake_dir = fake_spin(&argv_log, None, 0);
@@ -619,7 +609,7 @@ exit {exit}
         // chunk 3+ never had `set` attempted. Mirror the Fastly
         // diagnostic shape: name committed / failed / not-attempted
         // so the operator can resume from a known boundary.
-        let _lock = path_mutation_guard().lock().expect("guard");
+        let _lock = env_lock().lock().expect("guard");
         let out_dir = tempdir().expect("out dir");
         let argv_log = out_dir.path().join("argv.txt");
         // Fail on the 2nd invocation: chunk 1 commits, chunk 2 errors,

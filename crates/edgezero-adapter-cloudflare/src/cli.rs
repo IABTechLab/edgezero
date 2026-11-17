@@ -10,13 +10,14 @@ use edgezero_adapter::cli_support::{
     find_manifest_upwards, find_workspace_root, path_distance, read_package_name, run_native_cli,
 };
 use edgezero_adapter::registry::{
-    Adapter, AdapterAction, AdapterPushContext, ProvisionStores, ReadConfigEntry, ResolvedStoreId,
-    register_adapter,
+    Adapter, AdapterAction, AdapterExecutionTarget, AdapterPushContext, ProvisionStores,
+    ReadConfigEntry, ResolvedStoreId, register_adapter,
 };
 use edgezero_adapter::scaffold::{
     AdapterBlueprint, AdapterFileSpec, CommandTemplates, DependencySpec, LoggingDefaults,
     ManifestSpec, ReadmeInfo, TemplateRegistration, register_adapter_blueprint,
 };
+use edgezero_core::{Capability, CapabilitySupport, PlatformMetadata};
 use walkdir::WalkDir;
 
 static CLOUDFLARE_ADAPTER: CloudflareCliAdapter = CloudflareCliAdapter;
@@ -134,6 +135,39 @@ struct CloudflareCliAdapter;
     reason = "cloudflare has no validate_app_config_keys / validate_adapter_manifest / validate_typed_secrets requirements; those three trait defaults are intentionally inherited. `read_config_entry` and `read_config_entry_local` are both overridden below (wrangler kv key get --remote / --local). `single_store_kinds` IS overridden below (returns `&[\"secrets\"]`)."
 )]
 impl Adapter for CloudflareCliAdapter {
+    fn capability(&self, capability: Capability) -> CapabilitySupport {
+        match capability {
+            Capability::BufferedResponseContentLength
+            | Capability::ConfigReadDeadlines
+            | Capability::InboundReadDeadlines
+            | Capability::IngressAdmissionAbort
+            | Capability::OutboundAuthorityOverride
+            | Capability::OutboundBatchCancellation
+            | Capability::OutboundConnectTimeout
+            | Capability::OutboundHeaderFidelity
+            | Capability::OutboundDeadlines
+            | Capability::OutboundFailureDiagnostics
+            | Capability::ResponseEgressAbort
+            | Capability::ResponseEgressBackpressure
+            | Capability::ResponseEgressCompletion
+            | Capability::ResponseWriteDeadlines
+            | Capability::StreamedUploadDeadlines => CapabilitySupport::BestEffort,
+            Capability::IngressAdmission
+            | Capability::LazyStreamedResponsePassthrough
+            | Capability::OutboundBatchCompletionOrder
+            | Capability::OutboundBatchSlotIsolation
+            | Capability::OutboundCacheBypass
+            | Capability::OutboundFlexiblePhaseBudget
+            | Capability::OutboundHttp
+            | Capability::OutboundRedirectFollowing => CapabilitySupport::Native,
+            Capability::ConfigReadAllocationBounds
+            | Capability::OutboundCompleteResourceAccounting
+            | Capability::RawIngressFramingValidation
+            | Capability::RawIngressHeadLimits
+            | _ => CapabilitySupport::Unsupported,
+        }
+    }
+
     fn execute(&self, action: AdapterAction, args: &[String]) -> Result<(), String> {
         match action {
             // `wrangler` is the native sign-in surface for Cloudflare
@@ -167,6 +201,30 @@ impl Adapter for CloudflareCliAdapter {
         }
     }
 
+    fn execute_target(
+        &self,
+        action: AdapterAction,
+        target: &AdapterExecutionTarget,
+        args: &[String],
+    ) -> Result<(), String> {
+        let manifest = target_manifest(target)?;
+        match action {
+            AdapterAction::Build => build_from_manifest(&manifest, args).map(|_artifact| ()),
+            AdapterAction::Deploy => deploy_from_manifest(&manifest, args),
+            AdapterAction::Serve => serve_from_manifest(&manifest, args),
+            AdapterAction::AuthLogin
+            | AdapterAction::AuthLogout
+            | AdapterAction::AuthStatus
+            | AdapterAction::DeployStaging
+            | AdapterAction::EmitVersion
+            | AdapterAction::Healthcheck
+            | AdapterAction::Rollback
+            | _ => Err(format!(
+                "cloudflare adapter does not support pinned target action {action:?}"
+            )),
+        }
+    }
+
     fn merged_id_kinds(&self) -> &'static [&'static str] {
         // Both KV and Config back to Worker KV namespaces via the
         // same `[[kv_namespaces]] binding = <platform-name>`
@@ -187,6 +245,10 @@ impl Adapter for CloudflareCliAdapter {
 
     fn name(&self) -> &'static str {
         "cloudflare"
+    }
+
+    fn platform_metadata(&self) -> PlatformMetadata {
+        crate::CLOUDFLARE_PLATFORM
     }
 
     fn provision(
@@ -929,6 +991,10 @@ fn read_wrangler_kv_key(
 pub fn build(extra_args: &[String]) -> Result<PathBuf, String> {
     let manifest =
         find_wrangler_manifest(env::current_dir().map_err(|err| err.to_string())?.as_path())?;
+    build_from_manifest(&manifest, extra_args)
+}
+
+fn build_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<PathBuf, String> {
     let manifest_dir = manifest
         .parent()
         .ok_or_else(|| "wrangler manifest has no parent directory".to_owned())?;
@@ -971,6 +1037,11 @@ pub fn build(extra_args: &[String]) -> Result<PathBuf, String> {
 pub fn deploy(extra_args: &[String]) -> Result<(), String> {
     let manifest =
         find_wrangler_manifest(env::current_dir().map_err(|err| err.to_string())?.as_path())?;
+    deploy_from_manifest(&manifest, extra_args)
+}
+
+fn deploy_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), String> {
+    validate_pinned_wrangler_args(AdapterAction::Deploy, extra_args)?;
     let manifest_dir = manifest
         .parent()
         .ok_or_else(|| "wrangler manifest has no parent directory".to_owned())?;
@@ -1112,6 +1183,11 @@ fn register_ctor() {
 pub fn serve(extra_args: &[String]) -> Result<(), String> {
     let manifest =
         find_wrangler_manifest(env::current_dir().map_err(|err| err.to_string())?.as_path())?;
+    serve_from_manifest(&manifest, extra_args)
+}
+
+fn serve_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), String> {
+    validate_pinned_wrangler_args(AdapterAction::Serve, extra_args)?;
     let manifest_dir = manifest
         .parent()
         .ok_or_else(|| "wrangler manifest has no parent directory".to_owned())?;
@@ -1132,15 +1208,276 @@ pub fn serve(extra_args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+// Parse values as Wrangler does, so a value is never mistaken for a selector (or vice versa).
+// Unknown options fail closed instead of guessing how many positional values they consume.
+fn validate_pinned_wrangler_args(action: AdapterAction, args: &[String]) -> Result<(), String> {
+    let invalid = || {
+        "pinned Cloudflare native arguments must retain the selected source, config and destination"
+            .to_owned()
+    };
+    let mut remaining = args.iter().peekable();
+    while let Some(argument) = remaining.next() {
+        let Some(long) = argument.strip_prefix("--") else {
+            let short = argument.strip_prefix('-').ok_or_else(invalid)?;
+            if short.is_empty()
+                || !short.bytes().all(|byte| {
+                    matches!(byte, b'h' | b'v')
+                        || (action == AdapterAction::Serve && matches!(byte, b'r' | b'l'))
+                })
+            {
+                return Err(invalid());
+            }
+            continue;
+        };
+        let (name, inline) = long
+            .split_once('=')
+            .map_or((long, None), |(name, value)| (name, Some(value)));
+        let boolean = name.strip_prefix("no-").unwrap_or(name);
+        if pinned_wrangler_boolean(action, boolean) {
+            if inline.is_some_and(|value| !matches!(value, "true" | "false")) {
+                return Err(invalid());
+            }
+            if !name.starts_with("no-")
+                && inline.is_none()
+                && remaining
+                    .peek()
+                    .is_some_and(|value| matches!(value.as_str(), "true" | "false"))
+            {
+                remaining.next();
+            }
+            continue;
+        }
+        if name == "metafile" && action == AdapterAction::Deploy {
+            if inline.is_none()
+                && remaining
+                    .peek()
+                    .is_some_and(|value| !value.starts_with('-'))
+            {
+                remaining.next();
+            }
+            continue;
+        }
+        let array = matches!(
+            name,
+            "define" | "alias" | "var" | "compatibility-flags" | "compatibility-flag"
+        );
+        let scalar = matches!(
+            name,
+            "outdir"
+                | "outfile"
+                | "compatibility-date"
+                | "jsx-factory"
+                | "jsx-fragment"
+                | "tsconfig"
+                | "log-level"
+        ) || (action == AdapterAction::Deploy
+            && matches!(
+                name,
+                "message" | "tag" | "containers-rollout" | "old-asset-ttl" | "secrets-file"
+            ))
+            || (action == AdapterAction::Serve
+                && matches!(
+                    name,
+                    "ip" | "port"
+                        | "inspector-port"
+                        | "inspector-ip"
+                        | "tunnel-name"
+                        | "local-protocol"
+                        | "https-key-path"
+                        | "https-cert-path"
+                        | "upstream-protocol"
+                        | "host"
+                        | "local-upstream"
+                        | "persist-to"
+                        | "log-file"
+                ));
+        if !scalar && !array {
+            return Err(invalid());
+        }
+        if inline.is_none() {
+            let value = remaining.next().ok_or_else(invalid)?;
+            if value.is_empty() || value.starts_with('-') {
+                return Err(invalid());
+            }
+        }
+        if array {
+            while remaining
+                .peek()
+                .is_some_and(|value| !value.starts_with('-'))
+            {
+                remaining.next();
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pinned_wrangler_boolean(action: AdapterAction, name: &str) -> bool {
+    matches!(
+        name,
+        "help" | "version" | "bundle" | "minify" | "latest" | "legacy-env"
+    ) || (action == AdapterAction::Serve
+        && matches!(
+            name,
+            "remote"
+                | "local"
+                | "test-scheduled"
+                | "live-reload"
+                | "show-interactive-dev-session"
+                | "types"
+                | "tunnel"
+        ))
+        || (action == AdapterAction::Deploy
+            && matches!(
+                name,
+                "dry-run"
+                    | "keep-vars"
+                    | "upload-source-maps"
+                    | "strict"
+                    | "experimental-public-invocation"
+                    | "logpush"
+                    | "autoconfig"
+            ))
+}
+
+fn target_manifest(target: &AdapterExecutionTarget) -> Result<PathBuf, String> {
+    let manifest = target.platform_manifest().map_or_else(
+        || target.app_root().join("wrangler.toml"),
+        Path::to_path_buf,
+    );
+    if !manifest.is_file() {
+        return Err(format!(
+            "pinned Cloudflare manifest {} is not a regular file",
+            manifest.display()
+        ));
+    }
+    Ok(manifest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[cfg(unix)]
     use edgezero_core::test_env::PathPrepend;
-
     #[cfg(unix)]
     use std::sync::Mutex;
     use tempfile::tempdir;
+
+    const TEST_KV_ID: &str = "sessions";
+    const TEST_KV_ID_ALT: &str = "cache";
+    const TEST_CONFIG_ID: &str = "app_config";
+    const TEST_SECRET_ID: &str = "default";
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_native_commands_reject_target_overrides_before_launch() {
+        let _lock = path_mutation_guard().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("wrangler.review.jsonc");
+        fs::write(&config, serde_json::json!({}).to_string()).unwrap();
+        let log = dir.path().join("argv");
+        let fake = fake_wrangler_argv_log(&log);
+        let _path = PathPrepend::new(fake.path());
+        let target =
+            AdapterExecutionTarget::new(dir.path().to_path_buf(), None, Some(config.clone()));
+        for action in [AdapterAction::Deploy, AdapterAction::Serve] {
+            for raw_args in [
+                vec!["other.js"],
+                vec!["--dry-run", "other.js"],
+                vec!["--", "other.js"],
+                vec!["--script=other.js"],
+                vec!["--config", "other.jsonc"],
+                vec!["-cother.jsonc"],
+                vec!["--cwd=elsewhere"],
+                vec!["--env", "other"],
+                vec!["-eother"],
+                vec!["--name=other"],
+                vec!["--assets=elsewhere"],
+                vec!["--unknown=value"],
+                vec!["--no-minify", "true"],
+                vec!["--no-bundle", "false"],
+                vec!["--config=first", "--config=second"],
+                vec!["-hcother.jsonc"],
+            ] {
+                let args = raw_args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                assert!(
+                    CloudflareCliAdapter
+                        .execute_target(action, &target, &args)
+                        .is_err(),
+                    "{action:?}: {args:?}"
+                );
+                assert!(!log.exists(), "rejected argv cannot launch Wrangler");
+            }
+            let args = [
+                "--define",
+                "MODE:review",
+                "--alias",
+                "source:replacement",
+                "--no-bundle",
+            ]
+            .map(str::to_owned);
+            CloudflareCliAdapter
+                .execute_target(action, &target, &args)
+                .unwrap();
+            let recorded = fs::read_to_string(&log).unwrap();
+            let mut expected = vec![
+                if action == AdapterAction::Deploy {
+                    "deploy"
+                } else {
+                    "dev"
+                },
+                "--config",
+                config.to_str().unwrap(),
+            ];
+            expected.extend(args.iter().map(String::as_str));
+            assert_eq!(recorded.lines().collect::<Vec<_>>(), expected);
+            fs::remove_file(&log).unwrap();
+        }
+    }
+
+    #[test]
+    fn pinned_wrangler_guard_preserves_value_arities_and_ordinary_aliases() {
+        for (action, raw_args) in [
+            (
+                AdapterAction::Deploy,
+                vec![
+                    "--var",
+                    "A:1",
+                    "B:2",
+                    "--metafile",
+                    "--dry-run",
+                    "--outfile",
+                    "output.js",
+                    "--logpush=false",
+                ],
+            ),
+            (
+                AdapterAction::Deploy,
+                vec![
+                    "--metafile=output.json",
+                    "--compatibility-flag",
+                    "flag-one",
+                    "flag-two",
+                ],
+            ),
+            (
+                AdapterAction::Serve,
+                vec![
+                    "-lh",
+                    "--inspector-ip",
+                    "127.0.0.1",
+                    "--minify",
+                    "false",
+                    "--alias",
+                    "original:substitute",
+                ],
+            ),
+        ] {
+            let args = raw_args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            validate_pinned_wrangler_args(action, &args).unwrap();
+        }
+    }
 
     // Shared fixture names. Pinning these as consts (instead of
     // inline `"sessions"` / `"app_config"` per call site) keeps the
@@ -1149,10 +1486,186 @@ mod tests {
     // the same const. Also names the intent: these are the LOGICAL
     // store ids the cloudflare adapter operates on, not arbitrary
     // strings.
-    const TEST_KV_ID: &str = "sessions";
-    const TEST_KV_ID_ALT: &str = "cache";
-    const TEST_CONFIG_ID: &str = "app_config";
-    const TEST_SECRET_ID: &str = "default";
+    #[test]
+    fn bounded_config_scaffolds_require_gc_cleanup_support() {
+        for source in [
+            include_str!("templates/wrangler.toml.hbs"),
+            include_str!(
+                "../../../examples/app-demo/crates/app-demo-adapter-cloudflare/wrangler.toml"
+            ),
+            include_str!(
+                "../../../crates/edgezero-test-harness/fixtures/reusable-app/crates/fixture-cloudflare/wrangler.toml"
+            ),
+        ] {
+            let document = source
+                .parse::<toml_edit::DocumentMut>()
+                .expect("Wrangler TOML");
+            let flags = document
+                .get("compatibility_flags")
+                .and_then(toml_edit::Item::as_array)
+                .expect("explicit compatibility flags");
+            let date = document
+                .get("compatibility_date")
+                .and_then(toml_edit::Item::as_str)
+                .expect("explicit compatibility date");
+            assert_eq!(
+                flags
+                    .iter()
+                    .any(|value| value.as_str() == Some("enable_weak_ref")),
+                date < "2025-05-05",
+                "weak references are enabled by default from 2025-05-05"
+            );
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the complete capability data table together"
+    )]
+    fn adapter_capability_matrix_matches_contracts() {
+        for (capability, support) in [
+            (
+                Capability::ConfigReadAllocationBounds,
+                CapabilitySupport::Unsupported,
+            ),
+            (
+                Capability::ConfigReadDeadlines,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::InboundReadDeadlines,
+                CapabilitySupport::BestEffort,
+            ),
+            (Capability::IngressAdmission, CapabilitySupport::Native),
+            (
+                Capability::IngressAdmissionAbort,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::RawIngressFramingValidation,
+                CapabilitySupport::Unsupported,
+            ),
+            (
+                Capability::RawIngressHeadLimits,
+                CapabilitySupport::Unsupported,
+            ),
+            (
+                Capability::ResponseEgressAbort,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::ResponseEgressBackpressure,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::ResponseEgressCompletion,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::ResponseWriteDeadlines,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::BufferedResponseContentLength,
+                CapabilitySupport::BestEffort,
+            ),
+            (Capability::OutboundHttp, CapabilitySupport::Native),
+            (
+                Capability::OutboundRedirectFollowing,
+                CapabilitySupport::Native,
+            ),
+            (
+                Capability::OutboundCompleteResourceAccounting,
+                CapabilitySupport::Unsupported,
+            ),
+            (
+                Capability::OutboundHeaderFidelity,
+                CapabilitySupport::BestEffort,
+            ),
+            (Capability::OutboundDeadlines, CapabilitySupport::BestEffort),
+            (
+                Capability::OutboundConnectTimeout,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::OutboundFailureDiagnostics,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::OutboundFlexiblePhaseBudget,
+                CapabilitySupport::Native,
+            ),
+            (
+                Capability::OutboundAuthorityOverride,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::OutboundBatchCancellation,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::OutboundBatchCompletionOrder,
+                CapabilitySupport::Native,
+            ),
+            (
+                Capability::OutboundBatchSlotIsolation,
+                CapabilitySupport::Native,
+            ),
+            (Capability::OutboundCacheBypass, CapabilitySupport::Native),
+            (
+                Capability::OutboundImageOptimizer,
+                CapabilitySupport::Unsupported,
+            ),
+            (
+                Capability::StreamedUploadDeadlines,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::LazyStreamedResponsePassthrough,
+                CapabilitySupport::Native,
+            ),
+        ] {
+            assert_eq!(
+                CLOUDFLARE_ADAPTER.capability(capability),
+                support,
+                "{capability:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adapter_platform_metadata_matches_runtime_metadata() {
+        let metadata = CLOUDFLARE_ADAPTER.platform_metadata();
+        let source = edgezero_core::PlatformResourceSource::PlatformLimit {
+            provider: "Cloudflare Workers",
+        };
+
+        assert_eq!(metadata, crate::CLOUDFLARE_PLATFORM);
+        assert_eq!(
+            metadata.memory_ceiling(),
+            edgezero_core::PlatformFact::known(
+                edgezero_core::MemoryCeiling::new(
+                    128_000_000,
+                    edgezero_core::MemoryCeilingScope::PerInstance,
+                    None,
+                ),
+                source,
+            )
+        );
+        assert_eq!(
+            metadata.inbound_request_population_bound(),
+            edgezero_core::PlatformFact::unknown(
+                edgezero_core::PlatformUnknownReason::ProviderUnpublished
+            )
+        );
+        assert_eq!(
+            metadata.host_ingress_memory_accounting(),
+            edgezero_core::PlatformFact::unknown(
+                edgezero_core::PlatformUnknownReason::ProviderUnpublished
+            )
+        );
+    }
 
     // ---------- extract_namespace_id ----------
 

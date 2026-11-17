@@ -1,0 +1,46 @@
+[app]
+name = "logging-config-fixture"
+
+[logging.Axum]
+level = "trace"
+endpoint = "axum_logs"
+echo_stdout = true
+
+[logging.Cloudflare]
+level = "warn"
+endpoint = "shadowed_cloudflare_logs"
+echo_stdout = true
+
+[adapters.cloudflare.logging]
+level = "debug"
+
+[logging.FASTLY]
+level = "error"
+endpoint = "shadowed:invalid"
+echo_stdout = true
+
+[adapters.Fastly.logging]
+level = "off"
+endpoint = "fastly_logs"
+echo_stdout = false
+
+[logging.Spin]
+level = "warn"
+endpoint = "spin_logs"
+echo_stdout = false
+
+[adapters.spin.logging]
+
+[logging.Custom]
+level = "info"
+endpoint = "custom_logs"
+
+[logging.partial]
+echo_stdout = false
+
+[logging.empty]
+
+[logging.error_only]
+level = "error"
+
+[adapters.no_logging]
