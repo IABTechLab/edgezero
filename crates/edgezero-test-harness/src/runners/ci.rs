@@ -784,6 +784,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("events.jsonl");
         let record = format!("{}\n", json!({"event":"wire-case", "status":"pass"}));
+        // The current complete Fastly wire capture contains 518 records.
         fs::write(&file, record.repeat(518)).unwrap();
         assert_eq!(
             read_events(&file, WIRE_ARTIFACT_RECORDS).unwrap().len(),
@@ -822,6 +823,9 @@ mod tests {
         assert!(read_events(&file, CI_ARTIFACT_RECORDS).is_err());
         fs::write(&file, vec![b' '; ARTIFACT_BYTES as usize + 1]).unwrap();
         assert!(read_events(&file, CI_ARTIFACT_RECORDS).is_err());
-        assert!(read_events(&file, WIRE_ARTIFACT_RECORDS).is_err());
+        let error = read_events(&file, WIRE_ARTIFACT_RECORDS)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing or oversized CI artifact"));
     }
 }
