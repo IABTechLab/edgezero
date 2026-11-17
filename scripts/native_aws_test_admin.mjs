@@ -55,6 +55,9 @@ function client(endpoint, service) {
   });
 }
 
+// Reuse the same strictly loopback-only emulator client in other local proofs.
+export { client as fixtureClient };
+
 async function seed(dynamo, secrets) {
   const keys = [
     { AttributeName: "pk", KeyType: "HASH" },

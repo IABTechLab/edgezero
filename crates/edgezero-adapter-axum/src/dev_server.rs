@@ -28,7 +28,8 @@ use crate::diagnostics::{NativeDiagnosticsHandle, NativeSession};
 use crate::outbound_executor::{AxumOutboundExecutor, AxumOutboundExecutorHandle};
 pub use crate::run_options::AxumRunOptions;
 use crate::run_options::{
-    JsonBodyLimit, config_path, failure, native_limit_setting, native_settings, shutdown_grace,
+    JsonBodyLimit, config_path, failure, geo_setting, native_limit_setting, native_settings,
+    shutdown_grace,
 };
 use crate::trusted_proxy::TrustedProxyPolicy;
 use anyhow::Context as _;
@@ -51,6 +52,7 @@ use edgezero_core::config_store::{ConfigStoreError, ConfigStoreHandle, ConfigSto
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::logging::{BOOT_LOG_LEVEL, BOOT_LOG_TARGET, resolve_logging_level};
+use edgezero_core::manifest::BakedManifest;
 #[cfg(test)]
 use edgezero_core::router::RouterService;
 use edgezero_core::secret_store::SecretHandle;
@@ -66,7 +68,7 @@ use tokio::time::{Instant as NativeInstant, sleep_until};
 use crate::config_store::AxumConfigStore;
 use crate::config_store_limits::ConfigStoreLimits;
 use crate::connection::{ConnectionExit, serve_http1_with_shutdown};
-use crate::geo::NativeGeo;
+use crate::geo::{self, NativeGeo};
 use crate::ingress_config::AxumIngressConfig;
 use crate::key_value_store::PersistentKvStore;
 use crate::native_stores::{self, NativeSourcePlan, NativeStoreOverrides, NativeStoreSource};
@@ -1059,7 +1061,10 @@ where
     A: Hooks,
     F: FnOnce() -> anyhow::Result<()>,
 {
-    let (env, json_body_limit, native) = capture_dev_environment(vars_os())?;
+    let (env, json_body_limit, mut native) = capture_dev_environment(vars_os())?;
+    // The dev server ignores the manifest table: its deployment-only values are
+    // usually absent locally. Settings alone opt a dev run into geo.
+    let geo = geo::resolve(None, &env, &BakedManifest::Absent)?;
     if !A::owns_logging() {
         app_logger(&env)
             .init()
@@ -1094,6 +1099,8 @@ where
                 config: build_config_registry(metadata.config, &env, config_limits)?,
                 secrets: build_secret_registry(metadata.secrets, &env),
             };
+            let max_object_bytes = geo.max_object_bytes(None)?;
+            native.geo = geo.prepare(stores.kv(), max_object_bytes).await?;
             prepare_transport(app, stores, json_body_limit, native)
         },
     )
@@ -1120,7 +1127,7 @@ where
                     ["adapter", "trusted_proxy_cidrs"] => Some("TRUSTED_PROXY_CIDRS"),
                     ["adapter", "forwarding_header_family"] => Some("FORWARDING_HEADER_FAMILY"),
                     ["logging", "request_records"] => Some("LOGGING__REQUEST_RECORDS"),
-                    _ => None,
+                    _ => geo_setting(&path),
                 }
             })
         });
@@ -1319,12 +1326,12 @@ where
         &'startup PreparedStores,
     ) -> LocalStartupFuture<'startup>,
 {
-    let geo = options.native_geo()?;
-    let native = NativeHosting {
+    let geo = options.native_geo(&A::manifest())?;
+    let mut native = NativeHosting {
         diagnostics: options.diagnostics(),
         policy: options.trusted_proxy_policy(),
         request_records: options.request_records(),
-        geo,
+        geo: NativeGeo::default(),
     };
     run_local(
         ListenerSource::Bind(options.addr()),
@@ -1335,6 +1342,7 @@ where
         async move {
             let metadata = A::stores();
             let sources = NativeSourcePlan::validate(metadata, &options, overrides)?;
+            let max_object_bytes = geo.max_object_bytes(Some(&sources))?;
             init_logging::<A>(options.logging_level())?;
             let mut app = App::build::<A>(crate::AXUM_PLATFORM)
                 .map_err(|_error| anyhow::anyhow!("application configuration failed"))?;
@@ -1345,6 +1353,7 @@ where
                 app.record_store_requirements(),
             )
             .await?;
+            native.geo = geo.prepare(stores.kv(), max_object_bytes).await?;
             let transport = AxumOutboundClient::try_transport()
                 .map_err(|_error| failure("transport", "HTTP client", "initialization failed"))?;
             initialize(&mut app, &stores).await.map_err(|error| {
