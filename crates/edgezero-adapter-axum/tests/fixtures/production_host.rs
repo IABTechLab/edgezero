@@ -38,6 +38,7 @@ use edgezero_core::ingress::{
     AdmissionDecision, CheckedEffectiveHost, CheckedHostSource, IngressGrant,
 };
 use edgezero_core::key_value_store::KvHandle;
+use edgezero_core::manifest::{BakedManifest, Manifest};
 use edgezero_core::middleware::{Middleware, Next};
 use edgezero_core::params::PathParams;
 use edgezero_core::probe::{self, LifecyclePhase, LifecycleReader};
@@ -293,6 +294,17 @@ impl Hooks for FixtureApp {
             app.set_monotonic_clock(MonotonicClock::new(move || frozen));
         }
         Ok(())
+    }
+
+    /// `geo-manifest` bakes `CloudFront` geo with the credential header; the ALB
+    /// networks come from `EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS`.
+    fn manifest() -> BakedManifest {
+        if mode().starts_with("geo-manifest") {
+            return Manifest::from_baked_json(
+                r#"{"adapters":{"axum":{"geo":{"provider":"cloudfront","origin_credential_header_name":"x-origin-verify-fixture"}}}}"#,
+            );
+        }
+        BakedManifest::Absent
     }
 
     fn owns_logging() -> bool {
@@ -992,6 +1004,10 @@ async fn geo_observation(mut ctx: RequestContext) -> Result<Response, EdgeError>
     reason = "test-only initializer asserts root-free startup, capability capture and known-valid forged state"
 )]
 fn run_geo_fixture(selected: &str) -> anyhow::Result<()> {
+    if selected == "geo-manifest-dev" {
+        // The dev runner ignores the manifest table; only settings select geo.
+        return run_app::<FixtureApp>();
+    }
     let address: SocketAddr = env::var("FIXTURE_BIND")?.parse()?;
     let peer_network = if selected.ends_with("untrusted") {
         "192.0.2.1/32"
@@ -1017,9 +1033,17 @@ fn run_geo_fixture(selected: &str) -> anyhow::Result<()> {
     } else {
         NativeGeoSelection::CloudFront { policy }
     };
-    let options = AxumRunOptions::new(address)?.with_geo(selection);
-    // Capture from the same finalized options, without bypassing the runner's validation.
-    let capability = options.geo_capability();
+    let (options, capability) = if selected == "geo-manifest" {
+        // No `with_geo`: the baked manifest and EDGEZERO__ settings select geo.
+        let options = AxumRunOptions::from_env()?;
+        let capability = options.geo_capability_for::<FixtureApp>();
+        (options, capability)
+    } else {
+        let options = AxumRunOptions::new(address)?.with_geo(selection);
+        // Capture from the same finalized options, without bypassing the runner's validation.
+        let capability = options.geo_capability();
+        (options, capability)
+    };
     let is_off = selected == "geo-off";
     let (sender, receiver) = oneshot::channel();
     run_app_with_options_and_initializer::<FixtureApp, _, _>(
