@@ -1041,6 +1041,7 @@ pub fn deploy(extra_args: &[String]) -> Result<(), String> {
 }
 
 fn deploy_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), String> {
+    validate_pinned_wrangler_args(AdapterAction::Deploy, extra_args)?;
     let manifest_dir = manifest
         .parent()
         .ok_or_else(|| "wrangler manifest has no parent directory".to_owned())?;
@@ -1186,6 +1187,7 @@ pub fn serve(extra_args: &[String]) -> Result<(), String> {
 }
 
 fn serve_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), String> {
+    validate_pinned_wrangler_args(AdapterAction::Serve, extra_args)?;
     let manifest_dir = manifest
         .parent()
         .ok_or_else(|| "wrangler manifest has no parent directory".to_owned())?;
@@ -1204,6 +1206,138 @@ fn serve_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), Str
     }
 
     Ok(())
+}
+
+// Parse values as Wrangler does, so a value is never mistaken for a selector (or vice versa).
+// Unknown options fail closed instead of guessing how many positional values they consume.
+fn validate_pinned_wrangler_args(action: AdapterAction, args: &[String]) -> Result<(), String> {
+    let invalid = || {
+        "pinned Cloudflare native arguments must retain the selected source, config and destination"
+            .to_owned()
+    };
+    let mut remaining = args.iter().peekable();
+    while let Some(argument) = remaining.next() {
+        let Some(long) = argument.strip_prefix("--") else {
+            let short = argument.strip_prefix('-').ok_or_else(invalid)?;
+            if short.is_empty()
+                || !short.bytes().all(|byte| {
+                    matches!(byte, b'h' | b'v')
+                        || (action == AdapterAction::Serve && matches!(byte, b'r' | b'l'))
+                })
+            {
+                return Err(invalid());
+            }
+            continue;
+        };
+        let (name, inline) = long
+            .split_once('=')
+            .map_or((long, None), |(name, value)| (name, Some(value)));
+        let boolean = name.strip_prefix("no-").unwrap_or(name);
+        if pinned_wrangler_boolean(action, boolean) {
+            if inline.is_some_and(|value| !matches!(value, "true" | "false")) {
+                return Err(invalid());
+            }
+            if !name.starts_with("no-")
+                && inline.is_none()
+                && remaining
+                    .peek()
+                    .is_some_and(|value| matches!(value.as_str(), "true" | "false"))
+            {
+                remaining.next();
+            }
+            continue;
+        }
+        if name == "metafile" && action == AdapterAction::Deploy {
+            if inline.is_none()
+                && remaining
+                    .peek()
+                    .is_some_and(|value| !value.starts_with('-'))
+            {
+                remaining.next();
+            }
+            continue;
+        }
+        let array = matches!(
+            name,
+            "define" | "alias" | "var" | "compatibility-flags" | "compatibility-flag"
+        );
+        let scalar = matches!(
+            name,
+            "outdir"
+                | "outfile"
+                | "compatibility-date"
+                | "jsx-factory"
+                | "jsx-fragment"
+                | "tsconfig"
+                | "log-level"
+        ) || (action == AdapterAction::Deploy
+            && matches!(
+                name,
+                "message" | "tag" | "containers-rollout" | "old-asset-ttl" | "secrets-file"
+            ))
+            || (action == AdapterAction::Serve
+                && matches!(
+                    name,
+                    "ip" | "port"
+                        | "inspector-port"
+                        | "inspector-ip"
+                        | "tunnel-name"
+                        | "local-protocol"
+                        | "https-key-path"
+                        | "https-cert-path"
+                        | "upstream-protocol"
+                        | "host"
+                        | "local-upstream"
+                        | "persist-to"
+                        | "log-file"
+                ));
+        if !scalar && !array {
+            return Err(invalid());
+        }
+        if inline.is_none() {
+            let value = remaining.next().ok_or_else(invalid)?;
+            if value.is_empty() || value.starts_with('-') {
+                return Err(invalid());
+            }
+        }
+        if array {
+            while remaining
+                .peek()
+                .is_some_and(|value| !value.starts_with('-'))
+            {
+                remaining.next();
+            }
+        }
+    }
+    Ok(())
+}
+
+fn pinned_wrangler_boolean(action: AdapterAction, name: &str) -> bool {
+    matches!(
+        name,
+        "help" | "version" | "bundle" | "minify" | "latest" | "legacy-env"
+    ) || (action == AdapterAction::Serve
+        && matches!(
+            name,
+            "remote"
+                | "local"
+                | "test-scheduled"
+                | "live-reload"
+                | "show-interactive-dev-session"
+                | "types"
+                | "tunnel"
+        ))
+        || (action == AdapterAction::Deploy
+            && matches!(
+                name,
+                "dry-run"
+                    | "keep-vars"
+                    | "upload-source-maps"
+                    | "strict"
+                    | "experimental-public-invocation"
+                    | "logpush"
+                    | "autoconfig"
+            ))
 }
 
 fn target_manifest(target: &AdapterExecutionTarget) -> Result<PathBuf, String> {
@@ -1226,10 +1360,124 @@ mod tests {
 
     #[cfg(unix)]
     use edgezero_core::test_env::PathPrepend;
-
     #[cfg(unix)]
     use std::sync::Mutex;
     use tempfile::tempdir;
+
+    const TEST_KV_ID: &str = "sessions";
+    const TEST_KV_ID_ALT: &str = "cache";
+    const TEST_CONFIG_ID: &str = "app_config";
+    const TEST_SECRET_ID: &str = "default";
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_native_commands_reject_target_overrides_before_launch() {
+        let _lock = path_mutation_guard().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let config = dir.path().join("wrangler.review.jsonc");
+        fs::write(&config, serde_json::json!({}).to_string()).unwrap();
+        let log = dir.path().join("argv");
+        let fake = fake_wrangler_argv_log(&log);
+        let _path = PathPrepend::new(fake.path());
+        let target =
+            AdapterExecutionTarget::new(dir.path().to_path_buf(), None, Some(config.clone()));
+        for action in [AdapterAction::Deploy, AdapterAction::Serve] {
+            for raw_args in [
+                vec!["other.js"],
+                vec!["--dry-run", "other.js"],
+                vec!["--", "other.js"],
+                vec!["--script=other.js"],
+                vec!["--config", "other.jsonc"],
+                vec!["-cother.jsonc"],
+                vec!["--cwd=elsewhere"],
+                vec!["--env", "other"],
+                vec!["-eother"],
+                vec!["--name=other"],
+                vec!["--assets=elsewhere"],
+                vec!["--unknown=value"],
+                vec!["--no-minify", "true"],
+                vec!["--no-bundle", "false"],
+                vec!["--config=first", "--config=second"],
+                vec!["-hcother.jsonc"],
+            ] {
+                let args = raw_args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                assert!(
+                    CloudflareCliAdapter
+                        .execute_target(action, &target, &args)
+                        .is_err(),
+                    "{action:?}: {args:?}"
+                );
+                assert!(!log.exists(), "rejected argv cannot launch Wrangler");
+            }
+            let args = [
+                "--define",
+                "MODE:review",
+                "--alias",
+                "source:replacement",
+                "--no-bundle",
+            ]
+            .map(str::to_owned);
+            CloudflareCliAdapter
+                .execute_target(action, &target, &args)
+                .unwrap();
+            let recorded = fs::read_to_string(&log).unwrap();
+            let mut expected = vec![
+                if action == AdapterAction::Deploy {
+                    "deploy"
+                } else {
+                    "dev"
+                },
+                "--config",
+                config.to_str().unwrap(),
+            ];
+            expected.extend(args.iter().map(String::as_str));
+            assert_eq!(recorded.lines().collect::<Vec<_>>(), expected);
+            fs::remove_file(&log).unwrap();
+        }
+    }
+
+    #[test]
+    fn pinned_wrangler_guard_preserves_value_arities_and_ordinary_aliases() {
+        for (action, raw_args) in [
+            (
+                AdapterAction::Deploy,
+                vec![
+                    "--var",
+                    "A:1",
+                    "B:2",
+                    "--metafile",
+                    "--dry-run",
+                    "--outfile",
+                    "output.js",
+                    "--logpush=false",
+                ],
+            ),
+            (
+                AdapterAction::Deploy,
+                vec![
+                    "--metafile=output.json",
+                    "--compatibility-flag",
+                    "flag-one",
+                    "flag-two",
+                ],
+            ),
+            (
+                AdapterAction::Serve,
+                vec![
+                    "-lh",
+                    "--inspector-ip",
+                    "127.0.0.1",
+                    "--minify",
+                    "false",
+                    "--alias",
+                    "original:substitute",
+                ],
+            ),
+        ] {
+            let args = raw_args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            validate_pinned_wrangler_args(action, &args).unwrap();
+        }
+    }
 
     // Shared fixture names. Pinning these as consts (instead of
     // inline `"sessions"` / `"app_config"` per call site) keeps the
@@ -1238,11 +1486,6 @@ mod tests {
     // the same const. Also names the intent: these are the LOGICAL
     // store ids the cloudflare adapter operates on, not arbitrary
     // strings.
-    const TEST_KV_ID: &str = "sessions";
-    const TEST_KV_ID_ALT: &str = "cache";
-    const TEST_CONFIG_ID: &str = "app_config";
-    const TEST_SECRET_ID: &str = "default";
-
     #[test]
     fn bounded_config_scaffolds_require_gc_cleanup_support() {
         for source in [

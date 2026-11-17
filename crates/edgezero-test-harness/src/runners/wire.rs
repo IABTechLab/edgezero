@@ -60,6 +60,11 @@ pub(super) fn batch_recovery_artifact(adapter: &str) -> Vec<Value> {
     batch_recovery::tests::artifact(adapter)
 }
 
+#[cfg(test)]
+pub(super) fn redirect_artifact(adapter: &str) -> Vec<Value> {
+    tests::redirect_artifact(adapter)
+}
+
 fn body(reply: &Value) -> Result<Vec<u8>> {
     Ok(serde_json::from_value(reply["body_bytes"].clone())?)
 }
@@ -303,7 +308,7 @@ pub(super) fn validate_spin_artifact(events: &[Value]) -> Result<()> {
         .as_u64()
         .and_then(|port| u16::try_from(port).ok())
         .ok_or("missing Spin origin port")?;
-    replay_spin_wire(wire)?;
+    replay_wire("spin", wire)?;
     let mut cases = Vec::new();
     let mut receipts = 0;
     for event in events
@@ -398,7 +403,7 @@ struct Matrix<'a> {
 }
 
 impl MatrixContracts for Matrix<'_> {
-    fn adapter(&self) -> &'static str {
+    fn adapter(&self) -> &str {
         self.adapter
     }
 
@@ -470,7 +475,7 @@ impl MatrixContracts for Matrix<'_> {
 }
 
 trait MatrixContracts {
-    fn adapter(&self) -> &'static str;
+    fn adapter(&self) -> &str;
     fn ports(&self) -> [u16; 2];
     fn inventory(&self) -> (usize, usize);
     fn call(
@@ -697,6 +702,7 @@ trait MatrixContracts {
 }
 
 struct ReplayMatrix<'a> {
+    adapter: &'a str,
     ports: [u16; 2],
     events: std::vec::IntoIter<&'a Value>,
     exchanges: usize,
@@ -704,8 +710,8 @@ struct ReplayMatrix<'a> {
 }
 
 impl MatrixContracts for ReplayMatrix<'_> {
-    fn adapter(&self) -> &'static str {
-        "spin"
+    fn adapter(&self) -> &str {
+        self.adapter
     }
 
     fn ports(&self) -> [u16; 2] {
@@ -725,14 +731,14 @@ impl MatrixContracts for ReplayMatrix<'_> {
         expected: Option<Vec<(u16, String)>>,
         _gate: Option<&str>,
     ) -> Result<Value> {
-        let event = self.events.next().ok_or("missing Spin redirect case")?;
+        let event = self.events.next().ok_or("missing redirect case")?;
         require(
             event["path"] == path
                 && event["mode"] == mode
                 && event["streamed"] == streamed
                 && event["encoded_cap"] == encoded
                 && event["qualification"] == false,
-            "Spin redirect case differs from ordered matrix",
+            "redirect case differs from ordered matrix",
         )?;
         let observed: Vec<(u16, String)> =
             serde_json::from_value(event["origin_requests"].clone())?;
@@ -744,7 +750,7 @@ impl MatrixContracts for ReplayMatrix<'_> {
         let report = event
             .get("report")
             .filter(|report| report.is_object())
-            .ok_or("missing Spin redirect report")?
+            .ok_or("missing redirect report")?
             .clone();
         self.exchanges += 1;
         self.dispatches += observed.len();
@@ -752,23 +758,24 @@ impl MatrixContracts for ReplayMatrix<'_> {
     }
 }
 
-fn replay_spin_wire(wire: Vec<&Value>) -> Result<()> {
+pub(super) fn replay_wire(adapter: &str, wire: Vec<&Value>) -> Result<()> {
     let receipt_port = |event: &Value, index: usize| {
         event["origin_requests"][index][0]
             .as_u64()
             .and_then(|port| u16::try_from(port).ok())
             .filter(|port| *port != 0)
-            .ok_or("invalid Spin redirect origin port")
+            .ok_or("invalid redirect origin port")
     };
     // Bind both origins once; every replayed receipt and final URI must agree.
-    let first = receipt_port(wire.first().ok_or("missing Spin redirect case")?, 0)?;
+    let first = receipt_port(wire.first().ok_or("missing redirect case")?, 0)?;
     let cross = wire
         .iter()
         .find(|event| event["path"] == "/p5/cross" && event["mode"] == "follow")
-        .ok_or("missing Spin cross-origin case")?;
+        .ok_or("missing cross-origin case")?;
     let second = receipt_port(cross, 1)?;
-    require(first != second, "Spin redirect origins must be distinct")?;
+    require(first != second, "redirect origins must be distinct")?;
     let mut matrix = ReplayMatrix {
+        adapter,
         ports: [first, second],
         events: wire.into_iter(),
         exchanges: 0,
@@ -777,7 +784,7 @@ fn replay_spin_wire(wire: Vec<&Value>) -> Result<()> {
     matrix.run()?;
     require(
         matrix.events.next().is_none(),
-        "unexpected extra Spin redirect case",
+        "unexpected extra redirect case",
     )
 }
 
@@ -1223,7 +1230,7 @@ mod tests {
         wire_report(&path, streamed, outcome)
     }
 
-    fn spin_artifact() -> Vec<Value> {
+    pub(super) fn redirect_artifact(adapter: &str) -> Vec<Value> {
         let mut values = Vec::new();
         let first = 4001;
         let second = 4002;
@@ -1233,9 +1240,11 @@ mod tests {
                         encoded: bool,
                         requests: Vec<(u16, String)>,
                         report: Value| {
-            values.push(json!({"event":"spin-wire-case","path":path,"mode":mode,
+            values.push(
+                json!({"event":format!("{adapter}-wire-case"),"path":path,"mode":mode,
                 "streamed":streamed,"encoded_cap":encoded,"origin_requests":requests,
-                "report":report,"qualification":false}));
+                "report":report,"qualification":false}),
+            );
         };
         for streamed in [false, true] {
             for coding in ["identity", "gzip", "passthrough"] {
@@ -1290,8 +1299,22 @@ mod tests {
                     match kind {
                         "pending" => wire_error("gateway_timeout", "PerCallTimeout"),
                         "error" => {
-                            let mut error = wire_error("bad_gateway", "Protocol");
-                            error["error"]["provider"] = json!("Spin { phase: ResponseBodyRead }");
+                            let mut error = wire_error(
+                                "bad_gateway",
+                                if adapter == "spin" {
+                                    "Protocol"
+                                } else {
+                                    "Transport"
+                                },
+                            );
+                            error["error"]["provider"] = json!(match adapter {
+                                "spin" => "Spin { phase: ResponseBodyRead }",
+                                "cloudflare" =>
+                                    "Cloudflare { phase: ResponseBodyRead, cause: Unknown }",
+                                "fastly" =>
+                                    "Fastly { phase: ResponseBodyRead, cause: IoError { kind: UnexpectedEof } }",
+                                _ => "Axum { phase: ResponseBodyRead, cause: Body }",
+                            });
                             error
                         }
                         "emptybr" => wire_error("bad_gateway", "Decode(Brotli)"),
@@ -1382,6 +1405,12 @@ mod tests {
                 );
             }
         }
+        values
+    }
+
+    fn spin_artifact() -> Vec<Value> {
+        let first = 4001;
+        let mut values = redirect_artifact("spin");
         values.extend((0..26).map(|index| {
             let token = format!("case-{index}");
             let path = PolicyCase::new(index).unwrap().path(&token);
@@ -1440,15 +1469,15 @@ mod tests {
     fn persisted_spin_redirect_replay_requires_exact_consumption() {
         let valid = spin_artifact();
         let wire = valid[..68].iter().collect::<Vec<_>>();
-        replay_spin_wire(wire.clone()).unwrap();
-        assert!(replay_spin_wire(wire[..67].to_vec()).is_err());
+        replay_wire("spin", wire.clone()).unwrap();
+        assert!(replay_wire("spin", wire[..67].to_vec()).is_err());
         let mut extra = wire;
         extra.push(&valid[0]);
         assert!(
-            replay_spin_wire(extra)
+            replay_wire("spin", extra)
                 .unwrap_err()
                 .to_string()
-                .contains("unexpected extra Spin redirect case")
+                .contains("unexpected extra redirect case")
         );
     }
 

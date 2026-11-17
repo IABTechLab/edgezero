@@ -20,7 +20,7 @@ mod task;
 pub mod test_support;
 mod upload;
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::net::IpAddr;
 use std::num::NonZeroU64;
 use std::rc::Rc;
@@ -64,6 +64,7 @@ pub use batch::{
     OutboundCollectedSlot, OutboundPreparedBatch,
 };
 pub(crate) use dispatch::ForwardedReadDeadline;
+pub use exchange::OutboundExchangeFailure;
 pub use redirect::{
     OutboundFollowFailure, OutboundFollowResult, OutboundRedirectAction, OutboundRedirectContext,
     OutboundRedirectLimit, OutboundRedirectStopReason,
@@ -160,6 +161,7 @@ pub struct OutboundResponseContext {
     body_policy: ResponseBodyPolicy,
     budget: DispatchBudget,
     entered_at: MonotonicInstant,
+    exchange_failure: OnceCell<OutboundExchangeFailure>,
     header_limiter: ResponseHeaderLimiter,
     mode: OutboundSendMode,
     #[cfg(feature = "test-utils")]
@@ -202,6 +204,7 @@ pub struct OutboundLocationEvidence {
 /// to a live streamed response without starting another transport exchange.
 #[must_use]
 pub struct OutboundHead {
+    checkpoint: Option<head::BodyCheckpoint>,
     context: OutboundResponseContext,
     encoded: BodyStream,
     headers: HeaderMap,
