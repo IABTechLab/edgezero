@@ -685,8 +685,8 @@ pub(super) fn provider(name: &str, run: &Path, records: &mut Records) -> Result<
 }
 
 fn axum_startup(run: &Path, records: &mut Records) -> Result<()> {
-    let output = cargo_build()?
-        .args([
+    let output = capture_command(
+        cargo_build()?.args([
             "build",
             "--offline",
             "--locked",
@@ -696,17 +696,11 @@ fn axum_startup(run: &Path, records: &mut Records) -> Result<()> {
             "--bin",
             "fixture-axum-assembly",
             "--message-format=json-render-diagnostics",
-        ])
-        .stderr(Stdio::inherit())
-        .output()?;
-    require(
-        output.status.success(),
-        "native assembly fixture build failed",
-    )?;
-    let binary = stage(
-        &built_executable(&output.stdout, "fixture-axum-assembly")?,
+        ]),
         run,
+        "axum-assembly-build",
     )?;
+    let binary = stage(&built_executable(&output, "fixture-axum-assembly")?, run)?;
     records.push(json!({"event":"build","adapter":"axum","variant":"assembly-startup","artifact":artifact(&binary)?}))?;
     let log = run.join("assembly-axum-startup.log");
     let outcome = (|| -> Result<()> {

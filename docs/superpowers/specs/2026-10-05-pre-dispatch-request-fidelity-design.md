@@ -81,7 +81,11 @@ future has no Send requirement. Use the existing async-trait dependency.
 
 Builder methods `pre_dispatch_hook<H: PreDispatchHook>(hook: H)` and `pre_dispatch_hook_arc(hook: BoxPreDispatchHook)` install one optional hook. Default is None. Repeated registration panics during router construction, so another registration cannot silently remove an authentication gate. `RouterService` clones share the same Arc-backed instance.
 
-Before route lookup, `RouterInner::dispatch` snapshots the routing inputs and invokes the hook:
+For direct low-level router dispatch, `RouterInner::dispatch` snapshots the routing
+inputs and invokes the hook before route lookup. Canonical application ingress first
+resolves the route and runs route-aware admission; refusal and abort bypass the hook.
+An admitted request runs the same hook before resolved-route dispatch, state insertion,
+middleware or handlers:
 
 ```rust
 let method = request.method().clone();
@@ -100,7 +104,9 @@ if let Some(hook) = &self.pre_dispatch_hook {
 
 The router snapshots method/path before the hook and validates them after continuation,
 then rechecks the normalized head against the captured application ingress limits.
-Only then may it call `find_route` or insert introspection/state and run middleware.
+Only then may low-level dispatch call `find_route`; canonical ingress instead uses its
+already captured resolution. Neither path inserts introspection/state or runs middleware
+before an admitted continuation passes these checks.
 The hook and routed handler share one body cell. Bounded cached reads, buffered
 transformations with explicit input/output limits, and synchronous per-chunk mapping
 preserve original input accounting, source ownership and the absolute read deadline.
@@ -221,8 +227,8 @@ Trusted Server owns early Fastly native shortcut exclusion, classification, auth
 ## 9. Tests and acceptance
 
 1. No-hook routing and existing 404/405/middleware/state behavior remain identical.
-2. Hook sees arbitrary methods/paths before any router lookup result; terminal success/error runs zero state/context/middleware/handler effects.
-3. Continued method/path changes fail before lookup, state or middleware; headers, extensions, body and query mutations reach the handler. Terminal responses remain allowed after mutation; consumed/replaced body behavior is explicit.
+2. Hook sees arbitrary admitted methods/paths before resolved-route dispatch; direct low-level dispatch also runs it before lookup. Admission refusal/abort runs no hook. Terminal success/error runs zero state/context/middleware/handler effects.
+3. Continued method/path changes fail before routed dispatch, state or middleware (and before lookup on the low-level path); headers, extensions, body and query mutations reach the handler. Terminal responses remain allowed after mutation; consumed/replaced body behavior is explicit.
 4. Hook sharing across clones and a non-Send future compile/run without introducing Tokio.
 5. Metadata captures at/over target cap, omits partial values, rejects spoofed origin sources and exposes conservative missing capability.
 6. Cloudflare runtime extension methods and UTF-8 strings survive the real converter, not a synthetic core request.
