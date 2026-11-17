@@ -621,6 +621,42 @@ where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
     Finalize: FnOnce(&mut Response) -> State,
 {
+    deliver_with_registries(app, stores, req, prepare, finalize, send_egress_response)
+}
+
+/// Exercises the registry-backed lifecycle used by `run_app` with an injected delivery boundary.
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+#[inline]
+pub fn send_request_with_registries_and_hooks_for_test<State, Prepare, Finalize, Deliver>(
+    app: &App,
+    stores: StoresMetadata,
+    req: FastlyRequest,
+    prepare: Prepare,
+    finalize: Finalize,
+    deliver: Deliver,
+) -> FastlyRequestDelivery<State>
+where
+    Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+    Finalize: FnOnce(&mut Response) -> State,
+    Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
+{
+    deliver_with_registries(app, stores, req, prepare, finalize, deliver)
+}
+
+fn deliver_with_registries<State, Prepare, Finalize, Deliver>(
+    app: &App,
+    stores: StoresMetadata,
+    req: FastlyRequest,
+    prepare: Prepare,
+    finalize: Finalize,
+    deliver: Deliver,
+) -> FastlyRequestDelivery<State>
+where
+    Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+    Finalize: FnOnce(&mut Response) -> State,
+    Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
+{
     with_callback(|| {
         init_fastly_abi();
         let request_start = app.monotonic_now();
@@ -640,7 +676,7 @@ where
                 request_start,
                 prepare,
             );
-            finish_request(outcome, finalize, send_egress_response)
+            finish_request(outcome, finalize, deliver)
         })
     })
 }

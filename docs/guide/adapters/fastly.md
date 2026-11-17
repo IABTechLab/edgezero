@@ -490,7 +490,7 @@ adapter's progress driver; a blocked hostcall cannot be preempted. Tasks delay t
 a reused `serve_app` instance. When delivery did not commit and the caller may send its own native
 response, the tasks have already run by the time the lifecycle returns. Requests converted with the
 public `into_core_request` outside a lifecycle get no scheduler, so registration returns `501`.
-Do not retain a context or scheduler handle across requests.
+A handle retained from an earlier request is rejected rather than queued into a later one.
 
 ## Testing
 

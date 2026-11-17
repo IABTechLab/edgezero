@@ -38,8 +38,8 @@
   - Creates `watch::channel(())` before `dispatch_admitted`.
   - Inserts `AfterResponseHandle::new(AxumAfterResponse{..})` into the core request extensions.
   - Attaches the sender to the returned response through `AxumEgressBody::release_after_response_on_drop`.
-- [x] `AxumEgressBody` gains `after_response_release: Option<watch::Sender<()>>`. Plain drop order releases it after the attempt terminates in `Drop`. `finish()` runs on EOF, and Hyper drops the body after the final frame.
-- [x] RED/GREEN in-crate server tests, using the existing real-listener harness in `dev_server.rs` tests:
+- [x] `AxumEgressBody` gains `after_response: Option<AfterResponseRelease>`. Plain drop order releases it after the attempt terminates in `Drop`. `finish()` runs on EOF, and Hyper drops the body after the final frame.
+- [x] RED/GREEN server tests in `tests/after_response.rs`, through the public `AxumDevServer::serve` and a real listener:
   - **Delivery gate:** the response body is a stream gated by a oneshot. The handler registers a task that sets a flag.
     1. Read the headers and assert the flag is false.
     2. Release the final chunk, read to the end over a keep-alive connection that stays open, then assert the flag becomes true within 1 s.
@@ -57,10 +57,11 @@
 - [x] `drain_tasks`: after the connection loop, while the outcome is `Ok`, select on a second signal, `sleep_until(deadline)` and `tracker.wait_idle()`.
   - On timeout, log `"{n} after-response task(s) abandoned at shutdown grace"` and return `grace exhausted`.
   - The `cancel_connections` (prebound) path does not wait.
-- [x] Fixture route `/after-task`: it registers a task that sleeps for `FIXTURE_TASK_MILLIS` (default 500), then prints `AFTER_TASK_DONE`, and responds `200 queued`.
+- [x] Fixture route `/after-task`: it registers a task that sleeps for `FIXTURE_TASK_MILLIS` (default 500), then prints `AFTER_TASK_DONE`, and responds `200 after-task-queued`.
 - [x] Subprocess tests:
   - **`sigterm_waits_for_after_response_task`:** a 1.5 s task. Request `/after-task`, read the response, send SIGTERM immediately, and assert `AFTER_TASK_DONE` has not been printed yet. Then expect `AFTER_TASK_DONE`, followed by a clean exit (status 0).
   - **`grace_exhaustion_cancels_after_response_task`:** grace 1 s, task 10 s, SIGTERM. Expect a non-zero exit, `grace exhausted` in the log, no `AFTER_TASK_DONE`, and elapsed time under 4 s.
+- [x] Subprocess tests after review: `connections_and_after_response_tasks_share_one_grace` (800 ms drain, 1 s grace, must exit well before 1.8 s) and `second_signal_during_after_response_wait_forces_stop`. The task wait selects idle ahead of the deadline and logs abandoned tasks on every exit path.
 - [x] Verify: `cargo +1.98.1 test -p edgezero-adapter-axum --test production_hosting`, plus the existing tests unchanged.
 
 ## Task 4: Fastly queue and drain
@@ -70,15 +71,17 @@
 - [x] Add a thread-local `QUEUE: RefCell<Option<Vec<(Duration, LocalBoxFuture<'static, ()>)>>>`.
   - `arm()` returns a guard that restores the previous queue.
   - `FastlyAfterResponse` schedules into the queue, or errors when it is not armed.
-  - One helper, `run_lifecycle(clock, dispatch_and_finish)`, arms, runs the closure, then `drain(clock)`. `drain` disarms and takes the tasks (no borrow is held while polling), then joins them, each raced against `native_time(clock).wait_until(start + budget)`, under `block_on(drive_callback(..))`. It warns on timeout or on a driver error. Each deadline is `Deadline::at_instant(start + budget)`, saturating.
+  - One helper, `with_after_response(clock, dispatch_and_finish)`, arms, runs the closure, then `drain(clock)`. `drain` disarms and takes the tasks (no borrow is held while polling), then joins them, each raced against `native_time(clock).wait_until(start + budget)`, under `block_on(drive_callback(..))`. It warns on timeout or on a driver error. Each deadline is `Deadline::at_instant(start + budget)`, saturating.
 - [x] `dispatch_with_handles` inserts `AfterResponseHandle::new(FastlyAfterResponse)` only while a queue is armed, after the `prepare` scratch extensions are copied. `into_core_request` and `capture_egress_for_test` get no handle.
-- [x] `run_request_with_delivery` and `send_request_with_registries_and_hooks` both call `run_lifecycle` inside `with_callback`, with the clock read from the app before dispatch.
+- [x] `run_request_with_delivery` and `send_request_with_registries_and_hooks` both call `with_after_response` inside `with_callback`, with the clock read from the app before dispatch. The registries funnel gains `send_request_with_registries_and_hooks_for_test`. Each lifecycle has a generation, so a retained handle is rejected.
 - [x] Host unit tests (feature off):
   - The handle is inserted only while armed.
   - An armed queue collects tasks, and the guard restores the previous queue.
 - [x] Viceroy contract tests through `run_request_with_hooks_for_test`:
-  - The `deliver` closure pushes `delivered`. The task first awaits a 10 ms timer, then pushes `task`. Expected order: `[delivered, task]`.
-  - A task that sets `started` and then awaits `pending()`, with a 20 ms budget and a drop probe: the call returns, `started` is set, and the probe has dropped.
+  - The `deliver` closure pushes `deliver`. The task first awaits a 10 ms timer, then pushes `task`. Expected order: `[deliver, task]`, through both funnels, with a `prepare` hook inserting a rejecting handle.
+  - A task that sets `started` and then needs a 10 ms timer, with a 1 ms budget and a drop probe: `started` is set, the probe has dropped, and the task never finished.
+  - A task's outbound request to a refused backend reports a Fastly provider failure (the exchange ran after delivery).
+  - With no commitment, `may_send_native_response()` is true and the task already ran.
   - A task that tries to register a second task gets an error.
   - A `deliver` closure reporting no commitment: tasks still run before the funnel returns.
 - [x] Verify: `cargo +1.98.1 test -p edgezero-adapter-fastly`, and the wasm contract suite under Viceroy (see the tool note below).
@@ -86,7 +89,7 @@
 ## Task 5: Capability matrices and docs
 
 - [x] Adapter `capability()` entries:
-  - Axum: `Native`.
+  - Axum: `BoundedCooperative`.
   - Fastly: `BoundedCooperative`.
   - Cloudflare and Spin: `Unsupported`, falling through to the wildcard, with an explicit arm for readability.
 - [x] Update each `adapter_capability_matrix_matches_contracts` test.

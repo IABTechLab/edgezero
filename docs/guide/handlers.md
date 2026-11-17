@@ -238,7 +238,7 @@ use edgezero_core::EdgeError;
 
 async fn page(ctx: RequestContext) -> Result<&'static str, EdgeError> {
     if let Some(client) = ctx.http_client() {
-        ctx.after_response(Duration::from_secs(2), async move {
+        let registered = ctx.after_response(Duration::from_secs(2), async move {
             // Build and send the request inside the task, not before it.
             let sent = match OutboundRequest::get("https://sync.example.com/ping") {
                 Ok(request) => client.send(request).await.map(|_response| ()),
@@ -247,14 +247,19 @@ async fn page(ctx: RequestContext) -> Result<&'static str, EdgeError> {
             if let Err(error) = sent {
                 log::warn!("after-response sync failed: {error}");
             }
-        })?;
+        });
+        // Optional work must not fail the page on an adapter without support.
+        if let Err(error) = registered {
+            log::warn!("after-response sync not scheduled: {error}");
+        }
     }
     Ok("ok")
 }
 ```
 
 Registration returns `501 Not Implemented` on adapters without support; see the
-[after-response task matrix](./capabilities.md#after-response-task-matrix). Tasks return `()`, so
+[after-response task matrix](./capabilities.md#after-response-task-matrix). Declare
+`after-response-tasks` as a required capability when the work is not optional. Tasks return `()`, so
 handle and log their own failures. A task cannot register further tasks.
 
 ### Store Extractors

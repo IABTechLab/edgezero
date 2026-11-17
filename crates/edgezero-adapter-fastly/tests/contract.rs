@@ -33,8 +33,11 @@ mod tests {
     use edgezero_adapter_fastly::delivery::{
         FastlyRequestDelivery, FastlyResponseCommitState, testing::response_delivery,
     };
-    use edgezero_adapter_fastly::request::{FastlyService, into_core_request};
-    use edgezero_core::after_response::AfterResponseHandle;
+    use edgezero_adapter_fastly::request::{
+        FastlyService, into_core_request, send_request_with_registries_and_hooks_for_test,
+    };
+    use edgezero_core::after_response::{AfterResponseHandle, AfterResponseScheduler};
+    use edgezero_core::app::StoresMetadata;
     use edgezero_core::app::{App, Hooks};
     use edgezero_core::body::Body;
     use edgezero_core::config_store::{
@@ -43,6 +46,7 @@ mod tests {
     };
     use edgezero_core::context::{BodyKind, RequestContext};
     use edgezero_core::error::EdgeError;
+    use edgezero_core::error_detail::ProviderFailureAdapter;
     use edgezero_core::http::{HeaderMap, Method, Response, StatusCode, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
     use edgezero_core::outbound::{
@@ -55,6 +59,7 @@ mod tests {
     use fastly::Request as FastlyRequest;
     use fastly::http::Method as FastlyMethod;
     use futures::{executor::block_on, stream};
+    use futures_util::future::LocalBoxFuture;
 
     fn complete_envelope(envelope: ResponseEgressEnvelope) -> Response {
         complete_envelope_with_report(envelope).0
@@ -899,16 +904,33 @@ mod tests {
             .build()
     }
 
+    struct HijackingScheduler;
+
+    impl AfterResponseScheduler for HijackingScheduler {
+        fn schedule(
+            &self,
+            _budget: Duration,
+            _task: LocalBoxFuture<'static, ()>,
+        ) -> Result<(), EdgeError> {
+            Err(EdgeError::internal(anyhow::anyhow!(
+                "a prepare hook replaced the adapter scheduler"
+            )))
+        }
+    }
+
     fn run_after_response(
         router: RouterService,
         events: &Arc<Mutex<Vec<&'static str>>>,
         commitment: FastlyResponseCommitState,
-    ) {
+    ) -> FastlyRequestDelivery<()> {
         let app = App::new(router);
         let delivery_events = Arc::clone(events);
         let delivered = FastlyService::new(&app).run_request_with_hooks_for_test(
             fastly_request(FastlyMethod::GET, "/after", None),
-            |_raw, _extensions| {},
+            |_raw, extensions| {
+                // The adapter installs its own handle after the hook's extensions.
+                extensions.insert(AfterResponseHandle::new(HijackingScheduler));
+            },
             |_response| (),
             move |envelope| {
                 let (response, report) = complete_envelope_with_report(envelope);
@@ -918,6 +940,7 @@ mod tests {
             },
         );
         assert!(matches!(delivered, FastlyRequestDelivery::Routed { .. }));
+        delivered
     }
 
     #[test]
@@ -926,7 +949,7 @@ mod tests {
         let started = Arc::new(AtomicUsize::new(0));
         let dropped = Arc::new(AtomicUsize::new(0));
         let router = after_response_router(&events, Duration::from_secs(2), &started, &dropped);
-        run_after_response(router, &events, FastlyResponseCommitState::Committed);
+        let _delivered = run_after_response(router, &events, FastlyResponseCommitState::Committed);
         assert_eq!(*events.lock().expect("events"), ["deliver", "task"]);
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }
@@ -937,8 +960,80 @@ mod tests {
         let started = Arc::new(AtomicUsize::new(0));
         let dropped = Arc::new(AtomicUsize::new(0));
         let router = after_response_router(&events, Duration::from_secs(2), &started, &dropped);
-        run_after_response(router, &events, FastlyResponseCommitState::NotCommitted);
+        let delivered =
+            run_after_response(router, &events, FastlyResponseCommitState::NotCommitted);
+        // The caller may still send a native replacement, after the tasks already ran.
+        assert!(delivered.may_send_native_response());
         assert_eq!(*events.lock().expect("events"), ["deliver", "task"]);
+    }
+
+    #[test]
+    fn after_response_task_runs_through_the_registry_lifecycle_used_by_run_app() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let app = App::new(after_response_router(
+            &events,
+            Duration::from_secs(2),
+            &started,
+            &dropped,
+        ));
+        let delivery_events = Arc::clone(&events);
+        let delivered = send_request_with_registries_and_hooks_for_test(
+            &app,
+            StoresMetadata::default(),
+            fastly_request(FastlyMethod::GET, "/after", None),
+            |_raw, _extensions| {},
+            |_response| (),
+            move |envelope| {
+                let (response, report) = complete_envelope_with_report(envelope);
+                assert_eq!(response.status(), StatusCode::OK);
+                delivery_events.lock().expect("events").push("deliver");
+                response_delivery(FastlyResponseCommitState::Committed, report, Ok(()))
+            },
+        );
+        assert!(matches!(delivered, FastlyRequestDelivery::Routed { .. }));
+        assert_eq!(*events.lock().expect("events"), ["deliver", "task"]);
+    }
+
+    #[test]
+    fn after_response_task_can_start_outbound_requests_after_delivery() {
+        let outcome = Arc::new(Mutex::new(None));
+        let handler_outcome = Arc::clone(&outcome);
+        let router = RouterService::builder()
+            .get("/after", move |ctx: RequestContext| {
+                let task_outcome = Arc::clone(&handler_outcome);
+                async move {
+                    let client = ctx.http_client().expect("outbound client");
+                    ctx.after_response(Duration::from_secs(2), async move {
+                        let request = OutboundRequest::get("http://127.0.0.1:9/after-response")
+                            .expect("request")
+                            .timeout(Duration::from_secs(1));
+                        // A closed outbound scope fails before any exchange and carries no
+                        // provider detail; reaching Fastly's transport (a refused backend
+                        // here) yields a Fastly provider failure.
+                        let reached_transport = match client.send(request).await {
+                            Ok(_response) => true,
+                            Err(error) => error.provider_failure_detail().is_some_and(|detail| {
+                                detail.adapter() == ProviderFailureAdapter::Fastly
+                            }),
+                        };
+                        *task_outcome.lock().expect("outcome") = Some(reached_transport);
+                    })?;
+                    Ok::<_, EdgeError>("queued")
+                }
+            })
+            .build();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _delivered = run_after_response(router, &events, FastlyResponseCommitState::Committed);
+        let reached_transport = outcome
+            .lock()
+            .expect("outcome")
+            .expect("the task's outbound request completed");
+        assert!(
+            reached_transport,
+            "the task's request reached Fastly's transport after delivery"
+        );
     }
 
     #[test]
@@ -948,7 +1043,7 @@ mod tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         // The task needs 10 ms for its timer; a 1 ms budget cancels it after it started.
         let router = after_response_router(&events, Duration::from_millis(1), &started, &dropped);
-        run_after_response(router, &events, FastlyResponseCommitState::Committed);
+        let _delivered = run_after_response(router, &events, FastlyResponseCommitState::Committed);
         assert_eq!(started.load(Ordering::SeqCst), 1, "the task started");
         assert_eq!(
             dropped.load(Ordering::SeqCst),

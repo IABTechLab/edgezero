@@ -235,7 +235,7 @@ const expectedResponseEgressRows = [
 const expectedAfterResponseRows = [
   [
     'after-response-tasks',
-    'Native',
+    'BoundedCooperative',
     'Unsupported',
     'BoundedCooperative',
     'Unsupported',

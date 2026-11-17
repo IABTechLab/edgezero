@@ -138,6 +138,7 @@ struct EdgezeroAxumConfig {
 impl Adapter for AxumCliAdapter {
     fn capability(&self, capability: Capability) -> CapabilitySupport {
         match capability {
+            Capability::AfterResponseTasks => CapabilitySupport::BoundedCooperative,
             Capability::ConfigReadDeadlines
             | Capability::OutboundConnectTimeout
             | Capability::OutboundFailureDiagnostics
@@ -145,8 +146,7 @@ impl Adapter for AxumCliAdapter {
             | Capability::ResponseEgressBackpressure
             | Capability::ResponseEgressCompletion
             | Capability::ResponseWriteDeadlines => CapabilitySupport::BestEffort,
-            Capability::AfterResponseTasks
-            | Capability::BufferedResponseContentLength
+            Capability::BufferedResponseContentLength
             | Capability::InboundReadDeadlines
             | Capability::IngressAdmission
             | Capability::IngressAdmissionAbort
@@ -899,7 +899,10 @@ mod tests {
         let connect = AXUM_ADAPTER.capability(Capability::OutboundConnectTimeout);
         assert_eq!(connect, CapabilitySupport::BestEffort);
         for (capability, support) in [
-            (Capability::AfterResponseTasks, CapabilitySupport::Native),
+            (
+                Capability::AfterResponseTasks,
+                CapabilitySupport::BoundedCooperative,
+            ),
             (
                 Capability::ConfigReadAllocationBounds,
                 CapabilitySupport::Unsupported,

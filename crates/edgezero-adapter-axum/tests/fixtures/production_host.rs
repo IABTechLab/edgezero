@@ -154,7 +154,11 @@ async fn finite(ctx: RequestContext) -> Result<&'static str, EdgeError> {
         sleep(Duration::from_millis(5)).await;
     }
     println!("DRAINING");
-    sleep(Duration::from_millis(80)).await;
+    let millis = env::var("FIXTURE_FINITE_MILLIS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(80);
+    sleep(Duration::from_millis(millis)).await;
     Ok("finite-complete")
 }
 

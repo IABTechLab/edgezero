@@ -584,9 +584,9 @@ performance or resource lifetimes.
 
 `ctx.after_response(budget, task)` spawns the task on the server's executor. It starts when Hyper
 drops the response body, after the final frame is handed over or when the connection ends early, and
-is cancelled at its budget. On SIGTERM or SIGINT, the production and `run_app` entrypoints first
-drain connections, then wait for registered tasks, all within one
-`EDGEZERO__ADAPTER__SHUTDOWN_GRACE_SECONDS` budget. Tasks still pending at the grace are cancelled
+is cancelled at its budget. On SIGTERM or SIGINT, the production entrypoints, `run_app` and
+`AxumDevServer::run` first drain connections, then wait for registered tasks, all within one grace
+(`EDGEZERO__ADAPTER__SHUTDOWN_GRACE_SECONDS`, or a fixed 10 s for `AxumDevServer::run`). Tasks still pending at the grace are cancelled
 and the process exits non-zero with `grace exhausted`; a second signal still stops immediately.
 `AxumDevServer::serve` cancels tasks at shutdown, like its connections.
 Tasks share the server's single-threaded executor with every connection. The budget cancels a

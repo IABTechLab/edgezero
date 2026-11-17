@@ -330,9 +330,9 @@ not included. These limitations block whole-response-lifetime certification.
 
 ## After-Response Task Matrix
 
-| Capability             | Axum   | Cloudflare  | Fastly             | Spin        |
-| ---------------------- | ------ | ----------- | ------------------ | ----------- |
-| `after-response-tasks` | Native | Unsupported | BoundedCooperative | Unsupported |
+| Capability             | Axum               | Cloudflare  | Fastly             | Spin        |
+| ---------------------- | ------------------ | ----------- | ------------------ | ----------- |
+| `after-response-tasks` | BoundedCooperative | Unsupported | BoundedCooperative | Unsupported |
 
 `ctx.after_response(budget, task)` registers a task while a request is handled. The adapter starts
 the task once the response attempt ends at its terminal egress boundary, whatever the outcome. That
@@ -341,13 +341,16 @@ response. The task is dropped, and so cancelled, when its budget elapses. Regist
 the request's tasks are released, so a task cannot register more tasks. Start outbound requests
 inside the task.
 
+Both supporting adapters are `BoundedCooperative`: the budget cancels a task only when it yields,
+so CPU-bound or blocking work overruns it.
+
 - Axum spawns each task on the server's executor and releases it when Hyper drops the response body.
-  Production and `run_app` shutdown waits for registered tasks within
-  `EDGEZERO__ADAPTER__SHUTDOWN_GRACE_SECONDS`, after connections drain. Tasks still pending at the
-  grace are cancelled, and the process exits with the existing `grace exhausted` failure. The
-  prebound `AxumDevServer::serve` embedding cancels them, consistent with its cancel-not-drain
-  contract. As with outbound deadlines, cancellation happens at await points; blocking work in a
-  task delays the shared executor.
+  Shutdown through the production entrypoints, `run_app` and `AxumDevServer::run` (fixed 10 s grace)
+  waits for registered tasks after connections drain, within the same grace
+  (`EDGEZERO__ADAPTER__SHUTDOWN_GRACE_SECONDS` where configurable). Tasks still pending at the grace
+  are cancelled, and the process exits with the existing `grace exhausted` failure; a second signal
+  still stops immediately. The prebound `AxumDevServer::serve` embedding cancels them, consistent
+  with its cancel-not-drain contract. Blocking work in a task also delays the shared executor.
 - Fastly drives the tasks after the response is sent, before the request callback returns, inside
   the same outbound scope. The budget is checked whenever a task yields to the adapter's progress
   driver; a blocked hostcall cannot be preempted. The tasks delay the next request on a reused

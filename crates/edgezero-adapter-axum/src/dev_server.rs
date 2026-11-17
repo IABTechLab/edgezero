@@ -742,21 +742,23 @@ async fn drain_tasks(
     }
     tasks.clear();
     // Every connection has settled, so no handler can register more work. Tasks share the grace.
+    // An idle tracker wins over a deadline that passed while the select was being set up.
     if outcome.is_ok() {
         tokio::select! {
             biased;
             signal = next_signal(signals) => {
                 outcome = Err(signal.err().unwrap_or_else(|| failure("shutdown", "signal", "forced stop")));
             }
+            () = after_response.wait_idle() => {}
             () = sleep_until(deadline) => {
-                log::warn!(
-                    "{} after-response task(s) abandoned at the shutdown grace",
-                    after_response.pending()
-                );
                 outcome = Err(failure("shutdown", "budget", "grace exhausted"));
             }
-            () = after_response.wait_idle() => {}
         }
+    }
+    // Pending tasks are cancelled when the executor drops, whichever way shutdown ended.
+    let abandoned = after_response.pending();
+    if abandoned > 0 {
+        log::warn!("{abandoned} after-response task(s) abandoned at shutdown");
     }
     outcome
 }

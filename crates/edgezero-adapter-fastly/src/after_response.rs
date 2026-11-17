@@ -1,7 +1,7 @@
 //! Fastly after-response tasks: queued during one request lifecycle, then driven after the
 //! response is sent, inside the same callback scope, each bounded by its budget.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
 use edgezero_core::after_response::{AfterResponseHandle, AfterResponseScheduler};
@@ -12,17 +12,27 @@ use futures_util::future::LocalBoxFuture;
 
 type Queued = (Duration, LocalBoxFuture<'static, ()>);
 
+/// One armed request lifecycle: its unique generation and its queued tasks.
+struct Lifecycle {
+    generation: u64,
+    tasks: Vec<Queued>,
+}
+
 thread_local! {
     /// `Some` while a request lifecycle accepts tasks; `None` otherwise.
-    static QUEUE: RefCell<Option<Vec<Queued>>> = const { RefCell::new(None) };
+    static QUEUE: RefCell<Option<Lifecycle>> = const { RefCell::new(None) };
+    /// Source of lifecycle generations; a handle only queues into the lifecycle that issued it.
+    static NEXT_GENERATION: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Request-lifecycle guard. Restores the previously armed queue when dropped.
+/// Request-lifecycle guard. Restores the previously armed lifecycle when dropped.
 pub(crate) struct ArmedQueue {
-    previous: Option<Vec<Queued>>,
+    previous: Option<Lifecycle>,
 }
 
-struct FastlyAfterResponse;
+struct FastlyAfterResponse {
+    generation: u64,
+}
 
 impl ArmedQueue {
     /// Closes registration and returns the queued tasks; the guard still restores on drop.
@@ -32,7 +42,10 @@ impl ArmedQueue {
     )]
     pub(crate) fn take(&self) -> Vec<Queued> {
         QUEUE.with(|queue| match queue.try_borrow_mut() {
-            Ok(mut queued) => queued.take().unwrap_or_default(),
+            Ok(mut queued) => queued
+                .take()
+                .map(|lifecycle| lifecycle.tasks)
+                .unwrap_or_default(),
             Err(_borrowed) => {
                 log::warn!("after-response queue was busy; queued tasks were dropped");
                 Vec::new()
@@ -63,11 +76,11 @@ impl AfterResponseScheduler for FastlyAfterResponse {
         task: LocalBoxFuture<'static, ()>,
     ) -> Result<(), EdgeError> {
         QUEUE.with(|queue| match queue.try_borrow_mut().as_deref_mut() {
-            Ok(Some(queued)) => {
-                queued.push((budget, task));
+            Ok(Some(lifecycle)) if lifecycle.generation == self.generation => {
+                lifecycle.tasks.push((budget, task));
                 Ok(())
             }
-            Ok(None) | Err(_) => Err(EdgeError::internal(anyhow::anyhow!(
+            Ok(_) | Err(_) => Err(EdgeError::internal(anyhow::anyhow!(
                 "after-response tasks can only be registered while the request is handled"
             ))),
         })
@@ -76,15 +89,25 @@ impl AfterResponseScheduler for FastlyAfterResponse {
 
 /// Opens a fresh queue for one request lifecycle.
 pub(crate) fn arm() -> ArmedQueue {
-    let previous = QUEUE.with(|queue| queue.replace(Some(Vec::new())));
+    let generation = NEXT_GENERATION.with(|next| {
+        let issued = next.get();
+        next.set(issued.wrapping_add(1));
+        issued
+    });
+    let previous = QUEUE.with(|queue| {
+        queue.replace(Some(Lifecycle {
+            generation,
+            tasks: Vec::new(),
+        }))
+    });
     ArmedQueue { previous }
 }
 
-/// Returns the request's handle while a lifecycle is armed.
+/// Returns the current lifecycle's handle while one is armed.
 pub(crate) fn handle_if_armed() -> Option<AfterResponseHandle> {
     QUEUE
-        .with(|queue| queue.try_borrow().is_ok_and(|queued| queued.is_some()))
-        .then(|| AfterResponseHandle::new(FastlyAfterResponse))
+        .with(|queue| -> Option<u64> { Some(queue.try_borrow().ok()?.as_ref()?.generation) })
+        .map(|generation| AfterResponseHandle::new(FastlyAfterResponse { generation }))
 }
 
 /// Drives `tasks` to completion or their budgets inside the current callback scope.
@@ -159,6 +182,19 @@ mod tests {
         assert!(!polled.get());
         drop(armed);
         assert!(handle_if_armed().is_none());
+    }
+
+    #[test]
+    fn a_retained_handle_cannot_queue_into_a_later_lifecycle() {
+        let first = arm();
+        let retained = handle_if_armed().expect("first handle");
+        drop(first);
+        let second = arm();
+        assert!(
+            retained.schedule(Duration::from_secs(1), async {}).is_err(),
+            "a handle from an earlier request is rejected"
+        );
+        assert!(second.take().is_empty());
     }
 
     #[test]
