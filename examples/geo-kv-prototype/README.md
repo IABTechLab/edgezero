@@ -1,79 +1,156 @@
-# KV Geo format prototype
+# KV Geo offline tools
 
-A standalone Rust experiment for [portable KV Geo](../../docs/superpowers/specs/2026-11-05-kv-geo-design.md). It imports GeoLite City/Country CSV, exports a compact IP index, and checks asynchronous point lookups through the real EdgeZero `KvHandle` against the original unmerged CIDRs.
+Standalone build, publication and verification for [portable KV Geo](../../docs/superpowers/specs/2026-11-05-kv-geo-design.md). CSV import and the independent CIDR oracle stay here. `src/index.rs` selectively re-exports the core `geo::kv` encoder and reader, so the tool and serving code use the same `geo/v1` production-candidate format. Old `geo/p1` artifacts are not compatible; rebuild them.
 
-This is the format/lookup prototype, not production Geo integration. It does not change `GeoProvider`, request dispatch, adapters, store bindings or CLI commands. The crate has its own workspace and lockfile so CSV/import dependencies do not enter production builds.
+This crate has its own workspace, lockfile and target directory. It does not provision resources or deploy an application. Native backends are optional dependencies, absent from default builds. The serving reader does not depend on this crate, CSV, the oracle, a filesystem or native SDKs.
 
-## Run
+## Build and local checks
 
 From the repository root:
 
 ```sh
-cargo test --locked --manifest-path examples/geo-kv-prototype/Cargo.toml
-cargo build --locked --release --manifest-path examples/geo-kv-prototype/Cargo.toml
-```
+MANIFEST=examples/geo-kv-prototype/Cargo.toml
+TARGET=examples/geo-kv-prototype/target
+cargo test --locked --manifest-path "$MANIFEST" --target-dir "$TARGET"
+cargo build --locked --release --manifest-path "$MANIFEST" --target-dir "$TARGET"
+BIN="$PWD/$TARGET/release/geo-kv-prototype"
 
-The binary is `examples/geo-kv-prototype/target/release/geo-kv-prototype` unless `CARGO_TARGET_DIR` selects another directory. The commands below assume `BIN` points to that binary.
-
-Extract the City CSV archive outside the repository. The source directory must contain the English locations file and both Blocks files. For Country CSV, use the corresponding Country filenames.
-
-```sh
-SOURCE="$HOME/.cache/edgezero/geo-kv-prototype/source/GeoLite2-City-CSV_20261103"
-OUT="$HOME/.cache/edgezero/geo-kv-prototype/artifacts-64k"
-
+SOURCE="$HOME/.cache/edgezero/geo/source/GeoLite2-City-CSV_RELEASE"
+OUT="$HOME/.cache/edgezero/geo/artifacts-64k"
 "$BIN" build "$SOURCE" "$OUT" 65536
 "$BIN" verify "$SOURCE" "$OUT" 2048 4194304
 "$BIN" lookup "$OUT" 1.0.1.1 ::1
 ```
 
-- `build` imports, merges adjacent equal locations, builds byte-bounded objects, exports them through `KvHandle`, reads every object back, and emits a pinned receipt, inventory and build report. Use a separate output directory for each object-size experiment. An identical rerun must reproduce the same receipt and object bytes.
-- `verify` compares 2,048 points per family against an independent `ipnet::contains` lookup over source CIDRs. Points include family endpoints, stratified CIDR endpoints and neighbors, and deterministic random addresses. It measures cache-disabled, cache-enabled first-pass and cache-enabled repeated-pass lookups. The last two share a bounded cache, not a full dataset preload. The manifest read is measured separately from per-query object reads.
-- `lookup` runs in a fresh process without reading CSV or an inventory. Results follow input order, without echoing addresses. A JSON `null` means no geographic coverage; a missing required object is an error.
+Extract one permitted GeoLite City or Country release outside the repository. Supply the English Locations file and both Blocks files from that release. Import validates named columns, family membership, CIDRs, overlaps, referenced locations and geographic code syntax. It does not substitute registered or represented countries. City imports the first subdivision; Country produces country-only results. Empty references or locations without country leave gaps.
 
-Generated CSV, index files and machine-readable reports stay outside Git. Publication artifacts contain derived MaxMind data and retain its licensing, attribution, update and deletion obligations.
+`build` merges adjacent equal locations and exports byte-bounded objects through `KvHandle`. It reads the inventory back, validates the full reachable tree, and writes:
 
-## Data and policy are separate
+- `receipt.json`, the exact manifest key and SHA-256 deployment identity.
+- `inventory.json`, every exact key, byte count and SHA-256, including the manifest.
+- `build-report.json`, source hashes, index shape, size, timings and whole-process peak RSS.
 
-The downloaded release includes `XK`. EdgeZero's existing `CountryCode` rejects that code. The prototype's six-byte location is a source-format DTO, not a `GeoLocation` or production `GeoResolution`.
+Default object size is 64 KiB. Use separate output directories to compare 16 and 64 KiB. Completed identical builds can be repeated in place. Keep the source, receipt and inventory together. Build files are immutable; an interrupted local file write is not automatically repaired. Regenerate damaged local artifacts in a fresh directory and compare the receipt before publishing.
 
-The prototype validates country syntax, preserves source codes, reports unsupported-code network counts and exposes `core_country_supported` in explicit lookup output. It does not add `XK` to EdgeZero's country allowlist, silently discard those intervals, or map them to another country. Production policy needs a decision before integrating this format with Geo outcomes.
+`verify` checks inventory closure and the full local tree, then compares cache-disabled, cache-enabled first-pass and repeated-pass lookups with the independent original-CIDR oracle. Samples include family endpoints, stratified CIDR boundaries and neighbors, plus deterministic random points. IPv4-mapped IPv6 follows serving normalization. It writes `verification-report.json`.
 
-## Experimental encoding
+`lookup` opens only the receipt and the local reader, without CSV or inventory loading. Results follow argument order without echoing addresses. `null` means no coverage. Required missing or corrupt objects fail the command. `XK` remains a source location with `core_country_supported: false`, rather than becoming a gap or an invented core country.
+
+## Publish the same artifact to native backends
+
+Build the native tool once:
+
+```sh
+cargo build --locked --release --manifest-path "$MANIFEST" \
+  --target-dir "$TARGET" --features 'celld dynamodb'
+```
+
+A build with just `--features celld` or `--features dynamodb` works too. Native commands run on a current-thread Tokio runtime; the default offline tool uses the portable executor.
 
 ```mermaid
 flowchart TD
-    Receipt[Pinned manifest key and SHA-256] --> Manifest[Family roots and object byte budget]
-    Manifest --> Directory[Sorted child envelopes and hashes]
-    Directory --> Leaf[Sorted address intervals and source locations]
-    Leaf --> Location[Country and optional subdivision]
+    Build[CSV release builds one local artifact] --> Check[Validate receipt, inventory and full local tree]
+    Check --> Publish[Publisher binding reads each remote key]
+    Publish --> Existing{Remote bytes exist?}
+    Existing -->|Identical| Skip[Skip write]
+    Existing -->|Different| Abort[Abort, never overwrite]
+    Existing -->|Absent| Write[Write and read back exact bytes]
+    Skip --> Manifest[Process manifest last]
+    Write --> Manifest
+    Manifest --> Serving[Separate serving binding verifies full tree]
+    Serving --> Oracle[Compare sampled lookups with local source oracle]
+    Oracle --> Rollout[Operator selects pin after serving-location checks]
 ```
 
-Each binary object has a 12-byte header:
+`publish <artifact-dir> <publisher-settings.json>` validates all local bytes before preparing a backend. Inventory keys must belong to the pinned generation, match their hashes and exactly cover the reachable tree. Duplicate, omitted and extra objects fail validation. Each object is checked again when read for upload. Backend value limits are checked before publication.
 
-| Bytes | Meaning                             |
-| ----- | ----------------------------------- |
-| 0..4  | Magic `EZP1`                        |
-| 4     | Address family, 4 or 6              |
-| 5     | Kind, 0 for leaf or 1 for directory |
-| 6..8  | Big-endian level, 0 for leaf        |
-| 8..12 | Big-endian record count             |
+Remote publication reads before writing, skips identical bytes, aborts on different bytes, writes only absent objects, and reads new writes back. It processes the manifest last regardless of inventory ordering. After interruption or an uncertain write, rerun **the same command with the same artifact and inventory**. There is no internal retry loop, mutable `active` key, overwrite repair or fallback generation. Assign one publisher per generation. Ordinary KV writes are unconditional; read-before-write is not a lock against another publisher.
 
-Leaf records contain inclusive start and end addresses, then a six-byte location. IPv4 addresses occupy four bytes each; IPv6 addresses occupy sixteen. Location bytes are uppercase country code, subdivision length, and three zero-padded subdivision bytes. Leaf records are therefore 14 or 38 bytes.
+`verify-remote <artifact-dir> <serving-settings.json> <csv-dir> <samples-per-family>` opens the pinned manifest through the serving binding, verifies every reachable object and compares samples with the local CSV oracle. It issues only exact-key reads, never writes or listing. Source CSV is read by this offline verification process, not sent to the backend or loaded by serving applications. The source hashes must match the manifest. Success prints the pin, object count and checked sample count.
 
-Directory records contain inclusive child-envelope bounds and a 32-byte child SHA-256. They occupy 40 or 64 bytes. Child level decreases by one. Child keys derive from generation, family and digest; no arbitrary child key is decoded from dataset bytes. Directories are grouped until each family has one root. No key listing or CIDR-prefix probing occurs.
+### Ordinary celld
 
-The JSON manifest binds source-file hashes, edition, object budget and both roots. `receipt.json` pins its exact key and digest. The experimental generation hashes schema number, object budget and source metadata. Changes to this encoding/build algorithm require a new format version; p1 is not frozen for consumers.
+Provision stock celld, install/configure the existing EdgeZero store service and create the alias and grants through existing operator tooling. See [native celld stores](../../docs/guide/native-celld-stores.md). No celld fork, special Geo service or namespace provisioning is built into this tool.
 
-Objects are validated before use or caching. The reader checks content digest, family, level, lengths, ordering, envelopes and source-code syntax. The cache retains validated object bytes and searches records without materializing all intervals. Its configured budget counts retained payload bytes, not allocator/hash-map overhead. A fetched object and validation scratch memory exist in addition to retained cache payload.
+Publisher settings, stored outside Git:
 
-## Measurement boundaries
+```json
+{
+  "backend": "celld",
+  "settings": {
+    "endpoint": "https://celld.example.test:8443",
+    "store": "geo",
+    "access": { "mode": "authenticated", "token_env": "GEO_PUBLISH_TOKEN" }
+  },
+  "limits": { "max_value_bytes": 1048576 }
+}
+```
 
-`store.rs` is a local file-backed artifact transport implementing `KvStore`. Its synchronous filesystem operations are intentionally a prototype harness, not a production async backend. The lookup algorithm itself only uses `KvHandle` and requires no filesystem API. Replacing this harness with actual remote KV and integrating cancellation belongs to the next stage.
+Serving settings use the same endpoint and alias with `token_env: "GEO_SERVING_TOKEN"`. Inject token values through the environment, not JSON, arguments or shell history. The publisher needs read/write access. The serving grant must be read-only. The ordinary settings validator requires HTTPS for authenticated access. Local trusted-network experiments can use `"access": { "mode": "trusted-network" }` with an explicit loopback HTTP endpoint, but that does not prove grant enforcement.
 
-Local timings include file reads, SHA-256, validation and search. OS page cache is uncontrolled. Cache-disabled means the resolver object cache is disabled, not that disk or OS caches are cold. No simulated network delay is added. The sample mix is a correctness workload, not representative user traffic or a KV cost forecast.
+```sh
+"$BIN" publish "$OUT" /secure/geo-celld-publisher.json
+"$BIN" verify-remote "$OUT" /secure/geo-celld-serving.json "$SOURCE" 2048
+```
 
-Linux `VmHWM` supplies whole-process peak RSS. Import/verify processes retain source CIDRs for the oracle, so their RSS is not serving memory. Use a fresh `lookup` process to measure a small serving workload without that retained dataset.
+Preparation uses `CelldPreparation::prepare_kv` with optional `CelldPreparationLimits`. It does not probe permissions. Publication and serving verification exercise actual reads. Prove stock celld denies writes under the serving grant separately using existing service tooling; this verifier intentionally does not attempt a write.
 
-The artifact writer demonstrates deterministic export/read-back, not crash-safe publication, distributed propagation, concurrent writer exclusion or a backend's upload API. Production retry, publication and retirement behavior remains specified separately.
+### DynamoDB and DynamoDB Local
 
-See [measured results](../../docs/superpowers/plans/2026-11-05-kv-geo-prototype-results.md).
+Provision an ordinary compatible table and namespace outside this tool. See [DynamoDB KV](../../docs/guide/dynamodb-kv.md) for table keys and value layout. Do not create a dedicated Geo table merely for this workflow.
+
+```json
+{
+  "backend": "dynamodb",
+  "settings": {
+    "region": "us-east-1",
+    "table": "edgezero-kv",
+    "namespace": "geo",
+    "limits": { "max_value_bytes": 393216 }
+  }
+}
+```
+
+The tool calls `AwsPreparation::prepare_dynamodb`, including its ordinary `DescribeTable` validation, with ambient AWS credentials. `AWS_ENDPOINT_URL_DYNAMODB` selects DynamoDB Local through the SDK's normal configuration. For a disposable local instance only:
+
+```sh
+AWS_ENDPOINT_URL_DYNAMODB=http://127.0.0.1:8000 \
+AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local \
+  "$BIN" publish "$OUT" /secure/geo-dynamodb-publisher.json
+AWS_ENDPOINT_URL_DYNAMODB=http://127.0.0.1:8000 \
+AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local \
+  "$BIN" verify-remote "$OUT" /secure/geo-dynamodb-serving.json "$SOURCE" 2048
+```
+
+Use a serving role allowing only `dynamodb:DescribeTable` and `dynamodb:GetItem` on the selected table ARN, with no write grants. A minimal identity policy is:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["dynamodb:DescribeTable", "dynamodb:GetItem"],
+    "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/edgezero-kv"
+  }]
+}
+```
+
+Check the role's other attached policies and resource policies too. The publishing operator also needs `PutItem`; retirement needs `DeleteItem`. DynamoDB Local does not enforce IAM, so a local read-only verifier proves it issues no writes, not that a deployed role denies them. Actual role denial remains hosted qualification. This tool adds no retries; ordinary backend operation timeouts and preparation limits still apply.
+
+## Rollout, retention and output safety
+
+Uploader read-back and a manifest written last do not prove propagation to all serving locations. Run full verification through the actual serving identity and path at the required locations before selecting the pin. The deployment pin is `<generation>@<manifest_sha256>`, using the generation from `geo/v1/<generation>/manifest`. Restart canaries and then the fleet through existing deployment tooling. Rollback requires re-verifying a still-permitted previous pin. There is no automatic runtime fallback.
+
+Retire only after readers stop referencing a generation. Use its exact inventory with existing operator deletion tooling, and include local artifacts, source files, retained caches and backups in the retention process. TTL is not deletion evidence. This tool does not delete remote data or prove retirement.
+
+Do not put licensed CSV, derived artifacts, reports or credentials into Git or release images. Follow the [GeoLite EULA](https://www.maxmind.com/en/geolite/eula), attribution and permitted-use obligations. Geography is an estimate; applications own jurisdiction recognition and policy.
+
+Successful commands print aggregate reports and dataset identity, never reader addresses or credentials. Errors print a fixed failure message and usage, not raw SDK, CSV, filesystem or parsing errors. Dependency logging is an operator concern. Explicit `lookup` results disclose geography in input order; use synthetic addresses when recording evidence.
+
+## Format and measurement limits
+
+Core owns the `EZG1` binary encoding and schema validation. Objects use sorted intervals, embedded six-byte source locations and digest-addressed children; the manifest binds both family roots and source hashes. No full index preload or key listing is required for lookup. Reader limits here are a 384 KiB object ceiling, 32 objects per path, and 4,096 cache entries. Cache payload bytes are configurable for local verification; remote verification disables caching. These are tool limits, not a claim about deployed capacity or final schema defaults.
+
+`store.rs` is a local file-backed `KvStore` for artifact IO, not a production async filesystem backend. Local timings include file reads, hashing, validation and search. OS page cache is uncontrolled. Cache-disabled does not mean a cold disk. Linux `VmHWM` includes importer/oracle memory in those commands, so it is not serving RSS. Fresh `lookup` avoids retaining CSV.
+
+Tests use synthetic City/Country data and in-memory fault injection. They cover deterministic exports, boundaries/gaps, unsupported codes, safe output, inventory tampering, manifest-last publication, identical replay, resuming after every uncertain write, conflict/read-back failures and missing/corrupt serving visibility without writes. Run optional-backend compilation and tests with `--all-features`; it does not contact services. Real stock-celld, DynamoDB Local, serving-grant denial, production-size 16/64 KiB measurements and hosted IAM qualification still require operator runs. Earlier [prototype measurements](../../docs/superpowers/plans/2026-11-05-kv-geo-prototype-results.md) describe the old `p1` experiment, not backend evidence for this implementation.

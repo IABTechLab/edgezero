@@ -25,6 +25,10 @@
 
 mod country_codes;
 
+/// Versioned KV-backed geography index.
+#[cfg(feature = "geo-kv")]
+pub mod kv;
+
 use std::fmt;
 
 /// A bounded validation category. Rejected source values are never retained.
@@ -61,11 +65,18 @@ impl GeoProviderId {
         Self("cloudfront".to_owned())
     }
 
+    /// Identity reserved for the built-in KV provider.
+    #[inline]
+    #[must_use]
+    pub fn kv() -> Self {
+        Self("kv".to_owned())
+    }
+
     /// Validate an application provider label matching `[a-z][a-z0-9._-]{0,63}`.
     ///
     /// # Errors
-    /// Returns a bounded category for invalid labels or the reserved `cloudfront`, `fastly`
-    /// and `cloudflare` IDs.
+    /// Returns a bounded category for invalid labels or the reserved `cloudfront`, `fastly`,
+    /// `cloudflare`, and `kv` IDs.
     #[inline]
     pub fn new(value: &str) -> Result<Self, GeoValueError> {
         if value.is_empty()
@@ -77,7 +88,7 @@ impl GeoProviderId {
         {
             return Err(GeoValueError::InvalidProviderId);
         }
-        if matches!(value, "cloudfront" | "fastly" | "cloudflare") {
+        if matches!(value, "cloudfront" | "fastly" | "cloudflare" | "kv") {
             return Err(GeoValueError::ReservedProviderId);
         }
         Ok(Self(value.to_owned()))
@@ -309,6 +320,9 @@ pub trait GeoProvider {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeoUnavailableReason {
     MissingMetadata,
+    MissingReaderIp,
+    NoMatch,
+    UnsupportedGeography,
     UntrustedIngress,
 }
 
@@ -319,12 +333,15 @@ pub enum GeoSource {
     CloudFront,
     Cloudflare,
     Fastly,
+    Kv,
 }
 
 /// The declared infrastructure protection used for source admission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GeoTrustBasis {
+    CheckedDirectPeer,
+    CheckedForwardedClient,
     /// Operator-declared credential-gated, network-isolated ALB path.
     /// This does not prove the external listener or network configuration.
     DeclaredProtectedAlb,
@@ -373,6 +390,7 @@ impl GeoOutcome {
                 GeoSource::CloudFront => "cloudfront",
                 GeoSource::Cloudflare => "cloudflare",
                 GeoSource::Fastly => "fastly",
+                GeoSource::Kv => return Self::NoSelection,
             }
             .to_owned(),
         );
@@ -502,7 +520,7 @@ mod tests {
                 Err(GeoValueError::InvalidProviderId)
             );
         }
-        for value in ["cloudfront", "fastly", "cloudflare"] {
+        for value in ["cloudfront", "fastly", "cloudflare", "kv"] {
             assert_eq!(
                 GeoProviderId::new(value),
                 Err(GeoValueError::ReservedProviderId)

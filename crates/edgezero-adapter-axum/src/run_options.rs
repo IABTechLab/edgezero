@@ -16,7 +16,9 @@ use edgezero_store_celld::settings::{CelldAccessToken, CelldPreparationLimits};
 use log::LevelFilter;
 
 use crate::diagnostics::NativeDiagnosticsHandle;
-use crate::geo::{self, NativeGeo, NativeGeoCapability, NativeGeoConfigError, NativeGeoSelection};
+use crate::geo::{
+    self, NativeGeoCapability, NativeGeoConfigError, NativeGeoPlan, NativeGeoSelection,
+};
 use crate::native_bindings::{
     NativeBindingsLimits, NativeConfigBinding, NativeKvBinding, NativePreparationPolicySources,
     NativeStoreBindings, NativeStoreBindingsInput,
@@ -411,7 +413,7 @@ impl AxumRunOptions {
     pub(crate) fn native_geo(
         &self,
         manifest: &BakedManifest,
-    ) -> Result<NativeGeo, NativeGeoConfigError> {
+    ) -> Result<NativeGeoPlan, NativeGeoConfigError> {
         geo::resolve(self.geo.as_ref(), &self.env, manifest)
     }
 
@@ -786,7 +788,14 @@ pub(crate) fn geo_setting(path: &[String]) -> Option<&'static str> {
         [
             "adapter",
             "geo",
-            "provider" | "alb_peer_cidrs" | "origin_credential_header_name"
+            "provider"
+                | "alb_peer_cidrs"
+                | "origin_credential_header_name"
+                | "store_id"
+                | "pin"
+                | "reader_ip"
+                | "lookup_timeout_ms"
+                | "max_in_flight"
         ]
     )
     .then_some("GEO")

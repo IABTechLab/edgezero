@@ -1064,7 +1064,7 @@ where
     let (env, json_body_limit, mut native) = capture_dev_environment(vars_os())?;
     // The dev server ignores the manifest table: its deployment-only values are
     // usually absent locally. Settings alone opt a dev run into geo.
-    native.geo = geo::resolve(None, &env, &BakedManifest::Absent)?;
+    let geo = geo::resolve(None, &env, &BakedManifest::Absent)?;
     if !A::owns_logging() {
         app_logger(&env)
             .init()
@@ -1099,6 +1099,8 @@ where
                 config: build_config_registry(metadata.config, &env, config_limits)?,
                 secrets: build_secret_registry(metadata.secrets, &env),
             };
+            let max_object_bytes = geo.max_object_bytes(None)?;
+            native.geo = geo.prepare(stores.kv(), max_object_bytes).await?;
             prepare_transport(app, stores, json_body_limit, native)
         },
     )
@@ -1325,11 +1327,11 @@ where
     ) -> LocalStartupFuture<'startup>,
 {
     let geo = options.native_geo(&A::manifest())?;
-    let native = NativeHosting {
+    let mut native = NativeHosting {
         diagnostics: options.diagnostics(),
         policy: options.trusted_proxy_policy(),
         request_records: options.request_records(),
-        geo,
+        geo: NativeGeo::default(),
     };
     run_local(
         ListenerSource::Bind(options.addr()),
@@ -1340,6 +1342,7 @@ where
         async move {
             let metadata = A::stores();
             let sources = NativeSourcePlan::validate(metadata, &options, overrides)?;
+            let max_object_bytes = geo.max_object_bytes(Some(&sources))?;
             init_logging::<A>(options.logging_level())?;
             let mut app = App::build::<A>(crate::AXUM_PLATFORM)
                 .map_err(|_error| anyhow::anyhow!("application configuration failed"))?;
@@ -1350,6 +1353,7 @@ where
                 app.record_store_requirements(),
             )
             .await?;
+            native.geo = geo.prepare(stores.kv(), max_object_bytes).await?;
             let transport = AxumOutboundClient::try_transport()
                 .map_err(|_error| failure("transport", "HTTP client", "initialization failed"))?;
             initialize(&mut app, &stores).await.map_err(|error| {

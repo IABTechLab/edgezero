@@ -1,9 +1,9 @@
 # Portable KV-backed Geo
 
-- Status: draft for review. The format prototype is measured; production Geo integration and remote KV behavior are not implemented or verified.
-- Date: 2026-11-05.
-- Base: `72ceed7e2a802cfa536851dd20c95ca55ebea4fc`, the shared base of this branch and `feature/axum-local-geoip` before its MMDB implementation.
-- Related work: [pluggable Geo providers](2026-10-22-pluggable-geo-providers-design.md), issues [#432](https://github.com/IABTechLab/edgezero/issues/432) and [#438](https://github.com/IABTechLab/edgezero/issues/438).
+- Status: design for [#454](https://github.com/IABTechLab/edgezero/pull/454). The prototype is measured; managed serving and backend proofs are not implemented or verified.
+- Drafted: 2026-11-05. Revised: 2026-11-17.
+- Dependencies: [native Geo providers (#439)](https://github.com/IABTechLab/edgezero/pull/439) and [Axum Geo manifest/settings selection (#502)](https://github.com/IABTechLab/edgezero/pull/502). Reconcile the shared settings and outcome changes before adding KV selection.
+- Merge gate: reviewers must agree that the KV checks in [§10](#10-acceptance-and-delivery) replace the MMDB-specific requirements in [#438](https://github.com/IABTechLab/edgezero/issues/438) before claiming closure.
 
 ## 1. Outcome and decisions
 
@@ -11,7 +11,7 @@ Consumers can resolve an admitted reader IP to an estimated country and optional
 
 Use GeoLite CSV as the initial import format. Transform it outside the serving runtime into an immutable, versioned IP index. Resolve requests asynchronously through `KvHandle`, with optional bounded in-memory caching. Geography remains an estimate; applications own jurisdiction recognition and policy.
 
-KV is the portable serving dependency, not a claim of better lookup performance than MMDB. Remote KV adds read cost, latency and failure modes. The first implementation must measure these costs before making production performance claims.
+#454 ships opt-in managed Axum serving with a portable `KvHandle` reader. Stock celld with the EdgeZero store service and DynamoDB Local are the first end-to-end proof backends, not dependencies of Geo. Publish the same artifact to both. A compatible binding must support exact-key byte reads, fit the artifact's key and value limits, and make the pinned generation visible to readers before rollout. This design makes no performance claim over MMDB.
 
 Required invariants:
 
@@ -24,19 +24,19 @@ Required invariants:
 - Runtime Geo resolution requires no filesystem, local sidecar, MaxMind credentials or downloader.
 - Portable code gains no native SDK, Tokio dependency, mandatory `Send` future or platform-specific timer.
 
-CloudFront assertions remain an optional selected provider. This work does not depend on the sibling MMDB implementation and does not remove it from that branch.
+Preserve protected CloudFront and supplied providers. Fastly, Cloudflare, and Spin keep their existing Geo behavior; their managed KV Geo integration is separate work. Trusted Server wiring and deployment are also separate.
 
 ## 2. Ownership and flow
 
-| Concern | Owner |
-| --- | --- |
-| Dataset acquisition, download integrity and licensing | Operator's update process |
-| CSV validation, geographic projection and index construction | Offline importer |
-| KV resource creation, credentials and backend bindings | Existing platform tooling and operator |
-| Index lookup and decoding | Portable KV Geo implementation |
-| Socket/platform client identity and forwarding trust | Adapter ingress |
-| Per-request outcome and geographic value types | Portable Geo contract |
-| Jurisdiction, consent, permissions and response caching | Application |
+| Concern                                                      | Owner                                  |
+| ------------------------------------------------------------ | -------------------------------------- |
+| Dataset acquisition, download integrity and licensing        | Operator's update process              |
+| CSV validation, geographic projection and index construction | Offline importer                       |
+| KV resource creation, credentials and backend bindings       | Existing platform tooling and operator |
+| Index lookup and decoding                                    | Portable KV Geo implementation         |
+| Socket/platform client identity and forwarding trust         | Adapter ingress                        |
+| Per-request outcome and geographic value types               | Portable Geo contract                  |
+| Jurisdiction, consent, permissions and response caching      | Application                            |
 
 ```mermaid
 flowchart TD
@@ -72,7 +72,9 @@ Country uses the corresponding Country filenames and produces country-only locat
 
 Join block `geoname_id` to location `geoname_id`. Keep `country_iso_code` and, for City, `subdivision_1_iso_code`. Do not substitute `registered_country_geoname_id` or `represented_country_geoname_id`; those identify different geographic facts. Names, coordinates, postal codes and network registration metadata are not needed in the serving index.
 
-Validate address-family membership, CIDRs, duplicate location identities, referenced locations and consumed geographic codes. A populated reference with no matching location is an import error. An absent geolocation reference or location without country yields no geographic coverage, not a guessed country. A subdivision without country is invalid. Country-only locations remain partial; subdivision validation checks syntax, not worldwide assignment or application recognition.
+Validate address-family membership, CIDRs, duplicate location identities, referenced locations and geographic code syntax. A populated reference with no matching location is an import error. An absent geolocation reference or location without country yields no geographic coverage, not a guessed country. A subdivision without country is invalid. Country-only locations remain partial; subdivision validation checks syntax, not worldwide assignment or application recognition.
+
+Preserve syntactically valid source codes that core does not recognize, including `XK`, in the source-format record. A matching interval with such a country yields unsupported geography. It is neither a gap nor a backend failure and does not change the `CountryCode` allowlist.
 
 Convert networks into sorted numeric intervals, separately for IPv4 and IPv6. Reject conflicting or overlapping source intervals rather than inventing precedence. Adjacent intervals with identical projected locations may be merged. Preserve gaps. Use overflow-safe address arithmetic, including the last address in each family.
 
@@ -96,75 +98,66 @@ geo/v1/<generation>/v6/directory/<id>
 geo/v1/<generation>/v6/leaf/<id>
 ```
 
-A leaf contains sorted, disjoint inclusive intervals and their country and optional subdivision. A directory contains sorted, disjoint child envelopes, exact child keys and expected content digests. Envelopes include any internal gaps; the selected leaf confirms actual coverage. A directory gap proves no coverage without another read.
+A leaf contains sorted, disjoint inclusive intervals and their country and optional subdivision. A directory contains sorted, disjoint child envelopes and expected content digests. Derive each exact child key from the pinned generation, address family and digest rather than accepting arbitrary key strings from stored data. Envelopes include any internal gaps; the selected leaf confirms actual coverage. A directory gap proves no coverage without another read.
 
 Build leaves by encoded byte size, then build directories over contiguous groups until each family has one root. Additional directory levels allow the directory itself to exceed one KV value without requiring a whole-directory preload. Lookup chooses at most one child at each level by binary search. It never probes multiple prefixes or scans neighboring leaves.
 
-Use a versioned binary encoding with explicit record counts, address-family widths and network-byte-order addresses. Locations are stored with the intervals, avoiding a second location-record read. The exact byte schema, directory fanout and default object size must be recorded after the prototype; this draft does not claim they are settled.
+Use a versioned binary encoding with explicit record counts, address-family widths and network-byte-order addresses. Store locations with intervals to avoid a second read. Compare 16 KiB and 64 KiB objects on both proof backends before freezing the production schema and defaults. Record the resulting encoding and limits; the experimental `p1` encoding is not a stable contract.
 
 ### Limits and validation
 
-All accesses go through `KvHandle`. Build to an explicit target backend value budget, including serialization overhead. The portable 25 MiB ceiling is not a promise every backend accepts that size. For example, the current native DynamoDB adapter caps values at 384 KiB and permits operators to lower that cap.
+All accesses go through `KvHandle`. Build to a key and value budget that fits the intended backends, accounting for storage overhead. The portable 25 MiB ceiling does not override the stock celld service's 1 MiB value ceiling or the DynamoDB binding's 384 KiB ceiling. Operators can configure lower limits. Celld caps bytes while collecting a response; DynamoDB checks its configured value cap after the AWS SDK decodes the item. Measure SDK allocations separately rather than treating the index limit as a wire limit.
 
 The reader validates schema, digest, encoded lengths, counts, ordering, interval bounds, child bounds and geographic values before using an object. Child keys must remain within the selected generation and address family, and children must fit the parent's declared envelope. Expected digests bind decoded descendants to the selected manifest. Hashes identify bytes, not publisher authenticity.
 
-The implementation must specify per-object bytes, traversal work and memory budgets. Derive defaults from the supported backend limits and measured index shape, rather than inventing an arbitrary fixed tree depth. Reject an incompatible dataset explicitly; never skip validation or truncate data to fit.
+Enforce limits for manifest and object bytes, record counts, tree depth, retained cache bytes and entries, and concurrent lookups. Include transport buffers, validation scratch and objects still held after eviction in memory measurements. Derive defaults from the backend limits and measured index shape. Reject an incompatible dataset rather than truncating it or skipping validation.
 
 ## 5. Async resolution and request lifecycle
 
-The base's `GeoProvider` is synchronous and assertion-only. KV resolution requires a new async execution boundary and a typed reader-IP input; it cannot be implemented by blocking on KV inside that existing trait.
+Keep the public synchronous `GeoProvider` and assertion-only `GeoInput` unchanged. Axum's internal prepared provider selection distinguishes synchronous assertion providers from the async KV resolver. The portable reader takes a typed IP and owns its configured `KvHandle`; it does not get a request, headers or a service registry. No public async plugin trait, blocking KV bridge, native SDK or mandatory `Send` future is needed.
 
-Retain the public synchronous supplied-provider contract for existing consumers. Add an object-safe asynchronous provider contract using the repository's non-`Send` future convention. Existing synchronous providers are wrapped at composition and return immediately. Native hosting retains the object ownership bounds it needs. The new provider owns its configured `KvHandle`; request input does not expose the request or a service registry.
-
-Give the new async contract discriminated assertion and reader-IP inputs, with source admission owned by adapters. Preserve the existing synchronous `GeoInput` assertion struct; the composition wrapper converts only the assertion variant into it. Add `NoMatch` and `MissingReaderIp` outcomes and reader-IP provenance. Existing country/subdivision value types and `RequestContext::geo()` remain the consumer interface. New public variants need release notes and exhaustive-match migration examples.
+Use the existing country and subdivision types and `RequestContext::geo()` as the consumer interface. Record reader-IP provenance without exposing the IP itself. Document new outcome variants and any exhaustive-match migration.
 
 Managed request sequence:
 
 1. Perform existing ingress validation, forwarding normalization and admission. Rejected or aborted ingress makes no Geo lookup.
-2. Establish the selected input contract from adapter-private facts. Missing usable reader input produces `MissingReaderIp` without provider calls.
-3. Await the selected provider once, with the request's remaining execution/cancellation budget. Traverse index objects and return one resolution.
-4. Attach an owned immutable outcome before request preparers, application middleware and handlers. Response finalization never resolves again.
+2. Take the reader IP from checked ingress facts, including its provenance. Missing usable reader input produces `MissingReaderIp` without provider calls.
+3. Await KV Geo once under an Axum-owned concurrency and time budget, separate from the body-read deadline. If lookup cannot start within that budget, return provider failure without entering an unbounded queue.
+4. Attach one owned outcome before request preparers, application middleware and handlers. Response finalization uses that outcome without resolving again.
 
-A logical provider invocation can perform multiple KV reads. Without cache hits, read count is manifest acquisition plus one read per directory level and one leaf. The manifest may be retained for the configured instance lifetime. Concurrent cold requests may perform duplicate reads without changing correctness; request coalescing is not a first-version requirement.
+A lookup follows at most one path, with up to one read per directory level plus one leaf read. Manifest acquisition is startup work. Concurrent cold requests may duplicate reads; request coalescing is not required.
 
-Geo code adds no retry loop. Backend retry and timeout behavior must be documented separately. Adapter integration supplies runtime-specific deadline/cancellation mechanics; portable lookup does not acquire a timer dependency. Cancellation releases request ownership without detached lookup work. A dropped future does not promise the underlying platform has aborted its physical I/O.
+Geo adds no retry loop or detached task. Document backend retry and timeout behavior separately. The adapter owns deadline and cancellation mechanics. Dropping the request future stops Geo work owned by that request; it does not guarantee the backend aborted physical I/O.
 
-| Condition | Outcome |
-| --- | --- |
-| Geo not selected | `NoSelection` |
-| Selected, no admitted usable reader IP | `MissingReaderIp` |
-| Validated directory or leaf proves address gap | `NoMatch` |
-| Matched country, absent subdivision | Located, country only |
-| Matched country and subdivision | Located, estimated subdivision |
-| Expected object absent, invalid, unsupported or digest mismatch | Provider failure |
-| KV error or Geo lookup deadline exhausted | Provider failure |
+| Condition                                                       | Outcome                        |
+| --------------------------------------------------------------- | ------------------------------ |
+| Geo not selected                                                | `NoSelection`                  |
+| Selected, no admitted usable reader IP                          | `MissingReaderIp`              |
+| Validated directory or leaf proves address gap                  | `NoMatch`                      |
+| Matched country, absent subdivision                             | Located, country only          |
+| Matched country and subdivision                                 | Located, estimated subdivision |
+| Matched interval contains an unsupported source country code    | Unsupported geography          |
+| Expected object absent, invalid, unsupported or digest mismatch | Provider failure               |
+| KV error, saturation or Geo lookup deadline exhausted           | Provider failure               |
 
 Provider failure does not choose CloudFront, another dataset, or an older cache generation. Outcomes do not automatically choose HTTP status or permission policy.
 
 ## 6. Configuration and adapter portability
 
-Configuration selects a logical KV store ID, dataset generation, expected manifest digest and reader-IP expectation. Resolve the logical ID through existing bindings; the Geo selection contains no physical table name, namespace credentials or filesystem path. Fail configuration if the ID is undeclared, the selection is unsupported, or the configured backend cannot serve the dataset's object budget.
+Extend #502's Axum selection path: `with_geo` overrides settings, then the Axum manifest, then Off. KV takes a dedicated logical store ID, a pin containing both generation and manifest digest, and a reader-IP mode. Override the pin as a unit. The selection contains no physical table, credentials or filesystem path. Reject undeclared bindings, incompatible limits and mixed provider fields. Do not silently select the application's default KV store.
 
-Use an explicit portable Geo selection that every managed adapter can consume. The exact Rust and manifest spelling remains a review decision. Selecting Geo must not silently create a new default store or reuse an application's default store by accident.
+Resolve the named `KvHandle` once after store preparation. Under a bounded startup budget, fetch and validate the pinned manifest and both nonempty roots through the serving binding before readiness. If those reads fail, the selected provider prevents readiness. Full-tree verification belongs to rollout, not every startup. A missing or corrupt required descendant after startup remains a provider failure.
 
-Native hosting prepares the manifest after KV handles are ready and before readiness. Request-scoped edge runtimes may acquire it during request initialization and optionally retain it in runtime-supported memory. They do not need a process-wide startup phase or full-data validation on every invocation. Unsupported schemas or missing manifests fail initialization; missing descendants remain request-time provider failures.
+Require one reader-IP mode:
 
-Every adapter must establish an admitted client IP independently of geographic metadata:
+- **Direct peer** is for a listener that receives reader connections directly. Use the checked socket peer, not a forwarding or geographic header.
+- **Forwarded required** uses the normalized effective client only when its client provenance is trusted forwarding. Checking that an IP exists is not enough: normalization can retain the socket peer on forwarding failure. A checked client can also appear in a `Partial` forwarding summary when other fields are absent, so use the client provenance rather than the summary alone.
 
-| Adapter | Required integration |
-| --- | --- |
-| Axum | Reuse checked peer and trusted-forwarding normalization; support direct-peer or forwarded-required expectation. |
-| Fastly | Use platform client-address facts with documented provenance. |
-| Cloudflare | Use the platform's documented client-address mechanism and prove its replacement/trust contract, rather than accepting an arbitrary copied header. |
-| Spin | Use a verified runtime client-address mechanism or an explicit trusted-ingress integration; return missing input if neither is available. |
-
-These are acceptance requirements, not assertions that the base already implements them. Preserve existing mapped-IPv4 normalization. Never geolocate a reverse proxy merely because its socket peer is available under a forwarded-required selection.
-
-KV makes lookup portable, but does not create trustworthy reader identity. A runtime with KV but no trustworthy client address cannot produce reader-IP geography. Report that limitation explicitly rather than weakening admission.
+Preserve IPv4-mapped IPv6 normalization. A missing or untrusted reader input never falls back to the proxy's IP. Portable lookup does not imply trustworthy reader-IP acquisition on any other managed adapter.
 
 ## 7. Cache behavior
 
-Caching is optional and bounded by bytes. Cache validated immutable objects using store identity, dataset generation and object digest. Eviction only causes another KV read. Fresh workers and caches disabled entirely must produce the same outcomes as warm workers.
+Caching is optional and bounded by bytes and entry count. Cache validated immutable objects by digest within one prepared binding and generation. Eviction only causes another KV read. With the same available generation, cache-disabled and warm lookups must produce the same geography.
 
 Use in-memory caching where the runtime permits it, without requiring cross-request or cross-instance persistence. Do not cache reader IPs or add an IP-to-location cache. A missing expected object is a publication/storage failure, not a negative geolocation cache entry.
 
@@ -172,17 +165,12 @@ Retiring a dataset includes stopping or reconfiguring instances that retain its 
 
 ## 8. Publication and lifecycle
 
-A complete offline build precedes publication. One publishing operation owns a generation; concurrent publishers use separate generation targets. Upload objects under their immutable keys, read them back and verify their expected bytes or digests, then publish the manifest last. A retry of the same build writes the same bytes. Never overwrite a published generation with different data.
+Extend the [standalone tool](../../../examples/geo-kv-prototype/README.md) with offline `build`, plus `publish` and remote `verify` using the existing ordinary celld and DynamoDB preparation APIs. Only handle preparation knows the backend. Leave provisioning and credentials with the operator. The Geo serving identity is read-only; the operator may both publish and retire. No third identity, new authorization code, dedicated DynamoDB table or celld fork is required.
 
-The portable KV API has no compare-and-swap or multi-key transaction. Immutable publication is therefore an operator/tooling ownership rule, not a storage-enforced lock. Deployment configuration pins the manifest digest. There is no mutable `active` pointer in the first version.
-
-A manifest written last is not a global readiness barrier on eventually consistent KV. Validate propagation through the selected provider's supported mechanisms before rollout. A successful uploader-region read-back does not prove all serving locations can read every descendant. If an object is temporarily unavailable, readers return provider failure without switching generations. Document the backend-specific rollout check and residual uncertainty.
-
-A stopped upload leaves an unselected partial generation. Re-running the same inventory converges; cleanup of abandoned generations uses the retained inventory outside request handling. Retire selected generations only after readers stop referencing them, subject to the dataset's mandatory update and deletion terms. Do not rely on KV TTL as proof of immediate deletion.
-
-The publishing workflow needs two outputs: an artifact containing the exact key/value inventory, and a way to upload and verify it for the selected backend. Runtime `KvHandle` portability does not imply a workstation can instantiate every edge SDK's store binding. Reuse existing provider tooling where available; otherwise add an explicit uploader or document an operator-supported upload workflow. CLI syntax and initial backend uploader coverage must be agreed before implementation is considered end-to-end complete.
-
-Keep dataset acquisition and MaxMind credentials outside these runtime APIs. Attribution and redistribution/deletion obligations apply to the derived KV index, retained export artifacts, caches and backups as well as the original CSV archive.
+1. **Build.** Produce the exact key/value inventory and a generation/digest receipt from one permitted CSV release.
+2. **Publish.** Assign one publisher to each generation. Read each object first: skip identical bytes, write only if absent, and abort on different bytes. Verify the read-back of new writes. Publish the manifest last. An interrupted or uncertain write is reconciled by rerunning the same inventory. Ordinary `KvHandle` writes are unconditional; read-before-write is not a lock.
+3. **Verify and select.** From the serving path, validate the full reachable tree through the serving binding and compare sampled lookups against the independent source oracle. One uploader's read-back or a manifest written last does not prove that other serving locations can read every object. Check visibility at the serving locations before rollout. Deploy the pin and restart canaries, then the fleet. Rollback re-verifies and restores a previous pin only while it is still permitted. There is no mutable `active` key or request-time fallback.
+4. **Retire.** After readers stop referencing a generation, delete it by inventory within the applicable retention deadline. Include artifacts, caches and backups; don't use TTL as evidence of deletion. Keep licensed inputs and outputs out of Git and release images. Keep MaxMind credentials off serving hosts and document attribution and permitted use under the [GeoLite EULA](https://www.maxmind.com/en/geolite/eula).
 
 ## 9. Diagnostics
 
@@ -192,29 +180,24 @@ Do not retain reader IPs, raw forwarding headers, credentials or raw KV errors i
 
 ## 10. Acceptance and delivery
 
-Deliver in checkable units:
+Complete and record these checks before merging #454:
 
-1. **Format prototype.** Build synthetic City/Country fixtures and a real permitted GeoLite release. Record encoded size, object count, depth, cold-read count, import cost and maximum decoded-object memory. Freeze schema and defaults only after these measurements.
-2. **Importer and lookup.** Prove deterministic bytes and compare index results with an independent direct CSV-range lookup, including generated/random addresses, family boundaries, gaps, country-only records and subdivisions. Reject malformed references, overlaps and corrupt objects. Exercise actual `KvHandle` reads with caching off and on.
-3. **Async contract and native integration.** Preserve existing CloudFront/supplied-provider behavior. Test checked-reader input, source rejection, request admission, deadlines, cancellation and immutable outcomes through managed Axum dispatch. No detached work, blocking KV bridge or response-finalization lookup.
-4. **Edge adapter integration.** Run managed request tests for Fastly, Cloudflare and Spin, including forged address inputs and runtimes without usable reader facts. Compile all WASM targets without native dependency leakage. Generic data access alone is not adapter acceptance.
-5. **Publication and deployed checks.** Exercise interrupted uploads, identical re-publication, read-back mismatch, incomplete visibility, pinned versions, missing descendants and retirement. Verify real provider upload/binding/read paths separately from mocks, with operator authorization for live resources.
+1. **Deterministic CI.** Use synthetic City and Country fixtures. Prove deterministic bytes and compare IPv4/IPv6 boundary, neighbor, gap and sampled lookups against the independent CIDR oracle. Cover country-only, subdivisions and unsupported geography. Reject malformed imports and corrupt objects. Exercise cache disabled and warm, eviction and bounds. Include the standalone crate in CI and verify the portable reader's WASM dependency graph stays free of the importer and native SDKs.
+2. **Managed Axum.** Prove selection precedence, Off and existing CloudFront/supplied behavior, direct and trusted forwarded input, mapped IPv4, and zero KV reads for rejected ingress or missing reader. Reject bad manifest/root data, unavailable bindings and denied reads before readiness. Exercise missing or corrupt descendants, deadlines, cancellation and concurrent limits. Assert the same immutable outcome reaches application dispatch and finalization without a second lookup.
+3. **Two backend runs.** Publish the same artifact to stock celld with the EdgeZero service and DynamoDB Local. Verify through each serving binding and drive requests through a managed Axum listener. Cover interrupted and identical publication, conflicting bytes, incomplete visibility, simultaneous A/B pins, restart, rollback and inventory retirement. Prove stock celld denies writes under the serving grant. For DynamoDB, prove serving issues no writes and document a minimal IAM policy with `DescribeTable` and `GetItem`. Local DynamoDB does not enforce IAM; actual denial under a deployed role is hosted qualification.
+4. **Licensed-size evidence.** Use a permitted production-size City release on both test backends. Compare 16 and 64 KiB objects, verify sampled source-oracle agreement, and report encoded size, object count, depth, startup time and RSS, cold and warm lookup latency, reads and bytes per request, and concurrent peak RSS alongside the enforced limits. Record exact commands, tested revision, and source and artifact digests. Synthetic Country coverage does not qualify production-size Country data.
 
-Performance acceptance must include cold and warm lookup latency, reads and bytes per request, memory, and KV cost at the intended traffic level. Test representative native remote KV and edge KV. The current DynamoDB binding uses one partition key per namespace, so workload capacity and hot-partition behavior need explicit evaluation; index sharding alone does not change that physical partitioning.
-
-The spec is ready for implementation planning when the byte format/object budgets, configuration spelling, reader-IP support matrix, publishing coverage and acceptable lookup budgets have been reviewed. Until then it is a design draft, not a production-readiness claim.
+Managed AWS IAM, stock-celld fleet durability, production capacity and deployment latency targets require separate qualification. Neither local proof demonstrates them. Check the production owner or hot partition under the intended traffic: stock celld has one owning object per namespace, and DynamoDB uses the namespace as its partition key.
 
 ## 11. Prototype findings
 
 The [standalone prototype](../../../examples/geo-kv-prototype/README.md) and [measurement record](../plans/2026-11-05-kv-geo-prototype-results.md) exercise the downloaded City CSV through `KvHandle` using a local artifact-store harness. A 64 KiB object budget produced about 40.3 MiB across 649 objects, with at most two object reads per lookup after manifest acquisition. This is not deployed-provider performance evidence or a frozen wire format.
 
-One production decision is now concrete: the CSV contains `XK`, which core rejects. The format experiment preserves it in a source DTO and reports the mismatch without changing core policy. Resolve how a complete dataset containing unsupported source codes maps into Geo outcomes before implementing the import validation policy in section 3. It must not silently become an address gap or an accepted core country.
+The measured CSV contains `XK`, which core rejects. The prototype preserved the source code and reported the mismatch. The serving contract in §3 keeps that distinction as unsupported geography.
 
 ## 12. Scope boundaries and references
 
-Included: City/Country CSV import, versioned KV index, portable async lookup, optional object caching, explicit selection, checked reader inputs, adapter integration, publication/retirement contract and focused proofs.
-
-Deferred: remote geolocation APIs, automatic source fallback, automatic download/update scheduling, live version switching, richer city/coordinate output, jurisdiction catalogues, permission policy and mandatory MMDB support. Application response-cache variation remains an application responsibility.
+Deferred: managed KV Geo outside Axum, hosted deployment qualification, Trusted Server selection and consent-path proof, automatic download/update scheduling, live version switching, remote geolocation APIs, richer location fields and MMDB support. The application continues to own jurisdiction, consent, permissions and response caching.
 
 - [GeoLite formats and account requirements](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/).
 - [CSV fields and join semantics](https://dev.maxmind.com/geoip/docs/databases/city-and-country/).
@@ -222,4 +205,5 @@ Deferred: remote geolocation APIs, automatic source fallback, automatic download
 - [Dummy City CSV sample](https://dev.maxmind.com/examples/GeoIP2-City-CSV_Example.zip).
 - [KV interface and provider consistency](../../guide/kv.md).
 - [Native DynamoDB limits and semantics](../../guide/dynamodb-kv.md).
+- [Native celld store service and grants](../../guide/native-celld-stores.md).
 - [Native startup lifecycle](2026-10-05-axum-production-startup-lifecycle-design.md).
