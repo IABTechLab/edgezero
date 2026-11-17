@@ -39,7 +39,9 @@ mod tests {
         assert!(stdout.contains("[edgezero::boot]"), "{stdout}");
         assert!(stdout.contains("not a valid IP address"), "{stdout}");
         assert!(
-            stderr.contains("[edgezero] demo server error: failed to bind"),
+            stderr.contains(
+                "[edgezero] demo server error: startup bind: listener: address unavailable"
+            ),
             "{stderr}"
         );
         assert!(
@@ -56,9 +58,11 @@ mod tests {
             stdout.contains("[edgezero_adapter_axum::dev_server]"),
             "{stdout}"
         );
-        assert!(stdout.contains("starting axum server"), "{stdout}");
+        assert!(stdout.contains("axum HTTP/1 ingress limits"), "{stdout}");
         assert!(
-            stderr.contains("[edgezero] demo server error: failed to bind"),
+            stderr.contains(
+                "[edgezero] demo server error: startup bind: listener: address unavailable"
+            ),
             "{stderr}"
         );
     }
