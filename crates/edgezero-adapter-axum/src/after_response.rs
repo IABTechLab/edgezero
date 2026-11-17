@@ -40,6 +40,14 @@ impl AfterResponseTracker {
         // The sender lives in `self`, so the channel cannot close while this waits.
         let _idle = idle.wait_for(|count| *count == 0).await;
     }
+
+    /// Logs how many registered tasks shutdown is about to cancel, if any.
+    pub(crate) fn warn_abandoned(&self) {
+        let abandoned = self.pending();
+        if abandoned > 0 {
+            log::warn!("{abandoned} after-response task(s) abandoned at shutdown");
+        }
+    }
 }
 
 /// Decrements the tracker when its task ends for any reason, including spawn failure.

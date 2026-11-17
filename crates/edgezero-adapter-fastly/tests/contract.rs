@@ -983,7 +983,9 @@ mod tests {
             &app,
             StoresMetadata::default(),
             fastly_request(FastlyMethod::GET, "/after", None),
-            |_raw, _extensions| {},
+            |_raw, extensions| {
+                extensions.insert(AfterResponseHandle::new(HijackingScheduler));
+            },
             |_response| (),
             move |envelope| {
                 let (response, report) = complete_envelope_with_report(envelope);

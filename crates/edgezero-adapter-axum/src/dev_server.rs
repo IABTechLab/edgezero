@@ -704,6 +704,8 @@ where
     } else {
         drain_tasks(&mut tasks, &after_response, grace, signals, outcome).await
     };
+    // Pending tasks are cancelled when the executor drops, whichever way shutdown ended.
+    after_response.warn_abandoned();
     // Service/registry clones are dropped only after every owned connection settles.
     drop(service);
     result
@@ -754,11 +756,6 @@ async fn drain_tasks(
                 outcome = Err(failure("shutdown", "budget", "grace exhausted"));
             }
         }
-    }
-    // Pending tasks are cancelled when the executor drops, whichever way shutdown ended.
-    let abandoned = after_response.pending();
-    if abandoned > 0 {
-        log::warn!("{abandoned} after-response task(s) abandoned at shutdown");
     }
     outcome
 }
