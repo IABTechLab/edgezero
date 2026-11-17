@@ -13,6 +13,9 @@
 
 const SERVICE = "edgezero-celld-store";
 const PROTOCOL = 1;
+const RECORD_PROTOCOL = 1;
+const RECORD_HEADER = "x-edgezero-record-version";
+const EXPECTED_INSTANCE_HEADER = "x-edgezero-expected-instance";
 const FORMAT = "rows-v1";
 const VERSION_HEADER = "x-edgezero-store-version";
 const INSTANCE_HEADER = "x-edgezero-store-instance";
@@ -41,6 +44,7 @@ const LIMITS = Object.freeze({
   maxPolicyBytes: 262_144,
 });
 
+const MAX_RECORD_WIRE_BYTES = 4 * Math.ceil(LIMITS.maxValueBytes / 3) + 4 * Math.ceil(LIMITS.maxMetadataBytes / 3) + 256;
 const OPERATIONS = new Set(["read", "write", "delete", "list"]);
 const MAX_U64 = 18_446_744_073_709_551_615n;
 const encoder = new TextEncoder();
@@ -58,6 +62,8 @@ const ERRORS = Object.freeze({
   unsupported_version: 426,
   unavailable: 503,
   deadline: 504,
+  precondition_failed: 412,
+  instance_changed: 503,
 });
 
 class StoreError extends Error {
@@ -73,7 +79,7 @@ function fail(category) {
 
 function errorResponse(category, head = false) {
   const status = ERRORS[category] ?? 503;
-  const headers = { [VERSION_HEADER]: String(PROTOCOL) };
+  const headers = { [VERSION_HEADER]: String(PROTOCOL), [RECORD_HEADER]: String(RECORD_PROTOCOL) };
   if (head) return new Response(null, { status, headers });
   headers["content-type"] = "application/json";
   return new Response(JSON.stringify({ error: category in ERRORS ? category : "unavailable" }), {
@@ -178,6 +184,56 @@ function fromBase64url(text) {
 
 function hex(bytes) {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// Record JSON keeps arbitrary bytes out of strings and headers.
+function base64(bytes) {
+  const text = base64url(bytes).replaceAll("-", "+").replaceAll("_", "/");
+  return text.padEnd(4 * Math.ceil(bytes.length / 3), "=");
+}
+
+function fromBase64(text, limit) {
+  if (typeof text !== "string") fail("invalid_input");
+  if (text.length > 4 * Math.ceil(limit / 3)) fail("limit_exceeded");
+  let binary;
+  try {
+    binary = atob(text);
+  } catch {
+    return fail("invalid_input");
+  }
+  if (binary.length > limit) fail("limit_exceeded");
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  if (base64(bytes) !== text) fail("invalid_input");
+  return bytes;
+}
+
+function parseRecordWrite(bytes) {
+  let raw;
+  try {
+    raw = JSON.parse(strictDecoder.decode(bytes));
+  } catch {
+    return fail("invalid_input");
+  }
+  if (!exactKeys(raw, ["body", "mode"], ["metadata", "ttl_ms", "generation"])) fail("invalid_input");
+  if (!["add", "overwrite", "if-generation-match"].includes(raw.mode)) fail("invalid_input");
+  const expected = raw.generation ?? null;
+  if (raw.mode === "if-generation-match") {
+    if (decimal(expected) === 0n) fail("invalid_input");
+  } else if (expected !== null) fail("invalid_input");
+  const ttlMs = raw.ttl_ms ?? null;
+  if (ttlMs !== null && (!Number.isSafeInteger(ttlMs) || ttlMs <= 0 || ttlMs > LIMITS.maxTtlSeconds * 1000)) {
+    fail("invalid_input");
+  }
+  let metadata = null;
+  if (raw.metadata !== undefined && raw.metadata !== null) {
+    const encoded = fromBase64(raw.metadata, LIMITS.maxMetadataBytes);
+    try {
+      metadata = strictDecoder.decode(encoded) || null;
+    } catch {
+      return fail("invalid_input");
+    }
+  }
+  return { body: fromBase64(raw.body, LIMITS.maxValueBytes), metadata, ttlMs, mode: raw.mode, generation: expected };
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +369,10 @@ const ROUTES = Object.freeze({
   keys: { GET: { operation: "list", query: ["prefix", "limit", "cursor"] } },
   put: { POST: { operation: "write", query: ["key", "ttl_seconds"] } },
   delete: { POST: { operation: "delete", query: ["key"] } },
+  record: { GET: { operation: "read", query: ["key"] }, HEAD: { operation: "read", query: ["key"] } },
+  "record-put": { POST: { operation: "write", query: ["key"] } },
+  "record-delete": { POST: { operation: "delete", query: ["key"] } },
+  "record-keys": { GET: { operation: "list", query: ["prefix", "limit", "cursor", "mode"] } },
 });
 
 function route(request) {
@@ -332,11 +392,11 @@ function route(request) {
   return { alias, resource: parts[4], operation: selected.operation, query };
 }
 
-async function readBody(request, allowed) {
+async function readBody(request, allowed, limit = LIMITS.maxValueBytes) {
   const encoding = request.headers.get("content-encoding");
   if (encoding !== null && encoding.toLowerCase() !== "identity") fail("invalid_input");
   const declared = request.headers.get("content-length");
-  if (declared !== null && (!/^[0-9]+$/.test(declared) || Number(declared) > LIMITS.maxValueBytes)) {
+  if (declared !== null && (!/^[0-9]+$/.test(declared) || Number(declared) > limit)) {
     fail(/^[0-9]+$/.test(declared) ? "limit_exceeded" : "invalid_input");
   }
   if (request.body === null) return new Uint8Array(0);
@@ -347,7 +407,7 @@ async function readBody(request, allowed) {
     const { done, value } = await reader.read();
     if (done) break;
     size += value.byteLength;
-    if (size > LIMITS.maxValueBytes) {
+    if (size > limit) {
       await reader.cancel();
       fail("limit_exceeded");
     }
@@ -389,10 +449,18 @@ async function handleWorker(request, env) {
     const operations = grants.get(selected.alias);
     if (namespace === undefined || operations === undefined) fail("forbidden");
     if (selected.operation !== null && !operations.has(selected.operation)) fail("forbidden");
-    const body = await readBody(request, selected.resource === "put");
-    const meta = { op: selected.resource };
+    const isRecord = selected.resource === "record" || selected.resource.startsWith("record-");
+    const meta = { op: selected.resource, alias: selected.alias };
+    if (isRecord) {
+      if (request.headers.get(RECORD_HEADER) !== String(RECORD_PROTOCOL)) fail("unsupported_version");
+      meta.expectedInstance = request.headers.get(EXPECTED_INSTANCE_HEADER);
+      if (meta.expectedInstance === null || !/^[A-Za-z0-9_-]{22}$/.test(meta.expectedInstance)) fail("invalid_input");
+    }
+    const put = selected.resource === "put" || selected.resource === "record-put";
+    const body = await readBody(request, put, selected.resource === "record-put" ? MAX_RECORD_WIRE_BYTES : LIMITS.maxValueBytes);
+    let forwardedBody = put ? body : null;
     const query = selected.query;
-    if (selected.resource === "value" || selected.resource === "put" || selected.resource === "delete") {
+    if (["value", "put", "delete", "record", "record-put", "record-delete"].includes(selected.resource)) {
       meta.key = query.get("key");
       if (!validKey(meta.key)) fail("invalid_input");
     }
@@ -401,7 +469,12 @@ async function handleWorker(request, env) {
       if (ttl < BigInt(LIMITS.minTtlSeconds) || ttl > BigInt(LIMITS.maxTtlSeconds)) fail("invalid_input");
       meta.ttlSeconds = Number(ttl);
     }
-    if (selected.resource === "keys") {
+    if (selected.resource === "record-put") {
+      const { body: decoded, ...write } = parseRecordWrite(body);
+      Object.assign(meta, write);
+      forwardedBody = decoded;
+    }
+    if (selected.resource === "keys" || selected.resource === "record-keys") {
       meta.prefix = query.get("prefix") ?? "";
       if (!validKey(meta.prefix, true)) fail("invalid_input");
       const limit = query.has("limit") ? decimal(query.get("limit")) : BigInt(LIMITS.defaultPageEntries);
@@ -412,9 +485,13 @@ async function handleWorker(request, env) {
         if (cursor.length === 0 || cursor.length > LIMITS.maxCursorBytes) fail("invalid_input");
         meta.cursor = cursor;
       }
+      if (isRecord) {
+        meta.mode = query.get("mode");
+        if (meta.mode !== "ordinary" && meta.mode !== "partition") fail("invalid_input");
+      }
     }
-    if (selected.resource === "value") meta.head = head;
-    if (selected.resource === "put" || selected.resource === "delete") {
+    if (selected.resource === "value" || selected.resource === "record") meta.head = head;
+    if (put || selected.resource === "delete" || selected.resource === "record-delete") {
       const id = request.headers.get(MUTATION_HEADER);
       if (id === null || !/^[A-Za-z0-9_-]{22}$/.test(id)) fail("invalid_input");
       meta.mutationId = id;
@@ -423,7 +500,7 @@ async function handleWorker(request, env) {
     const stub = env.EDGEZERO_STORE.get(env.EDGEZERO_STORE.idFromName(OBJECT_PREFIX + namespace));
     let response;
     try {
-      response = await stub.fetch(internalRequest(selected.resource, meta, selected.resource === "put" ? body : null));
+      response = await stub.fetch(internalRequest(selected.resource, meta, forwardedBody));
     } catch {
       // The owner may have run a mutation; the client reports possible commit.
       fail("unavailable");
@@ -571,8 +648,38 @@ function decodeCursor(token, instance, prefix) {
   return parts[1];
 }
 
+function encodeRecordCursor(instance, meta, after) {
+  const ordinary = fromBase64url(encodeCursor(instance, meta.prefix, after));
+  const alias = encoder.encode(meta.alias);
+  const bytes = new Uint8Array(ordinary.length + alias.length + 2);
+  bytes[0] = 2;
+  bytes.set(ordinary.subarray(1, 17), 1);
+  bytes[17] = alias.length;
+  bytes.set(alias, 18);
+  bytes[18 + alias.length] = meta.mode === "partition" ? 1 : 0;
+  bytes.set(ordinary.subarray(17), 19 + alias.length);
+  return base64url(bytes);
+}
+
+function decodeRecordCursor(token, instance, meta) {
+  const bytes = fromBase64url(token);
+  const alias = encoder.encode(meta.alias);
+  if (bytes.length < 19 + alias.length || bytes[0] !== 2 || bytes[17] !== alias.length) fail("invalid_input");
+  for (let i = 0; i < alias.length; i++) if (bytes[18 + i] !== alias[i]) fail("invalid_input");
+  if (bytes[18 + alias.length] !== (meta.mode === "partition" ? 1 : 0)) fail("invalid_input");
+  const ordinary = new Uint8Array(bytes.length - alias.length - 2);
+  ordinary[0] = 1;
+  ordinary.set(bytes.subarray(1, 17), 1);
+  ordinary.set(bytes.subarray(19 + alias.length), 17);
+  return decodeCursor(base64url(ordinary), instance, meta.prefix);
+}
+
 async function fingerprint(meta, body) {
-  const head = encoder.encode(JSON.stringify([meta.op, meta.key, meta.ttlSeconds ?? null]));
+  // Preserve the old ordinary fingerprint for deliveries spanning a deploy.
+  const fields = meta.op === "record-put" || meta.op === "record-delete"
+    ? [meta.op, meta.key, meta.mode ?? null, meta.generation ?? null, meta.ttlMs ?? null, meta.metadata ?? null, meta.expectedInstance]
+    : [meta.op, meta.key, meta.ttlSeconds ?? null];
+  const head = encoder.encode(JSON.stringify(fields));
   const bytes = new Uint8Array(head.length + 1 + (body?.length ?? 0));
   bytes.set(head, 0);
   bytes[head.length] = 0;
@@ -603,7 +710,7 @@ export class EdgeZeroStore {
   }
 
   respond(status, body, contentType) {
-    const headers = { [INSTANCE_HEADER]: this.meta.instance };
+    const headers = { [INSTANCE_HEADER]: this.meta.instance, [RECORD_HEADER]: String(RECORD_PROTOCOL) };
     if (contentType !== undefined) headers["content-type"] = contentType;
     return new Response(body, { status, headers });
   }
@@ -631,9 +738,17 @@ export class EdgeZeroStore {
           return this.value(meta);
         case "keys":
           return this.keys(meta);
+        case "record":
+          this.checkInstance(meta);
+          return this.record(meta);
+        case "record-keys":
+          this.checkInstance(meta);
+          return this.keys(meta);
         case "put":
-        case "delete": {
-          const body = op === "put" ? new Uint8Array(await request.arrayBuffer()) : null;
+        case "delete":
+        case "record-put":
+        case "record-delete": {
+          const body = op === "put" || op === "record-put" ? new Uint8Array(await request.arrayBuffer()) : null;
           return await this.mutate(meta, body);
         }
         default:
@@ -652,7 +767,8 @@ export class EdgeZeroStore {
       pagination: "keyset",
       no_expiry: true,
       mutation_ledger: true,
-      records: false,
+      records: true,
+      record_protocol: RECORD_PROTOCOL,
       max_value_bytes: LIMITS.maxValueBytes,
       max_metadata_bytes: LIMITS.maxMetadataBytes,
       instance: this.meta.instance,
@@ -672,8 +788,36 @@ export class EdgeZeroStore {
     return this.respond(200, row.body, "application/octet-stream");
   }
 
+  checkInstance(meta) {
+    if (typeof meta.expectedInstance !== "string" || !/^[A-Za-z0-9_-]{22}$/.test(meta.expectedInstance)) fail("invalid_input");
+    const current = readMeta(this.sql);
+    if (current.instance !== meta.expectedInstance) fail("instance_changed");
+    return current;
+  }
+
+  record(meta) {
+    const row = this.row(meta.key);
+    if (row === undefined) return this.error("not_found");
+    const token = generation(row.generation);
+    if (!(row.body instanceof ArrayBuffer) ||
+        (row.metadata !== null && (typeof row.metadata !== "string" || encoder.encode(row.metadata).length > LIMITS.maxMetadataBytes)) ||
+        (row.expires_at_ms !== null && (!Number.isSafeInteger(row.expires_at_ms) || row.expires_at_ms < 0))) {
+      throw new Error("invalid record row");
+    }
+    if (meta.head) return this.respond(200, null);
+    if (!live(row, Date.now())) return this.error("not_found");
+    return this.respond(200, JSON.stringify({
+      body: base64(new Uint8Array(row.body)),
+      metadata: row.metadata === null || row.metadata === "" ? null : base64(encoder.encode(row.metadata)),
+      generation: String(token),
+    }), "application/json");
+  }
+
   keys(meta) {
-    const after = meta.cursor === undefined ? null : decodeCursor(meta.cursor, this.meta.instance, meta.prefix);
+    const record = meta.op === "record-keys";
+    const after = meta.cursor === undefined ? null : record
+      ? decodeRecordCursor(meta.cursor, this.meta.instance, meta)
+      : decodeCursor(meta.cursor, this.meta.instance, meta.prefix);
     const upper = prefixUpperBound(meta.prefix);
     const clauses = [after === null ? "key >= ?" : "key > ?"];
     const params = [after ?? meta.prefix];
@@ -688,7 +832,9 @@ export class EdgeZeroStore {
       .toArray();
     const keys = rows.slice(0, meta.limit).map((row) => row.key);
     if (!keys.every((key) => key.startsWith(meta.prefix))) fail("unavailable");
-    const cursor = rows.length > meta.limit ? encodeCursor(this.meta.instance, meta.prefix, keys.at(-1)) : null;
+    const cursor = rows.length > meta.limit
+      ? record ? encodeRecordCursor(this.meta.instance, meta, keys.at(-1)) : encodeCursor(this.meta.instance, meta.prefix, keys.at(-1))
+      : null;
     return this.respond(200, JSON.stringify({ keys, cursor }), "application/json");
   }
 
@@ -699,49 +845,54 @@ export class EdgeZeroStore {
     if (body !== null && body.length > LIMITS.maxValueBytes) fail("limit_exceeded");
     const print = await fingerprint(meta, body);
     const outcome = this.storage.transactionSync(() => {
+      // Check inside the transaction, after hashing but before any effect.
+      const record = meta.op === "record-put" || meta.op === "record-delete";
+      const current = record ? this.checkInstance(meta) : null;
       const prior = this.sql
         .exec("SELECT fingerprint, outcome FROM edgezero_mutations WHERE id = ?", meta.mutationId)
         .toArray()[0];
       if (prior !== undefined) {
-        // A duplicate delivery returns the first outcome and applies nothing.
         return prior.fingerprint === print ? prior.outcome : "invalid_input";
       }
       const now = Date.now();
       if (now > meta.applyBefore) return "deadline";
       let result;
-      if (meta.op === "put") {
-        const { allocator } = readMeta(this.sql);
+      const existing = meta.op === "record-put" ? this.row(meta.key) : undefined;
+      const rejected = meta.op === "record-put" && (
+        (meta.mode === "add" && existing !== undefined) ||
+        (meta.mode === "if-generation-match" && (existing === undefined || String(generation(existing.generation)) !== meta.generation))
+      );
+      if (rejected) {
+        result = "precondition_failed";
+      } else if (meta.op === "put" || meta.op === "record-put") {
+        const { allocator } = current ?? readMeta(this.sql);
         if (allocator === MAX_U64) throw new Error("generation allocator exhausted");
         const next = String(allocator + 1n);
         this.sql.exec("UPDATE edgezero_meta SET allocator = ? WHERE singleton = 1", next);
-        const expires = meta.ttlSeconds === undefined ? null : now + meta.ttlSeconds * 1000;
+        const ttl = record ? meta.ttlMs : meta.ttlSeconds === undefined ? null : meta.ttlSeconds * 1000;
+        const expires = ttl === null ? null : now + ttl;
         this.sql.exec(
           `INSERT INTO edgezero_rows (key, body, metadata, generation, expires_at_ms)
-           VALUES (?, ?, NULL, ?, ?)
-           ON CONFLICT (key) DO UPDATE SET body = excluded.body, metadata = NULL,
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (key) DO UPDATE SET body = excluded.body, metadata = excluded.metadata,
              generation = excluded.generation, expires_at_ms = excluded.expires_at_ms`,
-          meta.key,
-          toArrayBuffer(body),
-          next,
-          expires,
+          meta.key, toArrayBuffer(body), record ? meta.metadata : null, next, expires,
         );
         result = "written";
       } else {
         this.sql.exec("DELETE FROM edgezero_rows WHERE key = ?", meta.key);
         result = "deleted";
       }
+      // Rejections are durable outcomes too: a duplicate must not reevaluate.
       this.sql.exec(
         "INSERT INTO edgezero_mutations (id, fingerprint, outcome, expires_at_ms) VALUES (?, ?, ?, ?)",
-        meta.mutationId,
-        print,
-        result,
-        now + LIMITS.ledgerRetentionMs,
+        meta.mutationId, print, result, now + LIMITS.ledgerRetentionMs,
       );
       return result;
     });
-    if (outcome === "written" || outcome === "deleted") {
+    if (outcome === "written" || outcome === "deleted" || outcome === "precondition_failed") {
       await this.rearm();
-      return this.respond(204, null);
+      return outcome === "precondition_failed" ? this.error(outcome) : this.respond(204, null);
     }
     return this.error(outcome);
   }

@@ -1,5 +1,9 @@
 # Native DynamoDB KV
 
+This page describes the ordinary `aws-dynamodb` format. For native conditional
+records, partitioned storage and global Scan, see [conditional KV records](./kv-records).
+The two modes are explicit and do not migrate each other's rows.
+
 DynamoDB is an optional live KV provider for native Axum apps. It uses the existing
 `Kv` extractor, `KvHandle` and per-ID registry. Config and Secrets Manager stores
 remain independent startup snapshots. DynamoDB calls happen during KV operations,

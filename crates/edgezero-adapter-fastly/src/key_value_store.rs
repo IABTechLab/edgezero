@@ -10,9 +10,15 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use edgezero_core::key_value_store::{KvError, KvPage, KvStore, KvStoreOpenFailure};
 use edgezero_core::logging::BOOT_LOG_TARGET;
-use fastly::kv_store::{KVStore, KVStoreError};
+use edgezero_core::record_store::{
+    Record, RecordBinding, RecordGeneration, RecordLayout, RecordPage, RecordPartition,
+    RecordWrite, RecordWriteMode, RecordWriteOutcome,
+};
+use fastly::kv_store::{InsertMode, KVStore, KVStoreError, ListMode};
 use fastly_shared::FastlyStatus;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::str::from_utf8;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
@@ -20,6 +26,7 @@ use std::time::Duration;
 ///
 /// Opens compiled declarations lazily per request, or wraps an explicitly opened handle.
 pub struct FastlyKvStore {
+    records: Option<RecordBinding>,
     source: FastlyKvStoreSource,
 }
 
@@ -31,6 +38,17 @@ enum FastlyKvStoreSource {
     Opened(KVStore),
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OrdinaryCursor {
+    format: String,
+    layout: String,
+    native: String,
+    prefix: String,
+    scope: String,
+    version: u32,
+}
+
 impl FastlyKvStore {
     pub(crate) fn declared(name: &'static str) -> Self {
         Self {
@@ -38,6 +56,14 @@ impl FastlyKvStore {
                 name,
                 opened: OnceLock::new(),
             },
+            records: None,
+        }
+    }
+
+    pub(crate) fn declared_records(name: &'static str, layout: RecordLayout) -> Self {
+        Self {
+            records: Some(record_binding(name, layout)),
+            ..Self::declared(name)
         }
     }
 
@@ -51,7 +77,35 @@ impl FastlyKvStore {
             open_result(KVStore::open(name)).map_err(|reason| KvError::OpenFailed { reason })?;
         Ok(Self {
             source: FastlyKvStoreSource::Opened(store),
+            records: None,
         })
+    }
+
+    /// Open a record-capable Fastly store with its immutable application layout.
+    ///
+    /// # Errors
+    /// Returns [`KvError::OpenFailed`] when the native binding cannot be opened.
+    #[inline]
+    pub fn open_records(name: &str, layout: RecordLayout) -> Result<Self, KvError> {
+        Ok(Self {
+            records: Some(record_binding(name, layout)),
+            ..Self::open(name)?
+        })
+    }
+
+    fn validate_partition(&self, key: &str, partition: &RecordPartition) -> Result<(), KvError> {
+        let binding = self.records.as_ref().ok_or_else(unsupported_records)?;
+        if binding.layout.resolve(key)? != *partition {
+            return Err(KvError::Validation("record partition mismatch".to_owned()));
+        }
+        Ok(())
+    }
+
+    fn validate_point(&self, key: &str) -> Result<(), KvError> {
+        if let Some(binding) = &self.records {
+            binding.layout.resolve(key)?;
+        }
+        Ok(())
     }
 
     fn with_store<Value>(
@@ -76,7 +130,11 @@ impl FastlyKvStore {
 impl KvStore for FastlyKvStore {
     #[inline]
     async fn delete(&self, key: &str) -> Result<(), KvError> {
+        self.validate_point(key)?;
         self.with_store(|store| {
+            if self.records.is_some() {
+                return delete_record(store, key);
+            }
             store
                 .delete(key)
                 .map_err(|err| KvError::Internal(anyhow::anyhow!("delete failed: {err}")))
@@ -90,6 +148,7 @@ impl KvStore for FastlyKvStore {
 
     #[inline]
     async fn get_bytes(&self, key: &str) -> Result<Option<Bytes>, KvError> {
+        self.validate_point(key)?;
         self.with_store(|store| match store.lookup(key) {
             Ok(mut response) => {
                 let bytes = response.take_body_bytes();
@@ -107,6 +166,19 @@ impl KvStore for FastlyKvStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<KvPage, KvError> {
+        if let Some(binding) = &self.records {
+            let native_cursor = decode_ordinary_cursor(binding, prefix, cursor)?;
+            let page = self.with_store(|store| {
+                strong_list_page(store, prefix, native_cursor.as_deref(), limit)
+            })?;
+            for key in &page.keys {
+                binding.layout.resolve(key)?;
+            }
+            return Ok(KvPage {
+                keys: page.keys,
+                cursor: encode_ordinary_cursor(binding, prefix, page.cursor)?,
+            });
+        }
         let limit_u32 = u32::try_from(limit)
             .map_err(|_e| KvError::Validation("list limit exceeds u32".to_owned()))?;
 
@@ -134,7 +206,21 @@ impl KvStore for FastlyKvStore {
 
     #[inline]
     async fn put_bytes(&self, key: &str, value: Bytes) -> Result<(), KvError> {
+        self.validate_point(key)?;
         self.with_store(|store| {
+            if self.records.is_some() {
+                return insert_record(
+                    store,
+                    key,
+                    RecordWrite {
+                        body: value.as_ref(),
+                        metadata: None,
+                        ttl: None,
+                        mode: RecordWriteMode::Overwrite,
+                    },
+                )
+                .map(|_| ());
+            }
             store
                 .insert(key, value.as_ref())
                 .map_err(|err| KvError::Internal(anyhow::anyhow!("insert failed: {err}")))
@@ -148,7 +234,21 @@ impl KvStore for FastlyKvStore {
         value: Bytes,
         ttl: Duration,
     ) -> Result<(), KvError> {
+        self.validate_point(key)?;
         self.with_store(|store| {
+            if self.records.is_some() {
+                return insert_record(
+                    store,
+                    key,
+                    RecordWrite {
+                        body: value.as_ref(),
+                        metadata: None,
+                        ttl: Some(ttl),
+                        mode: RecordWriteMode::Overwrite,
+                    },
+                )
+                .map(|_| ());
+            }
             store
                 .build_insert()
                 .time_to_live(ttl)
@@ -156,6 +256,279 @@ impl KvStore for FastlyKvStore {
                 .map_err(|err| KvError::Internal(anyhow::anyhow!("insert with ttl failed: {err}")))
         })
     }
+
+    #[inline]
+    fn record_binding(&self) -> Option<RecordBinding> {
+        self.records.clone()
+    }
+
+    #[inline]
+    async fn record_delete(&self, key: &str, partition: &RecordPartition) -> Result<(), KvError> {
+        self.validate_partition(key, partition)?;
+        self.with_store(|store| delete_record(store, key))
+    }
+
+    #[inline]
+    async fn record_exists_strong(
+        &self,
+        key: &str,
+        partition: &RecordPartition,
+    ) -> Result<bool, KvError> {
+        self.validate_partition(key, partition)?;
+        self.with_store(|store| {
+            exact_exists(key, |cursor| strong_list_page(store, key, cursor, 1000))
+        })
+    }
+
+    #[inline]
+    async fn record_insert(
+        &self,
+        key: &str,
+        partition: &RecordPartition,
+        write: RecordWrite<'_>,
+    ) -> Result<RecordWriteOutcome, KvError> {
+        self.validate_partition(key, partition)?;
+        self.with_store(|store| insert_record(store, key, write))
+    }
+
+    #[inline]
+    async fn record_list_partition(
+        &self,
+        partition: &RecordPartition,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<RecordPage, KvError> {
+        let binding = self.records.as_ref().ok_or_else(unsupported_records)?;
+        if binding.layout.partition(partition.prefix())? != *partition {
+            return Err(KvError::Validation("record partition mismatch".to_owned()));
+        }
+        let page =
+            self.with_store(|store| strong_list_page(store, partition.prefix(), cursor, limit))?;
+        for key in &page.keys {
+            self.validate_partition(key, partition)?;
+        }
+        Ok(RecordPage {
+            keys: page.keys,
+            cursor: page.cursor,
+        })
+    }
+
+    #[inline]
+    async fn record_lookup(
+        &self,
+        key: &str,
+        partition: &RecordPartition,
+    ) -> Result<Option<Record>, KvError> {
+        self.validate_partition(key, partition)?;
+        self.with_store(|store| match store.lookup(key) {
+            Ok(mut response) => Ok(Some(Record {
+                generation: RecordGeneration::from_u64(response.current_generation()),
+                metadata: decode_metadata(response.metadata().as_deref())?,
+                body: Bytes::from(response.take_body_bytes()),
+            })),
+            Err(KVStoreError::ItemNotFound) => Ok(None),
+            Err(_) => Err(KvError::Unavailable),
+        })
+    }
+}
+
+fn record_binding(name: &str, layout: RecordLayout) -> RecordBinding {
+    RecordBinding {
+        layout,
+        scope: name.to_owned(),
+        format: "fastly-native-v1".to_owned(),
+        max_metadata_bytes: 2000,
+    }
+}
+
+fn unsupported_records() -> KvError {
+    KvError::Unsupported {
+        operation: "records".to_owned(),
+    }
+}
+
+fn decode_metadata(metadata: Option<&[u8]>) -> Result<Option<String>, KvError> {
+    metadata
+        .filter(|bytes| !bytes.is_empty())
+        .map(|bytes| {
+            from_utf8(bytes).map(str::to_owned).map_err(|_error| {
+                KvError::Internal(anyhow::anyhow!("invalid UTF-8 record metadata"))
+            })
+        })
+        .transpose()
+}
+
+fn insert_record(
+    store: &KVStore,
+    key: &str,
+    write: RecordWrite<'_>,
+) -> Result<RecordWriteOutcome, KvError> {
+    let conditional = !matches!(write.mode, RecordWriteMode::Overwrite);
+    let mut request = store.build_insert();
+    request = match write.mode {
+        RecordWriteMode::Add => request.mode(InsertMode::Add),
+        RecordWriteMode::Overwrite => request.mode(InsertMode::Overwrite),
+        RecordWriteMode::IfGenerationMatch(generation) => {
+            request.if_generation_match(generation.as_u64())
+        }
+    };
+    if let Some(metadata) = write.metadata.filter(|text| !text.is_empty()) {
+        if metadata.len() > 2000 {
+            return Err(KvError::Validation(
+                "Fastly metadata exceeds 2000 bytes".to_owned(),
+            ));
+        }
+        request = request.metadata(metadata);
+    }
+    if let Some(ttl) = write.ttl {
+        request = request.time_to_live(ttl);
+    }
+    insert_outcome(request.execute(key, write.body), conditional)
+}
+
+fn insert_outcome(
+    result: Result<(), KVStoreError>,
+    conditional: bool,
+) -> Result<RecordWriteOutcome, KvError> {
+    match result {
+        Ok(()) => Ok(RecordWriteOutcome::Written),
+        Err(KVStoreError::ItemPreconditionFailed) if conditional => {
+            Ok(RecordWriteOutcome::PreconditionFailed)
+        }
+        Err(error) => Err(mutation_error(&error)),
+    }
+}
+
+fn mutation_error(error: &KVStoreError) -> KvError {
+    match error {
+        KVStoreError::InvalidKey
+        | KVStoreError::InvalidStoreOptions
+        | KVStoreError::ItemBadRequest
+        | KVStoreError::ItemPayloadTooLarge => {
+            KvError::Validation("Fastly rejected record mutation".to_owned())
+        }
+        KVStoreError::ItemPreconditionFailed | KVStoreError::ItemNotFound => {
+            KvError::Internal(anyhow::anyhow!("unexpected record mutation rejection"))
+        }
+        KVStoreError::TooManyRequests => KvError::Unavailable,
+        KVStoreError::InvalidStoreHandle
+        | KVStoreError::StoreNotFound(_)
+        | KVStoreError::Unexpected(_)
+        | _ => KvError::MutationUncertain,
+    }
+}
+
+fn delete_record(store: &KVStore, key: &str) -> Result<(), KvError> {
+    match store.delete(key) {
+        Ok(()) | Err(KVStoreError::ItemNotFound) => Ok(()),
+        Err(error) => Err(mutation_error(&error)),
+    }
+}
+
+fn strong_list_page(
+    store: &KVStore,
+    prefix: &str,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<KvPage, KvError> {
+    let limit_u32 = u32::try_from(limit)
+        .map_err(|_error| KvError::Validation("list limit exceeds u32".to_owned()))?;
+    let pending = store
+        .as_handle()
+        .list(
+            ListMode::Strong,
+            cursor.map(str::to_owned),
+            Some(limit_u32),
+            Some(prefix.to_owned()),
+        )
+        .map_err(|_error| KvError::Unavailable)?;
+    let page = store
+        .pending_list_wait(pending)
+        .map_err(|_error| KvError::Unavailable)?;
+    if !matches!(page.mode(), ListMode::Strong)
+        || page.keys().iter().any(|key| !key.starts_with(prefix))
+    {
+        return Err(KvError::Internal(anyhow::anyhow!(
+            "invalid strong list response"
+        )));
+    }
+    let next = page.next_cursor().filter(|token| !token.is_empty());
+    if next.as_deref().is_some_and(|token| Some(token) == cursor) {
+        return Err(KvError::Internal(anyhow::anyhow!(
+            "nonadvancing list cursor"
+        )));
+    }
+    Ok(KvPage {
+        keys: page.into_keys(),
+        cursor: next,
+    })
+}
+
+fn exact_exists(
+    key: &str,
+    mut list: impl FnMut(Option<&str>) -> Result<KvPage, KvError>,
+) -> Result<bool, KvError> {
+    let mut cursor = None;
+    let mut seen = HashSet::new();
+    loop {
+        let page = list(cursor.as_deref())?;
+        if page.keys.iter().any(|candidate| candidate == key) {
+            return Ok(true);
+        }
+        let Some(next) = page.cursor else {
+            return Ok(false);
+        };
+        if next.is_empty() || !seen.insert(next.clone()) {
+            return Err(KvError::Internal(anyhow::anyhow!(
+                "nonadvancing existence cursor"
+            )));
+        }
+        cursor = Some(next);
+    }
+}
+
+fn decode_ordinary_cursor(
+    binding: &RecordBinding,
+    prefix: &str,
+    cursor: Option<&str>,
+) -> Result<Option<String>, KvError> {
+    let Some(token) = cursor else {
+        return Ok(None);
+    };
+    let parsed: OrdinaryCursor = serde_json::from_str(token)
+        .map_err(|_error| KvError::Validation("invalid ordinary list cursor".to_owned()))?;
+    if parsed.scope != binding.scope
+        || parsed.format != binding.format
+        || parsed.layout != binding.layout.id()
+        || parsed.version != binding.layout.version()
+        || parsed.prefix != prefix
+        || parsed.native.is_empty()
+    {
+        return Err(KvError::Validation(
+            "ordinary list cursor scope mismatch".to_owned(),
+        ));
+    }
+    Ok(Some(parsed.native))
+}
+
+fn encode_ordinary_cursor(
+    binding: &RecordBinding,
+    prefix: &str,
+    cursor: Option<String>,
+) -> Result<Option<String>, KvError> {
+    cursor
+        .map(|native| {
+            serde_json::to_string(&OrdinaryCursor {
+                scope: binding.scope.clone(),
+                format: binding.format.clone(),
+                layout: binding.layout.id().to_owned(),
+                version: binding.layout.version(),
+                prefix: prefix.to_owned(),
+                native,
+            })
+            .map_err(KvError::from)
+        })
+        .transpose()
 }
 
 fn open_result<Store>(
@@ -217,7 +590,192 @@ mod tests {
     use super::*;
     use edgezero_core::EdgeError;
     use edgezero_core::http::StatusCode;
+    use edgezero_core::record_store::RecordKeyLayout;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DotLayout;
+
+    impl RecordKeyLayout for DotLayout {
+        fn id(&self) -> &'static str {
+            "fastly-test"
+        }
+        fn partition_prefix<'key>(&self, key: &'key str) -> Result<&'key str, KvError> {
+            let end = key
+                .find('.')
+                .ok_or_else(|| KvError::Validation("missing partition".to_owned()))?;
+            key.get(..=end)
+                .ok_or_else(|| KvError::Validation("invalid partition".to_owned()))
+        }
+        fn validate(&self) -> Result<(), KvError> {
+            Ok(())
+        }
+        fn validate_partition(&self, prefix: &str) -> Result<(), KvError> {
+            if prefix.ends_with('.') && prefix.matches('.').count() == 1 {
+                Ok(())
+            } else {
+                Err(KvError::Validation("invalid partition".to_owned()))
+            }
+        }
+        fn version(&self) -> u32 {
+            1
+        }
+    }
+
+    #[test]
+    fn record_binding_is_immutable_and_acquisition_needs_no_native_io() {
+        let layout = RecordLayout::new(DotLayout).unwrap();
+        let store = FastlyKvStore::declared_records("test-store", layout.clone());
+        let binding = store.record_binding().unwrap();
+        assert_eq!(binding.layout, layout);
+        assert_eq!(binding.max_metadata_bytes, 2000);
+        store.validate_point("group.key").unwrap();
+        store.validate_point("invalid").unwrap_err();
+        store
+            .validate_partition("group.key", &layout.partition("other.").unwrap())
+            .unwrap_err();
+        assert!(
+            FastlyKvStore::declared("ordinary")
+                .record_binding()
+                .is_none()
+        );
+        FastlyKvStore::declared("ordinary")
+            .validate_point("invalid")
+            .unwrap();
+    }
+
+    #[test]
+    fn metadata_is_text_and_preserves_nonempty_bytes() {
+        assert_eq!(decode_metadata(None).unwrap(), None);
+        assert_eq!(decode_metadata(Some(b"")).unwrap(), None);
+        assert_eq!(
+            decode_metadata(Some("a\u{96ea}\n".as_bytes()))
+                .unwrap()
+                .as_deref(),
+            Some("a\u{96ea}\n")
+        );
+        decode_metadata(Some(&[0xff, 0xfe])).unwrap_err();
+    }
+
+    #[test]
+    fn only_conditional_precondition_rejection_is_contention() {
+        for conditional in [true, false] {
+            assert!(matches!(
+                insert_outcome(Ok(()), conditional),
+                Ok(RecordWriteOutcome::Written)
+            ));
+            assert!(matches!(
+                insert_outcome(
+                    Err(KVStoreError::Unexpected(FastlyStatus::ERROR)),
+                    conditional
+                ),
+                Err(KvError::MutationUncertain)
+            ));
+            assert!(matches!(
+                insert_outcome(Err(KVStoreError::TooManyRequests), conditional),
+                Err(KvError::Unavailable)
+            ));
+        }
+        assert!(matches!(
+            insert_outcome(Err(KVStoreError::ItemPreconditionFailed), true),
+            Ok(RecordWriteOutcome::PreconditionFailed)
+        ));
+        assert!(matches!(
+            insert_outcome(Err(KVStoreError::ItemPreconditionFailed), false),
+            Err(KvError::Internal(_))
+        ));
+        let error = mutation_error(&KVStoreError::StoreNotFound(
+            "secret-provider-payload".to_owned(),
+        ));
+        assert!(matches!(error, KvError::MutationUncertain));
+        assert!(!format!("{error:?} {error}").contains("secret-provider-payload"));
+    }
+
+    #[test]
+    fn exact_existence_follows_empty_and_neighbour_pages_until_exact_match() {
+        let mut calls = 0_usize;
+        assert!(
+            exact_exists("group.key", |cursor| {
+                calls += 1;
+                match calls {
+                    1 => {
+                        assert_eq!(cursor, None);
+                        Ok(KvPage {
+                            keys: vec!["group.key.child".to_owned()],
+                            cursor: Some("one".to_owned()),
+                        })
+                    }
+                    2 => {
+                        assert_eq!(cursor, Some("one"));
+                        Ok(KvPage {
+                            keys: vec![],
+                            cursor: Some("two".to_owned()),
+                        })
+                    }
+                    3 => {
+                        assert_eq!(cursor, Some("two"));
+                        Ok(KvPage {
+                            keys: vec!["group.key".to_owned()],
+                            cursor: None,
+                        })
+                    }
+                    _ => panic!("unexpected extra page"),
+                }
+            })
+            .unwrap()
+        );
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn exact_existence_does_not_infer_absence_before_end_or_error() {
+        let mut calls = 0_usize;
+        assert!(
+            !exact_exists("group.key", |_| {
+                calls += 1;
+                Ok(KvPage {
+                    keys: vec!["group.key.child".to_owned()],
+                    cursor: (calls == 1).then(|| "next".to_owned()),
+                })
+            })
+            .unwrap()
+        );
+        assert_eq!(calls, 2);
+        assert!(matches!(
+            exact_exists("group.key", |_| Err(KvError::Unavailable)),
+            Err(KvError::Unavailable)
+        ));
+        exact_exists("group.key", |_| {
+            Ok(KvPage {
+                keys: vec![],
+                cursor: Some("stuck".to_owned()),
+            })
+        })
+        .unwrap_err();
+    }
+
+    #[test]
+    fn ordinary_cursor_preserves_native_position_and_rejects_other_scopes() {
+        let layout = RecordLayout::new(DotLayout).unwrap();
+        let binding = record_binding("first", layout.clone());
+        let cursor = encode_ordinary_cursor(&binding, "", Some("native-position".to_owned()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decode_ordinary_cursor(&binding, "", Some(&cursor))
+                .unwrap()
+                .as_deref(),
+            Some("native-position")
+        );
+        decode_ordinary_cursor(&binding, "group.", Some(&cursor)).unwrap_err();
+        decode_ordinary_cursor(&record_binding("other", layout), "", Some(&cursor)).unwrap_err();
+        decode_ordinary_cursor(&binding, "", Some("native-position")).unwrap_err();
+        decode_ordinary_cursor(
+            &binding,
+            "",
+            Some(r#"{"scope":"first","native":"record-cursor"}"#),
+        )
+        .unwrap_err();
+    }
 
     #[test]
     fn open_failure_classification_drops_provider_payloads() {

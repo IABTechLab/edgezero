@@ -413,6 +413,94 @@ fn main() -> anyhow::Result<()> {
         project
     }
 
+    fn generate_records(root: &Path) -> PathBuf {
+        let project = generate(root);
+        let manifest = project.join("edgezero.toml");
+        let manifest_source = fs::read_to_string(&manifest).expect("generated record route");
+        fs::write(
+            &manifest,
+            manifest_source.replacen(
+                "handler = \"celld_proof_core::handlers::celld_probe\"",
+                "handler = \"celld_proof_core::handlers::celld_record_probe\"",
+                1,
+            ),
+        )
+        .expect("record route declaration");
+        let core_manifest = project.join("crates/celld-proof-core/Cargo.toml");
+        let dependencies = fs::read_to_string(&core_manifest).expect("generated core dependencies");
+        fs::write(
+            &core_manifest,
+            dependencies.replacen(
+                "edgezero-core = { workspace = true }",
+                "edgezero-core = { workspace = true, features = [\"test-utils\"] }",
+                1,
+            ),
+        )
+        .expect("portable shared-contract helper in fixture only");
+        let core_lib = project.join("crates/celld-proof-core/src/lib.rs");
+        let lib_source = fs::read_to_string(&core_lib).expect("generated configure hook");
+        let mut configured = lib_source.replacen(
+            "fn configure_app(app: &mut EdgeZeroApp) -> Result<(), EdgeError> {",
+            "fn configure_app(app: &mut EdgeZeroApp) -> Result<(), EdgeError> {\n    app.require_record_store(\"state\", RecordFixtureLayout)?;", 1,
+        );
+        configured.push_str(
+            r#"
+struct RecordFixtureLayout;
+impl edgezero_core::RecordKeyLayout for RecordFixtureLayout {
+    fn id(&self) -> &'static str { "generated-celld-store-records" }
+    fn version(&self) -> u32 { 1 }
+    fn validate(&self) -> Result<(), edgezero_core::key_value_store::KvError> { Ok(()) }
+    fn partition_prefix<'key>(&self, key: &'key str) -> Result<&'key str, edgezero_core::key_value_store::KvError> {
+        if key.starts_with("probe/") { Ok("probe/") }
+        else { Err(edgezero_core::key_value_store::KvError::Validation("outside fixture group".to_owned())) }
+    }
+    fn validate_partition(&self, prefix: &str) -> Result<(), edgezero_core::key_value_store::KvError> {
+        if prefix == "probe/" { Ok(()) }
+        else { Err(edgezero_core::key_value_store::KvError::Validation("incomplete fixture group".to_owned())) }
+    }
+}
+"#,
+        );
+        fs::write(core_lib, configured).expect("declare layout before native preparation");
+        let handlers = project.join("crates/celld-proof-core/src/handlers.rs");
+        let mut handler_source = fs::read_to_string(&handlers).expect("generated record handler");
+        handler_source.push_str(r#"
+#[action]
+pub async fn celld_record_probe(
+    edgezero_core::extractor::State(state): edgezero_core::extractor::State<std::sync::Arc<crate::config::StartupState>>,
+    kv: edgezero_core::extractor::Kv,
+) -> Result<Text<String>, EdgeError> {
+    let store = kv.default().ok_or_else(|| EdgeError::service_unavailable("KV missing"))?;
+    let records = store.require_records()?;
+    let run_contract = !state.mutated.swap(true, std::sync::atomic::Ordering::SeqCst)
+        && std::env::var("CELLD_PROOF_MODE").unwrap_or_default() == "records-put";
+    if run_contract {
+        edgezero_core::record_store::contract::assert_record_contract(&store, "probe/").await;
+        store.put_bytes("probe/persist", b"native-no-expiry".to_vec().into()).await?;
+    }
+    let row = records.lookup("probe/persist").await?
+        .ok_or_else(|| EdgeError::service_unavailable("record missing"))?;
+    let strong = records.exists_strong("probe/persist").await?;
+    Ok(Text::new(format!("record-contract={run_contract};body={:?};metadata={:?};strong={strong}",
+        row.body.as_ref(), row.metadata)))
+}
+"#);
+        fs::write(handlers, handler_source)
+            .expect("shared public contract through generated route");
+        project
+    }
+
+    fn record_bindings(project: &Path, endpoint: &str) -> PathBuf {
+        let path = bindings(project, endpoint, true);
+        let text = fs::read_to_string(&path).expect("generated native record bindings");
+        fs::write(
+            &path,
+            text.replacen("provider = \"celld-kv\"", "provider = \"celld-records\"", 1),
+        )
+        .expect("explicit fresh-record provider, not raw auto-upgrade");
+        path
+    }
+
     fn bindings(project: &Path, endpoint: &str, authenticated: bool) -> PathBuf {
         let path = project.join("celld-bindings.toml");
         let access = if authenticated {
@@ -696,6 +784,66 @@ store = "state"
                 cert,
             }
         }
+    }
+
+    #[test]
+    #[ignore = "requires explicit official CELLD_BIN, EDGEZERO_CELLD_STORE_SERVICE, Node.js and OpenSSL; shared record contract through generated TLS route"]
+    fn generated_native_consumer_uses_stock_celld_store_records() {
+        let temp = TempDir::new().expect("generated record fixture");
+        let service_dir = StoreService::prepare(temp.path());
+        let service = StoreService::start(temp.path(), &service_dir);
+        let project = generate_records(temp.path());
+        let binding = record_bindings(&project, &service.endpoint);
+        let disabled = build(&project, None);
+        let mut blocked = App::start(
+            &disabled,
+            &project,
+            &binding,
+            "records-put",
+            Some((APP_TOKEN, &service.cert)),
+        );
+        blocked.rejected();
+        drop(blocked);
+        let binary = build(&project, Some("celld-records"));
+        let mut first = App::start(
+            &binary,
+            &project,
+            &binding,
+            "records-put",
+            Some((APP_TOKEN, &service.cert)),
+        );
+        let response = first.request();
+        assert!(
+            response.contains("200 OK")
+                && response.contains("record-contract=true")
+                && response.contains("metadata=None")
+                && response.contains("strong=true"),
+            "generated stock service public record contract: {response}"
+        );
+        let again = first.request();
+        assert!(
+            again.contains("record-contract=false"),
+            "contract runs once per app"
+        );
+        drop(first);
+        drop(service);
+        let restarted_service = StoreService::start(temp.path(), &service_dir);
+        let restarted_binding = record_bindings(&project, &restarted_service.endpoint);
+        let mut second = App::start(
+            &binary,
+            &project,
+            &restarted_binding,
+            "records-read",
+            Some((APP_TOKEN, &restarted_service.cert)),
+        );
+        let restarted_response = second.request();
+        assert!(
+            restarted_response.contains("200 OK") && restarted_response.contains("record-contract=false")
+                && restarted_response.contains("metadata=None") && restarted_response.contains("strong=true")
+                && restarted_response.contains("body=[110, 97, 116, 105, 118, 101, 45, 110, 111, 45, 101, 120, 112, 105, 114, 121]"),
+            "record no-expiry row survives app and stock service restart: {restarted_response}"
+        );
+        assert!(!project.join(".edgezero").exists());
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub mod params;
 pub mod platform;
 pub mod pre_dispatch;
 pub mod probe;
+pub mod record_store;
 pub mod responder;
 pub mod response;
 pub mod response_egress;
@@ -119,6 +120,11 @@ pub use platform::{
     PlatformUnknownReason,
 };
 pub use pre_dispatch::PreDispatchRequest;
+pub use record_store::{
+    Record, RecordBinding, RecordGeneration, RecordHandle, RecordKeyLayout, RecordLayout,
+    RecordPage, RecordPartition, RecordStoreRequirements, RecordWrite, RecordWriteMode,
+    RecordWriteOutcome,
+};
 pub use response_egress::{
     DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision,
     DetachedResponseEgressDecisionFactory, DetachedResponseEgressHead,

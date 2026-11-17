@@ -2,6 +2,8 @@
 # Check isolated normal graphs, not workspace-unified or test dependencies.
 set -euo pipefail
 export LC_ALL=C
+# shellcheck source=scripts/portable_dependency_checks.sh
+source "$(dirname "${BASH_SOURCE[0]}")/portable_dependency_checks.sh"
 
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
@@ -65,26 +67,14 @@ assert_portable() {
   local name="$1" root="$2"
   shift 2
   graph "$name" "$root" "$@"
-  if grep -Eq '^(edgezero-adapter-axum|edgezero-store-(aws|celld)|axum(-[^ ]+)?|tokio-[^ ]+|reqwest|hyper(-[^ ]+)?|mio|socket2|ipnet|aws-config|aws-sdk-[^ ]+) v' "$scratch/$name"; then
+  if grep -Eq '^(edgezero-adapter-axum|edgezero-store-(aws|celld)|axum(-[^ ]+)?|reqwest|hyper(-[^ ]+)?|mio|socket2|ipnet|aws-config|aws-sdk-[^ ]+) v' "$scratch/$name"; then
     fail "native runtime/store/SDK leaked into $name"
   fi
-  # Pinned worker 0.8.5 already uses tokio 1.52.3 with default-features=false
-  # and no selected features on wasm32-unknown-unknown. That empty-feature
-  # dependency is not the native executor. Keep the exception exact so a worker
-  # upgrade or enabling runtime/net features requires a fresh isolation review.
-  if [[ "$name" == cloudflare ]]; then
-    grep -Eq '^worker v0[.]8[.]5[|]' "$scratch/$name" \
-      || fail 'Cloudflare worker pin changed; review its empty-feature tokio exception'
-    grep -Eq '^tokio v1[.]52[.]3[|]$' "$scratch/$name" \
-      || fail 'missing expected Cloudflare empty-feature tokio dependency'
+  if [[ "$name" == core ]] && grep -Eq '^tokio(-[^ ]+)? v' "$scratch/$name"; then
+    fail 'Tokio dependency leaked into portable core'
   fi
-  if ! awk -F '|' -v name="$name" '
-    /^tokio v/ {
-      sub(/ [(][*][)]$/, "", $2)
-      if (name != "cloudflare" || $1 != "tokio v1.52.3" || $2 != "") exit 1
-    }
-  ' "$scratch/$name"; then
-    fail "unexpected tokio version or native runtime features in $name"
+  if ! assert_wasm_tokio_features < "$scratch/$name"; then
+    fail "Tokio runtime/native-I/O features leaked into $name"
   fi
 }
 assert_portable core edgezero-core --no-default-features

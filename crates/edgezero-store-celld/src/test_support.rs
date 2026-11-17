@@ -31,6 +31,10 @@ pub(crate) const SERVICE_HEADERS: &str =
 pub(crate) struct Request {
     pub(crate) body: Vec<u8>,
     pub(crate) mutation_id: Option<String>,
+    #[cfg(feature = "records")]
+    pub(crate) expected_instance: Option<String>,
+    #[cfg(feature = "records")]
+    pub(crate) record_version: Option<String>,
     pub(crate) connection: usize,
     pub(crate) method: String,
     pub(crate) target: String,
@@ -184,68 +188,90 @@ impl Drop for Fixture {
     }
 }
 
+async fn read_request<S>(stream: &mut BufReader<S>, connection: usize) -> Option<Request>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut first = String::new();
+    if stream.read_line(&mut first).await.unwrap_or(0) == 0 {
+        return None;
+    }
+    let mut parts = first.split_whitespace();
+    let method = parts
+        .next()
+        .expect("fixture request line includes a method")
+        .to_owned();
+    let target = parts
+        .next()
+        .expect("fixture request line includes a target")
+        .to_owned();
+    let mut length = 0;
+    let mut authorization = None;
+    let mut encoding = None;
+    let mut mutation_id = None;
+    #[cfg(feature = "records")]
+    let mut expected_instance = None;
+    #[cfg(feature = "records")]
+    let mut record_version = None;
+    loop {
+        let mut line = String::new();
+        if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
+            return None;
+        }
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, raw_value)) = line.split_once(':') {
+            let value = raw_value.trim();
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value
+                    .parse()
+                    .expect("fixture Content-Length is a valid length");
+            }
+            if name.eq_ignore_ascii_case("authorization") {
+                authorization = Some(value.to_owned());
+            }
+            if name.eq_ignore_ascii_case("accept-encoding") {
+                encoding = Some(value.to_owned());
+            }
+            if name.eq_ignore_ascii_case("x-edgezero-mutation-id") {
+                mutation_id = Some(value.to_owned());
+            }
+            #[cfg(feature = "records")]
+            if name.eq_ignore_ascii_case("x-edgezero-expected-instance") {
+                expected_instance = Some(value.to_owned());
+            }
+            #[cfg(feature = "records")]
+            if name.eq_ignore_ascii_case("x-edgezero-record-version") {
+                record_version = Some(value.to_owned());
+            }
+        }
+    }
+    let mut body = vec![0; length];
+    if stream.read_exact(&mut body).await.is_err() {
+        return None;
+    }
+    Some(Request {
+        body,
+        mutation_id,
+        #[cfg(feature = "records")]
+        expected_instance,
+        #[cfg(feature = "records")]
+        record_version,
+        connection,
+        method,
+        target,
+        authorization,
+        encoding,
+    })
+}
+
 async fn serve<S>(socket: S, state: Arc<Mutex<State>>, connection: usize)
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut stream = BufReader::new(socket);
-    loop {
-        let mut first = String::new();
-        if stream.read_line(&mut first).await.unwrap_or(0) == 0 {
-            return;
-        }
-        let mut parts = first.split_whitespace();
-        let method = parts
-            .next()
-            .expect("fixture request line includes a method")
-            .to_owned();
-        let target = parts
-            .next()
-            .expect("fixture request line includes a target")
-            .to_owned();
-        let mut length = 0;
-        let mut authorization = None;
-        let mut encoding = None;
-        let mut mutation_id = None;
-        loop {
-            let mut line = String::new();
-            if stream.read_line(&mut line).await.unwrap_or(0) == 0 {
-                return;
-            }
-            if line == "\r\n" {
-                break;
-            }
-            if let Some((name, raw_value)) = line.split_once(':') {
-                let value = raw_value.trim();
-                if name.eq_ignore_ascii_case("content-length") {
-                    length = value
-                        .parse()
-                        .expect("fixture Content-Length is a valid length");
-                }
-                if name.eq_ignore_ascii_case("authorization") {
-                    authorization = Some(value.to_owned());
-                }
-                if name.eq_ignore_ascii_case("accept-encoding") {
-                    encoding = Some(value.to_owned());
-                }
-                if name.eq_ignore_ascii_case("x-edgezero-mutation-id") {
-                    mutation_id = Some(value.to_owned());
-                }
-            }
-        }
-        let mut body = vec![0; length];
-        if stream.read_exact(&mut body).await.is_err() {
-            return;
-        }
-        let request = Request {
-            body,
-            mutation_id,
-            connection,
-            method,
-            target,
-            authorization,
-            encoding,
-        };
+    while let Some(request) = read_request(&mut stream, connection).await {
         let reply = {
             let mut locked = state.lock().await;
             let dynamic = apply(&request, &mut locked.values);

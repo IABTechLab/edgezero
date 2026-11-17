@@ -56,6 +56,25 @@ test("the fault proxy forwards a marked request once, drops its reply, then pass
   }
 });
 
+test("the fault proxy can hold delivery before the target runs it", async () => {
+  const target = createServer((socket) => socket.on("data", (chunk) => socket.end(`reply:${chunk}`)));
+  const targetPort = await listen(target);
+  const probe = createServer();
+  const proxyPort = await listen(probe);
+  await new Promise((resolve) => probe.close(resolve));
+  const proxy = faultProxy(proxyPort, targetPort);
+  try {
+    await new Promise((resolve) => proxy.server.once("listening", resolve));
+    const until = Date.now() + 100;
+    proxy.holdUntil.set("held-marker", until);
+    assert.equal(await exchange(proxyPort, "held-marker"), "reply:held-marker");
+    assert.ok(Date.now() >= until, "delivery was not released before the selected deadline");
+  } finally {
+    proxy.server.close();
+    target.close();
+  }
+});
+
 test("the TLS terminator requires explicit certificate, key and target", () => {
   assert.throws(() => parseArgs([]), /required/);
   assert.throws(() => parseArgs(["--cert", "c"]), /required/);

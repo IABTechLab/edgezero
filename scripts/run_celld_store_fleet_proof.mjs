@@ -15,12 +15,13 @@
 // requirements fail; nothing is skipped. This is local evidence only: it does
 // not qualify a production bucket, network or fleet size.
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, connect } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { EdgeZeroStore } from "../services/celld-store/src/index.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const DEFAULT_IMAGE = "rustfs/rustfs:1.0.1";
@@ -83,14 +84,28 @@ async function waitFor(check, label, timeoutMs = 60_000) {
 
 /** Forwards to the real internal listener; can drop one reply after forwarding a matching request. */
 export function faultProxy(listenPort, targetPort) {
-  const state = { dropNext: null, forwarded: new Map(), server: null };
+  const state = { dropNext: null, forwarded: new Map(), holdUntil: new Map(), server: null };
   state.server = createServer((client) => {
     const upstream = connect(targetPort, "127.0.0.1");
     let dropping = false;
+    let pending = [];
+    let releaseAt = 0;
+    let release;
     client.on("data", (chunk) => {
       const text = chunk.toString("latin1");
       for (const [marker, count] of state.forwarded) {
         if (text.includes(marker)) state.forwarded.set(marker, count + 1);
+      }
+      for (const [marker, until] of state.holdUntil) {
+        if (text.includes(marker)) releaseAt = Math.max(releaseAt, until);
+      }
+      if (releaseAt > Date.now() || pending.length > 0) {
+        pending.push(chunk);
+        release ??= setTimeout(() => {
+          if (!upstream.destroyed) upstream.write(Buffer.concat(pending));
+          pending = [];
+        }, Math.max(0, releaseAt - Date.now()));
+        return;
       }
       if (state.dropNext !== null && text.includes(state.dropNext)) {
         state.dropNext = null;
@@ -102,7 +117,7 @@ export function faultProxy(listenPort, targetPort) {
       upstream.write(chunk);
     });
     upstream.on("data", (chunk) => { if (!dropping) client.write(chunk); });
-    const close = () => { client.destroy(); upstream.destroy(); };
+    const close = () => { clearTimeout(release); client.destroy(); upstream.destroy(); };
     client.on("close", close);
     upstream.on("close", close);
     client.on("error", close);
@@ -130,11 +145,39 @@ async function read(base, key) {
   return response.status === 200 ? response.text() : null;
 }
 
+async function recordRequest(base, instance, operation, key, payload, id = mutationId()) {
+  const response = await fetch(`${base}/v1/stores/state/${operation}?key=${encodeURIComponent(key)}`, {
+    method: operation === "record" ? "GET" : "POST",
+    headers: {
+      "x-edgezero-record-version": "1",
+      "x-edgezero-expected-instance": instance,
+      "x-edgezero-mutation-id": id,
+      "content-type": "application/json",
+    },
+    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+  });
+  const reply = response.status === 204 ? null : await response.json();
+  return { status: response.status, row: response.status === 200 ? reply : null, error: reply?.error ?? null,
+    instance: response.headers.get("x-edgezero-store-instance"), id };
+}
+
+function recordValue(value, mode = "overwrite", generation) {
+  return { body: Buffer.from(value).toString("base64"), metadata: Buffer.from("fleet-proof").toString("base64"), ttl_ms: null, mode,
+    ...(generation === undefined ? {} : { generation }) };
+}
+
+function sha256(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
 export async function runFleetProof({ env = process.env, log = console.log } = {}) {
   const celld = env.CELLD_BIN;
   if (!celld || !isAbsolute(celld)) throw new Error("CELLD_BIN must select an absolute official celld executable; no passing skip");
   const version = (await run(celld, ["--version"])).trim();
-  log(`celld version: ${version}`);
+  if (version !== "celld 0.6.3") throw new Error(`expected official celld 0.6.3, got ${version}`);
+  const binaryDigest = sha256(celld);
+  log(`celld version: ${version}; executable SHA-256 ${binaryDigest}`);
+  log(`service src/index.js SHA-256 ${sha256(join(root, "services/celld-store/src/index.js"))}`);
   const help = await run(celld, ["--help"]);
   if (help.includes("--store-api-config")) throw new Error("CELLD_BIN is a modified celld; this proof requires an official release");
   const image = env.CELLD_PROOF_BUCKET_IMAGE ?? DEFAULT_IMAGE;
@@ -205,6 +248,57 @@ export async function runFleetProof({ env = process.env, log = console.log } = {
     if (lost.status !== 204) throw new Error(`a resent mutation must return its first outcome, got ${lost.status}`);
     if (await read(viaA, "lost-reply") !== "once") throw new Error("lost-reply value is wrong");
 
+    // Record Add and CAS must also answer their first success after an actual
+    // internal resend. Without the ledger, each resend would reject its own write.
+    const capability = await fetch(`${viaA}/v1/stores/state/capabilities`);
+    if (!capability.ok) throw new Error("record preparation failed");
+    const instance = capability.headers.get("x-edgezero-store-instance");
+    if (!instance) throw new Error("missing prepared instance");
+    const recordCall = (operation, key, payload, id) => recordRequest(viaA, instance, operation, key, payload, id);
+    const baseline = (await put(viaA, "record-baseline", "baseline"));
+    if (baseline.status !== 204) throw new Error("record baseline failed");
+    const baselineRow = (await recordCall("record", "record-baseline")).row;
+    let expectedGeneration = BigInt(baselineRow.generation);
+    for (const mode of ["add", "if-generation-match"]) {
+      const recordId = mutationId();
+      proxy.forwarded.set(recordId, 0);
+      proxy.dropNext = recordId;
+      const payload = recordValue(mode, mode, mode === "add" ? undefined : String(expectedGeneration));
+      const outcome = await recordCall("record-put", "record-resend", payload, recordId);
+      const count = proxy.forwarded.get(recordId);
+      if (count < 2 || outcome.status !== 204) throw new Error(`record ${mode} fault not neutralized: ${count} deliveries, status ${outcome.status}`);
+      const row = (await recordCall("record", "record-resend")).row;
+      expectedGeneration += 1n;
+      if (row.generation !== String(expectedGeneration) || row.body !== payload.body || row.metadata !== payload.metadata) {
+        throw new Error(`record ${mode} did not apply exactly once`);
+      }
+      log(`record ${mode}: ${count} internal deliveries, one generation allocation, original success`);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    // Hold delivery after Worker admission but before the object transaction.
+    // Every retry with this ID is held beyond the same original apply window.
+    const lateId = mutationId();
+    proxy.forwarded.set(lateId, 0);
+    proxy.holdUntil.set(lateId, Date.now() + EdgeZeroStore.internals.LIMITS.applyWindowMs + 1_000);
+    const late = await recordCall("record-put", "record-too-late", recordValue("late", "add"), lateId);
+    if (proxy.forwarded.get(lateId) < 1 || late.status !== 504 || late.error !== "deadline" || late.instance !== instance) {
+      throw new Error(`late delivery did not reach the object's deadline check: ${JSON.stringify(late)}`);
+    }
+    if ((await recordCall("record", "record-too-late")).status !== 404) throw new Error("late mutation applied");
+    proxy.holdUntil.delete(lateId);
+    log("record delivery held beyond the apply window: rejected, no row created");
+    const survivingRecord = (await recordCall("record", "record-resend")).row;
+    // A remembered rejection must remain rejected even after deleting its row.
+    const rejectedId = mutationId();
+    const rejectedPayload = recordValue("must-not-appear", "add");
+    if ((await recordCall("record-put", "record-resend", rejectedPayload, rejectedId)).status !== 412) throw new Error("expected initial Add rejection");
+    if ((await recordCall("record-delete", "record-resend")).status !== 204) throw new Error("record delete failed");
+    if ((await recordCall("record-put", "record-resend", rejectedPayload, rejectedId)).status !== 412) throw new Error("replayed rejection changed into a write");
+    if ((await recordCall("record", "record-resend")).status !== 404) throw new Error("replayed rejection created a row");
+    if ((await recordCall("record-put", "record-resend", recordValue("takeover-record"))).status !== 204) throw new Error("record recreation failed");
+    const takeoverRecord = (await recordCall("record", "record-resend")).row;
+    if (BigInt(takeoverRecord.generation) <= BigInt(survivingRecord.generation)) throw new Error("delete reused generation");
+
     // 3: acknowledged writes survive kill -9 of the owner and takeover by A.
     const keys = [];
     for (let index = 0; index < 10; index += 1) {
@@ -218,7 +312,17 @@ export async function runFleetProof({ env = process.env, log = console.log } = {
       if (await read(viaA, key) !== `v${index}`) throw new Error(`acknowledged write ${key} lost after takeover`);
     }
     if (await read(viaA, "lost-reply") !== "once") throw new Error("lost-reply value changed after takeover");
-    log("Fleet proof passed: resend neutralized, acknowledged writes survived owner loss.");
+    const afterTakeover = (await recordCall("record", "record-resend")).row;
+    if (JSON.stringify(afterTakeover) !== JSON.stringify(takeoverRecord)) throw new Error("acknowledged record changed after takeover");
+    if ((await recordCall("record-put", "record-resend", recordValue("stale", "if-generation-match", survivingRecord.generation))).status !== 412) {
+      throw new Error("stale generation accepted after takeover");
+    }
+    if ((await recordCall("record-put", "record-resend", rejectedPayload, rejectedId)).status !== 412) throw new Error("remembered rejection lost after takeover");
+    if ((await recordCall("record-put", "record-after-takeover", recordValue("new", "add"))).status !== 204) throw new Error("post-takeover write failed");
+    const allocated = (await recordCall("record", "record-after-takeover")).row;
+    if (BigInt(allocated.generation) <= BigInt(takeoverRecord.generation)) throw new Error("allocator moved backward after takeover");
+    if (sha256(celld) !== binaryDigest) throw new Error("tested executable changed");
+    log("Fleet proof passed: ordinary KV and record resend neutralized; records, metadata, allocator and rejection ledger survived owner loss.");
   } finally {
     await cleanup();
   }

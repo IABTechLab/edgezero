@@ -20,6 +20,8 @@ mod client;
 mod kv;
 #[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 mod preparation;
+#[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
+mod records;
 #[cfg(test)]
 #[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 mod test_support;
@@ -61,4 +63,10 @@ pub enum PreparationError {
     Unavailable,
     #[error("deadline exceeded")]
     Deadline,
+    #[cfg(feature = "records")]
+    #[error("write precondition failed")]
+    PreconditionFailed,
+    #[cfg(feature = "records")]
+    #[error("mutation may have committed")]
+    MutationUncertain,
 }
