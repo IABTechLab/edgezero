@@ -95,6 +95,7 @@ fn validate_wire(events: &[Value], adapter: &str) -> Result<()> {
         cases.len() == 68 && receipts.iter().sum::<usize>() == 84,
         "incomplete redirect wire cases or origin receipts",
     )?;
+    super::super::wire::replay_wire(adapter, cases)?;
     super::super::wire::validate_batch_artifact(events, adapter)?;
     super::super::wire::validate_marker_artifact(events, adapter)?;
     super::super::wire::validate_encoding_artifact(events, adapter)?;
@@ -523,7 +524,7 @@ mod tests {
     }
 
     fn wire(adapter: &str) -> Vec<Value> {
-        let mut cases = (0..68).map(|index| json!({"event":format!("{adapter}-wire-case"),"origin_requests":if index < 16 {vec![json!({}),json!({})]} else {vec![json!({})]}})).collect::<Vec<_>>();
+        let mut cases = super::super::super::wire::redirect_artifact(adapter);
         cases.push(json!({"event":format!("{adapter}-wire-inventory"),"status":"pass","exchanges":68,"origin_requests":84,"qualification":false}));
         cases.extend(super::super::super::wire::batch_recovery_artifact(adapter));
         cases.extend(super::super::super::wire::marker_artifact(adapter));
@@ -532,6 +533,26 @@ mod tests {
             cases.extend(super::super::super::wire::forwarding_artifact(adapter));
         }
         cases
+    }
+
+    #[test]
+    fn persisted_redirect_rejects_count_preserving_content_corruption() {
+        for adapter in ["axum", "fastly", "cloudflare"] {
+            let valid = wire(adapter);
+            validate_wire(&valid, adapter).unwrap();
+            let mut missing_report = valid.clone();
+            missing_report[0].as_object_mut().unwrap().remove("report");
+            let mut duplicate = valid.clone();
+            duplicate[1] = duplicate[0].clone();
+            let mut corrupt_receipt = valid.clone();
+            corrupt_receipt[0]["origin_requests"][0] = json!([4001, "/foreign"]);
+            let accepted = [missing_report, duplicate, corrupt_receipt]
+                .map(|events| validate_wire(&events, adapter).is_ok());
+            assert_eq!(
+                accepted, [false; 3],
+                "{adapter}: malformed persisted evidence"
+            );
+        }
     }
 
     #[test]

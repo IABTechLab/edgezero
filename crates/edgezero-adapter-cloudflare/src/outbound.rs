@@ -617,7 +617,6 @@ mod worker_impl {
                         if let Some(completed) = &mut abort_guard { completed.disarm(); }
                         drop(source.take());
                         drop(abort_guard.take());
-                        if let Err(error) = HostEventYield::new().await { yield Err(error); }
                         return;
                     }
                 }
@@ -672,7 +671,8 @@ mod worker_impl {
             encoded,
             context,
             OutboundExchangeOwner::new(|| {}),
-        )?;
+        )?
+        .with_body_checkpoint(|| Box::pin(HostEventYield::new()));
         #[cfg(feature = "test-utils")]
         if let Some(observation) = recorder {
             observation.head_received();
@@ -3043,6 +3043,88 @@ mod worker_impl {
                 .expect_err("host-event deadline wins over source error");
 
             assert!(matches!(error, EdgeError::GatewayTimeout { .. }));
+        }
+
+        #[wasm_bindgen_test]
+        async fn response_terminal_checkpoints_refresh_frozen_clock() {
+            let _timers = NumericTimeoutGuard::install();
+            let mut wrong = Vec::new();
+            for (case, script, encoded_cap, decoded_cap, buffered_cap) in [
+                (
+                    "source",
+                    "return new Response(new ReadableStream({start(c) { c.error(new TypeError('private-token')); }}));",
+                    None,
+                    None,
+                    16,
+                ),
+                ("encoded", "return new Response('body');", Some(1), None, 16),
+                ("decoded", "return new Response('body');", None, Some(1), 16),
+                ("buffered", "return new Response('body');", None, None, 1),
+                (
+                    "declared",
+                    "return new Response('body', {headers: {'content-length': '4'}});",
+                    Some(1),
+                    None,
+                    16,
+                ),
+                (
+                    "decode",
+                    "return new Response(new Uint8Array([0, 0, 0, 0]), {headers: {'content-encoding': 'gzip'}});",
+                    None,
+                    None,
+                    16,
+                ),
+            ] {
+                let start = MonotonicInstant::now();
+                let budget = test_budget(start, Duration::from_millis(10));
+                let now = Arc::new(Mutex::new(start));
+                let on_event = Arc::clone(&now);
+                let advance = Closure::<dyn FnMut()>::new(move || {
+                    *on_event.lock().unwrap() = budget.deadline.instant();
+                });
+                let restore = Function::new_with_args("advance", "const original = globalThis.setTimeout; globalThis.setTimeout = (callback, milliseconds) => original(() => { advance(); callback(); }, milliseconds); return () => { globalThis.setTimeout = original; };")
+                    .call1(&JsValue::UNDEFINED, advance.as_ref()).unwrap().dyn_into::<Function>().unwrap();
+                let _restore = RestoreGlobal::new(restore);
+                let raw = Function::new_no_args(script)
+                    .call0(&JsValue::UNDEFINED)
+                    .unwrap()
+                    .dyn_into::<web_sys::Response>()
+                    .unwrap();
+                let controller = web_sys::AbortController::new().unwrap();
+                let result = finish_fixture_response(
+                    WorkerResponse::from(raw),
+                    AbortGuard::new(controller),
+                    Method::GET,
+                    OutboundProxyMarker::Off,
+                    ResponseDecoding::Decode,
+                    ResponseMode::Buffered {
+                        max_bytes: buffered_cap,
+                    },
+                    budget,
+                    32 * 1024 * 1024,
+                    24,
+                    None,
+                    decoded_cap,
+                    encoded_cap,
+                    None,
+                    None,
+                    native_time(controlled_clock(now)),
+                )
+                .await;
+                if !matches!(
+                    result,
+                    Err(EdgeError::GatewayTimeout {
+                        cause: BudgetSource::PerCallTimeout,
+                        ..
+                    })
+                ) {
+                    wrong.push((case, format!("{result:?}")));
+                }
+            }
+            assert!(
+                wrong.is_empty(),
+                "terminal paths returned before a real host event: {wrong:?}"
+            );
         }
 
         #[wasm_bindgen_test]

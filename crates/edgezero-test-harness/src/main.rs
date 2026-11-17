@@ -1479,7 +1479,10 @@ mod process_tests {
             exit_result(run(arguments));
         }
         if mode == "acceptance-blocked-git" {
-            fs::write(path.join("git-started"), std::process::id().to_string()).unwrap();
+            let ready = path.join("git-started");
+            let pending = path.join("git-started.pending");
+            fs::write(&pending, std::process::id().to_string()).unwrap();
+            fs::rename(pending, ready).unwrap();
             thread::sleep(Duration::from_secs(30));
             return;
         }
@@ -1559,7 +1562,10 @@ mod process_tests {
             let error = child.wait_success().unwrap_err();
             assert!(error.to_string().contains("interrupted"), "{error}");
             assert!(child.0.try_wait().unwrap().is_some());
-            assert!(!LIVE_GROUPS.lock().unwrap().contains_key(&child.0.id()));
+            assert!(
+                !LIVE_GROUPS.lock().unwrap().contains_key(&child.0.id()),
+                "cleanup remained registered: {error}"
+            );
             fs::write(path.join("cancellation-reaped"), b"complete").unwrap();
             std::mem::forget(fixture);
             return;
@@ -1841,7 +1847,7 @@ mod process_tests {
         }
     }
 
-    fn assert_progress_cargo_cancellation(adapter: &str) {
+    fn assert_cargo_cancellation(adapter: &str, suite: &str) {
         use std::os::unix::fs::PermissionsExt;
 
         let fixture = Fixture::new();
@@ -1863,15 +1869,7 @@ esac
         command
             .env(
                 "EDGEZERO_STATIC_CHECK_ARGS",
-                json!([
-                    "--adapter",
-                    adapter,
-                    "--suite",
-                    "outbound-progress",
-                    "--output",
-                    output,
-                ])
-                .to_string(),
+                json!(["--adapter", adapter, "--suite", suite, "--output", output,]).to_string(),
             )
             .env("EDGEZERO_TEST_HELPER", std::env::current_exe().unwrap())
             .env("CARGO", &cargo)
@@ -1939,12 +1937,19 @@ esac
 
     #[test]
     fn progress_build_cancellation_reaps_cargo_and_descendants() {
-        assert_progress_cargo_cancellation("axum");
+        assert_cargo_cancellation("axum", "outbound-progress");
     }
 
     #[test]
     fn progress_metadata_cancellation_reaps_cargo_and_descendants() {
-        assert_progress_cargo_cancellation("cloudflare");
+        assert_cargo_cancellation("cloudflare", "outbound-progress");
+    }
+
+    #[test]
+    fn axum_fixture_build_cancellation_reaps_cargo_and_descendants() {
+        for suite in ["smoke", "benchmark", "assembly"] {
+            assert_cargo_cancellation("axum", suite);
+        }
     }
 
     #[test]
