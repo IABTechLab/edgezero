@@ -305,6 +305,12 @@ fn configured_selection(
     env: &EnvConfig,
     defaults: Option<&ManifestAdapterGeo>,
 ) -> Result<NativeGeoSelection, NativeGeoConfigError> {
+    if env
+        .get(&["adapter", "geo", "credential_variable"])
+        .is_some()
+    {
+        return Err(NativeGeoConfigError::InvalidSelection);
+    }
     let env_provider = env.get(&["adapter", "geo", "provider"]);
     let env_networks = env.get(&["adapter", "geo", "alb_peer_cidrs"]);
     let env_header = env.get(&["adapter", "geo", "origin_credential_header_name"]);
@@ -789,6 +795,29 @@ mod tests {
             #[cfg(not(feature = "geo-cloudfront"))]
             assert_eq!(result, Err(NativeGeoConfigError::UnavailableCloudFront));
         }
+    }
+
+    #[test]
+    fn axum_rejects_spin_credential_override() {
+        struct NoGeo;
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "fixture retains unused Hooks defaults"
+        )]
+        impl Hooks for NoGeo {
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().build())
+            }
+        }
+        let options = AxumRunOptions::from_vars([(
+            "EDGEZERO__ADAPTER__GEO__CREDENTIAL_VARIABLE",
+            "geo_token",
+        )])
+        .unwrap();
+        assert_eq!(
+            options.geo_capability_for::<NoGeo>(),
+            Err(NativeGeoConfigError::InvalidSelection)
+        );
     }
 
     #[test]

@@ -340,6 +340,8 @@ pub enum GeoSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GeoTrustBasis {
+    /// An ingress credential authenticated the proxy assertion.
+    AuthenticatedIngressHeader,
     CheckedDirectPeer,
     CheckedForwardedClient,
     /// Operator-declared credential-gated, network-isolated ALB path.

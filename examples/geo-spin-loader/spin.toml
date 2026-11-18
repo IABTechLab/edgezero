@@ -1,0 +1,19 @@
+# Reference manual manifest. Prefer load.py, which generates an isolated manifest,
+# stages the artifact, supplies variables and enforces listener/deadline cleanup.
+spin_manifest_version = 2
+[application]
+name = "geo-spin-loader"
+version = "0.0.0"
+[variables]
+loader_token = { required = true, secret = true }
+loader_store = { default = "geo_runtime" }
+[[trigger.http]]
+route = "/..."
+component = "loader"
+[component.loader]
+source = "target/wasm32-wasip2/release/geo_spin_loader.wasm"
+files = [{ source = "artifact", destination = "/artifact" }]
+key_value_stores = ["geo_runtime"]
+[component.loader.variables]
+loader_token = "{{ loader_token }}"
+loader_store = "{{ loader_store }}"

@@ -59,7 +59,10 @@ mod tests {
     };
     use edgezero_core::context::RequestContext;
     use edgezero_core::error::EdgeError;
-    use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoSource, GeoStatus};
+    use edgezero_core::geo::{
+        GeoError, GeoOutcome, GeoProviderId, GeoSource, GeoStatus, GeoTrustBasis,
+        GeoUnavailableReason, SubdivisionCode,
+    };
     use edgezero_core::http::{Method, Response, StatusCode, response_builder};
     use edgezero_core::outbound::{
         HttpClient, OutboundCollectedSlot, OutboundRequest, OutboundSlotResult, OutboundTime,
@@ -415,43 +418,138 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    async fn dispatch_exposes_cf_metadata_through_ctx_geo() {
-        async fn geo(ctx: RequestContext) -> Result<Response, EdgeError> {
-            let body = Body::text(format!("{:?}", ctx.geo()));
-            response_builder()
-                .status(StatusCode::OK)
-                .body(body)
-                .map_err(EdgeError::internal)
-        }
-        let app = App::new(RouterService::builder().get("/geo", geo).build());
-        let inner = Clone::clone(cf_request(CfMethod::Get, "/geo", None).inner());
-        let cf = Object::new();
-        for (key, value) in [("country", "US"), ("regionCode", "CA")] {
-            Reflect::set(&cf, &JsValue::from_str(key), &JsValue::from_str(value))
-                .expect("cf field");
-        }
-        Reflect::set(&inner, &JsValue::from_str("cf"), &cf).expect("cf");
-        let (env, ctx, _timers) = test_env_ctx();
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one matrix compares all three managed entrypoints across the same ordered requests"
+    )]
+    async fn managed_entrypoints_keep_platform_geo_per_request() {
+        struct GeoApp;
 
-        let mut response = CloudflareService::new(&app)
-            .dispatch(CfRequest::from(inner), env, ctx)
-            .await
-            .expect("cf response");
-
-        assert_eq!(response.status_code(), StatusCode::OK.as_u16());
-        let expected = GeoOutcome::platform(GeoSource::Cloudflare, Some("US"), Some("CA"));
-        assert!(matches!(
-            &expected,
-            GeoOutcome::Selected {
-                status: GeoStatus::Located { .. },
-                ..
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "store-free fixture deliberately uses default application configuration"
+        )]
+        impl Hooks for GeoApp {
+            fn owns_logging() -> bool {
+                true
             }
-        ));
-        assert_eq!(
-            response.text().await.expect("text"),
-            format!("{expected:?}"),
-            "cf metadata wins over the request's CloudFront headers"
-        );
+
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().get("/geo", geo).build())
+            }
+        }
+
+        #[edgezero_core::action]
+        async fn geo(ctx: RequestContext) -> String {
+            let GeoOutcome::Selected { provider, status } = ctx.geo() else {
+                return serde_json::json!({"status": "no-selection"}).to_string();
+            };
+            assert_eq!(provider.as_str(), "cloudflare");
+            match status {
+                GeoStatus::Located {
+                    location,
+                    source,
+                    trust_basis,
+                } => {
+                    assert_eq!(*source, GeoSource::Cloudflare);
+                    assert_eq!(*trust_basis, GeoTrustBasis::PlatformMetadata);
+                    serde_json::json!({
+                        "status": "located",
+                        "country": location.country().as_str(),
+                        "subdivision": location.subdivision().map(SubdivisionCode::as_str),
+                    })
+                    .to_string()
+                }
+                GeoStatus::Unavailable(reason) => {
+                    assert_eq!(*reason, GeoUnavailableReason::MissingMetadata);
+                    serde_json::json!({"status": "missing"}).to_string()
+                }
+                GeoStatus::Error(error) => {
+                    serde_json::json!({"unexpected_error": error.to_string()}).to_string()
+                }
+            }
+        }
+
+        let app = App::build::<GeoApp>(edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM)
+            .expect("store-free application");
+        let cases: &[(&[(&str, &str)], serde_json::Value)] = &[
+            (
+                &[
+                    ("country", "US"),
+                    ("region", "California"),
+                    ("regionCode", "CA"),
+                ],
+                serde_json::json!({"status": "located", "country": "US", "subdivision": "CA"}),
+            ),
+            (&[], serde_json::json!({"status": "missing"})),
+            (
+                &[("country", "gb")],
+                serde_json::json!({"status": "located", "country": "GB", "subdivision": null}),
+            ),
+            (
+                &[("country", "us"), ("regionCode", "01")],
+                serde_json::json!({"status": "located", "country": "US", "subdivision": "01"}),
+            ),
+            (
+                &[("country", "US"), ("regionCode", "US-CA")],
+                serde_json::json!({"status": "located", "country": "US", "subdivision": null}),
+            ),
+            (
+                &[("country", "XX")],
+                serde_json::json!({"status": "missing"}),
+            ),
+            (
+                &[("country", "T1")],
+                serde_json::json!({"status": "missing"}),
+            ),
+            (
+                &[("regionCode", "CA")],
+                serde_json::json!({"status": "missing"}),
+            ),
+        ];
+
+        for entrypoint in ["service", "run_app", "dispatch_app"] {
+            for (fields, expected) in cases {
+                let inner = Clone::clone(cf_request(CfMethod::Get, "/geo", None).inner());
+                if !fields.is_empty() {
+                    let cf = Object::new();
+                    for (key, value) in *fields {
+                        Reflect::set(&cf, &JsValue::from_str(key), &JsValue::from_str(value))
+                            .expect("platform metadata field");
+                    }
+                    Reflect::set(&inner, &JsValue::from_str("cf"), &cf).expect("cf metadata");
+                }
+                for (name, value) in [
+                    ("cf-ipcountry", "DE"),
+                    ("cloudfront-viewer-country", "DE"),
+                    ("cloudfront-viewer-country-region", "BE"),
+                ] {
+                    inner.headers().set(name, value).expect("spoofed header");
+                }
+                let request = CfRequest::from(inner);
+                let (env, ctx, _timers) = test_env_ctx();
+                let mut response = match entrypoint {
+                    "service" => {
+                        CloudflareService::new(&app)
+                            .dispatch(request, env, ctx)
+                            .await
+                    }
+                    "run_app" => {
+                        edgezero_adapter_cloudflare::run_app::<GeoApp>(request, env, ctx).await
+                    }
+                    _ => {
+                        edgezero_adapter_cloudflare::dispatch_app::<GeoApp>(&app, request, env, ctx)
+                            .await
+                    }
+                }
+                .expect("managed geo response");
+                assert_eq!(response.status_code(), StatusCode::OK.as_u16());
+                let actual: serde_json::Value =
+                    serde_json::from_str(&response.text().await.expect("geo response body"))
+                        .expect("geo response JSON");
+                assert_eq!(&actual, expected, "{entrypoint}, metadata {fields:?}");
+            }
+        }
     }
 
     #[wasm_bindgen_test]
