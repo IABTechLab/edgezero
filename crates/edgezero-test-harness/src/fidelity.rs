@@ -838,6 +838,20 @@ fn verify_observation(platform: &str, case: &str, status: u16, verdict: &Value) 
             case,
             "JA4 must come only from the runtime TLS API",
         )?;
+        // Fastly reports its runtime client address. Cloudflare has no direct-ingress
+        // declaration here, so nothing is exposed. Spin declares direct ingress and must
+        // keep its own appended `spin-client-addr` even when the `spoof` case sends one first.
+        let expected_client_state = if platform == "cloudflare" {
+            "not_exposed"
+        } else {
+            "runtime"
+        };
+        require(
+            verdict["client_state"] == expected_client_state,
+            platform,
+            case,
+            "client address must come only from the runtime",
+        )?;
         require(
             verdict["target_available"] == (platform != "fastly"),
             platform,
