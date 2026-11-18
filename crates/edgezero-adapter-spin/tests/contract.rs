@@ -55,6 +55,9 @@ mod tests {
     use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoStatus};
     use edgezero_core::http::{Response, StatusCode, request_builder, response_builder};
     use edgezero_core::key_value_store::{KvError, KvHandle, KvPage, KvStore};
+    use edgezero_core::record_store::{
+        Record, RecordBinding, RecordPage, RecordPartition, RecordWrite, RecordWriteOutcome,
+    };
     use edgezero_core::router::RouterService;
     use edgezero_core::secret_store::{
         SecretError, SecretHandle, SecretStore, finish_bounded_secret_read,
@@ -180,6 +183,62 @@ mod tests {
             _ttl: Duration,
         ) -> Result<(), KvError> {
             Ok(())
+        }
+
+        fn record_binding(&self) -> Option<RecordBinding> {
+            None
+        }
+
+        async fn record_delete(
+            &self,
+            _key: &str,
+            _partition: &RecordPartition,
+        ) -> Result<(), KvError> {
+            Err(KvError::Unsupported {
+                operation: "record_delete".to_owned(),
+            })
+        }
+
+        async fn record_exists_strong(
+            &self,
+            _key: &str,
+            _partition: &RecordPartition,
+        ) -> Result<bool, KvError> {
+            Err(KvError::Unsupported {
+                operation: "record_exists_strong".to_owned(),
+            })
+        }
+
+        async fn record_insert(
+            &self,
+            _key: &str,
+            _partition: &RecordPartition,
+            _write: RecordWrite<'_>,
+        ) -> Result<RecordWriteOutcome, KvError> {
+            Err(KvError::Unsupported {
+                operation: "record_insert".to_owned(),
+            })
+        }
+
+        async fn record_list_partition(
+            &self,
+            _partition: &RecordPartition,
+            _cursor: Option<&str>,
+            _limit: usize,
+        ) -> Result<RecordPage, KvError> {
+            Err(KvError::Unsupported {
+                operation: "record_list_partition".to_owned(),
+            })
+        }
+
+        async fn record_lookup(
+            &self,
+            _key: &str,
+            _partition: &RecordPartition,
+        ) -> Result<Option<Record>, KvError> {
+            Err(KvError::Unsupported {
+                operation: "record_lookup".to_owned(),
+            })
         }
     }
 

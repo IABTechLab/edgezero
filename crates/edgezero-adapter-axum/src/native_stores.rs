@@ -12,16 +12,16 @@ use std::future::Future;
 use std::pin::Pin;
 
 use edgezero_core::app::StoresMetadata;
-use edgezero_core::key_value_store::KvHandle;
+use edgezero_core::key_value_store::{KvError, KvHandle};
 use edgezero_core::store_registry::{BoundSecretStore, ConfigStoreBinding};
 #[cfg(any(
     feature = "aws-appconfig-agent",
     feature = "aws-secrets-manager",
     feature = "aws-dynamodb",
-    feature = "celld-config",
     feature = "celld-kv"
 ))]
 use edgezero_core::time::MonotonicClock;
+use edgezero_core::{RecordLayout, RecordStoreRequirements};
 #[cfg(any(
     feature = "aws-appconfig-agent",
     feature = "aws-secrets-manager",
@@ -35,11 +35,11 @@ use edgezero_store_aws::AwsPreparation;
 )))]
 use edgezero_store_aws::settings::AwsPreparationLimits;
 use edgezero_store_aws::settings::{AgentAccessToken, AppConfigAgentSettings, DynamoDbKvSettings};
-#[cfg(any(feature = "celld-config", feature = "celld-kv"))]
+#[cfg(feature = "celld-kv")]
 use edgezero_store_celld::CelldPreparation;
-#[cfg(not(any(feature = "celld-config", feature = "celld-kv")))]
+#[cfg(not(feature = "celld-kv"))]
 use edgezero_store_celld::settings::CelldPreparationLimits;
-use edgezero_store_celld::settings::{CelldAccessToken, CelldConfigSettings, CelldKvSettings};
+use edgezero_store_celld::settings::{CelldAccessToken, CelldKvSettings};
 
 use crate::config_store_limits::ConfigStoreLimits;
 use crate::native_bindings::{
@@ -83,23 +83,24 @@ pub(crate) enum NativeConfigSource {
         settings: AppConfigAgentSettings,
         token: Option<AgentAccessToken>,
     },
-    Celld {
-        settings: CelldConfigSettings,
-        token: Option<CelldAccessToken>,
-    },
 }
 
 pub(crate) enum NativeKvSource {
     DynamoDb(DynamoDbKvSettings),
+    DynamoDbRecords(DynamoDbKvSettings),
+    CelldRecords {
+        settings: CelldKvSettings,
+        token: Option<CelldAccessToken>,
+    },
     Celld {
         settings: CelldKvSettings,
         token: Option<CelldAccessToken>,
     },
 }
 
-#[cfg(any(feature = "celld-config", feature = "celld-kv"))]
+#[cfg(feature = "celld-kv")]
 pub(crate) type NativeCelldSession = Option<CelldPreparation>;
-#[cfg(not(any(feature = "celld-config", feature = "celld-kv")))]
+#[cfg(not(feature = "celld-kv"))]
 pub(crate) struct NativeCelldSession;
 
 pub(crate) struct NativePreparationSessions {
@@ -305,8 +306,9 @@ impl NativeSourcePlan {
                 appconfig_agent: cfg!(feature = "aws-appconfig-agent"),
                 secrets_manager: cfg!(feature = "aws-secrets-manager"),
                 dynamodb: cfg!(feature = "aws-dynamodb"),
-                celld_config: cfg!(feature = "celld-config"),
+                dynamodb_records: cfg!(feature = "aws-dynamodb-records"),
                 celld_kv: cfg!(feature = "celld-kv"),
+                celld_records: cfg!(feature = "celld-records"),
             },
             options.bindings_limits(),
             options.preparation_policies(),
@@ -317,53 +319,26 @@ impl NativeSourcePlan {
             policies: bindings
                 .validate_with_policies(options.bindings_limits(), options.preparation_policies())
                 .map_err(|category| failure("sources", "bindings", &category.to_string()))?,
-            config: resolve(
-                selection.config,
-                overrides.config,
-                "config",
-                |id| match bindings
+            config: resolve(selection.config, overrides.config, "config", |id| {
+                let NativeConfigBinding::AppConfigAgent(settings) = bindings
                     .config()
                     .get(id)
-                    .ok_or_else(|| failure("config", id, "invalid binding"))?
-                {
-                    NativeConfigBinding::AppConfigAgent(settings) => {
-                        Ok(NativeConfigSource::AppConfigAgent {
-                            token: settings
-                                .access_token_env
-                                .as_deref()
-                                .map(|name| options.agent_token(name))
-                                .transpose()?,
-                            settings: settings.clone(),
-                        })
-                    }
-                    NativeConfigBinding::Celld(settings) => Ok(NativeConfigSource::Celld {
-                        token: settings
-                            .access
-                            .token_env()
-                            .map(|name| options.celld_token(name))
-                            .transpose()?,
-                        settings: settings.clone(),
-                    }),
-                },
-            )?,
+                    .ok_or_else(|| failure("config", id, "invalid binding"))?;
+                Ok(NativeConfigSource::AppConfigAgent {
+                    token: settings
+                        .access_token_env
+                        .as_deref()
+                        .map(|name| options.agent_token(name))
+                        .transpose()?,
+                    settings: settings.clone(),
+                })
+            })?,
             kv: resolve(selection.kv, overrides.kv, "kv", |id| {
-                match bindings
+                let binding = bindings
                     .kv()
                     .get(id)
-                    .ok_or_else(|| failure("kv", id, "invalid binding"))?
-                {
-                    NativeKvBinding::DynamoDb(settings) => {
-                        Ok(NativeKvSource::DynamoDb(settings.clone()))
-                    }
-                    NativeKvBinding::Celld(settings) => Ok(NativeKvSource::Celld {
-                        token: settings
-                            .access
-                            .token_env()
-                            .map(|name| options.celld_token(name))
-                            .transpose()?,
-                        settings: settings.clone(),
-                    }),
-                }
+                    .ok_or_else(|| failure("kv", id, "invalid binding"))?;
+                native_kv_source(binding, options)
             })?,
             secrets: resolve(selection.secrets, overrides.secrets, "secrets", |id| {
                 bindings
@@ -384,12 +359,104 @@ impl NativeSourcePlan {
         Ok(plan)
     }
 
+    /// Validate all record declarations before sessions, futures or local stores open.
+    /// A missing declaration retains ordinary constructor/format semantics. Aliases
+    /// cannot inherit a record layout without silently redirecting their value table.
+    pub(crate) fn validate_record_requirements(
+        &self,
+        requirements: &RecordStoreRequirements,
+        options: &AxumRunOptions,
+    ) -> anyhow::Result<()> {
+        for id in requirements.keys() {
+            if !self.kv.contains_key(id.as_str()) {
+                return Err(failure(
+                    "kv",
+                    id,
+                    "record declaration uses an undeclared ID",
+                ));
+            }
+        }
+        let mut scopes = BTreeMap::new();
+        for (id, source) in &self.kv {
+            let layout = requirements.get(*id);
+            let scope = match source {
+                NativeStoreSource::BuiltIn(
+                    NativeKvSource::DynamoDb(_) | NativeKvSource::Celld { .. },
+                ) if layout.is_some() => {
+                    return Err(failure(
+                        "kv",
+                        id,
+                        "raw binding does not support declared records",
+                    ));
+                }
+                NativeStoreSource::BuiltIn(NativeKvSource::DynamoDbRecords(settings)) => {
+                    if layout.is_none() {
+                        return Err(failure(
+                            "kv",
+                            id,
+                            "record binding requires an application layout",
+                        ));
+                    }
+                    Some(vec![
+                        "dynamodb-records".to_owned(),
+                        settings.region.clone(),
+                        settings.table.clone(),
+                        settings.namespace.clone(),
+                    ])
+                }
+                NativeStoreSource::BuiltIn(NativeKvSource::CelldRecords { settings, .. }) => {
+                    if layout.is_none() {
+                        return Err(failure(
+                            "kv",
+                            id,
+                            "record binding requires an application layout",
+                        ));
+                    }
+                    Some(vec![
+                        "celld-records".to_owned(),
+                        settings.endpoint.clone(),
+                        settings.store.clone(),
+                    ])
+                }
+                NativeStoreSource::Local => Some(vec![
+                    "local".to_owned(),
+                    options.env_config().store_name("kv", id),
+                ]),
+                NativeStoreSource::Ready(handle) if layout.is_some() => {
+                    let records = handle
+                        .require_records()
+                        .map_err(|error| failure("kv", id, record_capability_failure(&error)))?;
+                    if layout != Some(&records.binding().layout) {
+                        return Err(failure("kv", id, "supplied record layout mismatch"));
+                    }
+                    None
+                }
+                NativeStoreSource::Ready(_)
+                | NativeStoreSource::Prepare(_)
+                | NativeStoreSource::BuiltIn(
+                    NativeKvSource::DynamoDb(_) | NativeKvSource::Celld { .. },
+                ) => None,
+            };
+            if let Some(backing_scope) = scope
+                && scopes
+                    .insert(backing_scope, layout)
+                    .is_some_and(|previous| previous != layout)
+            {
+                return Err(failure(
+                    "kv",
+                    id,
+                    "shared backing store has conflicting record layouts",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     #[cfg_attr(
         not(any(
             feature = "aws-appconfig-agent",
             feature = "aws-secrets-manager",
             feature = "aws-dynamodb",
-            feature = "celld-config",
             feature = "celld-kv"
         )),
         expect(
@@ -412,7 +479,9 @@ impl NativeSourcePlan {
         }) || self.kv.values().any(|source| {
             matches!(
                 source,
-                NativeStoreSource::BuiltIn(NativeKvSource::DynamoDb(_))
+                NativeStoreSource::BuiltIn(
+                    NativeKvSource::DynamoDb(_) | NativeKvSource::DynamoDbRecords(_)
+                )
             )
         }) || self
             .secrets
@@ -435,16 +504,13 @@ impl NativeSourcePlan {
             let _: AwsPreparationLimits = self.policies.aws;
             NativeAwsSession
         };
-        #[cfg(any(feature = "celld-config", feature = "celld-kv"))]
-        let celld = if self.config.values().any(|source| {
+        #[cfg(feature = "celld-kv")]
+        let celld = if self.kv.values().any(|source| {
             matches!(
                 source,
-                NativeStoreSource::BuiltIn(NativeConfigSource::Celld { .. })
-            )
-        }) || self.kv.values().any(|source| {
-            matches!(
-                source,
-                NativeStoreSource::BuiltIn(NativeKvSource::Celld { .. })
+                NativeStoreSource::BuiltIn(
+                    NativeKvSource::Celld { .. } | NativeKvSource::CelldRecords { .. }
+                )
             )
         }) {
             Some(
@@ -454,12 +520,59 @@ impl NativeSourcePlan {
         } else {
             None
         };
-        #[cfg(not(any(feature = "celld-config", feature = "celld-kv")))]
+        #[cfg(not(feature = "celld-kv"))]
         let celld = {
             let _: CelldPreparationLimits = self.policies.celld;
             NativeCelldSession
         };
         Ok(NativePreparationSessions { aws, celld })
+    }
+}
+
+fn native_kv_source(
+    binding: &NativeKvBinding,
+    options: &AxumRunOptions,
+) -> anyhow::Result<NativeKvSource> {
+    match binding {
+        NativeKvBinding::DynamoDb(settings) => Ok(NativeKvSource::DynamoDb(settings.clone())),
+        NativeKvBinding::DynamoDbRecords(settings) => {
+            Ok(NativeKvSource::DynamoDbRecords(settings.clone()))
+        }
+        NativeKvBinding::Celld(settings) | NativeKvBinding::CelldRecords(settings) => {
+            let token = settings
+                .access
+                .token_env()
+                .map(|name| options.celld_token(name))
+                .transpose()?;
+            let cloned_settings = settings.clone();
+            if matches!(binding, NativeKvBinding::CelldRecords(_)) {
+                Ok(NativeKvSource::CelldRecords {
+                    settings: cloned_settings,
+                    token,
+                })
+            } else {
+                Ok(NativeKvSource::Celld {
+                    settings: cloned_settings,
+                    token,
+                })
+            }
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn record_capability_failure(error: &KvError) -> &'static str {
+    match error {
+        KvError::Unsupported { .. } => "record operations unsupported",
+        KvError::Validation(_) => "invalid record binding",
+        KvError::Internal(_)
+        | KvError::LimitExceeded { .. }
+        | KvError::MutationUncertain
+        | KvError::NotFound { .. }
+        | KvError::OpenFailed { .. }
+        | KvError::Serialization(_)
+        | KvError::Unavailable
+        | _ => "record capability acquisition failed",
     }
 }
 
@@ -514,7 +627,7 @@ where
 
 impl NativePreparationSessions {
     #[cfg_attr(
-        not(any(feature = "aws-appconfig-agent", feature = "celld-config")),
+        not(feature = "aws-appconfig-agent"),
         expect(
             clippy::unused_async,
             clippy::unused_async_trait_impl,
@@ -526,57 +639,29 @@ impl NativePreparationSessions {
         builtin: NativeConfigSource,
         id: &str,
     ) -> anyhow::Result<ConfigStoreBinding> {
-        match builtin {
-            NativeConfigSource::AppConfigAgent { settings, token } => {
-                #[cfg(feature = "aws-appconfig-agent")]
-                {
-                    let handle = self
-                        .aws
-                        .as_mut()
-                        .ok_or_else(|| failure("config", id, "invalid preparation session"))?
-                        .prepare_appconfig(&settings, token.as_ref())
-                        .await
-                        .map_err(|category| failure("config", id, &category.to_string()))?;
-                    Ok(ConfigStoreBinding {
-                        default_key: settings.default_key,
-                        handle,
-                    })
-                }
-                #[cfg(not(feature = "aws-appconfig-agent"))]
-                {
-                    let _: (
-                        AppConfigAgentSettings,
-                        Option<AgentAccessToken>,
-                        &mut NativeAwsSession,
-                    ) = (settings, token, &mut self.aws);
-                    Err(failure("config", id, "provider not compiled"))
-                }
-            }
-            NativeConfigSource::Celld { settings, token } => {
-                #[cfg(feature = "celld-config")]
-                {
-                    let handle = self
-                        .celld
-                        .as_mut()
-                        .ok_or_else(|| failure("config", id, "invalid preparation session"))?
-                        .prepare_config(&settings, token.as_ref())
-                        .await
-                        .map_err(|category| failure("config", id, &category.to_string()))?;
-                    Ok(ConfigStoreBinding {
-                        default_key: settings.default_key,
-                        handle,
-                    })
-                }
-                #[cfg(not(feature = "celld-config"))]
-                {
-                    let _: (
-                        CelldConfigSettings,
-                        Option<CelldAccessToken>,
-                        &mut NativeCelldSession,
-                    ) = (settings, token, &mut self.celld);
-                    Err(failure("config", id, "provider not compiled"))
-                }
-            }
+        let NativeConfigSource::AppConfigAgent { settings, token } = builtin;
+        #[cfg(feature = "aws-appconfig-agent")]
+        {
+            let handle = self
+                .aws
+                .as_mut()
+                .ok_or_else(|| failure("config", id, "invalid preparation session"))?
+                .prepare_appconfig(&settings, token.as_ref())
+                .await
+                .map_err(|category| failure("config", id, &category.to_string()))?;
+            Ok(ConfigStoreBinding {
+                default_key: settings.default_key,
+                handle,
+            })
+        }
+        #[cfg(not(feature = "aws-appconfig-agent"))]
+        {
+            let _: (
+                AppConfigAgentSettings,
+                Option<AgentAccessToken>,
+                &mut NativeAwsSession,
+            ) = (settings, token, &mut self.aws);
+            Err(failure("config", id, "provider not compiled"))
         }
     }
 
@@ -592,8 +677,46 @@ impl NativePreparationSessions {
         &mut self,
         builtin: NativeKvSource,
         id: &str,
+        declared_layout: Option<&RecordLayout>,
     ) -> anyhow::Result<KvHandle> {
         match builtin {
+            NativeKvSource::DynamoDbRecords(settings) => {
+                let layout =
+                    declared_layout.ok_or_else(|| failure("kv", id, "record layout required"))?;
+                #[cfg(feature = "aws-dynamodb-records")]
+                {
+                    self.aws
+                        .as_mut()
+                        .ok_or_else(|| failure("kv", id, "invalid preparation session"))?
+                        .prepare_dynamodb_records(&settings, layout)
+                        .await
+                        .map_err(|category| failure("kv", id, &category.to_string()))
+                }
+                #[cfg(not(feature = "aws-dynamodb-records"))]
+                {
+                    let _: (DynamoDbKvSettings, &RecordLayout) = (settings, layout);
+                    Err(failure("kv", id, "record provider not compiled"))
+                }
+            }
+            NativeKvSource::CelldRecords { settings, token } => {
+                let layout =
+                    declared_layout.ok_or_else(|| failure("kv", id, "record layout required"))?;
+                #[cfg(feature = "celld-records")]
+                {
+                    self.celld
+                        .as_mut()
+                        .ok_or_else(|| failure("kv", id, "invalid preparation session"))?
+                        .prepare_record_store(&settings, layout, token.as_ref())
+                        .await
+                        .map_err(|category| failure("kv", id, &category.to_string()))
+                }
+                #[cfg(not(feature = "celld-records"))]
+                {
+                    let _: (CelldKvSettings, &RecordLayout, Option<CelldAccessToken>) =
+                        (settings, layout, token);
+                    Err(failure("kv", id, "record provider not compiled"))
+                }
+            }
             NativeKvSource::DynamoDb(settings) => {
                 #[cfg(feature = "aws-dynamodb")]
                 {
@@ -677,60 +800,39 @@ mod tests {
     use std::collections::BTreeMap;
 
     const CELLD_KV: &str = "version=1\n[kv.state]\nprovider='celld-kv'\nendpoint='http://127.0.0.1:8788'\nstore='state-fixture'\n[kv.state.access]\nmode='trusted-network'\n";
-    const CELLD_CONFIG: &str = "version=1\n[config.app]\nprovider='celld-config'\nendpoint='http://127.0.0.1:8788'\ndefault_key='settings'\n[config.app.access]\nmode='trusted-network'\n[config.app.documents.settings]\nstore='config-fixture'\nkey='settings'\n";
 
     #[test]
-    fn celld_variants_check_independent_capabilities_without_local_roots() {
-        for (input, metadata, compiled) in [
-            (
-                CELLD_KV,
-                StoresMetadata {
-                    config: None,
-                    kv: Some(StoreMetadata {
-                        ids: &["state"],
-                        default: "state",
-                    }),
-                    secrets: None,
-                },
-                cfg!(feature = "celld-kv"),
-            ),
-            (
-                CELLD_CONFIG,
-                StoresMetadata {
-                    config: Some(StoreMetadata {
-                        ids: &["app"],
-                        default: "app",
-                    }),
-                    kv: None,
-                    secrets: None,
-                },
-                cfg!(feature = "celld-config"),
-            ),
-        ] {
-            let document = NativeStoreBindings::parse(input, NativeBindingsLimits::default())
-                .expect("settings only");
-            let options = AxumRunOptions::new("127.0.0.1:8787".parse().expect("address"))
-                .expect("options")
-                .with_store_bindings(document)
-                .expect("selected");
-            let plan =
-                NativeSourcePlan::validate(metadata, &options, NativeStoreOverrides::default());
-            if compiled {
-                let selected = plan.expect("no local roots required");
-                let sessions = selected.sessions().expect("provider sessions");
-                #[cfg(any(feature = "celld-config", feature = "celld-kv"))]
-                assert!(sessions.celld.is_some());
-                #[cfg(any(
-                    feature = "aws-appconfig-agent",
-                    feature = "aws-secrets-manager",
-                    feature = "aws-dynamodb"
-                ))]
-                assert!(sessions.aws.is_none());
-                let _: super::NativePreparationSessions = sessions;
-            } else {
-                let error = plan.err().expect("selected feature absent");
-                assert!(error.to_string().contains("provider not compiled"));
-            }
+    fn celld_variant_checks_its_capability_without_local_roots() {
+        let metadata = StoresMetadata {
+            config: None,
+            kv: Some(StoreMetadata {
+                ids: &["state"],
+                default: "state",
+            }),
+            secrets: None,
+        };
+        let document = NativeStoreBindings::parse(CELLD_KV, NativeBindingsLimits::default())
+            .expect("settings only");
+        let options = AxumRunOptions::new("127.0.0.1:8787".parse().expect("address"))
+            .expect("options")
+            .with_store_bindings(document)
+            .expect("selected");
+        let plan = NativeSourcePlan::validate(metadata, &options, NativeStoreOverrides::default());
+        if cfg!(feature = "celld-kv") {
+            let selected = plan.expect("no local roots required");
+            let sessions = selected.sessions().expect("provider sessions");
+            #[cfg(feature = "celld-kv")]
+            assert!(sessions.celld.is_some());
+            #[cfg(any(
+                feature = "aws-appconfig-agent",
+                feature = "aws-secrets-manager",
+                feature = "aws-dynamodb"
+            ))]
+            assert!(sessions.aws.is_none());
+            let _: super::NativePreparationSessions = sessions;
+        } else {
+            let error = plan.err().expect("selected feature absent");
+            assert!(error.to_string().contains("provider not compiled"));
         }
     }
 
@@ -771,7 +873,7 @@ mod tests {
             NativeSourcePlan::validate(metadata, &options, overrides).expect("valid sources");
         assert_eq!(polls.get(), 0);
         let sessions = plan.sessions().expect("no sessions");
-        #[cfg(any(feature = "celld-config", feature = "celld-kv"))]
+        #[cfg(feature = "celld-kv")]
         assert!(sessions.celld.is_none());
         #[cfg(any(
             feature = "aws-appconfig-agent",
@@ -820,24 +922,34 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "celld-config", feature = "celld-kv"))]
+    #[test]
+    fn celld_config_is_not_a_provider() {
+        let input = "version=1\n[config.app]\nprovider='celld-config'\nendpoint='http://127.0.0.1:8788'\ndefault_key='settings'\n[config.app.access]\nmode='trusted-network'\n[config.app.documents.settings]\nstore='config-fixture'\nkey='settings'\n";
+        NativeStoreBindings::parse(input, NativeBindingsLimits::default())
+            .expect_err("celld has no config provider");
+    }
+
+    #[cfg(feature = "celld-kv")]
     #[test]
     fn typed_celld_sources_retain_distinct_explicit_tokens() {
-        use super::NativeConfigSource;
-        let input = format!("{CELLD_CONFIG}{}", CELLD_KV.replace("version=1\n", ""))
+        let other = CELLD_KV
+            .replace("version=1\n", "")
+            .replace("kv.state", "kv.other")
+            .replace("state-fixture", "other-fixture");
+        let input = format!("{CELLD_KV}{other}")
             .replace("http://127.0.0.1:8788", "https://unreachable.invalid")
             .replace(
-                "[config.app.access]\nmode='trusted-network'",
-                "[config.app.access]\nmode='authenticated'\ntoken_env='CONFIG_TOKEN'",
+                "[kv.state.access]\nmode='trusted-network'",
+                "[kv.state.access]\nmode='authenticated'\ntoken_env='STATE_TOKEN'",
             )
             .replace(
-                "[kv.state.access]\nmode='trusted-network'",
-                "[kv.state.access]\nmode='authenticated'\ntoken_env='KV_TOKEN'",
+                "[kv.other.access]\nmode='trusted-network'",
+                "[kv.other.access]\nmode='authenticated'\ntoken_env='OTHER_TOKEN'",
             );
-        let config_token = "config-token-012345678901234567890123456789";
-        let kv_token = "kv-token-0123456789012345678901234567890123";
+        let state_token = "state-token-0123456789012345678901234567890";
+        let other_token = "other-token-0123456789012345678901234567890";
         let options =
-            AxumRunOptions::from_vars([("CONFIG_TOKEN", config_token), ("KV_TOKEN", kv_token)])
+            AxumRunOptions::from_vars([("STATE_TOKEN", state_token), ("OTHER_TOKEN", other_token)])
                 .expect("explicit values")
                 .with_store_bindings(
                     NativeStoreBindings::parse(&input, NativeBindingsLimits::default())
@@ -845,33 +957,26 @@ mod tests {
                 )
                 .expect("selection");
         let metadata = StoresMetadata {
-            config: Some(StoreMetadata {
-                ids: &["app"],
-                default: "app",
-            }),
+            config: None,
             kv: Some(StoreMetadata {
-                ids: &["state"],
+                ids: &["state", "other"],
                 default: "state",
             }),
             secrets: None,
         };
         let plan = NativeSourcePlan::validate(metadata, &options, NativeStoreOverrides::default())
             .expect("captured plan");
-        let Some(NativeStoreSource::BuiltIn(NativeConfigSource::Celld {
-            token: Some(config),
-            ..
-        })) = plan.config.get("app")
-        else {
-            panic!("typed config token")
+        let token = |id| {
+            let Some(NativeStoreSource::BuiltIn(NativeKvSource::Celld {
+                token: Some(token), ..
+            })) = plan.kv.get(id)
+            else {
+                panic!("typed KV token")
+            };
+            token.expose().to_owned()
         };
-        let Some(NativeStoreSource::BuiltIn(NativeKvSource::Celld {
-            token: Some(kv), ..
-        })) = plan.kv.get("state")
-        else {
-            panic!("typed KV token")
-        };
-        assert_eq!(config.expose(), config_token);
-        assert_eq!(kv.expose(), kv_token);
+        assert_eq!(token("state"), state_token);
+        assert_eq!(token("other"), other_token);
     }
 
     #[test]

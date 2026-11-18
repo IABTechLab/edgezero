@@ -285,10 +285,10 @@ mod fastly_impl {
     };
     use edgezero_core::outbound::{
         OutboundBatch, OutboundBatchDriverEvent, OutboundCachePolicy, OutboundDispatchRequest,
-        OutboundExchangeOwner, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
-        OutboundHeaderInput, OutboundHttpClient, OutboundPending, OutboundPreparedBatch,
-        OutboundProgressRuntime, OutboundRequest, OutboundRequestParts, OutboundResponse,
-        OutboundResponseContext, OutboundScope, OutboundSendMode, OutboundTime,
+        OutboundExchangeFailure, OutboundExchangeOwner, OutboundFuture, OutboundHead,
+        OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient, OutboundPending,
+        OutboundPreparedBatch, OutboundProgressRuntime, OutboundRequest, OutboundRequestParts,
+        OutboundResponse, OutboundResponseContext, OutboundScope, OutboundSendMode, OutboundTime,
     };
     use edgezero_core::time::{
         DEADLINE_FAR_FUTURE, DispatchBudget, MonotonicClock, MonotonicInstant,
@@ -306,7 +306,7 @@ mod fastly_impl {
     use futures_util::{FutureExt as _, StreamExt as _};
     use sha2::{Digest as _, Sha256};
 
-    use super::progress::{HeadFailure, HeadPoll, Progress, Transport};
+    use super::progress::{HeadPoll, Progress, Transport};
     use super::{timeout_error, validate_supported_options};
 
     #[cfg(feature = "test-utils")]
@@ -677,6 +677,7 @@ mod fastly_impl {
             Ok(backend)
         }
 
+        #[cfg(test)]
         fn configure(
             &self,
             request: OutboundDispatchRequest,
@@ -793,10 +794,10 @@ mod fastly_impl {
         fn pipeline(
             plan: RequestPlan,
             progress: &NativeProgress,
-            failure: HeadFailure,
         ) -> OutboundFuture<OutboundResponse> {
+            let failure = plan.context.exchange_failure();
             let client = Self::with_time(plan.context.time().clone());
-            let exchange_progress = progress.with_head_failure(failure.clone());
+            let exchange_progress = progress.with_exchange_failure(failure.clone());
             Box::pin(async move {
                 let budget = plan.context.budget();
                 let time = plan.context.time().clone();
@@ -855,14 +856,15 @@ mod fastly_impl {
                 request.entered_at(),
             );
             Box::pin(async move {
-                let failure = HeadFailure::default();
-                let progress = selected_progress?.with_head_failure(failure.clone());
-                let budget = request.budget();
-                let time = request.time().clone();
+                let plan = RequestPlan::new(request);
+                let failure = plan.context.exchange_failure();
+                let progress = selected_progress?.with_exchange_failure(failure.clone());
+                let budget = plan.context.budget();
+                let time = plan.context.time().clone();
                 progress
                     .drive(race_deadline(
                         async {
-                            let prepared = client.configure(request)?;
+                            let prepared = client.configure_plan(plan)?;
                             client.execute_head(prepared, &progress).boxed_local().await
                         },
                         budget,
@@ -879,12 +881,13 @@ mod fastly_impl {
             scope.check()?;
             let time = request.time().clone();
             let entered = request.entered_at();
-            let failure = HeadFailure::default();
+            let plan = RequestPlan::new(request);
+            let failure = plan.context.exchange_failure();
             let progress = super::scope::native_progress(&scope, &time, entered)?
-                .with_head_failure(failure.clone());
+                .with_exchange_failure(failure.clone());
             super::scope::begin(
                 &scope,
-                Self::pipeline(RequestPlan::new(request), &progress, failure),
+                Self::pipeline(plan, &progress),
                 &progress,
                 &time,
                 entered,
@@ -942,8 +945,8 @@ mod fastly_impl {
                 .into_iter()
                 .map(|(index, plan)| {
                     let budget = plan.context.budget();
-                    let failure = HeadFailure::default();
-                    let future = Self::pipeline(plan, &progress, failure.clone());
+                    let failure = plan.context.exchange_failure();
+                    let future = Self::pipeline(plan, &progress);
                     let clock = time.clock().clone();
                     async move {
                         let outcome = future.await;
@@ -1688,17 +1691,17 @@ mod fastly_impl {
             .body(native, budget)
     }
 
-    async fn race_deadline<Output>(
+    pub(super) async fn race_deadline<Output>(
         future: impl Future<Output = Result<Output, EdgeError>>,
         budget: DispatchBudget,
         time: &OutboundTime,
-        failure: &HeadFailure,
+        failure: &OutboundExchangeFailure,
     ) -> Result<Output, EdgeError> {
         let mut timer = time.wait_until(budget.deadline);
         let mut previous = time.clock().now();
         futures_util::pin_mut!(future);
         poll_fn(|cx| {
-            checked_now(time, &mut previous)?;
+            checked_now(time, &mut previous, failure)?;
             if let Some(error) = failure.take() {
                 return Poll::Ready(Err(error));
             }
@@ -1709,12 +1712,12 @@ mod fastly_impl {
             }
             if budget
                 .deadline
-                .is_expired_at(checked_now(time, &mut previous)?)
+                .is_expired_at(checked_now(time, &mut previous, failure)?)
             {
                 return Poll::Ready(Err(timeout_error(budget.cause)));
             }
             let output = future.as_mut().poll(cx);
-            let observed = checked_now(time, &mut previous)?;
+            let observed = checked_now(time, &mut previous, failure)?;
             if let Some(error) = failure.take() {
                 return Poll::Ready(Err(error));
             }
@@ -1740,9 +1743,10 @@ mod fastly_impl {
     fn checked_now(
         time: &OutboundTime,
         previous: &mut MonotonicInstant,
+        failure: &OutboundExchangeFailure,
     ) -> Result<MonotonicInstant, EdgeError> {
         let observed = time.clock().now();
-        if observed < *previous {
+        if observed < *previous || failure.observed_at().is_some_and(|at| at > observed) {
             return Err(EdgeError::internal(anyhow::anyhow!(
                 "outbound clock moved backwards during I/O"
             )));
@@ -1809,7 +1813,7 @@ mod fastly_impl {
         use std::thread;
 
         use super::super::testing;
-        use super::HeadFailure;
+        use super::OutboundExchangeFailure;
         use edgezero_core::error::{BudgetSource, ResponseLimitReason};
         use edgezero_core::http::header::{
             CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
@@ -1827,7 +1831,7 @@ mod fastly_impl {
         #[test]
         fn retained_head_failure_precedes_later_deadline_without_polling_io() {
             let start = MonotonicInstant::now();
-            let failure = HeadFailure::default();
+            let failure = OutboundExchangeFailure::default();
             failure.record(
                 start + Duration::from_millis(5),
                 EdgeError::bad_gateway("early failure"),
@@ -1857,6 +1861,39 @@ mod fastly_impl {
         }
 
         #[test]
+        fn retained_failure_never_hides_regression_before_race_entry() {
+            for consumed in [false, true] {
+                let start = MonotonicInstant::now();
+                let failure = OutboundExchangeFailure::default();
+                failure.record(
+                    start + Duration::from_millis(5),
+                    EdgeError::bad_gateway("original failure"),
+                );
+                if consumed {
+                    drop(failure.take().unwrap());
+                }
+                let time = OutboundTime::new(MonotonicClock::new(move || start), |_, _| {
+                    panic!("invalid clock must not arm a provider wait");
+                });
+                let budget = DispatchBudget {
+                    deadline: Deadline::at_instant(start + Duration::from_millis(100)),
+                    duration: Duration::from_millis(100),
+                    cause: BudgetSource::PerCallTimeout,
+                };
+                let error = block_on(super::race_deadline::<()>(
+                    async {
+                        panic!("invalid clock must not poll fresh I/O");
+                    },
+                    budget,
+                    &time,
+                    &failure,
+                ))
+                .unwrap_err();
+                assert!(matches!(error, EdgeError::Internal { .. }));
+            }
+        }
+
+        #[test]
         fn head_failure_consumed_inside_poll_retains_original_classification() {
             let start = MonotonicInstant::now();
             let observed = Arc::new(Mutex::new(start));
@@ -1865,7 +1902,7 @@ mod fastly_impl {
                 MonotonicClock::new(move || *sampled.lock().unwrap()),
                 |_, _| Box::pin(pending()),
             );
-            let failure = HeadFailure::default();
+            let failure = OutboundExchangeFailure::default();
             let budget = DispatchBudget {
                 deadline: Deadline::at_instant(start + Duration::from_millis(100)),
                 duration: Duration::from_millis(100),
@@ -1907,7 +1944,7 @@ mod fastly_impl {
                 MonotonicClock::new(move || *sampled.lock().unwrap()),
                 |_, _| Box::pin(pending()),
             );
-            let failure = HeadFailure::default();
+            let failure = OutboundExchangeFailure::default();
             let budget = DispatchBudget {
                 deadline: Deadline::at_instant(start + Duration::from_millis(100)),
                 duration: Duration::from_millis(100),

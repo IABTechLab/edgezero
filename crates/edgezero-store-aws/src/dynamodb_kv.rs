@@ -1,8 +1,14 @@
 //! Live native `DynamoDB` KV operations. SDK models never cross the portable boundary.
 
+#[cfg(feature = "dynamodb-records")]
+#[path = "dynamodb_records.rs"]
+mod records;
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+#[cfg(feature = "dynamodb-records")]
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -46,6 +52,8 @@ struct DynamoDbStore {
     clock: MonotonicClock,
     limits: DynamoDbKvLimits,
     namespace: String,
+    #[cfg(feature = "dynamodb-records")]
+    record_identity: Option<records::PreparedRecordIdentity>,
     region: String,
     table: String,
 }
@@ -70,6 +78,14 @@ impl AwsPreparation {
         &mut self,
         settings: &DynamoDbKvSettings,
     ) -> Result<KvHandle, PreparationError> {
+        let store = self.prepare_dynamodb_store(settings).await?;
+        Ok(KvHandle::new(Arc::new(store)))
+    }
+
+    async fn prepare_dynamodb_store(
+        &mut self,
+        settings: &DynamoDbKvSettings,
+    ) -> Result<DynamoDbStore, PreparationError> {
         self.validate_dynamodb_mapping(settings)?;
         let key = (settings.region.clone(), settings.limits);
         let client = if let Some(client) = self.dynamodb_clients.get(&key) {
@@ -113,22 +129,31 @@ impl AwsPreparation {
         &self,
         settings: &DynamoDbKvSettings,
         client: Client,
-    ) -> Result<KvHandle, PreparationError> {
+    ) -> Result<DynamoDbStore, PreparationError> {
         let budget = self.dynamodb_budget(settings)?;
-        let result = timeout(
-            budget,
-            client
-                .describe_table()
-                .table_name(&settings.table)
-                .customize()
-                .config_override(
-                    aws_sdk_dynamodb::Config::builder()
-                        .retry_config(RetryConfig::standard().with_max_attempts(1))
-                        .timeout_config(timeout_policy(settings.limits, budget)),
-                )
-                .send(),
-        )
-        .await;
+        #[cfg(feature = "dynamodb-records")]
+        let endpoint_capture = Arc::new(Mutex::new(None));
+        let preflight = client
+            .describe_table()
+            .table_name(&settings.table)
+            .customize()
+            .config_override(
+                aws_sdk_dynamodb::Config::builder()
+                    .retry_config(RetryConfig::standard().with_max_attempts(1))
+                    .timeout_config(timeout_policy(settings.limits, budget)),
+            );
+        #[cfg(feature = "dynamodb-records")]
+        let observed_request = {
+            let observer = Arc::clone(&endpoint_capture);
+            preflight.mutate_request(move |http_request| {
+                if let Ok(mut observed) = observer.lock() {
+                    *observed = records::endpoint_identity(http_request.uri());
+                }
+            })
+        };
+        #[cfg(not(feature = "dynamodb-records"))]
+        let observed_request = preflight;
+        let result = timeout(budget, observed_request.send()).await;
         self.check_deadline()?;
         let output = result
             .map_err(|_elapsed| PreparationError::Deadline)?
@@ -140,13 +165,19 @@ impl AwsPreparation {
             .and_then(|table| validate_table(table, &settings.table));
         self.check_deadline()?;
         validation?;
-        let handle = KvHandle::new(Arc::new(DynamoDbStore::new(
-            settings,
-            client,
-            self.clock.clone(),
-        )));
+        let prepared = DynamoDbStore::new(settings, client, self.clock.clone());
+        #[cfg(feature = "dynamodb-records")]
+        let store = {
+            let mut with_identity = prepared;
+            with_identity.record_identity = endpoint_capture.lock().ok().and_then(|captured| {
+                records::prepared_identity(captured.as_deref(), output.table.as_ref()?)
+            });
+            with_identity
+        };
+        #[cfg(not(feature = "dynamodb-records"))]
+        let store = prepared;
         self.check_deadline()?;
-        Ok(handle)
+        Ok(store)
     }
 
     #[cfg(test)]
@@ -156,7 +187,8 @@ impl AwsPreparation {
         client: Client,
     ) -> Result<KvHandle, PreparationError> {
         self.validate_dynamodb_mapping(settings)?;
-        self.finish_dynamodb_preparation(settings, client).await
+        let store = self.finish_dynamodb_preparation(settings, client).await?;
+        Ok(KvHandle::new(Arc::new(store)))
     }
 
     fn validate_dynamodb_mapping(
@@ -234,6 +266,8 @@ impl DynamoDbStore {
             namespace: settings.namespace.clone(),
             region: settings.region.clone(),
             table: settings.table.clone(),
+            #[cfg(feature = "dynamodb-records")]
+            record_identity: None,
         }
     }
 
@@ -298,6 +332,10 @@ impl DynamoDbStore {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "legacy ordinary bindings deliberately retain the Unsupported record defaults"
+)]
 #[async_trait(?Send)]
 impl KvStore for DynamoDbStore {
     #[inline]

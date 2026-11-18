@@ -7,6 +7,7 @@ mod lifetimes;
 mod overflow;
 mod progress;
 mod readiness;
+mod record_contract;
 mod response_headers;
 mod reuse;
 mod wire;
@@ -376,6 +377,9 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     if version.split_whitespace().nth(1) != Some(pin) {
         // Keep going: an unpinned Viceroy still gets signal, and a failure still exits 1.
         records.push(json!({"status":"unverified","adapter":"fastly","reason":format!("Viceroy version {version} does not match pinned {pin}")}))?;
+    }
+    if args.suite == "record-contract" {
+        return record_contract::run(&exe, run, records);
     }
     if args.suite == "outbound-wire" {
         return wire::run("fastly", run, records);
@@ -1537,6 +1541,14 @@ pub fn provider(name: &str, args: &Args, run: &Path, records: &mut Records) -> R
     }
     Ok(())
 }
+/// Captures stdout separately from retained diagnostics under the existing process owner.
+fn capture_command(command: &mut Command, run: &Path, name: &str) -> Result<Vec<u8>> {
+    let stdout = run.join(format!("{name}.stdout"));
+    let diagnostics = run.join(format!("{name}.stderr"));
+    Process::spawn_with_stdout(command, &diagnostics, &stdout)?.wait_success()?;
+    Ok(fs::read(stdout)?)
+}
+
 /// Builds the provider fixture and stages its artifact in the run directory.
 /// Returns the runtime executable and the staged artifact, or `None` when a
 /// required tool is unavailable.
@@ -1547,18 +1559,18 @@ fn provider_build(
     records: &mut Records,
 ) -> Result<Option<(PathBuf, PathBuf)>> {
     if name == "axum" {
-        let output = cargo_build()?
-            .args([
+        let output = capture_command(
+            cargo_build()?.args([
                 "build",
                 "--locked",
                 "-p",
                 "fixture-axum",
                 "--message-format=json-render-diagnostics",
-            ])
-            .stderr(Stdio::inherit())
-            .output()?;
-        require(output.status.success(), "Axum fixture build failed")?;
-        let staged = stage(&built_executable(&output.stdout, "fixture-axum")?, run)?;
+            ]),
+            run,
+            "axum-fixture-build",
+        )?;
+        let staged = stage(&built_executable(&output, "fixture-axum")?, run)?;
         records.push(json!({"event":"build","adapter":name,"artifact":artifact(&staged)?}))?;
         return Ok(Some((staged.clone(), staged)));
     }
@@ -2073,6 +2085,45 @@ fn faults(exe: &Path, run: &Path, records: &mut Records) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn supervised_capture_keeps_cargo_stdout_separate_and_retains_failed_diagnostics() {
+        let run = tempfile::tempdir().unwrap();
+        let record = json!({"reason":"compiler-artifact","target":{"name":"fixture-axum"},"executable":"/selected/fixture-axum"}).to_string();
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf '%s\\n' \"$1\"; printf 'diagnostic-only\\n' >&2",
+            "capture",
+            &record,
+        ]);
+        let output = capture_command(&mut command, run.path(), "capture").unwrap();
+        assert_eq!(
+            built_executable(&output, "fixture-axum").unwrap(),
+            PathBuf::from("/selected/fixture-axum")
+        );
+        assert!(!String::from_utf8_lossy(&output).contains("diagnostic-only"));
+        assert_eq!(
+            fs::read_to_string(run.path().join("capture.stderr")).unwrap(),
+            "diagnostic-only\n"
+        );
+        let mut failed = Command::new("/bin/sh");
+        failed.args([
+            "-c",
+            "printf 'failure-stdout'; printf 'failure-stderr' >&2; exit 7",
+        ]);
+        assert!(capture_command(&mut failed, run.path(), "failed").is_err());
+        assert_eq!(
+            fs::read(run.path().join("failed.stdout")).unwrap(),
+            b"failure-stdout"
+        );
+        assert_eq!(
+            fs::read(run.path().join("failed.stderr")).unwrap(),
+            b"failure-stderr"
+        );
+        assert!(!run.path().join("artifacts").exists());
+    }
 
     #[test]
     fn declared_kv_success_body_requires_request_and_instance_correlation() {

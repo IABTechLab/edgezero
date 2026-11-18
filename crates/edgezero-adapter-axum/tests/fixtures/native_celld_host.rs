@@ -1,4 +1,4 @@
-//! Public-runner child for deterministic scoped HTTP startup tests, not a celld service.
+//! Public-runner child for deterministic store-service HTTP startup tests, not a celld service.
 
 use std::env::var_os;
 use std::fs::write;
@@ -13,20 +13,12 @@ use edgezero_adapter_axum::dev_server::{
 use edgezero_adapter_axum::native_stores::{NativeStoreOverrides, NativeStorePreparationError};
 use edgezero_core::app::{App, Hooks, StoreMetadata, StoresMetadata};
 use edgezero_core::context::RequestContext;
-use edgezero_core::extractor::{AppConfig as TypedAppConfig, State};
+use edgezero_core::extractor::State;
 use edgezero_core::router::RouterService;
 use edgezero_core::{EdgeError, action};
-use serde::Deserialize;
 use tokio::time::{sleep, timeout};
-use validator::Validate;
 
 struct NativeCelldApp;
-
-#[derive(Deserialize, Validate, edgezero_core::AppConfig)]
-struct FixtureConfig {
-    #[validate(length(min = 4_u64))]
-    greeting: String,
-}
 
 #[expect(
     clippy::missing_trait_methods,
@@ -35,19 +27,16 @@ struct FixtureConfig {
 impl Hooks for NativeCelldApp {
     fn routes() -> Result<RouterService, EdgeError> {
         Ok(RouterService::builder()
-            .get("/snapshot", snapshot)
+            .get("/startup", startup)
             .get("/kv", kv)
             .build())
     }
 
     fn stores() -> StoresMetadata {
         StoresMetadata {
-            config: Some(StoreMetadata {
-                ids: &["app"],
-                default: "app",
-            }),
+            config: None,
             kv: Some(StoreMetadata {
-                ids: &["state"],
+                ids: &["state", "other"],
                 default: "state",
             }),
             secrets: None,
@@ -56,8 +45,8 @@ impl Hooks for NativeCelldApp {
 }
 
 #[action]
-async fn snapshot(State(greeting): State<Arc<str>>) -> Result<String, EdgeError> {
-    Ok(greeting.to_string())
+async fn startup(State(value): State<Arc<str>>) -> Result<String, EdgeError> {
+    Ok(value.to_string())
 }
 
 #[action]
@@ -78,18 +67,6 @@ fn initialize<'startup>(
     stores: &'startup PreparedStores,
 ) -> LocalStartupFuture<'startup> {
     Box::pin(async move {
-        let binding = stores
-            .config()
-            .and_then(|registry| registry.named_ref("app"))
-            .ok_or_else(|| EdgeError::service_unavailable("fixture config missing"))?;
-        let config = TypedAppConfig::<FixtureConfig>::from_binding(
-            binding,
-            None,
-            stores.secrets(),
-            app.config_extraction_limits(),
-            app.monotonic_clock(),
-        )
-        .await?;
         if let Some(marker) = var_os("FIXTURE_INITIALIZER_ENTERED") {
             write(marker, b"entered").map_err(|_error| {
                 EdgeError::internal(anyhow::anyhow!("fixture marker unavailable"))
@@ -107,7 +84,18 @@ fn initialize<'startup>(
                 EdgeError::internal(anyhow::anyhow!("fixture initializer deadline"))
             })?;
         }
-        app.insert_state(Arc::<str>::from(config.greeting));
+        // The initializer may use live KV, which performs its first remote call here.
+        let store = stores
+            .kv()
+            .and_then(|registry| registry.named("state"))
+            .ok_or_else(|| EdgeError::service_unavailable("fixture KV missing"))?;
+        let bytes = store
+            .get_bytes("value")
+            .await?
+            .ok_or_else(|| EdgeError::service_unavailable("fixture value missing"))?;
+        let value = String::from_utf8(bytes.to_vec())
+            .map_err(|_error| EdgeError::internal(anyhow::anyhow!("fixture value malformed")))?;
+        app.insert_state(Arc::<str>::from(value));
         Ok(())
     })
 }

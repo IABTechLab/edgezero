@@ -1,8 +1,9 @@
 # Native Geo providers
 
-Native Axum hosting can resolve CloudFront country and subdivision assertions once per admitted
-request. Geo is off by default. Select it from the manifest and `EDGEZERO__` settings, or in
-Rust. There is no database, reader-IP lookup, remote call, fallback provider, or CLI option.
+Native Axum hosting can resolve protected CloudFront assertions or look up a checked reader IP
+in a pinned KV index. It resolves geography once per admitted request. Geo is off by default.
+Select it from the manifest and `EDGEZERO__` settings, or in Rust. There is no fallback
+provider.
 
 Geography is an estimate, not proof of residence, identity, consent, or permission. Applications
 own jurisdiction recognition and policy. A missing subdivision stays unknown, and a
@@ -42,10 +43,89 @@ no provider selected, settings-supplied policy fields with `provider = "off"`, a
 selection missing networks or a header all fail startup. In the manifest, `provider = "off"`
 with policy fields fails to load.
 
+## Serve a CSV-backed KV index
+
+1. Build and publish an artifact with the [standalone Geo tool](https://github.com/IABTechLab/edgezero/tree/main/examples/geo-kv-prototype#readme).
+   Use the publisher's credential for writes. Verify the entire generation and sampled CSV
+   results from the serving path before choosing a pin. The tool does not provision a store.
+2. Compile with `geo-kv` plus the feature for your ordinary KV binding, such as `celld-kv`
+   or `aws-dynamodb`. Declare a dedicated logical KV ID in the app's `[stores.kv]`.
+   Bind it to a read-only namespace using the existing
+   [celld](native-celld-stores.md) or [DynamoDB](dynamodb-kv.md) store configuration.
+3. Select `kv` and supply the pin and lookup budgets. Use `forwarded-required` behind a
+   trusted reverse proxy. Configure the trusted peer networks and forwarding family as
+   described in the [Axum ingress guide](adapters/axum.md). Use `direct-peer` only when the
+   listener receives reader connections directly.
+
+```toml
+[adapters.axum.geo]
+provider = "kv"
+store_id = "geo_index"
+reader_ip = "forwarded-required"
+# Example budgets. Set them for your traffic and request latency requirements.
+lookup_timeout_ms = 100
+max_in_flight = 32
+```
+
+Set `EDGEZERO__ADAPTER__GEO__PIN` to the tool's `<generation>@<manifest-sha256>` pin.
+Override it as a single setting. The store ID, mode and budgets can likewise be overridden
+by `EDGEZERO__ADAPTER__GEO__STORE_ID`, `READER_IP`, `LOOKUP_TIMEOUT_MS` and `MAX_IN_FLIGHT`
+under the same prefix.
+
+The runner validates the manifest and both nonempty roots before readiness. It does not scan
+the full dataset at startup. A lookup follows at most three index objects and uses a cache
+limited to 4 MiB of validated payload and 256 entries. A missing checked reader requires no
+reads. A missing or corrupt required object, timeout, or saturated lookup limit yields a
+provider error. A verified gap yields `NoMatch`. A source code outside the supported country
+set, such as `XK`, yields `UnsupportedGeography`. Neither is a storage error.
+
+With celld, grant the application only `read` on the Geo alias. With DynamoDB, the serving role
+needs `DescribeTable` and `GetItem` on the chosen table; restrict `GetItem` to the Geo namespace
+with `dynamodb:LeadingKeys` where applicable. The operator can publish and retire with the
+same credential; no separate cleanup identity is needed. Geo never uses an EC record binding.
+
+Update or roll back by verifying another permitted generation and restarting with its pin.
+There is no `active` pointer and no automatic fallback. Keep the CSV, artifacts and backups
+within the [GeoLite license](https://www.maxmind.com/en/geolite/eula). Retire old objects after
+stopping readers and within the license deadline. Apply attribution to your deployment.
+
+With the `geo-kv` feature, embedding applications can also select the provider with
+`NativeGeoSelection::Kv(geo::kv::KvGeoSelection::new(...))`. The default dev runner can select through
+settings and uses its declared local KV; use a managed production runner for remote bindings.
+
+### Reproduce the local backend proof
+
+From the EdgeZero checkout, build the operator tool and managed listener fixture. Use the
+official celld 0.6.3 binary and a local Docker daemon with the DynamoDB Local image pinned in
+`scripts/run_geo_kv_integration.mjs` already available. The script starts disposable loopback
+services. It does not use hosted AWS or ambient AWS credentials.
+
+```sh
+cargo build --locked --manifest-path examples/geo-kv-prototype/Cargo.toml \
+  --target-dir "$PWD/examples/geo-kv-prototype/target" --all-features
+cargo build --locked -p edgezero-adapter-axum \
+  --target-dir "$PWD/target" --features geo-kv,celld-kv,aws-dynamodb,test-utils \
+  --bin edgezero-hosting-fixture
+
+CELLD_BIN=/absolute/path/to/official/celld \
+GEO_KV_TOOL_BIN="$PWD/examples/geo-kv-prototype/target/debug/geo-kv-prototype" \
+GEO_KV_HOST_BIN="$PWD/target/debug/edgezero-hosting-fixture" \
+node scripts/run_geo_kv_integration.mjs
+```
+
+For the production-size comparison, set `GEO_KV_CSV_DIR` to an absolute path to a permitted
+GeoLite City CSV extraction on Linux. The proof builds 16 KiB and 64 KiB artifacts, verifies
+both backends against the CSV oracle, and reports process peak RSS, latency and backend reads.
+The tool defaults to 16 KiB. In the local comparison, these objects fit the repeated-request
+working set on both backends; 64 KiB used fewer reads on the first pass. The first pass starts
+with an empty object cache; the second repeats its sampled addresses.
+Response-body byte counts include backend serialization. Results describe this local workload
+and build, not production SLOs, hosted IAM, or durability.
+
 ## Select a provider in Rust
 
 The public selection API lives in `edgezero_adapter_axum::geo` with the `axum` feature.
-Only the built-in implementation needs the default-off `geo-cloudfront` feature:
+The built-in CloudFront implementation needs the default-off `geo-cloudfront` feature:
 
 ```toml
 [dependencies]
@@ -53,8 +133,8 @@ edgezero-adapter-axum = { version = "<your-edgezero-version>", default-features 
 ```
 
 Use the same pinned EdgeZero release as your application. This feature enables `axum`, not
-AWS stores or an AWS SDK. A Geo-only application needs no AWS credentials, config/data roots,
-or declared stores. Existing declared stores keep their own startup requirements.
+AWS stores or an AWS SDK. A CloudFront-only application needs no AWS credentials, config/data
+roots, or declared stores. Existing declared stores keep their own startup requirements.
 
 ### Off
 

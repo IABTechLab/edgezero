@@ -711,11 +711,39 @@ pub struct ManifestAdapterGeo {
     /// ALB peer networks admitted as the protected `CloudFront` source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alb_peer_cidrs: Option<Vec<String>>,
+    /// Aggregate per-request KV lookup deadline in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup_timeout_ms: Option<u32>,
+    /// Count of concurrent lookups allowed to start on this instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_in_flight: Option<usize>,
     /// Header the ALB strips after checking the origin credential. Never the credential value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_credential_header_name: Option<String>,
+    /// Atomic generation and manifest digest pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ManifestGeoProvider>,
+    /// Reader provenance required by this listener's deployment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_ip: Option<String>,
+    /// Declared logical KV binding, not a backend resource name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_id: Option<String>,
+}
+
+impl ManifestAdapterGeo {
+    /// Whether any KV-specific settings were supplied.
+    #[inline]
+    #[must_use]
+    pub fn has_kv_fields(&self) -> bool {
+        self.store_id.is_some()
+            || self.pin.is_some()
+            || self.reader_ip.is_some()
+            || self.lookup_timeout_ms.is_some()
+            || self.max_in_flight.is_some()
+    }
 }
 
 /// Geo provider an Axum deployment selects.
@@ -725,6 +753,7 @@ pub struct ManifestAdapterGeo {
 pub enum ManifestGeoProvider {
     #[serde(rename = "cloudfront")]
     CloudFront,
+    Kv,
     Off,
 }
 
@@ -1485,15 +1514,20 @@ fn validate_manifest_adapter_definition(
 }
 
 fn validate_manifest_adapter_geo(geo: &ManifestAdapterGeo) -> Result<(), ValidationError> {
-    if geo.provider == Some(ManifestGeoProvider::Off)
-        && (geo.alb_peer_cidrs.is_some() || geo.origin_credential_header_name.is_some())
-    {
+    let assertion = geo.alb_peer_cidrs.is_some() || geo.origin_credential_header_name.is_some();
+    let kv = geo.has_kv_fields();
+    if geo.provider == Some(ManifestGeoProvider::Off) && (assertion || kv) {
         let mut error = ValidationError::new("geo_off_with_policy");
         error.message = Some(
             "`[adapters.axum.geo]` with `provider = \"off\"` must not set source policy fields"
                 .into(),
         );
         return Err(error);
+    }
+    if (assertion && (kv || geo.provider == Some(ManifestGeoProvider::Kv)))
+        || (kv && geo.provider == Some(ManifestGeoProvider::CloudFront))
+    {
+        return Err(ValidationError::new("geo_mixed_provider_fields"));
     }
     Ok(())
 }

@@ -30,7 +30,7 @@ use edgezero_core::ingress::{
     IngressBeginOutcome, IngressDispatchOutcome, IngressFraming, IngressHeadAccounting,
     IngressHeadParts, PreparedIngress,
 };
-use edgezero_core::key_value_store::KvHandle;
+use edgezero_core::key_value_store::{KvError, KvHandle};
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::response_egress::ResponseEgressEnvelope;
 use edgezero_core::secret_store::{SecretHandle, SecretStore};
@@ -487,6 +487,17 @@ where
     // legacy bare handles are synthesised into a one-id registry
     // at the dispatch boundary.
     let (config_registry, kv_registry, secret_registry) = synthesise_store_registries(stores);
+    if !app.record_store_requirements().is_empty() {
+        let validation = kv_registry
+            .as_ref()
+            .ok_or_else(|| KvError::Validation("required record registry missing".to_owned()))
+            .and_then(|registry| {
+                registry.validate_record_requirements(app.record_store_requirements())
+            });
+        if let Err(error) = validation {
+            return Ok(deliver(app.admitted_error_egress(prepared, error.into()))?);
+        }
+    }
     if let Some(registry) = config_registry {
         core_request.extensions_mut().insert(registry);
     }

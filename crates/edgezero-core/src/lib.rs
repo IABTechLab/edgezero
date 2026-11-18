@@ -40,6 +40,7 @@ pub mod params;
 pub mod platform;
 pub mod pre_dispatch;
 pub mod probe;
+pub mod record_store;
 pub mod responder;
 pub mod response;
 pub mod response_egress;
@@ -97,15 +98,16 @@ pub use outbound::{
     OutboundBatchContext, OutboundBatchDriverEvent, OutboundBatchFailure,
     OutboundBatchInsertFailure, OutboundBatchItem, OutboundBatchMergeFailure, OutboundBatchNext,
     OutboundBatchResults, OutboundBatchTermination, OutboundCachePolicy, OutboundCollectedSlot,
-    OutboundCropFocus, OutboundDispatchRequest, OutboundExchangeOwner, OutboundFollowFailure,
-    OutboundFollowResult, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
-    OutboundHeaderInput, OutboundHttpClient, OutboundImageFormat, OutboundImageOptimizerOptions,
-    OutboundImageOptimizerRegion, OutboundLocationEvidence, OutboundPending, OutboundPreparedBatch,
-    OutboundProgressRuntime, OutboundProxyMarker, OutboundRedirectAction, OutboundRedirectContext,
-    OutboundRedirectLimit, OutboundRedirectStopReason, OutboundRequest, OutboundRequestParts,
-    OutboundResizeFilter, OutboundResponse, OutboundResponseContext, OutboundScope,
-    OutboundScopeKind, OutboundScopeOwner, OutboundSendMode, OutboundSlotResult, OutboundTask,
-    OutboundTime, PROXY_HEADER, ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding,
+    OutboundCropFocus, OutboundDispatchRequest, OutboundExchangeFailure, OutboundExchangeOwner,
+    OutboundFollowFailure, OutboundFollowResult, OutboundFuture, OutboundHead,
+    OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient, OutboundImageFormat,
+    OutboundImageOptimizerOptions, OutboundImageOptimizerRegion, OutboundLocationEvidence,
+    OutboundPending, OutboundPreparedBatch, OutboundProgressRuntime, OutboundProxyMarker,
+    OutboundRedirectAction, OutboundRedirectContext, OutboundRedirectLimit,
+    OutboundRedirectStopReason, OutboundRequest, OutboundRequestParts, OutboundResizeFilter,
+    OutboundResponse, OutboundResponseContext, OutboundScope, OutboundScopeKind,
+    OutboundScopeOwner, OutboundSendMode, OutboundSlotResult, OutboundTask, OutboundTime,
+    PROXY_HEADER, ResponseBodyDisposition, ResponseBodyPolicy, ResponseDecoding,
     ResponseHeadNormalization, ResponseHeaderLimiter, ResponseMode, apply_response_body_policy,
     collect_response_stream, collect_response_stream_until_with_clock,
     enforce_payload_content_length, limit_decoded_stream, limit_encoded_stream,
@@ -118,6 +120,11 @@ pub use platform::{
     PlatformUnknownReason,
 };
 pub use pre_dispatch::PreDispatchRequest;
+pub use record_store::{
+    Record, RecordBinding, RecordGeneration, RecordHandle, RecordKeyLayout, RecordLayout,
+    RecordPage, RecordPartition, RecordStoreRequirements, RecordWrite, RecordWriteMode,
+    RecordWriteOutcome,
+};
 pub use response_egress::{
     DEFAULT_RESPONSE_WRITE_BUDGET, DetachedResponseEgressDecision,
     DetachedResponseEgressDecisionFactory, DetachedResponseEgressHead,

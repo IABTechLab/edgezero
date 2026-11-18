@@ -39,6 +39,8 @@ use edgezero_core::app::{App, Hooks};
 use edgezero_core::env_config::EnvConfig;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 use edgezero_core::error::EdgeError;
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+use edgezero_core::key_value_store::KvError;
 use edgezero_core::logging::ManagedLoggerError;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 use edgezero_core::outbound::OutboundScopeOwner;
@@ -113,7 +115,24 @@ fn build_target_app<A>(platform: edgezero_core::PlatformMetadata) -> Result<App,
 where
     A: Hooks,
 {
-    App::build::<A>(platform)
+    let app = App::build::<A>(platform)?;
+    let metadata = A::stores().kv;
+    if app
+        .record_store_requirements()
+        .keys()
+        .any(|id| !metadata.is_some_and(|meta| meta.ids.contains(&id.as_str())))
+    {
+        return Err(
+            KvError::Validation("record declaration uses an undeclared ID".to_owned()).into(),
+        );
+    }
+    if !app.record_store_requirements().is_empty() {
+        return Err(KvError::Unsupported {
+            operation: "records".to_owned(),
+        }
+        .into());
+    }
+    Ok(app)
 }
 
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
@@ -330,6 +349,78 @@ mod callback_scope_tests {
         assert_eq!(result, Err(&failure));
         assert!(captured.expect("callback error").check().is_err());
         assert!(!capture().is_managed());
+    }
+}
+
+#[cfg(test)]
+mod record_requirement_tests {
+    use edgezero_core::app::{App, Hooks, StoreMetadata, StoresMetadata};
+    use edgezero_core::http::StatusCode;
+    use edgezero_core::key_value_store::KvError;
+    use edgezero_core::router::RouterService;
+    use edgezero_core::{EdgeError, RecordKeyLayout};
+
+    struct Layout;
+    impl RecordKeyLayout for Layout {
+        fn id(&self) -> &'static str {
+            "platform.record-test"
+        }
+
+        fn partition_prefix<'key>(&self, _key: &'key str) -> Result<&'key str, KvError> {
+            Ok("group/")
+        }
+
+        fn validate(&self) -> Result<(), KvError> {
+            Ok(())
+        }
+
+        fn validate_partition(&self, prefix: &str) -> Result<(), KvError> {
+            if prefix == "group/" {
+                Ok(())
+            } else {
+                Err(KvError::Validation("incomplete partition".to_owned()))
+            }
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+    }
+
+    struct Required<const DECLARED: bool>;
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "record startup fixture retains unrelated Hooks defaults"
+    )]
+    impl<const DECLARED: bool> Hooks for Required<DECLARED> {
+        fn configure(app: &mut App) -> Result<(), EdgeError> {
+            app.require_record_store("identity", Layout)?;
+            Ok(())
+        }
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
+        }
+        fn stores() -> StoresMetadata {
+            StoresMetadata {
+                kv: DECLARED.then_some(StoreMetadata {
+                    ids: &["identity"],
+                    default: "identity",
+                }),
+                ..StoresMetadata::default()
+            }
+        }
+    }
+
+    #[test]
+    fn record_requirement_refuses_unsupported_platform_before_store_preparation() {
+        let error = super::build_target_app::<Required<true>>(super::SPIN_PLATFORM)
+            .err()
+            .expect("unsupported records");
+        assert_eq!(error.status(), StatusCode::NOT_IMPLEMENTED);
+        let undeclared = super::build_target_app::<Required<false>>(super::SPIN_PLATFORM)
+            .err()
+            .expect("undeclared record ID");
+        assert_eq!(undeclared.status(), StatusCode::BAD_REQUEST);
     }
 }
 

@@ -32,7 +32,7 @@ test("missing Docker fails instead of silently skipping the suite", async () => 
 
 async function fixture(t, {
   failPull = false, port = 8000, emptySuite = false, hang = false,
-  suiteCode = 17, slowCleanup = false,
+  suiteCode = 17, slowCleanup = false, missingRecordSuite = false, missingLocalSuite = false,
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "edgezero-runner-unit-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -51,9 +51,17 @@ case "$1" in
 esac
 `, { mode: 0o755 });
   await writeFile(join(directory, "cargo"), `#!/bin/sh
+printf 'cargo %s\\n' "$*" >> "$MOCK_DOCKER_LOG"
 case "$*" in
-  *--list*) ${emptySuite ? ":" : "printf 'generated_native_aws_emulator_contracts: test\\n'"} ;;
-  *) ${hang ? "mkdir \"$TMPDIR/generated-project\"; printf log > \"$TMPDIR/generated-log\"; printf 'runtime-start\\n' >> \"$MOCK_DOCKER_LOG\"; sleep 60" : `exit ${suiteCode}`} ;;
+  *native_aws_emulator_proof*) names='generated_native_aws_emulator_contracts${missingRecordSuite ? "" : " generated_native_aws_emulator_contracts_records"}' ;;
+  *dynamodb_records_local*) names='dynamodb_records_local_contract${missingLocalSuite ? "" : " dynamodb_records_local_simulated_expiry_reopen"}' ;;
+  *) names='' ;;
+esac
+case "$*" in
+  *--list*) ${emptySuite ? ":" : "for name in $names; do printf '%s: test\\n' \"$name\"; done"} ;;
+  *) ${hang ? "mkdir \"$TMPDIR/generated-project\"; printf log > \"$TMPDIR/generated-log\"; printf 'runtime-start\\n' >> \"$MOCK_DOCKER_LOG\"; sleep 60" : `if [ ${suiteCode} -ne 0 ]; then exit ${suiteCode}; fi
+for name in $names; do printf 'test %s ... ok\\n' "$name"; done
+printf 'test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n'`} ;;
 esac
 `, { mode: 0o755 });
   return {
@@ -104,6 +112,25 @@ test("a zero-test suite fails the nonzero guard", async (t) => {
     assert.match(error.stderr, /selected test suite contains zero tests/);
     return true;
   });
+  assert.deepEqual(await readdir(setup.temporary), []);
+});
+
+test("generated record and Local provider cases are both mandatory", async (t) => {
+  for (const option of ["missingRecordSuite", "missingLocalSuite"]) {
+    const setup = await fixture(t, { port: await readyServer(t), suiteCode: 0, [option]: true });
+    await assert.rejects(exec(process.execPath, [runner], setup.options), (error) => {
+      assert.match(error.stderr, /required sentinel test not listed/);
+      return true;
+    });
+  }
+});
+
+test("successful runner executes generated consumers and both Local record cases", async (t) => {
+  const setup = await fixture(t, { port: await readyServer(t), suiteCode: 0 });
+  await exec(process.execPath, [runner], setup.options);
+  const log = await readFile(setup.log, "utf8");
+  assert.match(log, /cargo .*--test native_aws_emulator_proof/);
+  assert.match(log, /cargo .*--features dynamodb-records --test dynamodb_records_local/);
   assert.deepEqual(await readdir(setup.temporary), []);
 });
 
