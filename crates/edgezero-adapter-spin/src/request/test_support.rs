@@ -209,7 +209,8 @@ pub async fn dispatch_request_with_geo_secret(
     dispatch_request_with_geo_stores(app, req, secret, reads, None).await
 }
 
-/// Managed ingress with explicit test-only credential and KV registry injection.
+/// Managed ingress with explicit test-only credential and KV registry injection. The
+/// `SpinClientSource` comes from app state and is `Off` when the app holds none.
 ///
 /// # Errors
 /// Returns the managed admission, dispatch or delivery error.
@@ -229,7 +230,7 @@ pub async fn dispatch_request_with_geo_stores(
         app,
         core_request,
         Stores {
-            geo: app.state::<SpinKvGeo>().cloned(),
+            client_source: app.state::<SpinClientSource>().cloned().unwrap_or_default(),
             kv_registry,
             ..Stores::default()
         },

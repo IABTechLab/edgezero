@@ -10,7 +10,7 @@ use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
 use edgezero_core::geo::GeoProviderId;
 use edgezero_core::geo::kv::Receipt;
-use edgezero_core::manifest::{BakedManifest, ManifestAdapterClientInfo, ManifestGeoProvider};
+use edgezero_core::manifest::{BakedManifest, ManifestGeoProvider};
 use std::time::Duration;
 
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
@@ -144,28 +144,46 @@ impl SpinKvGeo {
     }
 }
 
-/// Resolve `[adapters.spin.client_info] direct_ingress` for this deployment.
+/// Where a Spin deployment takes the client address for `ClientInfo`.
 ///
-/// # Errors
-/// Rejects `direct_ingress = true` beside an authenticated-header Geo selection. One
-/// declares that visitors connect directly, the other that a proxy speaks for them, and
-/// `ClientInfo` and `ctx.geo()` would then describe different addresses.
-#[inline]
-pub fn direct_ingress(baked: BakedManifest, geo: Option<&SpinKvGeo>) -> Result<bool, EdgeError> {
-    let declared = match baked {
-        BakedManifest::Absent => false,
-        BakedManifest::Present(manifest) => manifest
-            .adapter_entry("spin")
-            .and_then(|(_, adapter)| adapter.client_info)
-            .is_some_and(ManifestAdapterClientInfo::direct_ingress),
-        BakedManifest::Malformed(_) | _ => return Err(invalid_selection()),
-    };
-    if declared && geo.is_some() {
-        return Err(EdgeError::validation(
-            "Spin client_info direct_ingress cannot be combined with authenticated-header geo",
-        ));
+/// Managed dispatch resolves this per request from the manifest and settings with
+/// [`SpinClientSource::resolve`]; it never reads app state. Only the `test-utils`
+/// dispatch helpers read a `SpinClientSource` inserted as app state.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub enum SpinClientSource {
+    /// No source: every `ClientInfo` field is `NotExposed`.
+    #[default]
+    Off,
+    /// The last `spin-client-addr`, from `[adapters.spin.client_info] direct_ingress = true`.
+    DirectIngress,
+    /// The authenticated-header admission, shared with the KV Geo lookup.
+    AuthenticatedGeo(SpinKvGeo),
+}
+
+impl SpinClientSource {
+    /// Combine the resolved Geo selection with `[adapters.spin.client_info] direct_ingress`.
+    ///
+    /// # Errors
+    /// Rejects `direct_ingress = true` beside an authenticated-header Geo selection. One
+    /// declares that visitors connect directly, the other that a proxy speaks for them, and
+    /// `ClientInfo` and `ctx.geo()` would then describe different addresses.
+    #[inline]
+    pub fn resolve(baked: BakedManifest, geo: Option<SpinKvGeo>) -> Result<Self, EdgeError> {
+        let direct_ingress = match baked {
+            BakedManifest::Absent => false,
+            BakedManifest::Present(manifest) => manifest.client_info_direct_ingress("spin"),
+            BakedManifest::Malformed(_) | _ => return Err(invalid_selection()),
+        };
+        match (direct_ingress, geo) {
+            (true, Some(_)) => Err(EdgeError::validation(
+                "Spin client_info direct_ingress cannot be combined with authenticated-header geo",
+            )),
+            (true, None) => Ok(Self::DirectIngress),
+            (false, Some(selection)) => Ok(Self::AuthenticatedGeo(selection)),
+            (false, None) => Ok(Self::Off),
+        }
     }
-    Ok(declared)
 }
 
 fn valid_variable(name: &str) -> bool {

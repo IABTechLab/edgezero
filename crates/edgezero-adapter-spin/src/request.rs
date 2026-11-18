@@ -12,7 +12,7 @@ pub(crate) mod test_support;
 use crate::SpinResponse;
 use crate::config_store::SpinConfigStore;
 use crate::context::{SpinRequestContext, context_from_headers, direct_ingress_client_info};
-use crate::geo::{SpinKvGeo, ingress::capture_inputs};
+use crate::geo::{SpinClientSource, ingress::capture_inputs};
 use crate::ingress::capture_request_ingress;
 use crate::key_value_store::{DEFAULT_MAX_LIST_KEYS, SpinKvStore};
 use crate::response::from_egress_response;
@@ -60,10 +60,9 @@ use crate::outbound::{SpinOutboundClient, native_time};
 /// private and the field-scoped-visibility lint does not fire.
 #[derive(Default)]
 pub(crate) struct Stores {
+    client_source: SpinClientSource,
     config_registry: Option<ConfigRegistry>,
     config_store: Option<ConfigStoreHandle>,
-    direct_ingress: bool,
-    geo: Option<SpinKvGeo>,
     kv: Option<KvHandle>,
     kv_registry: Option<KvRegistry>,
     secret_registry: Option<SecretRegistry>,
@@ -393,9 +392,6 @@ where
         )
         .validate_normalized(app.ingress_head_limits());
         let geo_input = capture_inputs(head_request.headers_mut());
-        let direct_client = stores
-            .direct_ingress
-            .then(|| direct_ingress_client_info(head_request.headers()));
         if let Err(error) = head_validation {
             let egress = detached_error_envelope(app, error, request_method, request_start)?;
             return Ok(deliver(egress)?);
@@ -431,8 +427,8 @@ where
                 return Ok(deliver(egress)?);
             }
         };
-        let (geo, client_info) = match stores.geo.as_ref() {
-            Some(selection) => {
+        let (geo, client_info) = match &stores.client_source {
+            SpinClientSource::AuthenticatedGeo(selection) => {
                 let clock = prepared.monotonic_clock();
                 let deadline = prepared.read_deadline();
                 let admission = selection
@@ -444,10 +440,11 @@ where
                     .await;
                 (geo, admission.client_info())
             }
-            None => (
+            SpinClientSource::DirectIngress => (
                 GeoOutcome::NoSelection,
-                direct_client.unwrap_or_else(ClientInfo::not_exposed),
+                direct_ingress_client_info(head_request.headers()),
             ),
+            SpinClientSource::Off => (GeoOutcome::NoSelection, ClientInfo::not_exposed()),
         };
         if !explicit_empty_body(head_request.headers()) {
             let source = match make_source() {
@@ -540,7 +537,7 @@ pub(crate) async fn dispatch_with_registries(
     kv_meta: Option<StoreMetadata>,
     secret_meta: Option<StoreMetadata>,
     env: &EnvConfig,
-    (geo, direct_ingress): (Option<SpinKvGeo>, bool),
+    client_source: SpinClientSource,
 ) -> anyhow::Result<SpinResponse> {
     let request_start = app.monotonic_now();
     let kv_registry = build_kv_registry(kv_meta, env);
@@ -550,9 +547,8 @@ pub(crate) async fn dispatch_with_registries(
         app,
         req,
         Stores {
+            client_source,
             config_registry,
-            direct_ingress,
-            geo,
             kv_registry,
             secret_registry,
             ..Default::default()

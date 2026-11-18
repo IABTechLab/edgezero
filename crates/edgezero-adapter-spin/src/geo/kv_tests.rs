@@ -659,11 +659,26 @@ fn direct_ingress_is_declared_and_conflicts_with_authenticated_geo() {
         r#"{"adapters":{"spin":{"client_info":{"direct_ingress":true}}}}"#,
     );
     let off = Manifest::from_baked_json(r#"{"adapters":{"spin":{"client_info":{}}}}"#);
-    assert!(!direct_ingress(BakedManifest::Absent, None).unwrap());
-    assert!(!direct_ingress(off, None).unwrap());
-    assert!(direct_ingress(direct, None).unwrap());
-    let selection = authenticated_selection();
-    assert!(!direct_ingress(off, Some(&selection)).unwrap());
-    let error = direct_ingress(direct, Some(&selection)).unwrap_err();
+    assert!(matches!(
+        SpinClientSource::resolve(BakedManifest::Absent, None),
+        Ok(SpinClientSource::Off)
+    ));
+    assert!(matches!(
+        SpinClientSource::resolve(off, None),
+        Ok(SpinClientSource::Off)
+    ));
+    assert!(matches!(
+        SpinClientSource::resolve(direct, None),
+        Ok(SpinClientSource::DirectIngress)
+    ));
+    assert!(matches!(
+        SpinClientSource::resolve(off, Some(authenticated_selection())),
+        Ok(SpinClientSource::AuthenticatedGeo(_))
+    ));
+    let error = SpinClientSource::resolve(direct, Some(authenticated_selection())).unwrap_err();
     assert!(error.to_string().contains("direct_ingress"), "{error}");
+    assert!(
+        SpinClientSource::resolve(Manifest::from_baked_json("{"), None).is_err(),
+        "a malformed manifest must not silently turn the source off"
+    );
 }

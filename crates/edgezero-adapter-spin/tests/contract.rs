@@ -1028,16 +1028,21 @@ mod tests {
         #[test]
         #[expect(
             clippy::too_many_lines,
-            reason = "one real-index fixture traces admission and handler visibility through managed dispatch"
+            reason = "one real-index fixture traces admission, ClientInfo and Geo through managed dispatch"
         )]
         fn managed_kv_geo_strips_ip_and_token_before_callbacks() {
-            use edgezero_adapter_spin::geo::SpinKvGeo;
+            use edgezero_adapter_spin::geo::{SpinClientSource, SpinKvGeo};
             use edgezero_adapter_spin::outbound::test_support::dispatch_request_with_geo_stores;
             use edgezero_core::app::StoreMetadata;
+            use edgezero_core::client_info::{
+                Capture, ClientAddress, ClientInfo, ClientIpSource, UnavailableReason,
+            };
             use edgezero_core::env_config::EnvConfig;
             use edgezero_core::geo::kv::{Location, Range, Source, build, hex};
             use edgezero_core::store_registry::KvRegistry;
             use std::collections::BTreeMap;
+            use std::net::Ipv4Addr;
+            const VISITOR: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
             #[derive(Default)]
             struct Index(Mutex<BTreeMap<String, Bytes>>);
             #[async_trait::async_trait(?Send)]
@@ -1078,10 +1083,31 @@ mod tests {
             async fn observe(ctx: RequestContext) -> String {
                 assert!(!ctx.headers().contains_key("x-edgezero-geo-token"));
                 assert!(!ctx.headers().contains_key("x-edgezero-geo-ip"));
-                assert!(
-                    matches!(ctx.geo(), GeoOutcome::Selected { status: GeoStatus::Located { location, .. }, .. } if location.country().as_str() == "US" && location.subdivision().unwrap().as_str() == "CA")
+                // One admission feeds both facts, whether or not the lookup succeeds.
+                let admitted = ClientInfo::new(
+                    Capture::Unavailable(UnavailableReason::NotExposed),
+                    Capture::Captured(ClientAddress::new(
+                        VISITOR.into(),
+                        ClientIpSource::AuthenticatedHeader,
+                    )),
+                    Capture::Unavailable(UnavailableReason::NotExposed),
+                    Capture::Unavailable(UnavailableReason::NotExposed),
                 );
-                "selected".to_owned()
+                assert_eq!(ctx.client_info(), Some(&admitted));
+                if matches!(ctx.geo(), GeoOutcome::Selected { status: GeoStatus::Located { location, .. }, .. } if location.country().as_str() == "US" && location.subdivision().unwrap().as_str() == "CA")
+                {
+                    "located".to_owned()
+                } else if matches!(
+                    ctx.geo(),
+                    GeoOutcome::Selected {
+                        status: GeoStatus::Error(GeoError::ProviderFailure),
+                        ..
+                    }
+                ) {
+                    "failed".to_owned()
+                } else {
+                    format!("unexpected {:?}", ctx.geo())
+                }
             }
             sdk_block_on(async {
                 let kv = KvHandle::new(Arc::new(Index::default()));
@@ -1091,9 +1117,10 @@ mod tests {
                         edition: "synthetic".into(),
                         files: vec![],
                     },
+                    // Only the admitted visitor's address is located.
                     &[Range {
-                        start: 0,
-                        end: u128::from(u32::MAX),
+                        start: u128::from(u32::from(VISITOR)),
+                        end: u128::from(u32::from(VISITOR)),
                         location: Location::new("US", "CA").unwrap(),
                     }],
                     &[],
@@ -1124,7 +1151,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
                 let mut app = App::new(RouterService::builder().get("/geo", observe).build());
-                app.insert_state(selection);
+                app.insert_state(SpinClientSource::AuthenticatedGeo(selection));
                 app.set_ingress_admission_policy(|head| {
                     assert!(!head.headers().contains_key("x-edgezero-geo-token"));
                     assert!(!head.headers().contains_key("x-edgezero-geo-ip"));
@@ -1135,31 +1162,109 @@ mod tests {
                             .read_deadline_after(edgezero_core::DEFAULT_INBOUND_READ_BUDGET),
                     }
                 });
-                let request = SpinRequest::builder()
-                    .method("GET")
-                    .uri("http://example.test/geo")
-                    .header("content-length", "0")
-                    .header("x-edgezero-geo-ip", "192.0.2.1")
-                    .header("x-edgezero-geo-token", "0123456789abcdef0123456789abcdef")
-                    .body(http_body_util::Full::new(Bytes::new()))
+                // Without a KV handle the lookup fails, but the admitted address stays captured.
+                for (registry, expected) in [
+                    (
+                        Some(KvRegistry::single_id("geo".to_owned(), kv.clone())),
+                        "located",
+                    ),
+                    (None, "failed"),
+                ] {
+                    let request = SpinRequest::builder()
+                        .method("GET")
+                        .uri("http://example.test/geo")
+                        .header("content-length", "0")
+                        .header("x-edgezero-geo-ip", VISITOR.to_string())
+                        .header("x-edgezero-geo-token", "0123456789abcdef0123456789abcdef")
+                        .body(http_body_util::Full::new(Bytes::new()))
+                        .unwrap();
+                    let incoming =
+                        SpinRequest::from_request(request.into_request().unwrap()).unwrap();
+                    let response = dispatch_request_with_geo_stores(
+                        &app,
+                        incoming,
+                        Some(Bytes::from_static(b"0123456789abcdef0123456789abcdef")),
+                        None,
+                        registry,
+                    )
+                    .await
                     .unwrap();
-                let incoming = SpinRequest::from_request(request.into_request().unwrap()).unwrap();
-                let response = dispatch_request_with_geo_stores(
-                    &app,
-                    incoming,
-                    Some(Bytes::from_static(b"0123456789abcdef0123456789abcdef")),
-                    None,
-                    Some(KvRegistry::single_id("geo".to_owned(), kv)),
-                )
-                .await
-                .unwrap();
-                assert_eq!(captured_body(response).as_ref(), b"selected");
+                    assert_eq!(captured_body(response).as_ref(), expected.as_bytes());
+                }
+            });
+        }
+
+        #[test]
+        fn managed_client_info_reads_spin_client_addr_only_for_direct_ingress() {
+            use edgezero_adapter_spin::geo::SpinClientSource;
+            use edgezero_adapter_spin::outbound::test_support::dispatch_request_with_geo_stores;
+            use edgezero_core::client_info::{
+                Capture, ClientAddress, ClientInfo, ClientIpSource, PeerAddress, UnavailableReason,
+            };
+            let not_exposed = Capture::Unavailable(UnavailableReason::NotExposed);
+            // Spin appends its own field last; the first is a client forgery.
+            let socket = "198.51.100.4:5555".parse().unwrap();
+            let direct = ClientInfo::new(
+                Capture::Captured(PeerAddress::new(socket)),
+                Capture::Captured(ClientAddress::new(socket.ip(), ClientIpSource::DirectPeer)),
+                not_exposed.clone(),
+                not_exposed.clone(),
+            );
+            sdk_block_on(async {
+                for (source, expected) in [
+                    (None, ClientInfo::not_exposed()),
+                    (Some(SpinClientSource::Off), ClientInfo::not_exposed()),
+                    (Some(SpinClientSource::DirectIngress), direct.clone()),
+                ] {
+                    let seen = Arc::new(Mutex::new(None));
+                    let recorder = Arc::clone(&seen);
+                    let mut app = App::new(
+                        RouterService::builder()
+                            .get("/client", move |ctx: RequestContext| {
+                                let slot = Arc::clone(&recorder);
+                                async move {
+                                    assert!(!ctx.headers().contains_key("x-edgezero-geo-ip"));
+                                    assert_eq!(ctx.geo(), &GeoOutcome::NoSelection);
+                                    *slot.lock().unwrap() = ctx.client_info().cloned();
+                                    Ok::<_, EdgeError>("seen")
+                                }
+                            })
+                            .build(),
+                    );
+                    let label = format!("{source:?}");
+                    if let Some(client_source) = source {
+                        app.insert_state(client_source);
+                    }
+                    let request = SpinRequest::builder()
+                        .method("GET")
+                        .uri("http://example.test/client")
+                        .header("content-length", "0")
+                        .header("spin-client-addr", "203.0.113.66:1")
+                        .header("spin-client-addr", "198.51.100.4:5555")
+                        .header("x-edgezero-geo-ip", "192.0.2.1")
+                        .header("x-edgezero-geo-token", "0123456789abcdef0123456789abcdef")
+                        .body(http_body_util::Full::new(Bytes::new()))
+                        .unwrap();
+                    let incoming =
+                        SpinRequest::from_request(request.into_request().unwrap()).unwrap();
+                    let response = dispatch_request_with_geo_stores(
+                        &app,
+                        incoming,
+                        Some(Bytes::from_static(b"0123456789abcdef0123456789abcdef")),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(captured_body(response).as_ref(), b"seen", "{label}");
+                    assert_eq!(seen.lock().unwrap().as_ref(), Some(&expected), "{label}");
+                }
             });
         }
 
         #[test]
         fn configured_geo_does_not_read_secrets_before_admission() {
-            use edgezero_adapter_spin::geo::SpinKvGeo;
+            use edgezero_adapter_spin::geo::{SpinClientSource, SpinKvGeo};
             use edgezero_core::app::StoreMetadata;
             use edgezero_core::env_config::EnvConfig;
             use edgezero_core::manifest::BakedManifest;
@@ -1174,7 +1279,7 @@ mod tests {
                         ("EDGEZERO__ADAPTER__GEO__READER_IP", "authenticated-header"),
                         ("EDGEZERO__ADAPTER__GEO__CREDENTIAL_VARIABLE", "geo_token"),
                     ]);
-                    app.insert_state(
+                    app.insert_state(SpinClientSource::AuthenticatedGeo(
                         SpinKvGeo::from_config(
                             BakedManifest::Absent,
                             &env,
@@ -1185,7 +1290,7 @@ mod tests {
                         )
                         .unwrap()
                         .unwrap(),
-                    );
+                    ));
                     app.set_ingress_admission_policy(move |head| {
                         assert!(!head.headers().contains_key("x-edgezero-geo-token"));
                         if abort {

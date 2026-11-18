@@ -265,11 +265,10 @@ where
     A: Hooks,
 {
     let stores = A::stores();
-    let resolved = geo::SpinKvGeo::from_config(A::manifest(), &env, stores.kv).and_then(|geo| {
-        geo::direct_ingress(A::manifest(), geo.as_ref()).map(|direct| (geo, direct))
-    });
-    let selection = match resolved {
-        Ok(pair) => pair,
+    let resolved = geo::SpinKvGeo::from_config(A::manifest(), &env, stores.kv)
+        .and_then(|geo| geo::SpinClientSource::resolve(A::manifest(), geo));
+    let client_source = match resolved {
+        Ok(source) => source,
         Err(error) => {
             return Ok(request::send_assembly_error(
                 req,
@@ -286,7 +285,7 @@ where
         stores.kv,
         stores.secrets,
         &env,
-        selection,
+        client_source,
     )
     .await
 }
