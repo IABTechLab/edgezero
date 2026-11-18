@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::body::{Body, BodyStream, BodyTransfer, BufferedJsonPolicy};
+use crate::client_info::ClientInfo;
 use crate::config_store::ConfigExtractionLimits;
 use crate::error::{
     BadGatewayReason, BudgetSource, EdgeError, RequestBodyOverflowOrigin, ResponseLimitReason,
@@ -302,6 +303,7 @@ pub struct RequestContext {
     body: RefCell<BodyState>,
     body_policy: Option<BufferedJsonPolicy>,
     category_only_json_errors: bool,
+    client_info: Option<ClientInfo>,
     config_extraction_limits: ConfigExtractionLimits,
     geo: GeoOutcome,
     ingress_grant: RefCell<Option<IngressGrant>>,
@@ -476,6 +478,16 @@ impl RequestContext {
         }
     }
 
+    /// Returns the client network facts a managed adapter captured at ingress.
+    ///
+    /// `None` means no adapter snapshot was attached, for example on an unmanaged
+    /// request. Public headers and extensions never replace or synthesize it.
+    #[must_use]
+    #[inline]
+    pub fn client_info(&self) -> Option<&ClientInfo> {
+        self.client_info.as_ref()
+    }
+
     #[must_use]
     #[inline]
     pub fn config_extraction_limits(&self) -> ConfigExtractionLimits {
@@ -574,7 +586,8 @@ impl RequestContext {
         self.path_params = params;
         self.route_metadata = route_metadata;
         if let Some(mut admitted) = ingress {
-            (self.geo, self.category_only_json_errors) = admitted.take_request_context();
+            (self.geo, self.client_info, self.category_only_json_errors) =
+                admitted.take_request_context();
             let (request_start, read_deadline, grant, limits, clock) = admitted.into_parts();
             self.config_extraction_limits = limits;
             *self.ingress_grant.get_mut() = Some(grant);
@@ -779,6 +792,7 @@ impl RequestContext {
             body_policy,
             geo: GeoOutcome::NoSelection,
             category_only_json_errors: false,
+            client_info: None,
             config_extraction_limits: ConfigExtractionLimits::default(),
             ingress_grant: RefCell::new(None),
             input_guard: None,
@@ -791,8 +805,8 @@ impl RequestContext {
         }
     }
     pub(crate) fn new_pre_dispatch(request: Request, ingress: Option<&AdmittedIngress>) -> Self {
-        let (geo, category_only_json_errors) = ingress.map_or(
-            (GeoOutcome::NoSelection, false),
+        let (geo, client_info, category_only_json_errors) = ingress.map_or(
+            (GeoOutcome::NoSelection, None, false),
             AdmittedIngress::request_context,
         );
         let clock = ingress.map_or_else(MonotonicClock::default, AdmittedIngress::monotonic_clock);
@@ -824,6 +838,7 @@ impl RequestContext {
             monotonic_clock: clock,
             geo,
             category_only_json_errors,
+            client_info,
             parts,
             path_params: PathParams::default(),
             read_deadline: deadline,
