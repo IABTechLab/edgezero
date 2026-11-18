@@ -26,12 +26,15 @@ impl SpinGeoIngress {
     /// Select the Spin variable containing the expected ingress credential.
     ///
     /// # Errors
-    /// Rejects names outside `[a-z][a-z0-9_]{0,63}`. The credential itself is
+    /// Rejects names outside `[a-z][a-z0-9_]{0,63}`, trailing underscores, and
+    /// consecutive underscores, matching Spin's variable key rules. The credential is
     /// loaded per admitted request and is never retained in application state.
     #[inline]
     pub fn new(credential_variable: &str) -> Result<Self, EdgeError> {
         if credential_variable.is_empty()
             || credential_variable.len() > 64
+            || credential_variable.ends_with('_')
+            || credential_variable.contains("__")
             || !credential_variable
                 .as_bytes()
                 .first()
@@ -261,7 +264,16 @@ mod tests {
                 .credential_variable(),
             "geo_token"
         );
-        for name in ["", "GEO_TOKEN", "a-b", "1token", "a token", &"a".repeat(65)] {
+        for name in [
+            "",
+            "GEO_TOKEN",
+            "a-b",
+            "1token",
+            "a token",
+            "a_",
+            "a__b",
+            &"a".repeat(65),
+        ] {
             assert!(SpinGeoIngress::new(name).is_err(), "{name}");
         }
     }

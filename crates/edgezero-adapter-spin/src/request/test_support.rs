@@ -6,19 +6,23 @@ use edgezero_core::http::Uri;
 use edgezero_core::http::request_builder;
 use edgezero_core::secret_store::{SecretError, SecretStore, finish_bounded_secret_read};
 use std::future::pending;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-pub(super) struct GeoSecret(Option<Bytes>);
+pub(super) struct GeoSecret(Option<Bytes>, Option<Arc<AtomicUsize>>);
 
 #[cfg(test)]
 impl GeoSecret {
     pub(super) fn missing() -> Self {
-        Self(None)
+        Self(None, None)
     }
 }
 
 #[async_trait::async_trait(?Send)]
 impl SecretStore for GeoSecret {
     async fn get_bytes(&self, _store: &str, _key: &str) -> Result<Option<Bytes>, SecretError> {
+        if let Some(reads) = &self.1 {
+            reads.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(self.0.clone())
     }
 
@@ -31,6 +35,20 @@ impl SecretStore for GeoSecret {
         max_backend_bytes: u64,
         max_value_bytes: u64,
     ) -> Result<BoundedStoreRead<Bytes>, SecretError> {
+        if self.1.is_some() {
+            assert_eq!(
+                max_backend_bytes, 128,
+                "geo lookup must bound backend credential bytes"
+            );
+            assert_eq!(
+                max_value_bytes, 128,
+                "geo lookup must bound returned credential bytes"
+            );
+            assert!(
+                !deadline.is_expired_at(clock.now()),
+                "admitted lookup must receive a live request deadline"
+            );
+        }
         finish_bounded_secret_read(
             self.get_bytes(store_name, key).await,
             clock,
@@ -87,7 +105,7 @@ where
         move || Ok(source),
         |_| pending::<()>(),
         Ok,
-        &GeoSecret(None),
+        &GeoSecret(None, None),
     )
     .await
 }
@@ -122,7 +140,7 @@ where
         make_source,
         |_| pending::<()>(),
         deliver,
-        &GeoSecret(None),
+        &GeoSecret(None, None),
     )
     .await
 }
@@ -157,7 +175,7 @@ where
         move || Ok(source),
         make_timer,
         Ok,
-        &GeoSecret(None),
+        &GeoSecret(None, None),
     )
     .await
 }
@@ -172,7 +190,7 @@ pub async fn dispatch_request(
     app: &App,
     req: SpinRequest,
 ) -> anyhow::Result<ResponseEgressEnvelope> {
-    dispatch_request_with_geo_secret(app, req, None).await
+    dispatch_request_with_geo_secret(app, req, None, None).await
 }
 
 /// Uses the production converter and managed ingress with an in-memory credential backend.
@@ -186,6 +204,7 @@ pub async fn dispatch_request_with_geo_secret(
     app: &App,
     req: SpinRequest,
     secret: Option<Bytes>,
+    reads: Option<Arc<AtomicUsize>>,
 ) -> anyhow::Result<ResponseEgressEnvelope> {
     let request_start = app.monotonic_now();
     let (parts, native_body) = req.into_parts();
@@ -198,7 +217,7 @@ pub async fn dispatch_request_with_geo_secret(
         move || Ok(native_body.stream()),
         sleep,
         Ok,
-        &GeoSecret(secret),
+        &GeoSecret(secret, reads),
     )
     .await
 }

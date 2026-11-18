@@ -340,6 +340,8 @@ fn configure(app: &mut edgezero_core::app::App) -> Result<(), edgezero_core::Edg
 }
 ```
 
+Install this selection in adapter-local Hooks so shared handlers depend only on `ctx.geo()`.
+This is a Rust opt-in capability; there is currently no `[adapters.spin.geo]` manifest switch.
 The constructor accepts a lowercase Spin variable name, not a credential. Bind the secret
 in `spin.toml` (replace `my-app` with your component id):
 
@@ -356,6 +358,13 @@ high-entropy credential of 32–128 ASCII bytes in the range `0x21`–`0x7e`; do
 application state, or command-line arguments. The adapter loads it for each admitted
 request under the existing read deadline. There is one active credential; rotation requires
 coordinating the proxy and variable update.
+
+Spin variables can use local or remote secret providers. This adapter reads the variable
+once for each admitted request with a syntactically valid token, including a wrong token.
+Environment-backed lookup is local; providers such as Vault or Azure Key Vault can perform
+remote I/O on each read. Qualify the chosen provider's latency, throughput, and cost, and
+restrict origin access so arbitrary internet traffic cannot amplify secret-provider calls.
+The request deadline bounds guest waiting; it does not prove cancellation of remote work.
 
 The fronting proxy must remove all viewer-supplied instances of these fields and replace
 them with its own geographic metadata and credential:
@@ -388,6 +397,12 @@ Authenticated missing geography yields `MissingMetadata`; malformed or duplicate
 fields yield `GeoError::InvalidAssertion`. A country without region remains country-only.
 There is no fallback to `CF-IPCountry`, CloudFront headers, or a prior request's result.
 These outcomes do not themselves choose an HTTP status or application permission policy.
+
+Geographic assertions do not partition shared caches. Responses whose authorization or
+consent policy depends on geography, including error responses, need an appropriate cache
+policy at the application and proxy. Do not reuse a response across locations merely because
+the URL matches. Applications that require verified geography must reject unavailable/error
+states explicitly; authenticating assertions is not blanket origin access control.
 
 The adapter strips every token header before admission, middleware, and handler callbacks,
 including when the selection is off. Its bytes still count toward original header limits.

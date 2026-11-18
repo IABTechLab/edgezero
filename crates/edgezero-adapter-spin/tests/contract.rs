@@ -1052,12 +1052,14 @@ mod tests {
                         }
                     });
                     let duplicate = "0123456789abcdef0123456789abcdef";
-                    for tokens in [
-                        &[][..],
-                        &["short"][..],
-                        &[duplicate, duplicate][..],
-                        &[duplicate][..],
+                    for (tokens, expected_reads) in [
+                        (&[][..], 0_usize),
+                        (&["short"][..], 0),
+                        (&[duplicate, duplicate][..], 0),
+                        (&[duplicate][..], 1),
+                        (&["fedcba9876543210fedcba9876543210"][..], 1),
                     ] {
+                        let reads = Arc::new(AtomicUsize::new(0));
                         let mut outgoing = SpinRequest::builder()
                             .method("GET")
                             .uri("http://example.test/geo")
@@ -1081,12 +1083,17 @@ mod tests {
                             &app,
                             incoming,
                             Some(Bytes::from_static(b"0123456789abcdef0123456789abcdef")),
+                            Some(Arc::clone(&reads)),
                         )
                         .await
                         .expect("managed response");
                         assert_eq!(captured_body(response).as_ref(), b"observed");
+                        assert_eq!(
+                            reads.load(Ordering::SeqCst),
+                            if enabled { expected_reads } else { 0 }
+                        );
                     }
-                    assert_eq!(admissions.load(Ordering::SeqCst), 4);
+                    assert_eq!(admissions.load(Ordering::SeqCst), 5);
                     app.set_ingress_head_limits(
                         IngressHeadLimits::default()
                             .with_max_request_header_bytes(1024)
@@ -1111,8 +1118,65 @@ mod tests {
                     );
                     assert_eq!(
                         admissions.load(Ordering::SeqCst),
-                        4,
+                        5,
                         "stripping must not evade original header budget"
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn configured_geo_does_not_read_secrets_before_admission() {
+            use edgezero_adapter_spin::geo::SpinGeoIngress;
+            sdk_block_on(async {
+                for abort in [false, true] {
+                    let mut app = App::new(RouterService::builder().build());
+                    app.insert_state(SpinGeoIngress::new("geo_token").expect("selection"));
+                    app.set_ingress_admission_policy(move |head| {
+                        assert!(!head.headers().contains_key("x-edgezero-geo-token"));
+                        if abort {
+                            AdmissionDecision::Abort
+                        } else {
+                            AdmissionDecision::Refuse {
+                                completion: ResponseEgressCompletion::empty(),
+                                response: response_builder()
+                                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                                    .body(Body::empty())
+                                    .expect("refusal"),
+                            }
+                        }
+                    });
+                    let secret = Bytes::from_static(b"0123456789abcdef0123456789abcdef");
+                    let request = SpinRequest::builder()
+                        .method("GET")
+                        .uri("http://example.test/geo")
+                        .header("content-length", "0")
+                        .header("x-edgezero-geo-token", "0123456789abcdef0123456789abcdef")
+                        .body(http_body_util::Full::new(Bytes::new()))
+                        .expect("request");
+                    let incoming =
+                        SpinRequest::from_request(request.into_request().expect("WASI request"))
+                            .expect("incoming request");
+                    let reads = Arc::new(AtomicUsize::new(0));
+                    let result = dispatch_request_with_geo_secret(
+                        &app,
+                        incoming,
+                        Some(secret),
+                        Some(Arc::clone(&reads)),
+                    )
+                    .await;
+                    match (abort, result) {
+                        (true, Err(_)) => {}
+                        (false, Ok(response)) => assert_eq!(
+                            capture_response(response).status(),
+                            StatusCode::SERVICE_UNAVAILABLE
+                        ),
+                        _ => panic!("admission decision must precede geo lookup"),
+                    }
+                    assert_eq!(
+                        reads.load(Ordering::SeqCst),
+                        0,
+                        "rejected admission must not fetch the credential"
                     );
                 }
             });
