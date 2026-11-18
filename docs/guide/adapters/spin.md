@@ -450,7 +450,63 @@ async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
 ```
 
 Spin exposes this data through the `spin-client-addr` and `spin-full-url` headers
-rather than a separate runtime object.
+rather than a separate runtime object. Spin appends its own copies after the
+client's headers, so a client can send the same names first. The context reads
+the last field of each, which is the runtime's.
+
+## Client info
+
+[`ctx.client_info()`](../handlers.md#client-metadata) has two operator-declared
+sources for the client address. Both are off by default, and every field is then
+`NotExposed`.
+
+| Mode                 | Use when                                   | Effective client                                          | Direct peer             |
+| -------------------- | ------------------------------------------ | --------------------------------------------------------- | ----------------------- |
+| Direct ingress       | Visitors connect to the Spin host directly | Last `spin-client-addr`, source `DirectPeer`              | The same socket address |
+| Authenticated header | A proxy you run speaks for the visitor     | The KV Geo authenticated IP, source `AuthenticatedHeader` | `NotExposed`            |
+
+Viewer TLS is `NotExposed` in every mode: Spin passes the scheme in
+`spin-full-url` but no protocol version or cipher. `ctx.ja4()` stays
+`NotExposed`.
+
+### Direct ingress
+
+```toml
+[adapters.spin.client_info]
+direct_ingress = true
+```
+
+The setting declares that the Spin host sets `spin-client-addr` and that the peer
+it reports is the visitor. The component cannot verify either:
+
+- Spin's documentation says some runtimes do not set the header. On such a host
+  every copy is client-supplied. `wasmtime serve` sets none.
+- Behind a proxy, such as an ingress controller under SpinKube, the peer is the
+  proxy, not the visitor. Use the authenticated header mode there.
+
+Only the last `spin-client-addr` field is read, as the `ip:port` or `[ipv6]:port`
+form Spin writes. No field is `Missing`. A last field that is not UTF-8 or not a
+socket address is `Rejected`; earlier fields and `X-Forwarded-For` are never used.
+
+### Authenticated header
+
+The [KV Geo selection](#geographic-context-from-a-pinned-kv-dataset) already
+admits one visitor IP from `x-edgezero-geo-ip`, authenticated by
+`x-edgezero-geo-token`. When it is selected, `client_info()` reports that same IP,
+so `ctx.geo()` and `client_info()` always describe one address.
+
+| Request                                               | `effective_client()`  |
+| ----------------------------------------------------- | --------------------- |
+| Valid token and one valid IP                          | `AuthenticatedHeader` |
+| No token                                              | `Missing`             |
+| Malformed, repeated or wrong token; unreadable secret | `Rejected`            |
+| Valid token, no IP                                    | `Missing`             |
+| Valid token, repeated or malformed IP                 | `Rejected`            |
+
+A KV lookup failure or timeout after authentication does not change the client.
+Declaring `direct_ingress = true` together with this Geo selection is a
+configuration error in `run_app` and `dispatch_app`: one says visitors connect
+directly, the other that a proxy speaks for them.
 
 ## Testing
 

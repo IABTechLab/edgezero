@@ -288,6 +288,28 @@ and observers remain responsible for their own output. See
 [Axum diagnostics and trusted proxies](../axum-diagnostics.md) for configuration, metadata,
 request identity, counters, and deployment examples.
 
+## Client info
+
+[`ctx.client_info()`](../handlers.md#client-metadata) projects the same checked ingress result.
+`direct_peer()` is the listener's owned socket address. `effective_client()` follows the
+trusted proxy policy and never parses forwarding headers a second time:
+
+| Checked ingress                                                              | `effective_client()`                         | `effective_client_ip()` |
+| ---------------------------------------------------------------------------- | -------------------------------------------- | ----------------------- |
+| Client accepted from a trusted chain                                         | `TrustedForwarded` or `TrustedXForwardedFor` | The client              |
+| Peer not trusted, including the default no-trust policy                      | `DirectPeer`                                 | The peer                |
+| Trusted peer that sent no client node, or a chain whose every hop is trusted | `PeerFallback(Missing)`                      | `None`                  |
+| Trusted peer with an obfuscated node such as `for=_hidden`                   | `PeerFallback(Missing)`                      | `None`                  |
+| Trusted peer with a malformed assertion                                      | `PeerFallback(Rejected)`                     | `None`                  |
+
+An untrusted peer that sends `Forwarded` or `X-Forwarded-For` is reported as `DirectPeer`: its
+socket address is the client. A host accepted from a trusted proxy does not mean the client
+was: the client can still fall back to the proxy while the host is forwarded. Repeated
+`X-Forwarded-For` fields join into one chain, but a duplicate `X-Forwarded-Host` or
+`X-Forwarded-Proto` rejects the whole assertion, including a valid client. IPv4-mapped IPv6
+addresses are reported as IPv4. Viewer TLS is `NotExposed`: the listener serves plain HTTP, and
+a forwarded `https` scheme or a trusted JA4 does not change that.
+
 ## Native Geo providers
 
 Geo is off by default. Select it with `[adapters.axum.geo]` in `edgezero.toml` and
@@ -784,14 +806,57 @@ server block that proxies to Axum, including plain-HTTP ones.
 The allowlist works only when nobody else can send requests from those
 addresses. Do not list shared provider ranges such as CloudFront's: any AWS
 customer can point their own distribution at your origin and add any header
-they like, so its requests pass the peer check. CloudFront needs the
-protected-CloudFront check from
-[#439](https://github.com/IABTechLab/edgezero/pull/439), which this setting
-does not provide.
+they like, so its requests pass the peer check. Use
+[protected CloudFront JA4](#ja4-from-protected-cloudfront) instead.
 :::
 
 In code, build the setting with `TrustedJa4Header::parse(header, cidrs)` and
 pass it to `AxumDevServer::with_trusted_ja4_header`.
+
+The managed listener checks the peer against its own socket address. An
+application's received-head preparer cannot change the decision by editing
+request extensions.
+
+### JA4 from protected CloudFront
+
+Behind CloudFront and an ALB, select the fixed `CloudFront-Viewer-JA4-Fingerprint`
+header in the manifest. It reuses the protected path of the
+[CloudFront Geo selection](../native-geo.md), so there are no separate JA4 network
+settings:
+
+```toml
+[adapters.axum.geo]
+provider = "cloudfront"
+origin_credential_header_name = "x-origin-verify"
+# alb_peer_cidrs usually comes from EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS
+
+[adapters.axum.ja4]
+source = "protected-cloudfront"
+```
+
+| Request                                       | `ctx.ja4()`                                   |
+| --------------------------------------------- | --------------------------------------------- |
+| Admitted ALB peer, one valid header           | `Captured { source: TrustedProxyHeader, .. }` |
+| Admitted ALB peer, no or empty header         | `Unavailable(Missing)`                        |
+| Admitted ALB peer, invalid or repeated header | `Unavailable(Malformed)`                      |
+| Any other peer                                | `Unavailable(NotExposed)`; header not parsed  |
+
+Startup fails before listening when protected JA4 is selected and Geo is off, Geo uses
+KV, or the `EDGEZERO__ADAPTER__JA4_*` variables are also set. An unknown country or a failed
+Geo lookup does not change JA4. The credential header is removed before handlers, as for Geo.
+The development runner reads settings only and ignores this manifest table, as it does for Geo.
+
+The peer check proves the route to Axum, not who generated the header. Before enabling this
+mode, meet two CloudFront requirements that EdgeZero cannot check:
+
+1. The origin request policy includes `CloudFront-Viewer-JA4-Fingerprint`, so CloudFront
+   generates it. CloudFront adds it only to HTTPS requests.
+2. No viewer-supplied header of that name reaches the origin. AWS does not document what
+   CloudFront does with one, so verify it on your distribution.
+
+Then check the live deployment: an HTTPS request carries a fingerprint, a plain HTTP request
+carries none, and a request with a forged `CloudFront-Viewer-JA4-Fingerprint` header arrives
+without the forged value.
 
 ## Next Steps
 
