@@ -265,8 +265,27 @@ where
     A: Hooks,
 {
     let stores = A::stores();
-    request::dispatch_with_registries(app, req, stores.config, stores.kv, stores.secrets, &env)
-        .await
+    let geo = match geo::SpinKvGeo::from_config(A::manifest(), &env, stores.kv) {
+        Ok(geo) => geo,
+        Err(error) => {
+            return Ok(request::send_assembly_error(
+                req,
+                error,
+                app.monotonic_now(),
+                app.monotonic_clock(),
+            )?);
+        }
+    };
+    request::dispatch_with_registries(
+        app,
+        req,
+        stores.config,
+        stores.kv,
+        stores.secrets,
+        &env,
+        geo,
+    )
+    .await
 }
 
 #[cfg(test)]

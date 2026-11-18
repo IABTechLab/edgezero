@@ -1028,169 +1028,164 @@ mod tests {
         #[test]
         #[expect(
             clippy::too_many_lines,
-            reason = "one ordered matrix compares configured and disabled dispatch with credential and header-budget controls"
+            reason = "one real-index fixture traces admission and handler visibility through managed dispatch"
         )]
-        fn managed_geo_strips_credentials_and_preserves_selected_outcome() {
-            use edgezero_adapter_spin::geo::SpinGeoIngress;
-            use edgezero_core::geo::{GeoSource, GeoTrustBasis, GeoUnavailableReason};
-
-            #[edgezero_core::action]
-            async fn observe(mut ctx: RequestContext) -> String {
-                assert!(!ctx.headers().contains_key("x-edgezero-geo-token"));
-                ctx.extensions_mut().insert(GeoOutcome::NoSelection);
-                if *ctx
-                    .extensions()
-                    .get::<bool>()
-                    .expect("selection expectation")
-                {
-                    let GeoOutcome::Selected { provider, status } = ctx.geo() else {
-                        panic!("configured managed dispatch must retain its selection");
-                    };
-                    assert_eq!(provider.as_str(), "spin-ingress");
-                    if ctx.headers().contains_key("x-test-located") {
-                        let GeoStatus::Located {
-                            location,
-                            source,
-                            trust_basis,
-                        } = status
-                        else {
-                            panic!("authenticated managed request must be located");
-                        };
-                        assert_eq!(location.country().as_str(), "US");
-                        assert_eq!(location.subdivision().expect("region").as_str(), "CA");
-                        assert_eq!(*source, GeoSource::SpinIngress);
-                        assert_eq!(*trust_basis, GeoTrustBasis::AuthenticatedIngressHeader);
-                    } else {
-                        assert_eq!(
-                            *status,
-                            GeoStatus::Unavailable(GeoUnavailableReason::UntrustedIngress)
-                        );
-                    }
-                } else {
-                    assert_eq!(ctx.geo(), &GeoOutcome::NoSelection);
-                }
-                "observed".to_owned()
-            }
-
-            struct Sanitized;
+        fn managed_kv_geo_strips_ip_and_token_before_callbacks() {
+            use edgezero_adapter_spin::geo::SpinKvGeo;
+            use edgezero_adapter_spin::outbound::test_support::dispatch_request_with_geo_stores;
+            use edgezero_core::app::StoreMetadata;
+            use edgezero_core::env_config::EnvConfig;
+            use edgezero_core::geo::kv::{Location, Range, Source, build, hex};
+            use edgezero_core::store_registry::KvRegistry;
+            use std::collections::BTreeMap;
+            #[derive(Default)]
+            struct Index(Mutex<BTreeMap<String, Bytes>>);
             #[async_trait::async_trait(?Send)]
-            impl Middleware for Sanitized {
-                async fn handle(
+            #[expect(
+                clippy::missing_trait_methods,
+                reason = "ordinary-only index fixture retains default record methods"
+            )]
+            impl KvStore for Index {
+                async fn get_bytes(&self, key: &str) -> Result<Option<Bytes>, KvError> {
+                    Ok(self.0.lock().unwrap().get(key).cloned())
+                }
+                async fn put_bytes(&self, key: &str, value: Bytes) -> Result<(), KvError> {
+                    self.0.lock().unwrap().insert(key.to_owned(), value);
+                    Ok(())
+                }
+                async fn delete(&self, _: &str) -> Result<(), KvError> {
+                    panic!("no deletion")
+                }
+                async fn list_keys_page(
                     &self,
-                    ctx: RequestContext,
-                    next: Next<'_>,
-                ) -> Result<Response, EdgeError> {
-                    assert!(!ctx.headers().contains_key("x-edgezero-geo-token"));
-                    next.run(ctx).await
+                    _: &str,
+                    _: Option<&str>,
+                    _: usize,
+                ) -> Result<KvPage, KvError> {
+                    panic!("no listing")
+                }
+                async fn put_bytes_with_ttl(
+                    &self,
+                    _: &str,
+                    _: Bytes,
+                    _: Duration,
+                ) -> Result<(), KvError> {
+                    panic!("no TTL")
                 }
             }
-
+            use edgezero_core::manifest::BakedManifest;
+            #[edgezero_core::action]
+            async fn observe(ctx: RequestContext) -> String {
+                assert!(!ctx.headers().contains_key("x-edgezero-geo-token"));
+                assert!(!ctx.headers().contains_key("x-edgezero-geo-ip"));
+                assert!(
+                    matches!(ctx.geo(), GeoOutcome::Selected { status: GeoStatus::Located { location, .. }, .. } if location.country().as_str() == "US" && location.subdivision().unwrap().as_str() == "CA")
+                );
+                "selected".to_owned()
+            }
             sdk_block_on(async {
-                for enabled in [false, true] {
-                    let admissions = Arc::new(AtomicUsize::new(0));
-                    let observed_admissions = Arc::clone(&admissions);
-                    let mut app = App::new(
-                        RouterService::builder()
-                            .middleware(Sanitized)
-                            .get("/geo", observe)
-                            .build(),
-                    );
-                    app.insert_state(enabled);
-                    if enabled {
-                        app.insert_state(
-                            SpinGeoIngress::new("unavailable_variable").expect("selection"),
-                        );
+                let kv = KvHandle::new(Arc::new(Index::default()));
+                let (receipt, _, _) = build(
+                    &kv,
+                    Source {
+                        edition: "synthetic".into(),
+                        files: vec![],
+                    },
+                    &[Range {
+                        start: 0,
+                        end: u128::from(u32::MAX),
+                        location: Location::new("US", "CA").unwrap(),
+                    }],
+                    &[],
+                    1024,
+                )
+                .await
+                .unwrap();
+                let pin = format!(
+                    "{}@{}",
+                    receipt.manifest_key.split('/').nth(2).unwrap(),
+                    hex(&receipt.manifest_hash)
+                );
+                let env = EnvConfig::from_vars([
+                    ("EDGEZERO__ADAPTER__GEO__PROVIDER", "kv"),
+                    ("EDGEZERO__ADAPTER__GEO__STORE_ID", "geo"),
+                    ("EDGEZERO__ADAPTER__GEO__PIN", pin.as_str()),
+                    ("EDGEZERO__ADAPTER__GEO__READER_IP", "authenticated-header"),
+                    ("EDGEZERO__ADAPTER__GEO__CREDENTIAL_VARIABLE", "geo_token"),
+                ]);
+                let selection = SpinKvGeo::from_config(
+                    BakedManifest::Absent,
+                    &env,
+                    Some(StoreMetadata {
+                        default: "geo",
+                        ids: &["geo"],
+                    }),
+                )
+                .unwrap()
+                .unwrap();
+                let mut app = App::new(RouterService::builder().get("/geo", observe).build());
+                app.insert_state(selection);
+                app.set_ingress_admission_policy(|head| {
+                    assert!(!head.headers().contains_key("x-edgezero-geo-token"));
+                    assert!(!head.headers().contains_key("x-edgezero-geo-ip"));
+                    AdmissionDecision::Admit {
+                        completion: ResponseEgressCompletion::empty(),
+                        grant: edgezero_core::IngressGrant::new(()),
+                        read_deadline: head
+                            .read_deadline_after(edgezero_core::DEFAULT_INBOUND_READ_BUDGET),
                     }
-                    app.set_ingress_admission_policy(move |head| {
-                        assert!(!head.headers().contains_key("x-edgezero-geo-token"));
-                        observed_admissions.fetch_add(1, Ordering::SeqCst);
-                        AdmissionDecision::Admit {
-                            completion: ResponseEgressCompletion::empty(),
-                            grant: IngressGrant::new(()),
-                            read_deadline: head.read_deadline_after(Duration::from_secs(1)),
-                        }
-                    });
-                    let duplicate = "0123456789abcdef0123456789abcdef";
-                    for (tokens, expected_reads) in [
-                        (&[][..], 0_usize),
-                        (&["short"][..], 0),
-                        (&[duplicate, duplicate][..], 0),
-                        (&[duplicate][..], 1),
-                        (&["fedcba9876543210fedcba9876543210"][..], 1),
-                    ] {
-                        let reads = Arc::new(AtomicUsize::new(0));
-                        let mut outgoing = SpinRequest::builder()
-                            .method("GET")
-                            .uri("http://example.test/geo")
-                            .header("content-length", "0")
-                            .header("x-edgezero-geo-country", "US")
-                            .header("x-edgezero-geo-region", "CA");
-                        if tokens == [duplicate] {
-                            outgoing = outgoing.header("x-test-located", "yes");
-                        }
-                        for token in tokens {
-                            outgoing = outgoing.header("x-edgezero-geo-token", *token);
-                        }
-                        let request = outgoing
-                            .body(http_body_util::Full::new(Bytes::new()))
-                            .expect("native request");
-                        let incoming = SpinRequest::from_request(
-                            request.into_request().expect("WASI request"),
-                        )
-                        .expect("incoming request");
-                        let response = dispatch_request_with_geo_secret(
-                            &app,
-                            incoming,
-                            Some(Bytes::from_static(b"0123456789abcdef0123456789abcdef")),
-                            Some(Arc::clone(&reads)),
-                        )
-                        .await
-                        .expect("managed response");
-                        assert_eq!(captured_body(response).as_ref(), b"observed");
-                        assert_eq!(
-                            reads.load(Ordering::SeqCst),
-                            if enabled { expected_reads } else { 0 }
-                        );
-                    }
-                    assert_eq!(admissions.load(Ordering::SeqCst), 5);
-                    app.set_ingress_head_limits(
-                        IngressHeadLimits::default()
-                            .with_max_request_header_bytes(1024)
-                            .expect("header budget"),
-                    );
-                    let request = SpinRequest::builder()
-                        .method("GET")
-                        .uri("http://example.test/geo")
-                        .header("content-length", "0")
-                        .header("x-edgezero-geo-token", "a".repeat(1500))
-                        .body(http_body_util::Full::new(Bytes::new()))
-                        .expect("oversized native request");
-                    let incoming =
-                        SpinRequest::from_request(request.into_request().expect("WASI request"))
-                            .expect("incoming request");
-                    let response = dispatch_request(&app, incoming)
-                        .await
-                        .expect("bounded response");
-                    assert_eq!(
-                        capture_response(response).status(),
-                        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
-                    );
-                    assert_eq!(
-                        admissions.load(Ordering::SeqCst),
-                        5,
-                        "stripping must not evade original header budget"
-                    );
-                }
+                });
+                let request = SpinRequest::builder()
+                    .method("GET")
+                    .uri("http://example.test/geo")
+                    .header("content-length", "0")
+                    .header("x-edgezero-geo-ip", "192.0.2.1")
+                    .header("x-edgezero-geo-token", "0123456789abcdef0123456789abcdef")
+                    .body(http_body_util::Full::new(Bytes::new()))
+                    .unwrap();
+                let incoming = SpinRequest::from_request(request.into_request().unwrap()).unwrap();
+                let response = dispatch_request_with_geo_stores(
+                    &app,
+                    incoming,
+                    Some(Bytes::from_static(b"0123456789abcdef0123456789abcdef")),
+                    None,
+                    Some(KvRegistry::single_id("geo".to_owned(), kv)),
+                )
+                .await
+                .unwrap();
+                assert_eq!(captured_body(response).as_ref(), b"selected");
             });
         }
 
         #[test]
         fn configured_geo_does_not_read_secrets_before_admission() {
-            use edgezero_adapter_spin::geo::SpinGeoIngress;
+            use edgezero_adapter_spin::geo::SpinKvGeo;
+            use edgezero_core::app::StoreMetadata;
+            use edgezero_core::env_config::EnvConfig;
+            use edgezero_core::manifest::BakedManifest;
             sdk_block_on(async {
                 for abort in [false, true] {
                     let mut app = App::new(RouterService::builder().build());
-                    app.insert_state(SpinGeoIngress::new("geo_token").expect("selection"));
+                    let pin = format!("{}@{}", "a".repeat(64), "b".repeat(64));
+                    let env = EnvConfig::from_vars([
+                        ("EDGEZERO__ADAPTER__GEO__PROVIDER", "kv"),
+                        ("EDGEZERO__ADAPTER__GEO__STORE_ID", "geo"),
+                        ("EDGEZERO__ADAPTER__GEO__PIN", pin.as_str()),
+                        ("EDGEZERO__ADAPTER__GEO__READER_IP", "authenticated-header"),
+                        ("EDGEZERO__ADAPTER__GEO__CREDENTIAL_VARIABLE", "geo_token"),
+                    ]);
+                    app.insert_state(
+                        SpinKvGeo::from_config(
+                            BakedManifest::Absent,
+                            &env,
+                            Some(StoreMetadata {
+                                default: "geo",
+                                ids: &["geo"],
+                            }),
+                        )
+                        .unwrap()
+                        .unwrap(),
+                    );
                     app.set_ingress_admission_policy(move |head| {
                         assert!(!head.headers().contains_key("x-edgezero-geo-token"));
                         if abort {
@@ -1236,6 +1231,37 @@ mod tests {
                         reads.load(Ordering::SeqCst),
                         0,
                         "rejected admission must not fetch the credential"
+                    );
+                }
+            });
+        }
+
+        #[test]
+        fn private_geo_headers_count_toward_original_head_limits() {
+            sdk_block_on(async {
+                for header in ["x-edgezero-geo-token", "x-edgezero-geo-ip"] {
+                    let mut app = App::new(RouterService::builder().build());
+                    app.set_ingress_head_limits(
+                        IngressHeadLimits::default()
+                            .with_max_request_header_bytes(1024)
+                            .unwrap(),
+                    );
+                    app.set_ingress_admission_policy(|_| {
+                        panic!("oversized original head must be rejected before callbacks")
+                    });
+                    let request = SpinRequest::builder()
+                        .method("GET")
+                        .uri("http://example.test/geo")
+                        .header("content-length", "0")
+                        .header(header, "a".repeat(1500))
+                        .body(http_body_util::Full::new(Bytes::new()))
+                        .unwrap();
+                    let incoming =
+                        SpinRequest::from_request(request.into_request().unwrap()).unwrap();
+                    let response = dispatch_request(&app, incoming).await.unwrap();
+                    assert_eq!(
+                        capture_response(response).status(),
+                        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
                     );
                 }
             });

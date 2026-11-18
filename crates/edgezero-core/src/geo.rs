@@ -333,8 +333,6 @@ pub enum GeoSource {
     CloudFront,
     Cloudflare,
     Fastly,
-    /// Geographic assertions supplied by an authenticated Spin ingress proxy.
-    SpinIngress,
     Kv,
 }
 
@@ -342,8 +340,7 @@ pub enum GeoSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GeoTrustBasis {
-    /// A dedicated ingress credential matched a deployment-selected secret.
-    /// The operator remains responsible for proxy metadata and protected transport.
+    /// An ingress credential authenticated the proxy assertion.
     AuthenticatedIngressHeader,
     CheckedDirectPeer,
     CheckedForwardedClient,
@@ -387,7 +384,6 @@ impl GeoOutcome {
     /// Cloudflare's `XX` (unknown) or `T1` (Tor), means the platform has no usable
     /// geography rather than a forged assertion: an absent or unusable country is
     /// missing metadata, and an unusable subdivision leaves a country-only result.
-    /// `SpinIngress` is not platform metadata and returns `ProviderFailure` here.
     #[inline]
     #[must_use]
     pub fn platform(source: GeoSource, country: Option<&str>, subdivision: Option<&str>) -> Self {
@@ -396,25 +392,20 @@ impl GeoOutcome {
                 GeoSource::CloudFront => "cloudfront",
                 GeoSource::Cloudflare => "cloudflare",
                 GeoSource::Fastly => "fastly",
-                GeoSource::SpinIngress => "spin-ingress",
                 GeoSource::Kv => return Self::NoSelection,
             }
             .to_owned(),
         );
-        let status = if source == GeoSource::SpinIngress {
-            GeoStatus::Error(GeoError::ProviderFailure)
-        } else {
-            match country.and_then(|raw| CountryCode::new(raw).ok()) {
-                None => GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata),
-                Some(country_code) => GeoStatus::Located {
-                    location: GeoLocation::new(
-                        country_code,
-                        subdivision.and_then(|raw| SubdivisionCode::new(raw).ok()),
-                    ),
-                    source,
-                    trust_basis: GeoTrustBasis::PlatformMetadata,
-                },
-            }
+        let status = match country.and_then(|raw| CountryCode::new(raw).ok()) {
+            None => GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata),
+            Some(country_code) => GeoStatus::Located {
+                location: GeoLocation::new(
+                    country_code,
+                    subdivision.and_then(|raw| SubdivisionCode::new(raw).ok()),
+                ),
+                source,
+                trust_basis: GeoTrustBasis::PlatformMetadata,
+            },
         };
         Self::Selected { provider, status }
     }
@@ -427,17 +418,6 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use std::str;
-
-    #[test]
-    fn ingress_source_cannot_be_labeled_as_platform_metadata() {
-        assert!(matches!(
-            GeoOutcome::platform(GeoSource::SpinIngress, Some("US"), Some("CA")),
-            GeoOutcome::Selected {
-                status: GeoStatus::Error(GeoError::ProviderFailure),
-                ..
-            }
-        ));
-    }
 
     #[test]
     fn geo_country_codes_normalize_and_reject_unsupported() {

@@ -206,13 +206,33 @@ pub async fn dispatch_request_with_geo_secret(
     secret: Option<Bytes>,
     reads: Option<Arc<AtomicUsize>>,
 ) -> anyhow::Result<ResponseEgressEnvelope> {
+    dispatch_request_with_geo_stores(app, req, secret, reads, None).await
+}
+
+/// Managed ingress with explicit test-only credential and KV registry injection.
+///
+/// # Errors
+/// Returns the managed admission, dispatch or delivery error.
+#[doc(hidden)]
+#[inline]
+pub async fn dispatch_request_with_geo_stores(
+    app: &App,
+    req: SpinRequest,
+    secret: Option<Bytes>,
+    reads: Option<Arc<AtomicUsize>>,
+    kv_registry: Option<KvRegistry>,
+) -> anyhow::Result<ResponseEgressEnvelope> {
     let request_start = app.monotonic_now();
     let (parts, native_body) = req.into_parts();
     let core_request = into_core_request_head_for_app(parts, app);
     dispatch_ingress_stream_with_timer_and(
         app,
         core_request,
-        Stores::default(),
+        Stores {
+            geo: app.state::<SpinKvGeo>().cloned(),
+            kv_registry,
+            ..Stores::default()
+        },
         request_start,
         move || Ok(native_body.stream()),
         sleep,

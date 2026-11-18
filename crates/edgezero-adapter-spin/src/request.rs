@@ -12,7 +12,7 @@ pub(crate) mod test_support;
 use crate::SpinResponse;
 use crate::config_store::SpinConfigStore;
 use crate::context::{SpinRequestContext, parse_client_addr};
-use crate::geo::{SpinGeoIngress, ingress::capture_token};
+use crate::geo::{SpinKvGeo, ingress::capture_inputs};
 use crate::ingress::capture_request_ingress;
 use crate::key_value_store::{DEFAULT_MAX_LIST_KEYS, SpinKvStore};
 use crate::response::from_egress_response;
@@ -61,6 +61,7 @@ use crate::outbound::{SpinOutboundClient, native_time};
 pub(crate) struct Stores {
     config_registry: Option<ConfigRegistry>,
     config_store: Option<ConfigStoreHandle>,
+    geo: Option<SpinKvGeo>,
     kv: Option<KvHandle>,
     kv_registry: Option<KvRegistry>,
     secret_registry: Option<SecretRegistry>,
@@ -404,7 +405,7 @@ where
             IngressFraming::HostManaged,
         )
         .validate_normalized(app.ingress_head_limits());
-        let token = capture_token(head_request.headers_mut());
+        let geo_input = capture_inputs(head_request.headers_mut());
         if let Err(error) = head_validation {
             let egress = detached_error_envelope(app, error, request_method, request_start)?;
             return Ok(deliver(egress)?);
@@ -440,15 +441,17 @@ where
                 return Ok(deliver(egress)?);
             }
         };
-        let geo = match app.state::<SpinGeoIngress>() {
+        let geo = match stores.geo.as_ref() {
             Some(selection) => {
+                let handle = selection.handle(stores.kv_registry.as_ref());
                 selection
                     .resolve(
-                        token,
-                        head_request.headers(),
+                        geo_input,
                         &prepared.monotonic_clock(),
                         prepared.read_deadline(),
                         geo_secrets,
+                        handle,
+                        make_timer.clone(),
                     )
                     .await
             }
@@ -536,6 +539,7 @@ pub(crate) async fn dispatch_with_registries(
     kv_meta: Option<StoreMetadata>,
     secret_meta: Option<StoreMetadata>,
     env: &EnvConfig,
+    geo: Option<SpinKvGeo>,
 ) -> anyhow::Result<SpinResponse> {
     let request_start = app.monotonic_now();
     let kv_registry = build_kv_registry(kv_meta, env);
@@ -546,6 +550,7 @@ pub(crate) async fn dispatch_with_registries(
         req,
         Stores {
             config_registry,
+            geo,
             kv_registry,
             secret_registry,
             ..Default::default()

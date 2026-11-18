@@ -325,91 +325,110 @@ manifest I/O or parsing. It does not initialize a logger, configure filters, rea
 runtime overrides or change `owns_logging`. Existing runner and application-owned
 logging responsibilities remain unchanged.
 
-## Geographic context from trusted ingress
+## Geographic context from a pinned KV dataset
 
-Spin does not supply native country/region metadata. An application can enable
-authenticated ingress assertions by inserting a `SpinGeoIngress` selection in its existing
-`Hooks::configure` implementation:
+Spin has no native country/region metadata. Managed `run_app`, `run_app_with_platform`
+and `dispatch_app` can resolve `ctx.geo()` from an immutable KV dataset. Select it in
+the application's baked `edgezero.toml`; no adapter-specific `Hooks::configure` is needed:
 
-```rust
-fn configure(app: &mut edgezero_core::app::App) -> Result<(), edgezero_core::EdgeError> {
-    app.insert_state(edgezero_adapter_spin::geo::SpinGeoIngress::new(
-        "geo_ingress_token",
-    )?);
-    Ok(())
-}
+```toml
+[stores.kv]
+ids = ["geo"]
+default = "geo"
+
+[adapters.spin.geo]
+provider = "kv"
+store_id = "geo"
+pin = "<generation>@<manifest-sha256>" # Replace with the verified dataset receipt.
+reader_ip = "authenticated-header"
+credential_variable = "geo_token"
+lookup_timeout_ms = 250
 ```
 
-Install this selection in adapter-local Hooks so shared handlers depend only on `ctx.geo()`.
-This is a Rust opt-in capability; there is currently no `[adapters.spin.geo]` manifest switch.
-The constructor accepts a lowercase Spin variable name, not a credential. Bind the secret
-in `spin.toml` (replace `my-app` with your component id):
+The provider defaults to off. `EDGEZERO__ADAPTER__GEO__PROVIDER`, `__STORE_ID`,
+`__PIN`, `__READER_IP`, `__CREDENTIAL_VARIABLE` and `__LOOKUP_TIMEOUT_MS` override
+matching manifest defaults. A timeout must be 1–30000 milliseconds. Invalid pins,
+undeclared logical bindings, unknown geo override keys and mixed provider settings
+are configuration errors; `provider = "off"` must not retain source settings.
+Spin rejects Axum's peer/CloudFront policy and `max_in_flight` fields.
+
+Declare the physical store and credential variable in the consuming component's
+`spin.toml` (replace `my-app` with its component id):
 
 ```toml
 [variables]
-geo_ingress_token = { required = true, secret = true }
+geo_token = { required = true, secret = true }
+
+[component.my-app]
+key_value_stores = ["geo_runtime"]
 
 [component.my-app.variables]
-geo_ingress_token = "{{ geo_ingress_token }}"
+geo_token = "{{ geo_token }}"
+
+[component.my-app.environment]
+EDGEZERO__STORES__KV__GEO__NAME = "geo_runtime"
 ```
 
-Supply the variable through your deployment's secret provider. Its value must be a
-high-entropy credential of 32–128 ASCII bytes in the range `0x21`–`0x7e`; do not put it in source, logs,
-application state, or command-line arguments. The adapter loads it for each admitted
-request under the existing read deadline. There is one active credential; rotation requires
+Supply the variable through the deployment's secret provider. Use a high-entropy
+credential of 32–128 ASCII bytes in `0x21`–`0x7e`, never source, logs or command-line
+arguments. The adapter loads it once per admitted request with a syntactically valid
+token, including wrong tokens. Remote variable providers can incur network cost on
+each read; qualify latency and restrict direct origin access. Rotation requires
 coordinating the proxy and variable update.
 
-Spin variables can use local or remote secret providers. This adapter reads the variable
-once for each admitted request with a syntactically valid token, including a wrong token.
-Environment-backed lookup is local; providers such as Vault or Azure Key Vault can perform
-remote I/O on each read. Qualify the chosen provider's latency, throughput, and cost, and
-restrict origin access so arbitrary internet traffic cannot amplify secret-provider calls.
-The request deadline bounds guest waiting; it does not prove cancellation of remote work.
+A trusted proxy must remove every viewer-supplied instance of these headers and
+replace them with its own values:
 
-The fronting proxy must remove all viewer-supplied instances of these fields and replace
-them with its own geographic metadata and credential:
+| Header                 | Value                                                         |
+| ---------------------- | ------------------------------------------------------------- |
+| `x-edgezero-geo-ip`    | One original visitor IP, such as `192.0.2.1` or `2001:db8::1` |
+| `x-edgezero-geo-token` | The credential shared with Spin                               |
 
-| Header                   | Value                                                       |
-| ------------------------ | ----------------------------------------------------------- |
-| `x-edgezero-geo-country` | ISO country, such as `US`                                   |
-| `x-edgezero-geo-region`  | Optional subdivision component, such as `CA`, without `US-` |
-| `x-edgezero-geo-token`   | The secret credential shared with Spin                      |
+The IP must have no port, list, whitespace or zone identifier. IPv4-mapped IPv6 is
+canonicalized. The proxy needs no geographic database. Protect its transport to a
+fixed Spin origin with TLS or an isolated network, redact both fields in logs, and
+disable credential-bearing redirects. A credential authenticates its holder; the
+operator remains responsible for the claimed visitor IP and network topology.
+`Forwarded`, `X-Forwarded-For`, country headers and `spin-client-addr` are not geo
+trust sources.
 
-For example, a fronting Cloudflare Worker can take assertions from `request.cf.country` and
-`request.cf.regionCode`, rather than viewer headers. Build a new header set after deleting
-the three fields above; set only known geographic values and inject the credential from a
-Worker secret binding. Forward to a fixed HTTPS Spin origin with redirects disabled so the
-credential cannot follow an origin redirect. Protect proxy-to-origin transport with TLS or
-an isolated private network, redact the token in proxy logs, and restrict direct origin
-access. Matching a bearer credential authenticates its holder; it does not verify the
-proxy's geography or network configuration. Spin's `spin-client-addr` is not used as geo
-authentication because its availability and duplicate handling vary by runtime.
+Publish the dataset through the separate [Spin operator loader](https://github.com/IABTechLab/edgezero/blob/main/examples/geo-spin-loader/README.md)
+after building and verifying it with the [KV geo tools](https://github.com/IABTechLab/edgezero/blob/main/examples/geo-kv-prototype/README.md).
+The loader uses ordinary binary KV writes, checks immutable conflicts, reads writes
+back, publishes the manifest last and verifies the full tree. It is a temporary
+loopback application, never a route in the serving app. Use the exact same named
+store and backend configuration for loading and serving; local Spin storage requires
+an absolute database path. Select the pin only after verification through the serving
+identity/path. Rollback requires re-verifying the previous permitted generation.
 
-Managed `run_app`, `run_app_with_platform`, `dispatch_app`, and manual managed dispatch
-consume the selection automatically. Successful authentication produces provider
-`spin-ingress`, source `GeoSource::SpinIngress`, and trust basis
-`GeoTrustBasis::AuthenticatedIngressHeader`. Read country and optional subdivision from
-`GeoStatus::Located` through the same `ctx.geo()` interface as the other adapters.
+Serving performs exact-key reads only. Each admitted/authenticated request opens the
+pinned manifest, verifies both roots, and looks up the visitor IP through the shared
+portable resolver. All SDK handles and validated cache bytes are request-local,
+including retained `dispatch_app` applications. This repeats manifest/root reads on
+every request; measure cold-request latency and capacity with the selected backend.
+The local cache is limited to 1 MiB/16 entries, objects to 384 KiB and paths to three
+objects. The SDK materializes values before core validates their size, so these are
+not hard host allocation limits. Platform controls govern aggregate concurrency.
 
-Missing, invalid, duplicated, or incorrect credentials yield selected `UntrustedIngress`.
-Secret lookup failure or invalid secret configuration yields `GeoError::ProviderFailure`.
-Authenticated missing geography yields `MissingMetadata`; malformed or duplicated geographic
-fields yield `GeoError::InvalidAssertion`. A country without region remains country-only.
-There is no fallback to `CF-IPCountry`, CloudFront headers, or a prior request's result.
-These outcomes do not themselves choose an HTTP status or application permission policy.
+One KV deadline covers preparation and lookup. Secret and KV work also share the
+remaining admitted request deadline. Expiry drops guest futures; it does not certify
+cancellation of host/backend work. There is no automatic fallback or previous-request
+result. Outcomes retain provider `kv`; a location has `GeoSource::Kv` and
+`GeoTrustBasis::AuthenticatedIngressHeader`:
 
-Geographic assertions do not partition shared caches. Responses whose authorization or
-consent policy depends on geography, including error responses, need an appropriate cache
-policy at the application and proxy. Do not reuse a response across locations merely because
-the URL matches. Applications that require verified geography must reject unavailable/error
-states explicitly; authenticating assertions is not blanket origin access control.
+- Missing, duplicate, invalid or wrong credentials: `UntrustedIngress`.
+- Authenticated missing IP: `MissingReaderIp`; invalid or duplicate IP: `UntrustedIngress`.
+- Secret/backend errors, expired work, or missing/corrupt pinned objects: `ProviderFailure`.
+- A valid dataset gap: `NoMatch`; a source country unsupported by core: `UnsupportedGeography`.
+- A country without subdivision remains country-only.
 
-The adapter strips every token header before admission, middleware, and handler callbacks,
-including when the selection is off. Its bytes still count toward original header limits.
-Applications without the selection remain `NoSelection`. The unmanaged request converter
-does not authenticate ingress. Local proxy/Spin fixtures prove the configured mechanism;
-hosted metadata accuracy, transport protection, and downstream consent policy require
-separate deployment qualification.
+The adapter strips both private headers before admission, middleware and handlers,
+even when geo is off; original bytes still count toward header limits. Public header
+or extension mutations cannot change the private outcome. Configuration errors fail
+assembly; ordinary geo errors do not themselves choose an HTTP status or grant
+permission. Applications must define unavailable/error policy and geography-sensitive
+cache behavior, including error responses. Local runtime verification does not certify
+hosted proxy protection, data accuracy, licensed-data permissions or production load.
 
 ## Context Access
 

@@ -94,6 +94,19 @@ impl EnvConfig {
         self.entries.get(&path).map(String::as_str)
     }
 
+    /// Enumerate relative key paths in a configuration namespace, without values.
+    #[inline]
+    pub fn keys_below(&self, prefix: &[&str]) -> impl Iterator<Item = Vec<&str>> {
+        let folded_prefix: Vec<_> = prefix
+            .iter()
+            .map(|part| part.to_ascii_lowercase())
+            .collect();
+        self.entries.keys().filter_map(move |key| {
+            key.strip_prefix(folded_prefix.as_slice())
+                .map(|suffix| suffix.iter().map(String::as_str).collect())
+        })
+    }
+
     /// `EDGEZERO__LOGGING__ENDPOINT`. Adapters that wire a platform-specific
     /// logger (e.g. Fastly's named log endpoints) read this to know which
     /// endpoint to attach to; a `None` value means "don't init a platform
@@ -588,5 +601,20 @@ mod tests {
         assert_eq!(cfg.adapter_host(), Some("good"));
         assert_eq!(cfg.adapter_port(), None);
         assert_eq!(cfg.get(&["adapter"]), None);
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::EnvConfig;
+    #[test]
+    fn prefix_keys_are_case_folded_and_do_not_include_values() {
+        let env = EnvConfig::from_vars([
+            ("EDGEZERO__ADAPTER__GEO__PROVIDER", "kv"),
+            ("EDGEZERO__ADAPTER__GEO__TYPO", "private"),
+            ("EDGEZERO__STORES__KV__GEO__NAME", "binding"),
+        ]);
+        let keys: Vec<_> = env.keys_below(&["ADAPTER", "geo"]).collect();
+        assert_eq!(keys, vec![vec!["provider"], vec!["typo"]]);
     }
 }

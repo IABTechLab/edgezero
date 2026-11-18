@@ -19,6 +19,7 @@ pub use super::spin_impl::test_support::{
 pub use crate::request::test_support::{
     deadline_body, dispatch_ingress_stream, dispatch_ingress_stream_with_timer,
     dispatch_ingress_with, dispatch_request, dispatch_request_with_geo_secret,
+    dispatch_request_with_geo_stores,
 };
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
 pub use crate::response::test_support::next_response_body;

@@ -1,9 +1,7 @@
 #[cfg(any(feature = "celld", feature = "dynamodb"))]
 mod backend;
 mod import;
-mod index;
-mod publication;
-mod store;
+use geo_kv_prototype::{index, publication, store};
 
 use std::{fs, net::IpAddr, path::Path, sync::Arc, time::Instant};
 
