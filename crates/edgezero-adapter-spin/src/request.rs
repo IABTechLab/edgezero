@@ -10,6 +10,7 @@
 pub(crate) mod test_support;
 
 use crate::SpinResponse;
+use crate::after_response::unsupported_handle;
 use crate::config_store::SpinConfigStore;
 use crate::context::{SpinRequestContext, parse_client_addr};
 use crate::ingress::capture_request_ingress;
@@ -162,6 +163,7 @@ fn into_core_request_head(parts: RequestParts, outbound_clock: MonotonicClock) -
     request
         .extensions_mut()
         .insert(outbound_client(outbound_clock));
+    request.extensions_mut().insert(unsupported_handle());
 
     request
 }

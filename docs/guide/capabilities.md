@@ -355,8 +355,11 @@ so CPU-bound or blocking work overruns it.
   the same outbound scope. The budget is checked whenever a task yields to the adapter's progress
   driver; a blocked hostcall cannot be preempted. The tasks delay the next request on a reused
   `serve_app` instance, and a caller-sent native replacement after an uncommitted delivery.
-- Cloudflare and Spin install no scheduler, so registration returns `501 Not Implemented`. Cloudflare
+- Cloudflare installs no scheduler, so registration returns `501 Not Implemented`. Cloudflare
   `waitUntil` support is tracked in [#478](https://github.com/IABTechLab/edgezero/issues/478).
+- Spin rejects every registration with `501 Not Implemented` and the message
+  `after-response tasks are not supported by the Spin adapter`
+  (`edgezero_adapter_spin::AFTER_RESPONSE_UNSUPPORTED`). The task is dropped without being polled.
 
 ## Outbound Matrix
 

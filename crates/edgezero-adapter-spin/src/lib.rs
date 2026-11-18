@@ -1,5 +1,7 @@
 //! Adapter helpers for Spin (Fermyon).
 
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+mod after_response;
 #[cfg(all(feature = "cli", not(target_arch = "wasm32")))]
 pub mod cli;
 
@@ -75,6 +77,11 @@ pub const AKAMAI_FUNCTIONS_PLATFORM: edgezero_core::PlatformMetadata =
             edgezero_core::PlatformUnknownReason::ProviderUnpublished,
         ),
     );
+
+/// Message of the `501 Not Implemented` error that `RequestContext::after_response` returns on
+/// Spin, which does not run after-response tasks.
+pub const AFTER_RESPONSE_UNSUPPORTED: &str =
+    "after-response tasks are not supported by the Spin adapter";
 
 /// Generic Spin resource limits and accounting are runtime-configured.
 pub const SPIN_PLATFORM: edgezero_core::PlatformMetadata = edgezero_core::PlatformMetadata::new(

@@ -9,7 +9,10 @@
   after the response attempt ends and is cancelled at its budget. Adapters without support return
   `501 Not Implemented` at registration.
 - Add the `after-response-tasks` capability: Axum and Fastly `BoundedCooperative`,
-  Cloudflare and Spin `Unsupported` (tracked in #478 and #483).
+  Cloudflare and Spin `Unsupported` (Cloudflare tracked in #478).
+- Spin rejects after-response tasks with a `501` that names the adapter
+  (`edgezero_adapter_spin::AFTER_RESPONSE_UNSUPPORTED`) on every converted request, instead of
+  core's generic message (#483).
 - Axum production, `run_app` and `AxumDevServer::run` shutdown now waits for registered after-response tasks within the
   existing shutdown grace, after connections drain. Tasks still pending at the grace make the
   process exit non-zero with `grace exhausted`.

@@ -980,6 +980,65 @@ mod tests {
             });
         }
 
+        #[test]
+        fn native_request_after_response_registration_reports_spin_capability_error() {
+            sdk_block_on(async {
+                let polls = Arc::new(AtomicUsize::new(0));
+                let drops = Arc::new(AtomicUsize::new(0));
+                let handler_polls = Arc::clone(&polls);
+                let handler_drops = Arc::clone(&drops);
+                let router = RouterService::builder()
+                    .get("/task", move |ctx: RequestContext| {
+                        let task_polls = Arc::clone(&handler_polls);
+                        let probe = DropSignal(Arc::clone(&handler_drops));
+                        async move {
+                            let error = ctx
+                                .after_response(Duration::from_secs(1), async move {
+                                    let _probe = probe;
+                                    task_polls.fetch_add(1, Ordering::SeqCst);
+                                })
+                                .expect_err("Spin must reject after-response tasks");
+                            Ok::<_, EdgeError>(format!(
+                                "{} {}",
+                                error.status().as_u16(),
+                                error.message()
+                            ))
+                        }
+                    })
+                    .get("/control", |_ctx: RequestContext| async {
+                        Ok::<_, EdgeError>("control")
+                    })
+                    .build();
+                let app = App::new(router);
+
+                for (path, expected) in [
+                    (
+                        "/task",
+                        format!("501 {}", edgezero_adapter_spin::AFTER_RESPONSE_UNSUPPORTED),
+                    ),
+                    ("/control", "control".to_owned()),
+                ] {
+                    let outgoing_request = SpinRequest::builder()
+                        .method("GET")
+                        .uri(format!("http://example.test{path}"))
+                        .body(http_body_util::Empty::<Bytes>::new())
+                        .expect("outgoing-compatible request");
+                    let wasi_request = outgoing_request.into_request().expect("WASI request");
+                    let incoming_request =
+                        SpinRequest::from_request(wasi_request).expect("incoming Spin request");
+
+                    let mut response = dispatch_request(&app, incoming_request)
+                        .await
+                        .expect("Spin response");
+
+                    assert_eq!(response.response_mut().status(), StatusCode::OK);
+                    assert_eq!(captured_body(response).as_ref(), expected.as_bytes());
+                }
+                assert_eq!(polls.load(Ordering::SeqCst), 0, "task must never be polled");
+                assert_eq!(drops.load(Ordering::SeqCst), 1, "task must be dropped");
+            });
+        }
+
         struct CountingMiddleware(Arc<AtomicUsize>);
 
         #[async_trait::async_trait(?Send)]
