@@ -295,7 +295,7 @@ Draft PR #517, linked on top of stack #511 above #454.
 - [x] Merge order: after #469 and #514. When #514 merges into `feature/kv-geoip`, merge that branch back in.
 - [x] Closes #475, #89, #90, #91, #92 and #485.
 - [x] Follow-up live checks, not closing conditions: positive Fastly viewer TLS; Cloudflare direct-ingress IP and viewer TLS on a live Worker; Spin client address on each hosted Spin runtime; protected CloudFront JA4 on a real distribution: a generated fingerprint on HTTPS, no fingerprint over plain HTTP, a viewer-sent `CloudFront-Viewer-JA4-Fingerprint` never reaching the origin, and origin isolation.
-- [x] Raise with #502 and #469's author that `ctx.geo()` and `ctx.ja4()` on Cloudflare read `cf` without an opt-in, and service-binding callers can supply it. Not changed in this PR.
+- [ ] Raise with #502 and #469's author that `ctx.geo()` and `ctx.ja4()` on Cloudflare read `cf` without an opt-in, and service-binding callers can supply it. Not changed in this PR.
 - [x] Note the `SpinKvGeo::resolve` split so #514's author can reconcile it.
 
 ## Verification log
