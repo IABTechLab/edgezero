@@ -85,6 +85,38 @@ mod tests {
 
     struct FixedConfigStore(&'static str);
 
+    type ClientInfoCase = (
+        Option<&'static str>,
+        Option<Vec<(&'static str, JsValue)>>,
+        &'static str,
+    );
+
+    struct ClientInfoApp<const DIRECT: bool>;
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "store-free fixture deliberately uses default application configuration"
+    )]
+    impl<const DIRECT: bool> Hooks for ClientInfoApp<DIRECT> {
+        fn manifest() -> BakedManifest {
+            Manifest::from_baked_json(if DIRECT {
+                r#"{"adapters":{"cloudflare":{"client_info":{"direct_ingress":true}}}}"#
+            } else {
+                r#"{"adapters":{"cloudflare":{}}}"#
+            })
+        }
+
+        fn owns_logging() -> bool {
+            true
+        }
+
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder()
+                .get("/client", client_info_json)
+                .build())
+        }
+    }
+
     #[cfg(feature = "test-utils")]
     struct FailingConfiguration;
 
@@ -553,38 +585,6 @@ mod tests {
                         .expect("geo response JSON");
                 assert_eq!(&actual, expected, "{entrypoint}, metadata {fields:?}");
             }
-        }
-    }
-
-    type ClientInfoCase = (
-        Option<&'static str>,
-        Option<Vec<(&'static str, JsValue)>>,
-        &'static str,
-    );
-
-    struct ClientInfoApp<const DIRECT: bool>;
-
-    #[expect(
-        clippy::missing_trait_methods,
-        reason = "store-free fixture deliberately uses default application configuration"
-    )]
-    impl<const DIRECT: bool> Hooks for ClientInfoApp<DIRECT> {
-        fn manifest() -> BakedManifest {
-            Manifest::from_baked_json(if DIRECT {
-                r#"{"adapters":{"cloudflare":{"client_info":{"direct_ingress":true}}}}"#
-            } else {
-                r#"{"adapters":{"cloudflare":{}}}"#
-            })
-        }
-
-        fn owns_logging() -> bool {
-            true
-        }
-
-        fn routes() -> Result<RouterService, EdgeError> {
-            Ok(RouterService::builder()
-                .get("/client", client_info_json)
-                .build())
         }
     }
 

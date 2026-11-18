@@ -402,14 +402,17 @@ mod tests {
             ),
         );
         let rendered = format!("{info:?} {info:#?}");
-        for secret in [
+        for captured in [
             "2001:db8::9",
             "4431",
             "203.0.113.77",
             "TLSv1.3",
             "ECDHE-RSA-AES128-GCM-SHA256",
         ] {
-            assert!(!rendered.contains(secret), "{secret} leaked: {rendered}");
+            assert!(
+                !rendered.contains(captured),
+                "Debug output contains a captured value"
+            );
         }
         assert!(rendered.contains("TrustedXForwardedFor"));
         assert!(rendered.contains("Fastly"));
