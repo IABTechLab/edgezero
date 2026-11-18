@@ -464,12 +464,12 @@ impl AxumServiceState {
         };
         let checked = normalize(&self.trusted_proxy_policy, remote_addr, &parts);
         let client_info = checked.client_info();
+        guard.set_forwarding_result(checked.forwarding_result());
+        strip_forwarding_headers(&mut parts.headers);
         let ja4 = self.ja4.as_ref().map_or(
             CapturedJa4::Unavailable(Ja4Unavailable::NotExposed),
             |selection| selection.capture(remote_addr, &parts.headers),
         );
-        guard.set_forwarding_result(checked.forwarding_result());
-        strip_forwarding_headers(&mut parts.headers);
         parts.extensions.insert(checked.effective_host().clone());
         parts.extensions.insert(NativeIngressMetadata::new(
             guard.request_id(),
@@ -1399,6 +1399,23 @@ mod tests {
                 "{peer} {headers:?}"
             );
         }
+        // Forwarding headers are stripped before capture, so a generic header name in that
+        // family is never read, even from a trusted proxy.
+        let forwarding_named = ja4_service(
+            Ja4Selection::Generic(
+                TrustedJa4Header::parse("x-forwarded-ja4", "127.0.0.1/32").unwrap(),
+            ),
+            NativeGeo::default(),
+        );
+        assert_eq!(
+            ja4_label(
+                &forwarding_named,
+                "127.0.0.1:9",
+                &[("x-forwarded-ja4", JA4_FIXTURE)]
+            )
+            .await,
+            "missing+credential"
+        );
     }
 
     #[expect(
