@@ -70,6 +70,7 @@ Files: new `crates/edgezero-core/src/client_info.rs`; `crates/edgezero-core/src/
 - [ ] `effective_client_ip()` returns `Some` only for `Fastly`, `Cloudflare`, `TrustedForwarded`, `TrustedXForwardedFor`, `AuthenticatedHeader` and `DirectPeer`. `PeerFallback` returns `None`.
 - [ ] Hand-written `Debug` for `ClientInfo`, `ClientAddress` and `ViewerTlsValue` that prints capture state and source, never the IP or TLS string. No `Display`, no `Serialize`.
 - [ ] TLS classification helper shared by Fastly and Cloudflare: input is "absent", "present text" or "present but not text"; empty text is `Missing`; non-text is `Rejected`; any non-empty text is captured as reported. No grammar, allowlist, character rule or length limit.
+- [ ] A Fastly-shaped entry point on the same helper that takes `Result<Option<&str>, Utf8Error>`, so the whole Fastly TLS mapping is a pure function tested here, not only inside the `fastly`-gated adapter module.
 - [ ] `pub mod client_info;` in `lib.rs`.
 
 Tests (colocated):
@@ -126,17 +127,23 @@ Files: `crates/edgezero-adapter-fastly/src/request.rs`, `tests/contract.rs`.
 - [ ] Add `request_client_info(&FastlyRequest) -> ClientInfo` beside `request_geo`.
   - Direct peer: `NotExposed`.
   - Effective client: `get_client_ip_addr()` as source `Fastly`; `None` is `Missing`.
-  - TLS: `get_tls_protocol()` and `get_tls_cipher_openssl_name()` through the Task 1 helper. `Ok(None)` and `Ok(Some(""))` are `Missing`; `Err(Utf8Error)` is `Rejected`.
+  - TLS: pass `get_tls_protocol()` and `get_tls_cipher_openssl_name()` straight to the Task 1 Fastly-shaped helper. `Ok(None)` and `Ok(Some(""))` are `Missing`; `Err(Utf8Error)` is `Rejected`.
 - [ ] In `dispatch_with_handles`, capture it with `ingress` and `geo`, before `apply_request_prepare`. Thread it through `dispatch_ingress_reader` and `dispatch_core_request` into `dispatch_admitted_with_client_info`.
 - [ ] Leave `FastlyRequestContext` and the lower-level `into_core_request` unchanged. Unmanaged conversion attaches no snapshot.
 
 Tests:
 
-- Pure mapping tests that feed the classifier runtime-shaped values: populated (`TLSv1.3`, an OpenSSL cipher name), empty, absent, non-UTF-8.
+- The pure Fastly TLS mapping is tested in `edgezero-core` (Task 1) with populated (`TLSv1.3`, an OpenSSL cipher name), empty, absent and non-UTF-8 inputs.
 - Viceroy contract: a handler's effective client equals `FastlyRequestContext::client_ip`; TLS is `Missing` on Viceroy's plain HTTP; a raw prepare hook that inserts a `ClientInfo` extension does not change `ctx.client_info()`.
 - A non-client request has a `Missing` effective client.
 
-Checks: `cargo test -p edgezero-adapter-fastly` natively for pure tests; the Fastly WASM suite under Viceroy as `scripts/run_tests.sh` runs it.
+Checks:
+
+- `cargo test -p edgezero-core client_info` for the pure mapping.
+- Adapter tests, as the harness's `runtime-unit-tests` phase runs them: `CARGO_TARGET_WASM32_WASIP1_RUNNER="viceroy run" cargo test -p edgezero-adapter-fastly --no-default-features --features fastly,test-utils --target wasm32-wasip1 --lib`. `request.rs` compiles only with the `fastly` feature, so plain `cargo test -p edgezero-adapter-fastly` does not run these tests.
+- Contract tests, as the `sdk-tests` phase runs them: the same command with `--test contract` instead of `--lib`.
+
+Record in the verification log that these checks prove the mapping and plain-HTTP absence only. They do not prove positive viewer TLS capture on Fastly; that is a live follow-up.
 
 ## 5. Axum ClientInfo
 
@@ -171,13 +178,15 @@ Files: `crates/edgezero-adapter-cloudflare/src/lib.rs`, `src/request.rs`, `tests
 - [ ] Resolve `direct_ingress` once from `A::manifest()` in `lib.rs`, where runtime variables are already read, and pass it to `dispatch_with_handles`.
 - [ ] Add `request_client_info(&CfRequest, direct_ingress) -> ClientInfo` beside `request_geo`, before the native request is consumed.
   - Direct peer: `NotExposed`.
-  - Effective client with the opt-in off: `NotExposed`, and `CF-Connecting-IP` is not read. With it on: parse the header as one IP literal, source `Cloudflare`. Absent is `Missing`; any other value, including Workers' comma-joined repeats, is `Rejected`. No fallback header.
-  - TLS in both modes: read `cf` from `req.inner()` with `worker::js_sys::Reflect`, then `tlsVersion` and `tlsCipher` independently, `as_string()` into the Task 1 helper. A missing `cf`, `undefined` or `null` is `Missing`; a non-string or a throwing read is `Rejected`. Do not call `worker::Cf::tls_version()` or `tls_cipher()`.
+  - Opt-in off: effective client and both TLS fields are `NotExposed`. Read neither `CF-Connecting-IP` nor `cf`.
+  - Opt-in on, effective client: parse `CF-Connecting-IP` as one IP literal, source `Cloudflare`. Absent is `Missing`; any other value, including Workers' comma-joined repeats, is `Rejected`. No fallback header.
+  - Opt-in on, TLS: read `cf` from `req.inner()` with `worker::js_sys::Reflect`, then `tlsVersion` and `tlsCipher` independently, `as_string()` into the Task 1 helper. A missing `cf`, `undefined` or `null` is `Missing`; a non-string or a throwing read is `Rejected`. Do not call `worker::Cf::tls_version()` or `tls_cipher()`.
 - [ ] Thread the snapshot through `dispatch_ingress_stream_and` to `dispatch_admitted_with_client_info`. Do not change `request_geo` or the JA4 read.
 
 Tests (`wasm-bindgen-test`, synthetic `cf` set with `Reflect` as `ingress_fidelity.rs` already does):
 
-- Opt-in off: effective client `NotExposed` even with `CF-Connecting-IP`; TLS captured from synthetic `cf`.
+- Opt-in off: a request carrying `CF-Connecting-IP` and a synthetic `cf` with `tlsVersion` and `tlsCipher`, the shape a service-binding caller can send, reports the effective client and both TLS fields `NotExposed`.
+- Opt-in on: TLS captured from synthetic `cf` with source `Cloudflare`.
 - Opt-in on: IPv4 and IPv6 captured; missing header `Missing`; malformed and comma-joined values `Rejected`.
 - TLS: `""`, `null`, absent property, non-string value, and no `cf` object; each field independent of the other.
 - Geo and JA4 results are unchanged in both modes.
@@ -192,10 +201,11 @@ Files: `crates/edgezero-adapter-spin/src/context.rs`, `src/request.rs`, `src/geo
 
 - [ ] Resolve `direct_ingress` from the baked manifest wherever `SpinKvGeo::from_config` already runs for `run_app` and `dispatch_app`. If it is `true` and the Spin Geo selection is KV, which requires `reader_ip = "authenticated-header"`, return #514's configuration error.
 - [ ] `SpinRequestContext::client_addr` and `full_url` read the last field with `get_all(..).iter().next_back()`.
+- [ ] Change #514's private capture in `geo::ingress::capture_inputs` so the token is recorded as absent, valid, or invalid (malformed or duplicated) before the headers are removed. Today all three become `None`. Keep the header removal, the IP capture and the token syntax rules unchanged.
 - [ ] Split `SpinKvGeo::resolve` into:
-  - `authenticate(...) -> SpinIpAdmission` with variants for admitted IP, no token, token rejected, secret failure (including an expired deadline before comparison), missing IP and invalid IP.
+  - `authenticate(...) -> SpinIpAdmission` with variants for admitted IP, no token, invalid token, token not matching the secret, secret failure (including an expired deadline before comparison), missing IP and invalid IP.
   - `lookup(admitted_ip, ...) -> GeoOutcome` for the existing manifest, root and lookup work.
-  - Keep every existing Geo outcome identical: no token, rejected token and invalid IP give `UntrustedIngress`; secret failure gives `ProviderFailure`; missing IP gives `MissingReaderIp`.
+  - Keep every existing Geo outcome identical: no token, invalid token, mismatched token and invalid IP give `UntrustedIngress`; secret failure gives `ProviderFailure`; missing IP gives `MissingReaderIp`.
 - [ ] Build the snapshot in `dispatch_ingress_stream_with_timer_and`, after admission and before `dispatch_core_request`:
   - Off: direct peer and effective client `NotExposed`.
   - Direct ingress: parse the last `spin-client-addr` as a `SocketAddr`; direct peer is that address and effective client is its IP with source `DirectPeer`. No field is `Missing`; non-UTF-8 or unparsable is `Rejected`. Read it before the request moves.
@@ -207,7 +217,7 @@ Tests:
 
 - Native colocated: `SpinRequestContext` last-field reads with a client-prepended value; direct-ingress parsing of `ip:port`, `[ipv6]:port`, bare IP (`Rejected`), garbage and non-UTF-8; the config conflict error from both entry points.
 - #514's existing Geo tests pass unchanged after the split. Add tests that each `SpinIpAdmission` variant maps to the same Geo outcome as before.
-- Authenticated-header snapshot for every row of the spec's table; `client_info()` and `ctx.geo()` describe the same IP on a successful lookup; a failed or timed-out lookup leaves the snapshot `AuthenticatedHeader`.
+- Authenticated-header snapshot for every row of the spec's table, driven from request headers through `capture_inputs` and `authenticate`, not from prebuilt admission values: no token header, a malformed token, two token headers, a wrong token, a valid token with no, duplicated, malformed, IPv4, IPv6 and IPv4-mapped IP; `client_info()` and `ctx.geo()` describe the same IP on a successful lookup; a failed or timed-out lookup leaves the snapshot `AuthenticatedHeader`.
 - Wasmtime contract: off and direct ingress under `wasmtime serve` give `NotExposed` and `Missing`.
 
 Checks: `cargo test -p edgezero-adapter-spin`; `cargo check -p edgezero-adapter-spin --target wasm32-wasip2 --features spin`; the Spin contract suite under Wasmtime.
@@ -219,17 +229,21 @@ Spec: Protected CloudFront JA4 on Axum, Configuration.
 Files: `crates/edgezero-adapter-axum/src/ja4.rs`, `geo.rs`, `request.rs`, `service.rs`, `run_options.rs`, `dev_server.rs`, `tests/production_hosting.rs`.
 
 - [ ] `NativeGeo` exposes the selected `ProtectedCloudFrontAlb` for `CloudFront` and supplied providers, and `None` for off and KV.
-- [ ] Generalize the trust extension that `into_core_request_parts` reads into one Axum JA4 selection with two modes: the existing generic `TrustedJa4Header`, and protected CloudFront holding the Geo policy. Protected capture admits the peer with the policy, then calls `CapturedJa4::from_trusted_proxy_header` on `cloudfront-viewer-ja4-fingerprint`. A peer that is not admitted gives `NotExposed` without parsing.
+- [ ] One Axum JA4 selection with two modes: the existing generic `TrustedJa4Header`, and protected CloudFront holding the Geo policy. Protected capture admits the peer with the policy, then calls `CapturedJa4::from_trusted_proxy_header` on `cloudfront-viewer-ja4-fingerprint`. A peer that is not admitted gives `NotExposed` without parsing.
+- [ ] Capture JA4 in the managed service from the listener's `remote_addr` and the sanitized headers, after `sanitize_received_head` and next to `normalize()`. Pass the `CapturedJa4` to `into_core_request_parts` as an argument. Stop inserting `Arc<TrustedJa4Header>` into request extensions on the managed path, so the application's received-head preparer, which gets `&mut Extensions`, cannot change the peer or the trust configuration. This applies to the generic mode too; its results for an unmodified request do not change. The lower-level public `into_core_request` keeps its current extension-based behavior and is not the managed trust boundary.
 - [ ] Resolve `[adapters.axum.ja4] source` alongside Geo in `run_options` and the dev runner, using the same precedence and dev-runner rule as Geo. Fail before listening when protected JA4 is selected and Geo is off, Geo is KV, or `EDGEZERO__ADAPTER__JA4_*` is also set.
 - [ ] Leave `strip_credential` as is; the policy that enables protected JA4 already triggers it.
 
 Tests:
 
 - Generic proxy behavior unchanged; existing `ja4.rs` and dev-server JA4 tests pass.
+- A received-head preparer that replaces `ConnectInfo` with a trusted address, removes it, or inserts its own JA4 trust extension does not change the JA4 result on a managed listener, in both modes.
 - Protected mode over a managed listener: admitted peer with a valid, missing, malformed and duplicated fingerprint; denied peer with a valid fingerprint; the generic header is ignored in protected mode and the CloudFront header in generic mode.
 - An unknown country or failed Geo lookup leaves JA4 capture unchanged.
 - The credential header is absent from handler headers with protected JA4 on.
 - Startup fails for each invalid combination; Geo-only configurations and `EDGEZERO__ADAPTER__GEO__*` overrides behave as before.
+
+These tests prove the peer check, not CloudFront's behavior. The two CloudFront deployment requirements in the spec need the live checks listed in Task 12.
 
 Check: `cargo test -p edgezero-adapter-axum`, with and without the Geo features the existing CI matrix uses.
 
@@ -252,7 +266,7 @@ Spec: Documentation.
 
 - [ ] `docs/guide/handlers.md`, Request Context: `ctx.client_info()`, accessors, `effective_client_ip()`, `None` versus unavailable fields, the three reasons, and links to `ctx.geo()` and `ctx.ja4()`.
 - [ ] `docs/guide/capabilities.md`: client metadata matrix per adapter for direct peer, effective client, TLS version, TLS cipher, Geo and JA4.
-- [ ] `docs/guide/adapters/fastly.md`, `axum.md`, `cloudflare.md`, `spin.md`: the content each spec row lists.
+- [ ] `docs/guide/adapters/fastly.md`, `axum.md`, `cloudflare.md`, `spin.md`: the content each spec row lists. `axum.md` states the two CloudFront deployment requirements for protected JA4 (origin request policy includes the header; no viewer-supplied value of that name reaches the origin) and the checks to run before enabling it. `cloudflare.md` explains that service bindings can carry caller-supplied `cf`, which is why TLS is behind `direct_ingress`.
 - [ ] `docs/guide/configuration.md`: `[adapters.cloudflare.client_info]`, `[adapters.spin.client_info]`, `[adapters.axum.ja4] source`.
 - [ ] Every example compiles or matches a tested behavior; the matrix agrees with the adapter tests.
 
@@ -271,14 +285,15 @@ Check: docs ESLint and Prettier as Docs CI runs them.
 - [ ] Docs ESLint and Prettier
 - [ ] Review the diff against the spec section by section. Confirm nothing outside the spec was added.
 
-Record results in the verification log. A failure that also occurs at the Task 0 baseline is reported as pre-existing, not fixed here.
+Record results in the verification log. A failure that also occurs at the Task 0 baseline is reported as pre-existing, not fixed here. Label local Fastly TLS results as mapping and plain-HTTP evidence, not positive capture.
 
 ## 12. Pull request
 
 - [ ] Base `feature/kv-geoip`. State that the diff includes #469 and #514 until they land, and list the ClientInfo commits for review.
 - [ ] Merge order: after #469 and #514. When #514 merges into `feature/kv-geoip`, merge that branch back in.
 - [ ] Closes #475, #89, #90, #91, #92 and #485.
-- [ ] Follow-up live checks, not closing conditions: positive Fastly viewer TLS; Cloudflare direct-ingress IP and viewer TLS on a live Worker; Spin client address on each hosted Spin runtime; protected CloudFront header forwarding and origin isolation.
+- [ ] Follow-up live checks, not closing conditions: positive Fastly viewer TLS; Cloudflare direct-ingress IP and viewer TLS on a live Worker; Spin client address on each hosted Spin runtime; protected CloudFront JA4 on a real distribution: a generated fingerprint on HTTPS, no fingerprint over plain HTTP, a viewer-sent `CloudFront-Viewer-JA4-Fingerprint` never reaching the origin, and origin isolation.
+- [ ] Raise with #502 and #469's author that `ctx.geo()` and `ctx.ja4()` on Cloudflare read `cf` without an opt-in, and service-binding callers can supply it. Not changed in this PR.
 - [ ] Note the `SpinKvGeo::resolve` split so #514's author can reconcile it.
 
 ## Verification log

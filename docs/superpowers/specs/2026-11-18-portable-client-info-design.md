@@ -82,7 +82,7 @@ Each field is classified on its own.
 - Apply no grammar, allowlist, character rule, or length limit to captured values. They come from the provider runtime, not the client, and a list of known versions or ciphers would turn the next valid one into `Rejected`. Fastly reports OpenSSL names such as `ECDHE-RSA-AES128-GCM-SHA256`; Cloudflare reports names such as `AEAD-AES128-GCM-SHA256`.
 - On Cloudflare, read the properties from the `cf` object with `Reflect` and `as_string()`. Do not call `worker::Cf::tls_version()` or `tls_cipher()`: both unwrap the binding's `Result` and panic when the value is missing or not a string (worker 0.8.5, `cf.rs`).
 - On Fastly, the no-panic rule covers EdgeZero's parsing. The SDK's lazy load of client TLS metadata panics on invalid UTF-8 in SNI or JA4 (fastly 0.13.1, `handle.rs`). #469 already triggers that load on every request, so ClientInfo adds no new panic path.
-- Spin and Axum report both fields as `NotExposed`.
+- The Cloudflare row applies only with `direct_ingress` on. With it off, both fields are `NotExposed`. Spin and Axum report both fields as `NotExposed`.
 
 ## Capture and dispatch
 
@@ -101,7 +101,7 @@ Use the existing admitted-dispatch ownership path rather than a replaceable requ
 | --- | --- | --- | --- |
 | Fastly | Not exposed | Runtime downstream client IP | Runtime TLS protocol and cipher accessors |
 | Axum | Owned socket address, when available | Existing checked client result, including peer fallback and source | Not exposed on this path; a forwarded HTTPS scheme or trusted JA4 does not change this |
-| Cloudflare | Not exposed | Managed `CF-Connecting-IP` on the explicitly enabled direct path | `request.cf` TLS fields on every managed request |
+| Cloudflare | Not exposed | Managed `CF-Connecting-IP` on the explicitly enabled direct path | `request.cf` TLS fields on that same path |
 | Spin | Last runtime `spin-client-addr` field in direct-ingress mode | That address, source `DirectPeer`, or #514's authenticated IP, source `AuthenticatedHeader` | Not exposed |
 
 ### Fastly
@@ -135,14 +135,15 @@ Project the existing checked peer, effective client, client-field source, and fo
 direct_ingress = true
 ```
 
-The setting gates the client IP only. The default is off. This is an operator declaration that Cloudflare enforces direct-only traffic to the managed entrypoint and that service-binding calls do not reach that entrypoint. It is not an assertion the Worker can independently verify. The Workers request API has no documented direct-visitor discriminator. A `cf` object or absent `CF-Worker` is not proof. At the public edge, Cloudflare's [WAF upstream-zone field](https://developers.cloudflare.com/ruleset-engine/rules-language/fields/reference/cf.worker.upstream_zone/) can be used to enforce the routing contract. A caller-constructed request does not gain a trusted client IP by having `cf` data or a matching header.
+The setting gates the client IP and viewer TLS. The default is off. This is an operator declaration that Cloudflare enforces direct-only traffic to the managed entrypoint and that service-binding calls do not reach that entrypoint. It is not an assertion the Worker can independently verify. The Workers request API has no documented direct-visitor discriminator. A `cf` object or absent `CF-Worker` is not proof. At the public edge, Cloudflare's [WAF upstream-zone field](https://developers.cloudflare.com/ruleset-engine/rules-language/fields/reference/cf.worker.upstream_zone/) can be used to enforce the routing contract. A caller-constructed request does not gain trusted provenance by having `cf` data or a matching header.
 
-The gate covers `CF-Connecting-IP` because Cloudflare documents a way to set it from Worker code: in same-zone Worker subrequests it takes the value of `x-real-ip`, which the calling Worker can alter. Viewer TLS has no such documented path. It comes from the runtime's `cf` object, the same source `ctx.geo()` and `ctx.ja4()` already read on every managed request without an opt-in, so ClientInfo reads it the same way.
+Both facts can come from another Worker. Cloudflare documents that in same-zone Worker subrequests `CF-Connecting-IP` takes the value of `x-real-ip`, which the calling Worker can alter. The `cf` object can also be caller-supplied: workerd deep-clones the `cf` passed to `new Request(url, { cf })` and serializes it into the subrequest sent through a service binding, where it becomes the receiving Worker's `request.cf` (`Request` constructor and `serializeCfBlobJson` in `src/workerd/api/http.c++`). Reading `cf` alone does not show that the TLS values describe a viewer connection, so viewer TLS sits behind the same declaration as the client IP.
 
-- With the opt-in off, the effective client is `NotExposed`. Do not attempt to recover original visitor IP across Worker subrequests.
-- Viewer TLS does not depend on the opt-in. ClientInfo reads it on every managed request and reports source `Cloudflare`.
+`ctx.geo()` (#502) and `ctx.ja4()` (#469) read the same `cf` object without an opt-in. This change does not alter them; their exposure to service-binding callers belongs to those features.
+
+- With the opt-in off, the effective client and both TLS fields are `NotExposed`, whatever `cf` and headers the request carries. Do not attempt to recover original visitor IP across Worker subrequests.
 - With the opt-in on, parse `CF-Connecting-IP` as a single IP literal. Missing is `Missing`; malformed or multiple values are `Rejected`. Do not fall back to another header. Deployments using this feature must leave Pseudo IPv4 **Overwrite Headers** disabled; recovering original IPv6 in that mode is out of scope.
-- Read `cf.tlsVersion` and `cf.tlsCipher` independently and classify them by [Viewer TLS values](#viewer-tls-values). Local requests or partial metadata must not panic. Do not change `ctx.geo()` or `ctx.ja4()` behavior in either mode.
+- With the opt-in on, read `cf.tlsVersion` and `cf.tlsCipher` independently and classify them by [Viewer TLS values](#viewer-tls-values). Local requests or partial metadata must not panic. Do not change `ctx.geo()` or `ctx.ja4()` behavior in either mode.
 
 See Cloudflare's [HTTP headers and subrequest semantics](https://developers.cloudflare.com/fundamentals/reference/http-headers/) and [Workers request metadata](https://developers.cloudflare.com/workers/runtime-apis/request/#incomingrequestcfproperties).
 
@@ -189,7 +190,7 @@ credential_variable = "geo_token"
 
 #514 already admits one visitor IP on Spin. An operator proxy replaces `x-edgezero-geo-ip` and sends `x-edgezero-geo-token`, which the adapter compares in constant time against a Spin variable. Both headers are captured privately and removed before admission callbacks. ClientInfo reuses that admission instead of adding a second Spin trust setting, the same way protected JA4 reuses the Axum Geo path. Geo and ClientInfo then always describe the same visitor IP. This mode is what proxied deployments such as SpinKube use.
 
-- Split #514's `SpinKvGeo::resolve` into an authentication step and a lookup step. Authentication yields the admitted IP or a failure. The Geo lookup consumes the admitted IP; ClientInfo projects the same result. Header parsing, token rules, the secret read, and its deadline stay as #514 defines them.
+- Split #514's `SpinKvGeo::resolve` into an authentication step and a lookup step. Authentication yields the admitted IP or a failure. The Geo lookup consumes the admitted IP; ClientInfo projects the same result. Token rules, the secret read, and its deadline stay as #514 defines them. One capture change is needed: #514's `capture_inputs` turns a missing, invalid, or duplicated token into the same `None` before it strips the headers, which loses the difference between `Missing` and `Rejected`. Capture the token as absent, valid, or invalid instead. All three non-valid states keep #514's `UntrustedIngress` Geo outcome.
 - Authentication runs after admission and before `dispatch_admitted_with_geo`, so pre-dispatch, middleware, and handlers see the snapshot. The admission hook does not.
 - Classify the effective client as follows. A KV lookup failure, no match, or timeout after successful authentication does not change it.
 
@@ -226,6 +227,13 @@ Protected JA4 reuses the protected CloudFront path that the Axum Geo selection a
 
 With protected JA4 selected, check the owned socket peer against that policy before parsing the fixed `CloudFront-Viewer-JA4-Fingerprint` header through #469's parser. Ordinary forwarding trust or an effective client IP is not sufficient. The external ALB validates the origin credential. EdgeZero checks the socket peer and keeps removing the credential header, which `NativeGeo::strip_credential` already does whenever this policy is selected. The setting names the header; it does not contain the credential value or prove isolation of the live deployment.
 
+The owned socket peer is the listener's `remote_addr`, the value Geo and forwarding normalization already use. Today the generic JA4 path reads `ConnectInfo` and its trust configuration from request extensions after the application's received-head preparer has had mutable access to them. Capture JA4 in the managed service from `remote_addr` for both modes and pass the result to the request converter, so no extension edit changes the trust decision.
+
+Peer admission proves the route to Axum, not who generated the header. Deployments using this mode must also meet two CloudFront requirements, which EdgeZero cannot check:
+
+- The origin request policy includes `CloudFront-Viewer-JA4-Fingerprint`, so CloudFront generates it. CloudFront adds it only to HTTPS requests.
+- No viewer-supplied header with that name can reach the origin. AWS does not document what CloudFront does with a viewer-sent header of the same name, so verify it on the deployment before enabling the mode.
+
 JA4 depends on the Geo selection's path, not on its lookups. An unknown country or a failed Geo lookup does not change JA4 capture. Protected JA4 is unavailable when Geo is off or uses KV Geo, because neither carries the protected path. No issue asks for JA4 without Geo, and Trusted Server's reference deployment turns Geo on.
 
 | Axum JA4 configuration or request | Result |
@@ -254,8 +262,8 @@ Documentation ships in this PR. #89, #91, and #92 each list documented behavior 
 | `docs/guide/handlers.md`, Request Context | `ctx.client_info()`, its accessors, and `effective_client_ip()`. Explain `None` versus a snapshot with unavailable fields, and what `NotExposed`, `Missing`, and `Rejected` mean. List client IP, viewer TLS, `ctx.geo()`, and `ctx.ja4()` together as the client metadata a handler can read, with a link to each authority |
 | `docs/guide/capabilities.md` | A client metadata matrix with one row per adapter (Fastly, Axum, Cloudflare, Spin) and columns for direct peer, effective client, TLS version, TLS cipher, Geo, and JA4. Each cell gives the source or the unavailable reason |
 | `docs/guide/adapters/fastly.md` | The source of each field, the absence of a downstream address on non-client requests, plain HTTP under Viceroy, and the OpenSSL cipher names Fastly reports |
-| `docs/guide/adapters/axum.md` | How the effective client depends on the trusted proxy policy. Cover chain walking, peer fallback and its reasons, a host accepted while the client falls back, IPv4-mapped IPv6 handling, and the fact that viewer TLS is not exposed |
-| `docs/guide/adapters/cloudflare.md` | The `direct_ingress` opt-in, the routing contract it declares, and why it gates the client IP but not viewer TLS. Cover Worker subrequest and service binding behavior, the Pseudo IPv4 restriction, Cloudflare cipher names, and absence in local and test runtimes |
+| `docs/guide/adapters/axum.md` | How the effective client depends on the trusted proxy policy. Cover chain walking, peer fallback and its reasons, a host accepted while the client falls back, IPv4-mapped IPv6 handling, and the fact that viewer TLS is not exposed. For protected CloudFront JA4, state the two CloudFront deployment requirements and the live checks to run before enabling it |
+| `docs/guide/adapters/cloudflare.md` | The `direct_ingress` opt-in, the routing contract it declares, and why it gates both the client IP and viewer TLS, including service bindings carrying caller-supplied `cf`. Cover Worker subrequest and service binding behavior, the Pseudo IPv4 restriction, Cloudflare cipher names, and absence in local and test runtimes |
 | `docs/guide/adapters/spin.md` | Both client address modes and which deployment each fits. For direct ingress, cover header ordering and the last-field rule, hosts that do not set `spin-client-addr`, and absence under `wasmtime serve`. For authenticated header, cover the shared #514 Geo setting and why both modes cannot be combined. Cover the `SpinRequestContext` change |
 | `docs/guide/configuration.md` | `[adapters.cloudflare.client_info]`, `[adapters.spin.client_info]`, and `[adapters.axum.ja4] source`, including protected JA4's dependence on the CloudFront Geo selection |
 
@@ -275,7 +283,7 @@ ClientInfo carries IP and viewer TLS. Geo stays with `ctx.geo()` and JA4 with `c
 | #90 | Existing client-IP access preserved | Effective client from `get_client_ip_addr()`, `FastlyRequestContext` unchanged | Downstream IP parity with the legacy context |
 | #90 | Geo captured, unavailable values absent | `ctx.geo()` from #502 | `client_geo_reads_fastly_country_and_region` under Viceroy: loopback gives US/CA, no address and an unknown address give `MissingMetadata` |
 | #90 | TLS captured, unavailable values absent | ClientInfo viewer TLS | Fastly evidence row. Viceroy serves plain HTTP, so a mapping test that feeds runtime-shaped values covers populated TLS |
-| #91 | `cf` and client-IP fields populate | ClientInfo viewer TLS on every managed request, client IP with [`direct_ingress`](#cloudflare), `ctx.geo()` from #502 | Cloudflare evidence row, `cf_metadata_becomes_cloudflare_geo`, `dispatch_exposes_cf_metadata_through_ctx_geo` |
+| #91 | `cf` and client-IP fields populate | ClientInfo client IP and viewer TLS with [`direct_ingress`](#cloudflare), `ctx.geo()` from #502 | Cloudflare evidence row, `cf_metadata_becomes_cloudflare_geo`, `dispatch_exposes_cf_metadata_through_ctx_geo` |
 | #91 | Missing and malformed metadata deterministic | ClientInfo reasons, Geo `MissingMetadata` | Cloudflare evidence row; the absent-`cf` case in `cf_metadata_becomes_cloudflare_geo` |
 | #92 | Direct peer available through the shared contract | `direct_peer()` | Axum evidence row |
 | #92 | Forwarded clients need an explicit policy; chain and provenance documented | Existing #409 policy, projected without a second parser | Axum evidence row, `docs/guide/adapters/axum.md` |
@@ -290,14 +298,14 @@ Local and synthetic evidence is enough to close every issue in this table. Cloud
 | Core and hooks | No-snapshot versus unavailable; values with source; per-field errors; redacted debug; `PreDispatchRequest::client_info()` and handlers agree despite header/extension edits. No admission API or HTTP behavior change |
 | Fastly | Downstream IP parity with legacy context, non-client absence, local runtime handler access; populated, empty, missing, and non-UTF-8 TLS mapping; raw prepare does not replace captured facts |
 | Axum | Managed listener cases for every row of the [fallback table](#axum): direct peer, trusted forwarding, untrusted peer with spoofed headers, trusted peer with absent, unresolved, obfuscated, and malformed chains, and client fallback with an accepted forwarded host. Repeated `X-Forwarded-For` fields; duplicate `X-Forwarded-Host` and `X-Forwarded-Proto`. IPv4, IPv6, and IPv4-mapped IPv6. `effective_client_ip()` is `None` for every `PeerFallback`. No duplicate forwarding parser |
-| Cloudflare | Managed handler path with opt-in off and on; IPv4 and IPv6, missing and invalid IP, partial or absent `cf`, independent TLS fields with `""`, `null`, and non-string values, TLS captured with the opt-in off, unsupported path behavior; preserve Geo and JA4 contracts |
+| Cloudflare | Managed handler path with opt-in off and on; IPv4 and IPv6, missing and invalid IP, partial or absent `cf`, independent TLS fields with `""`, `null`, and non-string values; with the opt-in off, a request carrying forged `cf` TLS values and `CF-Connecting-IP` reports all three fields `NotExposed`; unsupported path behavior; preserve Geo and JA4 contracts |
 | Spin | Off ignores `spin-client-addr` and the #514 headers. Direct ingress, under the `spin up` request fidelity fixture, keeps the runtime value when the client sends its own `spin-client-addr` first (the existing `spoof` case); IPv4 and bracketed IPv6; missing under `wasmtime serve`; a malformed last field is `Rejected` with no fallback. Authenticated header: every row of its table, and `client_info()` and `ctx.geo()` describe the same IP when the lookup succeeds; a lookup failure leaves the captured client unchanged; #514's existing Geo tests still pass after the split. Combining both modes fails configuration. TLS `NotExposed`; `SpinRequestContext` reads the last field |
-| Protected JA4 | Both proxy modes independently; admitted and denied peers; absent, malformed, and duplicate assertions; capture unchanged by an unknown country or failed Geo lookup; credential header removed before handlers; no alternate header fallback |
+| Protected JA4 | Both proxy modes independently; admitted and denied peers; absent, malformed, and duplicate assertions; capture unchanged by an unknown country or failed Geo lookup; a received-head preparer that replaces `ConnectInfo` or the JA4 trust extension does not change the decision in either mode; credential header removed before handlers; no alternate header fallback |
 | Config and compatibility | Geo-only and generic proxy JA4 settings unchanged; `EDGEZERO__ADAPTER__GEO__*` overrides apply to the path protected JA4 uses; startup fails for protected JA4 with Geo off, with KV Geo, or with generic proxy JA4 also set; new tables rejected on other adapters |
 | Documentation | Every page in [Documentation](#documentation) updated. Examples compile or match tested behavior. The capabilities matrix agrees with the adapter tests |
 | Integration | Workspace gates in `CLAUDE.md`, affected local provider and WASM runtime contracts, and hosted CI on the review candidate |
 
-Local contracts, synthetic runtime metadata, and CI qualify the PR for review and close its issues. They do not prove deployed behavior. Track these as follow-up live checks, not closing conditions: positive Fastly viewer TLS, Cloudflare direct-ingress IP and viewer TLS on a live Worker, Spin client address behavior on each hosted Spin runtime, and protected CloudFront header forwarding and origin isolation. The [#491](https://github.com/IABTechLab/edgezero/issues/491) combined integration milestone is not this feature's merge target.
+Local contracts, synthetic runtime metadata, and CI qualify the PR for review and close its issues. They do not prove deployed behavior. Track these as follow-up live checks, not closing conditions: positive Fastly viewer TLS, Cloudflare direct-ingress IP and viewer TLS on a live Worker, Spin client address behavior on each hosted Spin runtime, and protected CloudFront JA4 provenance: a generated fingerprint on HTTPS requests, no fingerprint when CloudFront has none to report, a viewer-supplied header of that name never reaching the origin, and origin isolation. The [#491](https://github.com/IABTechLab/edgezero/issues/491) combined integration milestone is not this feature's merge target.
 
 ## Branch and delivery boundary
 
