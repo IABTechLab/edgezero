@@ -107,6 +107,27 @@ selectors, so prefer `run_app` unless you are mocking a backend.
 Use [application retention](#retaining-an-application) with that function when the
 caller owns a prebuilt app and wants fresh per-request store bindings.
 
+## Geographic context
+
+Managed dispatch (`run_app`, `dispatch_app`, and `CloudflareService`) automatically exposes
+Cloudflare's request geography through `ctx.geo()`. No geo setting or store is required.
+For `GeoOutcome::Selected` with `GeoStatus::Located`, read `location.country().as_str()` and
+`location.subdivision().map(|code| code.as_str())` using the types in `edgezero_core::geo`.
+The provider is `cloudflare`, source is `GeoSource::Cloudflare`, and trust basis is
+`GeoTrustBasis::PlatformMetadata`.
+
+Country comes from `cf.country`; subdivision comes from `cf.regionCode` (for example `CA`),
+not the descriptive `cf.region` (`California`). A valid country with absent or unusable
+subdivision stays country-only. Missing or unusable country, including Cloudflare's `XX`
+and `T1` placeholders, yields selected `GeoUnavailableReason::MissingMetadata`.
+Neither `CF-IPCountry` nor CloudFront geographic headers provide a fallback. Public request
+extensions cannot replace the framework-owned outcome, and a retained application receives
+fresh geography on every dispatch.
+
+Geography is an estimate, not proof of residence, identity, or consent. Local Worker tests
+with host-controlled metadata verify adapter wiring; they do not qualify Cloudflare's live
+IP geolocation accuracy or an application's permission policy.
+
 ## Ingress Body Conversion
 
 The converter preserves a genuine native Fetch request's null `body` as buffered empty, without

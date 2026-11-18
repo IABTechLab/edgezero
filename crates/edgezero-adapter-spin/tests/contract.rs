@@ -583,7 +583,7 @@ mod tests {
         use edgezero_adapter_spin::outbound::SpinOutboundClient;
         use edgezero_adapter_spin::outbound::test_support::{
             dispatch_ingress_stream, dispatch_ingress_stream_with_timer, dispatch_ingress_with,
-            dispatch_request,
+            dispatch_request, dispatch_request_with_geo_secret,
         };
         use edgezero_core::http::{HeaderMap, HeaderValue, Method};
         use edgezero_core::ingress::{
@@ -964,6 +964,158 @@ mod tests {
             let bytes = captured_body(response);
             assert_eq!(bytes.as_ref(), b"7");
             assert!(observations.load(Ordering::SeqCst) >= 3);
+        }
+
+        #[test]
+        #[expect(
+            clippy::too_many_lines,
+            reason = "one ordered matrix compares configured and disabled dispatch with credential and header-budget controls"
+        )]
+        fn managed_geo_strips_credentials_and_preserves_selected_outcome() {
+            use edgezero_adapter_spin::geo::SpinGeoIngress;
+            use edgezero_core::geo::{GeoSource, GeoTrustBasis, GeoUnavailableReason};
+
+            #[edgezero_core::action]
+            async fn observe(mut ctx: RequestContext) -> String {
+                assert!(!ctx.headers().contains_key("x-edgezero-geo-token"));
+                ctx.extensions_mut().insert(GeoOutcome::NoSelection);
+                if *ctx
+                    .extensions()
+                    .get::<bool>()
+                    .expect("selection expectation")
+                {
+                    let GeoOutcome::Selected { provider, status } = ctx.geo() else {
+                        panic!("configured managed dispatch must retain its selection");
+                    };
+                    assert_eq!(provider.as_str(), "spin-ingress");
+                    if ctx.headers().contains_key("x-test-located") {
+                        let GeoStatus::Located {
+                            location,
+                            source,
+                            trust_basis,
+                        } = status
+                        else {
+                            panic!("authenticated managed request must be located");
+                        };
+                        assert_eq!(location.country().as_str(), "US");
+                        assert_eq!(location.subdivision().expect("region").as_str(), "CA");
+                        assert_eq!(*source, GeoSource::SpinIngress);
+                        assert_eq!(*trust_basis, GeoTrustBasis::AuthenticatedIngressHeader);
+                    } else {
+                        assert_eq!(
+                            *status,
+                            GeoStatus::Unavailable(GeoUnavailableReason::UntrustedIngress)
+                        );
+                    }
+                } else {
+                    assert_eq!(ctx.geo(), &GeoOutcome::NoSelection);
+                }
+                "observed".to_owned()
+            }
+
+            struct Sanitized;
+            #[async_trait::async_trait(?Send)]
+            impl Middleware for Sanitized {
+                async fn handle(
+                    &self,
+                    ctx: RequestContext,
+                    next: Next<'_>,
+                ) -> Result<Response, EdgeError> {
+                    assert!(!ctx.headers().contains_key("x-edgezero-geo-token"));
+                    next.run(ctx).await
+                }
+            }
+
+            sdk_block_on(async {
+                for enabled in [false, true] {
+                    let admissions = Arc::new(AtomicUsize::new(0));
+                    let observed_admissions = Arc::clone(&admissions);
+                    let mut app = App::new(
+                        RouterService::builder()
+                            .middleware(Sanitized)
+                            .get("/geo", observe)
+                            .build(),
+                    );
+                    app.insert_state(enabled);
+                    if enabled {
+                        app.insert_state(
+                            SpinGeoIngress::new("unavailable_variable").expect("selection"),
+                        );
+                    }
+                    app.set_ingress_admission_policy(move |head| {
+                        assert!(!head.headers().contains_key("x-edgezero-geo-token"));
+                        observed_admissions.fetch_add(1, Ordering::SeqCst);
+                        AdmissionDecision::Admit {
+                            completion: ResponseEgressCompletion::empty(),
+                            grant: IngressGrant::new(()),
+                            read_deadline: head.read_deadline_after(Duration::from_secs(1)),
+                        }
+                    });
+                    let duplicate = "0123456789abcdef0123456789abcdef";
+                    for tokens in [
+                        &[][..],
+                        &["short"][..],
+                        &[duplicate, duplicate][..],
+                        &[duplicate][..],
+                    ] {
+                        let mut outgoing = SpinRequest::builder()
+                            .method("GET")
+                            .uri("http://example.test/geo")
+                            .header("content-length", "0")
+                            .header("x-edgezero-geo-country", "US")
+                            .header("x-edgezero-geo-region", "CA");
+                        if tokens == [duplicate] {
+                            outgoing = outgoing.header("x-test-located", "yes");
+                        }
+                        for token in tokens {
+                            outgoing = outgoing.header("x-edgezero-geo-token", *token);
+                        }
+                        let request = outgoing
+                            .body(http_body_util::Full::new(Bytes::new()))
+                            .expect("native request");
+                        let incoming = SpinRequest::from_request(
+                            request.into_request().expect("WASI request"),
+                        )
+                        .expect("incoming request");
+                        let response = dispatch_request_with_geo_secret(
+                            &app,
+                            incoming,
+                            Some(Bytes::from_static(b"0123456789abcdef0123456789abcdef")),
+                        )
+                        .await
+                        .expect("managed response");
+                        assert_eq!(captured_body(response).as_ref(), b"observed");
+                    }
+                    assert_eq!(admissions.load(Ordering::SeqCst), 4);
+                    app.set_ingress_head_limits(
+                        IngressHeadLimits::default()
+                            .with_max_request_header_bytes(1024)
+                            .expect("header budget"),
+                    );
+                    let request = SpinRequest::builder()
+                        .method("GET")
+                        .uri("http://example.test/geo")
+                        .header("content-length", "0")
+                        .header("x-edgezero-geo-token", "a".repeat(1500))
+                        .body(http_body_util::Full::new(Bytes::new()))
+                        .expect("oversized native request");
+                    let incoming =
+                        SpinRequest::from_request(request.into_request().expect("WASI request"))
+                            .expect("incoming request");
+                    let response = dispatch_request(&app, incoming)
+                        .await
+                        .expect("bounded response");
+                    assert_eq!(
+                        capture_response(response).status(),
+                        StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE
+                    );
+                    assert_eq!(
+                        admissions.load(Ordering::SeqCst),
+                        4,
+                        "stripping must not evade original header budget"
+                    );
+                }
+            });
         }
 
         #[test]

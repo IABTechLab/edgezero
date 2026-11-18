@@ -325,6 +325,77 @@ manifest I/O or parsing. It does not initialize a logger, configure filters, rea
 runtime overrides or change `owns_logging`. Existing runner and application-owned
 logging responsibilities remain unchanged.
 
+## Geographic context from trusted ingress
+
+Spin does not supply native country/region metadata. An application can enable
+authenticated ingress assertions by inserting a `SpinGeoIngress` selection in its existing
+`Hooks::configure` implementation:
+
+```rust
+fn configure(app: &mut edgezero_core::app::App) -> Result<(), edgezero_core::EdgeError> {
+    app.insert_state(edgezero_adapter_spin::geo::SpinGeoIngress::new(
+        "geo_ingress_token",
+    )?);
+    Ok(())
+}
+```
+
+The constructor accepts a lowercase Spin variable name, not a credential. Bind the secret
+in `spin.toml` (replace `my-app` with your component id):
+
+```toml
+[variables]
+geo_ingress_token = { required = true, secret = true }
+
+[component.my-app.variables]
+geo_ingress_token = "{{ geo_ingress_token }}"
+```
+
+Supply the variable through your deployment's secret provider. Its value must be a
+high-entropy credential of 32–128 ASCII bytes in the range `0x21`–`0x7e`; do not put it in source, logs,
+application state, or command-line arguments. The adapter loads it for each admitted
+request under the existing read deadline. There is one active credential; rotation requires
+coordinating the proxy and variable update.
+
+The fronting proxy must remove all viewer-supplied instances of these fields and replace
+them with its own geographic metadata and credential:
+
+| Header                   | Value                                                       |
+| ------------------------ | ----------------------------------------------------------- |
+| `x-edgezero-geo-country` | ISO country, such as `US`                                   |
+| `x-edgezero-geo-region`  | Optional subdivision component, such as `CA`, without `US-` |
+| `x-edgezero-geo-token`   | The secret credential shared with Spin                      |
+
+For example, a fronting Cloudflare Worker can take assertions from `request.cf.country` and
+`request.cf.regionCode`, rather than viewer headers. Build a new header set after deleting
+the three fields above; set only known geographic values and inject the credential from a
+Worker secret binding. Forward to a fixed HTTPS Spin origin with redirects disabled so the
+credential cannot follow an origin redirect. Protect proxy-to-origin transport with TLS or
+an isolated private network, redact the token in proxy logs, and restrict direct origin
+access. Matching a bearer credential authenticates its holder; it does not verify the
+proxy's geography or network configuration. Spin's `spin-client-addr` is not used as geo
+authentication because its availability and duplicate handling vary by runtime.
+
+Managed `run_app`, `run_app_with_platform`, `dispatch_app`, and manual managed dispatch
+consume the selection automatically. Successful authentication produces provider
+`spin-ingress`, source `GeoSource::SpinIngress`, and trust basis
+`GeoTrustBasis::AuthenticatedIngressHeader`. Read country and optional subdivision from
+`GeoStatus::Located` through the same `ctx.geo()` interface as the other adapters.
+
+Missing, invalid, duplicated, or incorrect credentials yield selected `UntrustedIngress`.
+Secret lookup failure or invalid secret configuration yields `GeoError::ProviderFailure`.
+Authenticated missing geography yields `MissingMetadata`; malformed or duplicated geographic
+fields yield `GeoError::InvalidAssertion`. A country without region remains country-only.
+There is no fallback to `CF-IPCountry`, CloudFront headers, or a prior request's result.
+These outcomes do not themselves choose an HTTP status or application permission policy.
+
+The adapter strips every token header before admission, middleware, and handler callbacks,
+including when the selection is off. Its bytes still count toward original header limits.
+Applications without the selection remain `NoSelection`. The unmanaged request converter
+does not authenticate ingress. Local proxy/Spin fixtures prove the configured mechanism;
+hosted metadata accuracy, transport protection, and downstream consent policy require
+separate deployment qualification.
+
 ## Context Access
 
 Access Spin-specific request metadata via the request context extensions:

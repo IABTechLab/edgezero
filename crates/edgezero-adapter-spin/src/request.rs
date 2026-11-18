@@ -12,15 +12,17 @@ pub(crate) mod test_support;
 use crate::SpinResponse;
 use crate::config_store::SpinConfigStore;
 use crate::context::{SpinRequestContext, parse_client_addr};
+use crate::geo::{SpinGeoIngress, ingress::capture_token};
 use crate::ingress::capture_request_ingress;
 use crate::key_value_store::{DEFAULT_MAX_LIST_KEYS, SpinKvStore};
 use crate::response::from_egress_response;
 use crate::secret_store::SpinSecretStore;
-use edgezero_core::app::{App, StoreMetadata};
+use edgezero_core::app::{App, FrameworkErrorDetail, StoreMetadata};
 use edgezero_core::body::Body;
 use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
+use edgezero_core::geo::GeoOutcome;
 #[cfg(test)]
 use edgezero_core::http::request_builder;
 use edgezero_core::http::{HeaderMap, Method, Request, RequestParts};
@@ -31,7 +33,7 @@ use edgezero_core::ingress::{
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::response_egress::ResponseEgressEnvelope;
-use edgezero_core::secret_store::SecretHandle;
+use edgezero_core::secret_store::{SecretHandle, SecretStore};
 use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
 };
@@ -354,10 +356,15 @@ where
         make_source,
         sleep,
         deliver,
+        &SpinSecretStore::new(),
     )
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "inject the credential backend independently of source construction, timing and delivery"
+)]
 async fn dispatch_ingress_stream_with_timer_and<
     Source,
     SourceError,
@@ -374,6 +381,7 @@ async fn dispatch_ingress_stream_with_timer_and<
     make_source: MakeSource,
     make_timer: MakeTimer,
     deliver: Deliver,
+    geo_secrets: &dyn SecretStore,
 ) -> anyhow::Result<Output>
 where
     Source: futures_util::Stream<Item = Result<bytes::Bytes, SourceError>> + 'static,
@@ -388,15 +396,24 @@ where
             .extensions_mut()
             .insert(outbound_client(app.monotonic_clock()));
         let request_method = head_request.method().clone();
+        // Account the original credential bytes, but never retain them in the
+        // cloned head that admission callbacks inspect.
+        let head_validation = IngressHeadParts::from_request(
+            &head_request,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        )
+        .validate_normalized(app.ingress_head_limits());
+        let token = capture_token(head_request.headers_mut());
+        if let Err(error) = head_validation {
+            let egress = detached_error_envelope(app, error, request_method, request_start)?;
+            return Ok(deliver(egress)?);
+        }
         let head_parts = IngressHeadParts::from_request(
             &head_request,
             IngressHeadAccounting::HostManaged,
             IngressFraming::HostManaged,
         );
-        if let Err(error) = head_parts.validate_normalized(app.ingress_head_limits()) {
-            let egress = detached_error_envelope(app, error, request_method, request_start)?;
-            return Ok(deliver(egress)?);
-        }
         let prepared = match app.begin_ingress(head_parts, request_start) {
             Ok(outcome) => match outcome {
                 IngressBeginOutcome::Admitted(prepared) => prepared,
@@ -423,6 +440,20 @@ where
                 return Ok(deliver(egress)?);
             }
         };
+        let geo = match app.state::<SpinGeoIngress>() {
+            Some(selection) => {
+                selection
+                    .resolve(
+                        token,
+                        head_request.headers(),
+                        &prepared.monotonic_clock(),
+                        prepared.read_deadline(),
+                        geo_secrets,
+                    )
+                    .await
+            }
+            None => GeoOutcome::NoSelection,
+        };
         if !explicit_empty_body(head_request.headers()) {
             let source = match make_source() {
                 Ok(source) => source,
@@ -435,7 +466,7 @@ where
                 make_timer,
             );
         }
-        dispatch_core_request(app, head_request, stores, prepared, deliver).await
+        dispatch_core_request(app, head_request, stores, prepared, geo, deliver).await
     })
     .await
 }
@@ -445,6 +476,7 @@ async fn dispatch_core_request<Output, Deliver>(
     mut core_request: Request,
     stores: Stores,
     prepared: PreparedIngress,
+    geo: GeoOutcome,
     deliver: Deliver,
 ) -> anyhow::Result<Output>
 where
@@ -464,7 +496,13 @@ where
     if let Some(registry) = secret_registry {
         core_request.extensions_mut().insert(registry);
     }
-    let response = Box::pin(app.dispatch_admitted(prepared, core_request)).await;
+    let response = Box::pin(app.dispatch_admitted_with_geo(
+        prepared,
+        core_request,
+        FrameworkErrorDetail::Default,
+        geo,
+    ))
+    .await;
     Ok(deliver(response)?)
 }
 
@@ -760,6 +798,7 @@ mod synthesis_tests {
                 },
                 |_| -> Pending<()> { panic!("expired read must not construct a timer") },
                 Ok,
+                &test_support::GeoSecret::missing(),
             ))
             .expect("response");
             assert_eq!(envelope.response_mut().status().as_u16(), status);

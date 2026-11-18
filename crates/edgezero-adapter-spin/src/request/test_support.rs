@@ -1,9 +1,45 @@
 //! Narrow request-conversion and timer bridges.
 use super::*;
 use bytes::Bytes;
+use edgezero_core::config_store::BoundedStoreRead;
 use edgezero_core::http::Uri;
 use edgezero_core::http::request_builder;
+use edgezero_core::secret_store::{SecretError, SecretStore, finish_bounded_secret_read};
 use std::future::pending;
+
+pub(super) struct GeoSecret(Option<Bytes>);
+
+#[cfg(test)]
+impl GeoSecret {
+    pub(super) fn missing() -> Self {
+        Self(None)
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl SecretStore for GeoSecret {
+    async fn get_bytes(&self, _store: &str, _key: &str) -> Result<Option<Bytes>, SecretError> {
+        Ok(self.0.clone())
+    }
+
+    async fn get_bytes_bounded(
+        &self,
+        store_name: &str,
+        key: &str,
+        clock: &MonotonicClock,
+        deadline: Deadline,
+        max_backend_bytes: u64,
+        max_value_bytes: u64,
+    ) -> Result<BoundedStoreRead<Bytes>, SecretError> {
+        finish_bounded_secret_read(
+            self.get_bytes(store_name, key).await,
+            clock,
+            deadline,
+            max_backend_bytes,
+            max_value_bytes,
+        )
+    }
+}
 
 #[doc(hidden)]
 #[inline]
@@ -51,6 +87,7 @@ where
         move || Ok(source),
         |_| pending::<()>(),
         Ok,
+        &GeoSecret(None),
     )
     .await
 }
@@ -85,6 +122,7 @@ where
         make_source,
         |_| pending::<()>(),
         deliver,
+        &GeoSecret(None),
     )
     .await
 }
@@ -119,6 +157,7 @@ where
         move || Ok(source),
         make_timer,
         Ok,
+        &GeoSecret(None),
     )
     .await
 }
@@ -133,5 +172,33 @@ pub async fn dispatch_request(
     app: &App,
     req: SpinRequest,
 ) -> anyhow::Result<ResponseEgressEnvelope> {
-    dispatch_with_handles_and(app, req, Stores::default(), app.monotonic_now(), Ok).await
+    dispatch_request_with_geo_secret(app, req, None).await
+}
+
+/// Uses the production converter and managed ingress with an in-memory credential backend.
+/// The actual Spin variable provider is qualified by the Spin runtime fixture.
+///
+/// # Errors
+/// Returns the managed request's admission, dispatch, or delivery error.
+#[doc(hidden)]
+#[inline]
+pub async fn dispatch_request_with_geo_secret(
+    app: &App,
+    req: SpinRequest,
+    secret: Option<Bytes>,
+) -> anyhow::Result<ResponseEgressEnvelope> {
+    let request_start = app.monotonic_now();
+    let (parts, native_body) = req.into_parts();
+    let core_request = into_core_request_head_for_app(parts, app);
+    dispatch_ingress_stream_with_timer_and(
+        app,
+        core_request,
+        Stores::default(),
+        request_start,
+        move || Ok(native_body.stream()),
+        sleep,
+        Ok,
+        &GeoSecret(secret),
+    )
+    .await
 }

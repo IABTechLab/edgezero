@@ -6,6 +6,7 @@ pub mod cli;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 pub mod config_store;
 pub mod context;
+pub mod geo;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 mod ingress;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
