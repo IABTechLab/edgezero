@@ -70,7 +70,7 @@ use crate::config_store_limits::ConfigStoreLimits;
 use crate::connection::{ConnectionExit, serve_http1_with_shutdown};
 use crate::geo::{self, NativeGeo};
 use crate::ingress_config::AxumIngressConfig;
-use crate::ja4::TrustedJa4Header;
+use crate::ja4::{Ja4Selection, TrustedJa4Header};
 use crate::key_value_store::PersistentKvStore;
 use crate::native_stores::{self, NativeSourcePlan, NativeStoreOverrides, NativeStoreSource};
 use crate::outbound::AxumOutboundClient;
@@ -207,7 +207,7 @@ impl AxumDevServer {
     #[must_use]
     #[inline]
     pub fn with_trusted_ja4_header(mut self, config: TrustedJa4Header) -> Self {
-        self.native.ja4 = Some(config);
+        self.native.ja4 = Some(Ja4Selection::Generic(config));
         self
     }
 
@@ -541,7 +541,7 @@ fn serve_local(
 struct NativeHosting {
     diagnostics: NativeDiagnosticsHandle,
     geo: NativeGeo,
-    ja4: Option<TrustedJa4Header>,
+    ja4: Option<Ja4Selection>,
     policy: TrustedProxyPolicy,
     request_records: bool,
 }
@@ -790,8 +790,8 @@ where
         native.geo,
     )
     .with_phase(reader.clone());
-    if let Some(config) = native.ja4 {
-        service = service.with_trusted_ja4_header(config);
+    if let Some(selection) = native.ja4 {
+        service = service.with_ja4_selection(selection);
     }
     if let Some(registry) = stores.config {
         service = service.with_config_registry(registry);
@@ -1156,7 +1156,7 @@ where
     let env = EnvConfig::from_vars(pairs);
     let limit = JsonBodyLimit::from_config(&env)?;
     let (policy, request_records) = native_settings(&env)?;
-    let ja4 = TrustedJa4Header::from_env(&env)?;
+    let ja4 = TrustedJa4Header::from_env(&env)?.map(Ja4Selection::Generic);
     Ok((
         env,
         limit,
@@ -1348,7 +1348,11 @@ where
         policy: options.trusted_proxy_policy(),
         request_records: options.request_records(),
         geo: NativeGeo::default(),
-        ja4: TrustedJa4Header::from_env(options.env_config())?,
+        ja4: Ja4Selection::resolve(
+            &A::manifest(),
+            geo.protected_path(),
+            TrustedJa4Header::from_env(options.env_config())?,
+        )?,
     };
     run_local(
         ListenerSource::Bind(options.addr()),

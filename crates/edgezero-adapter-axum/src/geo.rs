@@ -204,6 +204,11 @@ impl ProtectedCloudFrontAlb {
         })
     }
 
+    /// Whether the owned socket peer is inside the protected ALB networks.
+    pub(crate) fn admits(&self, peer: Option<SocketAddr>) -> bool {
+        peer.is_some_and(|actual_peer| self.networks.trusts(actual_peer.ip()))
+    }
+
     fn admit<'request>(
         &self,
         peer: Option<SocketAddr>,
@@ -433,6 +438,16 @@ pub(crate) enum NativeGeoPlan {
 }
 
 impl NativeGeoPlan {
+    /// The protected `CloudFront` path, when this selection carries one.
+    pub(crate) fn protected_path(&self) -> Option<ProtectedCloudFrontAlb> {
+        match self {
+            Self::Ready(NativeGeo::Selected { policy, .. }) => Some(policy.clone()),
+            Self::Ready(_) => None,
+            #[cfg(feature = "geo-kv")]
+            Self::Kv(_) => None,
+        }
+    }
+
     pub(crate) fn capability(&self) -> NativeGeoCapability {
         match self {
             Self::Ready(geo) => geo.capability(),

@@ -15,7 +15,13 @@ use anyhow::{Context as _, bail};
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::http::{HeaderMap, HeaderName};
 use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
+use edgezero_core::manifest::{BakedManifest, ManifestJa4Source};
 use ipnet::IpNet;
+
+use crate::geo::ProtectedCloudFrontAlb;
+
+/// The fixed header `CloudFront` writes the viewer's JA4 to when an origin request policy includes it.
+const CLOUDFRONT_JA4_HEADER: &str = "cloudfront-viewer-ja4-fingerprint";
 
 /// `EDGEZERO__ADAPTER__JA4_HEADER`: the header the trusted proxy writes JA4 to.
 const HEADER_KEY: [&str; 2] = ["adapter", "ja4_header"];
@@ -102,6 +108,66 @@ impl TrustedJa4Header {
         self.trusted_proxies
             .iter()
             .any(|network| network.contains(&canonical))
+    }
+}
+
+/// The JA4 source of one managed listener.
+#[derive(Clone, Debug)]
+pub(crate) enum Ja4Selection {
+    /// An operator-run proxy named by `EDGEZERO__ADAPTER__JA4_*`.
+    Generic(TrustedJa4Header),
+    /// `CloudFront-Viewer-JA4-Fingerprint` from a peer the protected `CloudFront` Geo path admits.
+    ProtectedCloudFront(ProtectedCloudFrontAlb),
+}
+
+impl Ja4Selection {
+    /// Capture JA4 for one request from the listener's owned socket peer.
+    pub(crate) fn capture(&self, peer: Option<SocketAddr>, headers: &HeaderMap) -> CapturedJa4 {
+        match self {
+            Self::Generic(config) => config.capture(peer, headers),
+            Self::ProtectedCloudFront(policy) => {
+                if policy.admits(peer) {
+                    CapturedJa4::from_trusted_proxy_header(headers.get_all(CLOUDFRONT_JA4_HEADER))
+                } else {
+                    CapturedJa4::Unavailable(Ja4Unavailable::NotExposed)
+                }
+            }
+        }
+    }
+
+    /// Resolve the managed listener's JA4 source from `[adapters.axum.ja4] source`, the
+    /// resolved Geo selection's protected `CloudFront` path, and the generic proxy settings.
+    ///
+    /// # Errors
+    /// Protected JA4 needs a Geo selection that carries the protected path (`CloudFront` or a
+    /// supplied provider) and cannot be combined with generic proxy JA4.
+    pub(crate) fn resolve(
+        manifest: &BakedManifest,
+        protected_path: Option<ProtectedCloudFrontAlb>,
+        generic: Option<TrustedJa4Header>,
+    ) -> anyhow::Result<Option<Self>> {
+        let source = match manifest {
+            BakedManifest::Present(baked) => baked
+                .adapter_entry("axum")
+                .and_then(|(_, adapter)| adapter.ja4)
+                .and_then(|ja4| ja4.source),
+            BakedManifest::Absent | BakedManifest::Malformed(_) | _ => None,
+        };
+        match source {
+            None => Ok(generic.map(Self::Generic)),
+            Some(ManifestJa4Source::ProtectedCloudFront) => {
+                if generic.is_some() {
+                    bail!(
+                        "protected CloudFront JA4 cannot be combined with EDGEZERO__ADAPTER__JA4_* settings"
+                    );
+                }
+                let policy = protected_path.context(
+                    "protected CloudFront JA4 requires a CloudFront or supplied Geo selection",
+                )?;
+                Ok(Some(Self::ProtectedCloudFront(policy)))
+            }
+            Some(_) => bail!("unsupported Axum JA4 source"),
+        }
     }
 }
 
@@ -229,5 +295,42 @@ mod tests {
             let _error = TrustedJa4Header::from_env(&EnvConfig::from_vars(partial))
                 .expect_err("should require both settings");
         }
+    }
+
+    #[test]
+    fn ja4_selection_requires_a_protected_path_and_no_generic_proxy() {
+        use super::Ja4Selection;
+        use crate::geo::{NativeGeo, NativeGeoPlan, ProtectedCloudFrontAlb};
+        use edgezero_core::manifest::{BakedManifest, Manifest};
+        let protected = Manifest::from_baked_json(
+            r#"{"adapters":{"axum":{"ja4":{"source":"protected-cloudfront"}}}}"#,
+        );
+        let policy = ProtectedCloudFrontAlb::new(["10.0.0.0/24"], "x-origin-verify").unwrap();
+        assert!(
+            Ja4Selection::resolve(&BakedManifest::Absent, Some(policy.clone()), None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            Ja4Selection::resolve(&BakedManifest::Absent, None, Some(config())),
+            Ok(Some(Ja4Selection::Generic(_)))
+        ));
+        assert!(matches!(
+            Ja4Selection::resolve(&protected, Some(policy.clone()), None),
+            Ok(Some(Ja4Selection::ProtectedCloudFront(_)))
+        ));
+        let no_path = Ja4Selection::resolve(&protected, None, None).unwrap_err();
+        assert!(no_path.to_string().contains("requires"), "{no_path}");
+        let combined = Ja4Selection::resolve(&protected, Some(policy), Some(config())).unwrap_err();
+        assert!(
+            combined.to_string().contains("cannot be combined"),
+            "{combined}"
+        );
+        assert!(
+            NativeGeoPlan::Ready(NativeGeo::Off)
+                .protected_path()
+                .is_none(),
+            "Geo off carries no protected path"
+        );
     }
 }

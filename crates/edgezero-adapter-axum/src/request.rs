@@ -60,6 +60,7 @@ pub async fn into_core_request(
         None,
         HttpClient::with_client(client),
         JsonBodyLimit::DEFAULT,
+        None,
     ))
 }
 
@@ -69,6 +70,7 @@ pub(crate) fn into_core_request_parts(
     read_lifetime: Option<(Deadline, MonotonicClock)>,
     outbound_client: HttpClient,
     json_body_limit: JsonBodyLimit,
+    managed_ja4: Option<CapturedJa4>,
 ) -> CoreRequest {
     let ingress_is_json = parts
         .headers
@@ -80,10 +82,15 @@ pub(crate) fn into_core_request_parts(
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| *addr);
-    let ja4 = parts.extensions.remove::<Arc<TrustedJa4Header>>().map_or(
-        CapturedJa4::Unavailable(Ja4Unavailable::NotExposed),
-        |trusted| trusted.capture(peer, &parts.headers),
-    );
+    // The managed listener captures JA4 from its owned socket. Only the public converter,
+    // which is not the managed trust boundary, still reads a caller-supplied extension.
+    let extension_ja4 = parts.extensions.remove::<Arc<TrustedJa4Header>>();
+    let ja4 = managed_ja4.unwrap_or_else(|| {
+        extension_ja4.map_or(
+            CapturedJa4::Unavailable(Ja4Unavailable::NotExposed),
+            |trusted| trusted.capture(peer, &parts.headers),
+        )
+    });
     let ingress = capture_request_ingress(&parts.uri, &parts.headers, transport, ja4);
     // A zero size hint can still leave trailers; only the transport's terminal signal is enough.
     let body = if axum_body.is_end_stream() {
@@ -387,6 +394,7 @@ mod tests {
                 lifetime,
                 client.clone(),
                 JsonBodyLimit::DEFAULT,
+                None,
             );
             assert_eq!(core.body().as_bytes(), Some(b"".as_slice()));
             assert_eq!(polls.load(Ordering::SeqCst), 0);
@@ -522,7 +530,7 @@ mod tests {
         let (parts, body) = request.into_parts();
 
         let core_request =
-            into_core_request_parts(parts, body, None, client, JsonBodyLimit::DEFAULT);
+            into_core_request_parts(parts, body, None, client, JsonBodyLimit::DEFAULT, None);
         assert!(
             !core_request
                 .extensions()
