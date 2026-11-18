@@ -838,7 +838,7 @@ fn fixed_registry_contains_unicode_and_standalone_chunked_probes() {
 
 #[test]
 fn observation_verification_rejects_utf8_corruption_even_during_collection() {
-    let mut verdict = json!({"hook": true, "ordinary": false, "global_order_unavailable": true, "spoofed_origin_ignored": true, "origin_available": true, "origin_matches_expected": true, "target_available": true, "target_matches_runtime": true, "cookie_utf8": false, "cookie_latin1": true});
+    let mut verdict = json!({"hook": true, "ordinary": false, "global_order_unavailable": true, "spoofed_origin_ignored": true, "origin_available": true, "origin_matches_expected": true, "target_available": true, "target_matches_runtime": true, "ja4_state": "missing", "cookie_utf8": false, "cookie_latin1": true});
     let error = verify_observation("cloudflare", "utf8", 200, &verdict)
         .expect_err("should reject the former C3 A9 to E9 defect");
     assert!(
