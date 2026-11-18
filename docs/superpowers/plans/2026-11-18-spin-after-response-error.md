@@ -8,11 +8,13 @@ Issue: #483. Base branch: `feature/476-after-response-tasks` (PR #509).
 1. **Failing tests first.**
    - `crates/edgezero-adapter-spin/src/after_response.rs` host unit tests: the handle returns
      `501` with `AFTER_RESPONSE_UNSUPPORTED`; the task is never polled and is dropped at
-     registration (drop probe uses core's `missing_trait_methods` expect pattern).
+     registration (drop probe uses core's `missing_trait_methods` expect pattern); a zero budget
+     through the Spin handle returns `500`.
    - `crates/edgezero-adapter-spin/tests/contract.rs` (`ingress_contract`) wasm32 test: a real
      `SpinRequest` dispatched through `test_support::dispatch_request` to a route that registers a
-     task returns a `501` response naming the Spin adapter; the task is never polled and is
-     dropped; a control route on the same app returns `200`.
+     task gets a `501` registration error with the Spin message (the handler echoes status and
+     message in a `200` body); the task is never polled and is dropped once; a control route on
+     the same app returns `200`.
 2. **Implement.** Define `AFTER_RESPONSE_UNSUPPORTED` ungated in `lib.rs` (no `pub use`, which
    the `restriction` lint group denies). Add the module (gated like `ingress`: `any(test,
    all(feature = "spin", target_arch = "wasm32"))`), insert the handle in

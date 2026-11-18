@@ -12,7 +12,8 @@
   Cloudflare and Spin `Unsupported` (Cloudflare tracked in #478).
 - Spin rejects after-response tasks with a `501` that names the adapter
   (`edgezero_adapter_spin::AFTER_RESPONSE_UNSUPPORTED`) on every converted request, instead of
-  core's generic message (#483).
+  core's generic message (#483). A zero budget on Spin now returns `500`, as on Axum and Fastly,
+  instead of `501`.
 - Axum production, `run_app` and `AxumDevServer::run` shutdown now waits for registered after-response tasks within the
   existing shutdown grace, after connections drain. Tasks still pending at the grace make the
   process exit non-zero with `grace exhausted`.

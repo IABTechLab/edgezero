@@ -33,23 +33,28 @@ adapter that forgot to install a scheduler, and it says nothing about which adap
 
 ## Contract
 
-- **Status and kind.** Registration on any Spin request returns `EdgeError::NotImplemented`
-  (HTTP `501`, kind `not_implemented`), unchanged from the base.
+- **Status and kind.** Registration with a positive budget on any Spin request returns
+  `EdgeError::NotImplemented` (HTTP `501`, kind `not_implemented`), unchanged from the base.
 - **Message.** `after-response tasks are not supported by the Spin adapter`. Defined, with no
   cfg gate, as `edgezero_adapter_spin::AFTER_RESPONSE_UNSUPPORTED` in `lib.rs` (beside
   `SPIN_PLATFORM`), so host-side app tests can name it too. Applications should branch on the
   status or kind, not the message.
 - **Task.** Never polled. Dropped before `after_response` returns.
-- **Zero budget.** Unchanged core rule: core rejects it with `500` before the scheduler is called.
+- **Zero budget.** Changes from `501` to `500`. On the base, Spin installed no handle, so core's
+  `schedule_with` returned `501` before any budget check. With a handle installed, core's
+  `AfterResponseHandle::schedule` rejects a zero budget with `500` before the scheduler is called.
+  That is #509's rule for a programming error, and Axum and Fastly already behave this way.
+  Cloudflare, which still installs no handle, keeps `501` until #478.
 - **Reach.** The handle is installed where every native Spin request becomes a core request
   (`into_core_request_head`). That covers `run_app`, `run_app_with_platform`, `dispatch_app`,
   `AppExt::dispatch`, `dispatch`, `dispatch_with_kv_label` and the public `into_core_request`.
   Not covered, by construction: `send_assembly_error` (no app, no handlers), and the test-utils
   `dispatch_ingress_*` bridges, which build the core request with `request_builder()` and already
   omit `SpinRequestContext` and ingress metadata. Those keep core's generic `501`.
-- **Handler-inserted handles.** Spin has no pre-dispatch `prepare` hook. A handler or middleware
-  that inserts its own `AfterResponseHandle` into extensions replaces the adapter's, as with any
-  extension. That is the application's explicit choice and is not guarded.
+- **Application-inserted handles.** Spin has no adapter `prepare` hook. Core pre-dispatch hooks,
+  middleware and handlers can still replace or remove the extension, as on every adapter. A
+  replacement is the application's explicit choice; a removal falls back to core's generic `501`,
+  so no task is dropped silently. Neither is guarded.
 
 ## Design
 
@@ -105,7 +110,7 @@ capability matrix, or the manifest.
 | --- | --- | --- | --- |
 | Spin handler registers a task | 501, generic message | registration error is 501 with the Spin message | wasm32 contract test dispatching a real `SpinRequest` (handler echoes status and message in a 200 body); `spin up` probe propagates the error with `?` and observes a 501 response |
 | Task registered on Spin | dropped unpolled | dropped unpolled | host unit test with poll and drop probes |
-| Zero budget on Spin | 500 | 500 | existing core test (core rejects before any scheduler) |
+| Zero budget on Spin | 501 (no handle) | 500 | host unit test through the Spin handle |
 | Bare core context (no adapter) | 501, generic message | unchanged | existing core unit test |
 | `required = ["after-response-tasks"]` on Spin | refused | refused | existing `adapter_capability_matrix_matches_contracts` |
 | Existing Spin routes | unchanged | unchanged | existing Spin suites; `spin up` control route |
@@ -121,5 +126,6 @@ generic message.
 ## Out of scope
 
 - Running after-response tasks on Spin.
-- Cloudflare (#478, PR #512). PR #512 edits the same capabilities bullet; whichever lands second
+- Cloudflare (#478, PR #512). PR #512 edits the same `capabilities.md` bullet and the same
+  `CHANGELOG.md` capability line, and says Spin installs no scheduler; whichever lands second
   rebases that sentence.

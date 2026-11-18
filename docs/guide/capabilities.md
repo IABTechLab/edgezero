@@ -357,9 +357,10 @@ so CPU-bound or blocking work overruns it.
   `serve_app` instance, and a caller-sent native replacement after an uncommitted delivery.
 - Cloudflare installs no scheduler, so registration returns `501 Not Implemented`. Cloudflare
   `waitUntil` support is tracked in [#478](https://github.com/IABTechLab/edgezero/issues/478).
-- Spin rejects every registration with `501 Not Implemented` and the message
-  `after-response tasks are not supported by the Spin adapter`
+- Spin rejects every registration with a positive budget with `501 Not Implemented` and the
+  message `after-response tasks are not supported by the Spin adapter`
   (`edgezero_adapter_spin::AFTER_RESPONSE_UNSUPPORTED`). The task is dropped without being polled.
+  A zero budget returns `500`, as on Axum and Fastly.
 
 ## Outbound Matrix
 

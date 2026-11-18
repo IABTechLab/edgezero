@@ -70,4 +70,13 @@ mod tests {
         assert!(!polled.get(), "a rejected task is never polled");
         assert!(dropped.get(), "a rejected task is dropped at registration");
     }
+
+    #[test]
+    fn zero_budget_is_a_programming_error_before_the_capability_error() {
+        let error = unsupported_handle()
+            .schedule(Duration::ZERO, async {})
+            .unwrap_err();
+
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }
