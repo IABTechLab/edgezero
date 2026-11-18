@@ -344,6 +344,7 @@ impl ManifestLoader {
 #[serde(deny_unknown_fields)]
 #[validate(schema(function = "validate_manifest_adapter_keys_case_unique"))]
 #[validate(schema(function = "validate_manifest_adapter_geo_placement"))]
+#[validate(schema(function = "validate_manifest_adapter_client_metadata_placement"))]
 #[validate(schema(
     function = "validate_manifest_fastly_logging",
     skip_on_field_errors = false
@@ -423,6 +424,16 @@ impl Manifest {
         self.adapters
             .iter()
             .find(|(key, _cfg)| key.to_ascii_lowercase() == needle)
+    }
+
+    /// Whether `[adapters.<adapter>.client_info] direct_ingress` is on. Off when the adapter
+    /// or its `client_info` table is absent.
+    #[must_use]
+    #[inline]
+    pub fn client_info_direct_ingress(&self, adapter: &str) -> bool {
+        self.adapter_entry(adapter)
+            .and_then(|(_, config)| config.client_info)
+            .is_some_and(ManifestAdapterClientInfo::direct_ingress)
     }
 
     #[must_use]
@@ -680,16 +691,21 @@ pub struct ManifestAdapter {
     #[serde(default)]
     #[validate(nested)]
     pub build: ManifestAdapterBuild,
+    /// `ClientInfo` declarations for Cloudflare or Spin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_info: Option<ManifestAdapterClientInfo>,
     #[serde(default)]
     #[validate(nested)]
     pub commands: ManifestAdapterCommands,
-    /// `[adapters.axum.geo]`: native geo selection. Only Axum reads it; other
-    /// adapters use their platform's geo and reject the table.
+    /// Geo selection for native Axum or authenticated-IP Spin KV lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[validate(nested)]
     pub geo: Option<ManifestAdapterGeo>,
+    /// Axum JA4 source selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ja4: Option<ManifestAdapterJa4>,
     /// Catch-all for any sub-table other than the canonical ones
-    /// (`adapter`, `build`, `commands`, `geo`, `logging`). The pre-rewrite
+    /// (`adapter`, `build`, `client_info`, `commands`, `geo`, `ja4`, `logging`). The pre-rewrite
     /// `[adapters.<name>.stores.*]` tables land here and are rejected by
     /// `validate_manifest_adapter` with the migration-guide message.
     #[serde(flatten)]
@@ -699,10 +715,52 @@ pub struct ManifestAdapter {
     pub logging: ManifestLoggingConfig,
 }
 
-/// `[adapters.axum.geo]`. Each key is a default that the matching
+/// `[adapters.cloudflare.client_info]` or `[adapters.spin.client_info]`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ManifestAdapterClientInfo {
+    /// Operator declaration that visitors reach the managed entrypoint directly.
+    ///
+    /// On Cloudflare it also declares that service bindings do not reach the
+    /// entrypoint; on Spin, that the host sets `spin-client-addr` to the visitor's
+    /// socket. The runtime cannot verify either. Defaults to off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_ingress: Option<bool>,
+}
+
+impl ManifestAdapterClientInfo {
+    /// Whether the direct-ingress declaration is on.
+    #[inline]
+    #[must_use]
+    pub const fn direct_ingress(self) -> bool {
+        matches!(self.direct_ingress, Some(true))
+    }
+}
+
+/// `[adapters.axum.ja4]`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ManifestAdapterJa4 {
+    /// JA4 source. Absent keeps the existing environment-configured behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ManifestJa4Source>,
+}
+
+/// A JA4 source an Axum deployment selects in its manifest.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[non_exhaustive]
+pub enum ManifestJa4Source {
+    /// `CloudFront-Viewer-JA4-Fingerprint` from a peer the protected `CloudFront` Geo path admits.
+    #[serde(rename = "protected-cloudfront")]
+    ProtectedCloudFront,
+}
+
+/// `[adapters.axum.geo]` or `[adapters.spin.geo]`. Each key is a default that the matching
 /// `EDGEZERO__ADAPTER__GEO__*` variable overrides at startup, so deployment-only
 /// values such as ALB networks can stay out of the compiled manifest. The
-/// merged selection is validated before the server listens.
+/// merged selection is validated before native serving or Spin request dispatch.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, Validate)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -711,6 +769,9 @@ pub struct ManifestAdapterGeo {
     /// ALB peer networks admitted as the protected `CloudFront` source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alb_peer_cidrs: Option<Vec<String>>,
+    /// Spin variable containing the expected ingress credential, never the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_variable: Option<String>,
     /// Aggregate per-request KV lookup deadline in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookup_timeout_ms: Option<u32>,
@@ -746,7 +807,7 @@ impl ManifestAdapterGeo {
     }
 }
 
-/// Geo provider an Axum deployment selects.
+/// Geo provider an Axum or Spin deployment selects.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -1515,7 +1576,7 @@ fn validate_manifest_adapter_definition(
 
 fn validate_manifest_adapter_geo(geo: &ManifestAdapterGeo) -> Result<(), ValidationError> {
     let assertion = geo.alb_peer_cidrs.is_some() || geo.origin_credential_header_name.is_some();
-    let kv = geo.has_kv_fields();
+    let kv = geo.has_kv_fields() || geo.credential_variable.is_some();
     if geo.provider == Some(ManifestGeoProvider::Off) && (assertion || kv) {
         let mut error = ValidationError::new("geo_off_with_policy");
         error.message = Some(
@@ -1534,14 +1595,56 @@ fn validate_manifest_adapter_geo(geo: &ManifestAdapterGeo) -> Result<(), Validat
 
 fn validate_manifest_adapter_geo_placement(manifest: &Manifest) -> Result<(), ValidationError> {
     for (name, adapter) in &manifest.adapters {
-        if adapter.geo.is_some() && !name.eq_ignore_ascii_case("axum") {
+        let Some(geo) = &adapter.geo else { continue };
+        if name.eq_ignore_ascii_case("axum") {
+            if geo.credential_variable.is_some() {
+                return Err(ValidationError::new("geo_spin_field_on_axum"));
+            }
+        } else if name.eq_ignore_ascii_case("spin") {
+            if geo.alb_peer_cidrs.is_some()
+                || geo.origin_credential_header_name.is_some()
+                || geo.max_in_flight.is_some()
+                || geo.provider == Some(ManifestGeoProvider::CloudFront)
+            {
+                return Err(ValidationError::new("geo_unsupported_spin_fields"));
+            }
+        } else {
             let mut error = ValidationError::new("geo_adapter_unsupported");
             error.message = Some(
                 format!(
-                    "`[adapters.{name}.geo]` is not supported; only Axum selects geo, \
+                    "`[adapters.{name}.geo]` is not supported; only Axum selects geo from CloudFront; Spin supports KV, \
                      other adapters use their platform's geo"
                 )
                 .into(),
+            );
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn validate_manifest_adapter_client_metadata_placement(
+    manifest: &Manifest,
+) -> Result<(), ValidationError> {
+    for (name, adapter) in &manifest.adapters {
+        if adapter.client_info.is_some()
+            && !name.eq_ignore_ascii_case("cloudflare")
+            && !name.eq_ignore_ascii_case("spin")
+        {
+            let mut error = ValidationError::new("client_info_adapter_unsupported");
+            error.message = Some(
+                format!(
+                    "`[adapters.{name}.client_info]` is not supported; only Cloudflare and Spin declare client-info ingress"
+                )
+                .into(),
+            );
+            return Err(error);
+        }
+        if adapter.ja4.is_some() && !name.eq_ignore_ascii_case("axum") {
+            let mut error = ValidationError::new("ja4_adapter_unsupported");
+            error.message = Some(
+                format!("`[adapters.{name}.ja4]` is not supported; only Axum selects a JA4 source")
+                    .into(),
             );
             return Err(error);
         }
@@ -3671,6 +3774,74 @@ ids = ["default"]
     }
 
     #[test]
+    fn client_metadata_tables_load_and_survive_baking() {
+        let loaded = ManifestLoader::try_load_from_str(
+            "[adapters.cloudflare.client_info]\ndirect_ingress = true\n\n[adapters.spin.client_info]\ndirect_ingress = false\n\n[adapters.axum.ja4]\nsource = \"protected-cloudfront\"\n",
+        )
+        .expect("client metadata tables");
+        let manifest = loaded.manifest();
+        let cloudflare = manifest.adapters["cloudflare"]
+            .client_info
+            .expect("cloudflare");
+        assert!(cloudflare.direct_ingress());
+        let spin = manifest.adapters["spin"].client_info.expect("spin");
+        assert!(!spin.direct_ingress());
+        assert_eq!(
+            manifest.adapters["axum"].ja4.and_then(|ja4| ja4.source),
+            Some(ManifestJa4Source::ProtectedCloudFront)
+        );
+        let json: &'static str = Box::leak(
+            serde_json::to_string(manifest)
+                .expect("serialize")
+                .into_boxed_str(),
+        );
+        let BakedManifest::Present(baked) = Manifest::from_baked_json(json) else {
+            panic!("baked manifest with client metadata must load: {json}");
+        };
+        assert_eq!(baked.adapters["cloudflare"].client_info, Some(cloudflare));
+        assert_eq!(baked.adapters["spin"].client_info, Some(spin));
+        assert_eq!(baked.adapters["axum"].ja4, manifest.adapters["axum"].ja4);
+        assert!(baked.client_info_direct_ingress("Cloudflare"));
+        assert!(!baked.client_info_direct_ingress("spin"));
+        assert!(!baked.client_info_direct_ingress("axum"));
+        assert!(!baked.client_info_direct_ingress("fastly"));
+        let empty = ManifestAdapterClientInfo::default();
+        assert!(!empty.direct_ingress());
+    }
+
+    #[test]
+    fn client_metadata_tables_reject_wrong_adapters_and_shapes() {
+        for (manifest, expected) in [
+            (
+                "[adapters.axum.client_info]\ndirect_ingress = true\n",
+                "only Cloudflare and Spin",
+            ),
+            (
+                "[adapters.fastly.client_info]\ndirect_ingress = true\n",
+                "only Cloudflare and Spin",
+            ),
+            (
+                "[adapters.spin.ja4]\nsource = \"protected-cloudfront\"\n",
+                "only Axum selects a JA4 source",
+            ),
+            (
+                "[adapters.cloudflare.client_info]\ntrusted = true\n",
+                "unknown field",
+            ),
+            (
+                "[adapters.axum.ja4]\nsource = \"cloudfront\"\n",
+                "unknown variant",
+            ),
+            ("[adapters.axum.ja4]\nheader = \"x-ja4\"\n", "unknown field"),
+        ] {
+            let err = ManifestLoader::try_load_from_str(manifest)
+                .err()
+                .unwrap_or_else(|| panic!("must reject: {manifest}"));
+            assert!(err.to_string().contains(expected), "{manifest}: {err}");
+        }
+    }
+
+    #[test]
     fn axum_geo_table_rejects_invalid_shapes() {
         for (manifest, expected) in [
             (
@@ -3809,6 +3980,26 @@ component = "my-app"
         let manifest_data = loader.manifest();
         let adapter = &manifest_data.adapters["spin"];
         assert_eq!(adapter.adapter.component.as_deref(), Some("my-app"));
+    }
+
+    #[test]
+    fn spin_kv_geo_manifest_accepts_deployment_selection() {
+        let input = format!(
+            r#"
+[stores.kv]
+ids = ["geo"]
+[adapters.spin.geo]
+provider = "kv"
+store_id = "geo"
+pin = "{}@{}"
+reader_ip = "authenticated-header"
+credential_variable = "geo_token"
+"#,
+            "a".repeat(64),
+            "b".repeat(64)
+        );
+        let loaded = ManifestLoader::try_load_from_str(&input);
+        assert!(loaded.is_ok(), "Spin KV deployment selection must load");
     }
 
     #[test]

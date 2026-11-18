@@ -9,6 +9,7 @@ publish = false
 
 [features]
 default = []
+publisher = []
 celld = ["dep:edgezero-store-celld", "dep:tokio"]
 dynamodb = ["dep:edgezero-store-aws", "dep:tokio"]
 

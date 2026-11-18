@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::body::{Body, BodyStream, BodyTransfer, BufferedJsonPolicy};
+use crate::client_info::ClientInfo;
 use crate::config_store::ConfigExtractionLimits;
 use crate::error::{
     BadGatewayReason, BudgetSource, EdgeError, RequestBodyOverflowOrigin, ResponseLimitReason,
@@ -18,7 +19,8 @@ use crate::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use crate::http::{
     Extensions, HeaderMap, HeaderValue, Method, Request, RequestParts, Uri, Version,
 };
-use crate::ingress::{AdmittedIngress, IngressGrant};
+use crate::ingress::{AdmittedIngress, IngressGrant, RequestIngress};
+use crate::ja4::CapturedJa4;
 use crate::outbound::{ForwardedReadDeadline, HttpClient};
 use crate::params::PathParams;
 use crate::router::RouteMetadata;
@@ -301,6 +303,7 @@ pub struct RequestContext {
     body: RefCell<BodyState>,
     body_policy: Option<BufferedJsonPolicy>,
     category_only_json_errors: bool,
+    client_info: Option<ClientInfo>,
     config_extraction_limits: ConfigExtractionLimits,
     geo: GeoOutcome,
     ingress_grant: RefCell<Option<IngressGrant>>,
@@ -475,6 +478,16 @@ impl RequestContext {
         }
     }
 
+    /// Returns the client network facts a managed adapter captured at ingress.
+    ///
+    /// `None` means no adapter snapshot was attached, for example on an unmanaged
+    /// request. Public headers and extensions never replace or synthesize it.
+    #[must_use]
+    #[inline]
+    pub fn client_info(&self) -> Option<&ClientInfo> {
+        self.client_info.as_ref()
+    }
+
     #[must_use]
     #[inline]
     pub fn config_extraction_limits(&self) -> ConfigExtractionLimits {
@@ -573,7 +586,8 @@ impl RequestContext {
         self.path_params = params;
         self.route_metadata = route_metadata;
         if let Some(mut admitted) = ingress {
-            (self.geo, self.category_only_json_errors) = admitted.take_request_context();
+            (self.geo, self.client_info, self.category_only_json_errors) =
+                admitted.take_request_context();
             let (request_start, read_deadline, grant, limits, clock) = admitted.into_parts();
             self.config_extraction_limits = limits;
             *self.ingress_grant.get_mut() = Some(grant);
@@ -587,6 +601,16 @@ impl RequestContext {
     pub(crate) fn fixed_input_outcome(&self) -> Option<FallbackDrainOutcome> {
         let guard = self.input_guard.as_ref()?;
         guard.outcome()
+    }
+
+    /// The adapter's JA4 capture for this request, read from [`RequestIngress`].
+    /// `None` if the request has no ingress metadata or the adapter made no claim.
+    #[inline]
+    pub fn ja4(&self) -> Option<&CapturedJa4> {
+        self.parts
+            .extensions
+            .get::<RequestIngress>()
+            .and_then(RequestIngress::ja4)
     }
 
     /// Buffers at most `max` bytes and deserializes form-urlencoded data.
@@ -768,6 +792,7 @@ impl RequestContext {
             body_policy,
             geo: GeoOutcome::NoSelection,
             category_only_json_errors: false,
+            client_info: None,
             config_extraction_limits: ConfigExtractionLimits::default(),
             ingress_grant: RefCell::new(None),
             input_guard: None,
@@ -780,8 +805,8 @@ impl RequestContext {
         }
     }
     pub(crate) fn new_pre_dispatch(request: Request, ingress: Option<&AdmittedIngress>) -> Self {
-        let (geo, category_only_json_errors) = ingress.map_or(
-            (GeoOutcome::NoSelection, false),
+        let (geo, client_info, category_only_json_errors) = ingress.map_or(
+            (GeoOutcome::NoSelection, None, false),
             AdmittedIngress::request_context,
         );
         let clock = ingress.map_or_else(MonotonicClock::default, AdmittedIngress::monotonic_clock);
@@ -813,6 +838,7 @@ impl RequestContext {
             monotonic_clock: clock,
             geo,
             category_only_json_errors,
+            client_info,
             parts,
             path_params: PathParams::default(),
             read_deadline: deadline,
@@ -2649,5 +2675,23 @@ mod tests {
             ctx.config_store_binding("undeclared").is_none(),
             "unknown id must yield None"
         );
+    }
+
+    #[test]
+    fn ja4_reads_adapter_ingress_claim() {
+        use crate::ingress::{CapturedTarget, HeaderFidelity, TargetUnavailable};
+        use crate::ja4::{CapturedJa4, Ja4Unavailable};
+        let mut context = ctx("/", Body::empty(), PathParams::default());
+        assert!(context.ja4().is_none());
+        let unavailable = CapturedJa4::Unavailable(Ja4Unavailable::NotExposed);
+        context.parts.extensions.insert(
+            RequestIngress::new(
+                CapturedTarget::Unavailable(TargetUnavailable::NotExposed),
+                None,
+                HeaderFidelity::default(),
+            )
+            .with_ja4(unavailable.clone()),
+        );
+        assert_eq!(context.ja4(), Some(&unavailable));
     }
 }

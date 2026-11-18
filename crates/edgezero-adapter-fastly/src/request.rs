@@ -11,6 +11,10 @@ use std::task::Poll;
 use bytes::Bytes;
 use edgezero_core::app::{App, FrameworkErrorDetail, StoreMetadata, StoresMetadata};
 use edgezero_core::body::Body;
+use edgezero_core::client_info::{
+    Capture, ClientAddress, ClientInfo, ClientIpSource, UnavailableReason, ViewerTlsSource,
+    ViewerTlsValue,
+};
 use edgezero_core::config_store::{ConfigStoreHandle, ConfigStoreOpenFailure};
 use edgezero_core::error::EdgeError;
 use edgezero_core::geo::{GeoOutcome, GeoSource};
@@ -23,6 +27,7 @@ use edgezero_core::ingress::{
     IngressFraming, IngressHeadAccounting, IngressHeadParts, OriginSource, PreparedIngress,
     RequestIngress, TargetUnavailable,
 };
+use edgezero_core::ja4::CapturedJa4;
 use edgezero_core::key_value_store::{KvError, KvHandle, KvStoreOpenFailure};
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::response_egress::ResponseEgressEnvelope;
@@ -410,6 +415,7 @@ fn dispatch_core_request(
     stores: Stores,
     prepared: PreparedIngress,
     geo: GeoOutcome,
+    client_info: ClientInfo,
 ) -> DispatchOutcome {
     // Hard-cutoff: legacy bare handles are no longer
     // inserted into request extensions. `with_config_handle`
@@ -444,11 +450,12 @@ fn dispatch_core_request(
     let entered = prepared.request_start();
     let method = prepared.request_method().clone();
     match executor::block_on(drive_callback(
-        Box::pin(app.dispatch_admitted_with_geo(
+        Box::pin(app.dispatch_admitted_with_client_info(
             prepared,
             core_request,
             FrameworkErrorDetail::Default,
             geo,
+            client_info,
         )),
         clock,
         entered,
@@ -489,6 +496,7 @@ where
 {
     let ingress = capture_request_ingress(&req);
     let geo = request_geo(&req);
+    let client_info = request_client_info(&req);
     let mut scratch = apply_request_prepare(&mut req, prepare);
     scratch.remove::<RequestIngress>();
     let synthesized_headers = scratch.remove::<edgezero_core::SynthesizedResponseHeaders>();
@@ -500,10 +508,15 @@ where
             )
         })?;
     head_request.extensions_mut().extend(scratch);
-    let outcome =
-        dispatch_ingress_reader(app, head_request, stores, request_start, geo, move || {
-            Ok(req.try_take_body())
-        });
+    let outcome = dispatch_ingress_reader(
+        app,
+        head_request,
+        stores,
+        request_start,
+        geo,
+        client_info,
+        move || Ok(req.try_take_body()),
+    );
     Ok(match (outcome, synthesized_headers) {
         (DispatchOutcome::Detached(envelope), Some(headers)) => {
             DispatchOutcome::Detached(envelope.with_synthesized_response_headers(headers))
@@ -521,6 +534,7 @@ fn dispatch_ingress_reader<Source, MakeSource>(
     stores: Stores,
     request_start: MonotonicInstant,
     geo: GeoOutcome,
+    client_info: ClientInfo,
     make_source: MakeSource,
 ) -> DispatchOutcome
 where
@@ -566,7 +580,23 @@ where
         source,
         Some((prepared.read_deadline(), prepared.monotonic_clock())),
     );
-    dispatch_core_request(app, head_request, stores, prepared, geo)
+    dispatch_core_request(app, head_request, stores, prepared, geo, client_info)
+}
+
+/// Client facts from Fastly's runtime, read from the original downstream request before
+/// any application hook. Fastly exposes no peer port, so the direct peer is not exposed.
+fn request_client_info(req: &FastlyRequest) -> ClientInfo {
+    let effective_client = req
+        .get_client_ip_addr()
+        .map_or(Capture::Unavailable(UnavailableReason::Missing), |ip| {
+            Capture::Captured(ClientAddress::new(ip, ClientIpSource::Fastly))
+        });
+    ClientInfo::new(
+        Capture::Unavailable(UnavailableReason::NotExposed),
+        effective_client,
+        ViewerTlsValue::capture_utf8(req.get_tls_protocol(), ViewerTlsSource::Fastly),
+        ViewerTlsValue::capture_utf8(req.get_tls_cipher_openssl_name(), ViewerTlsSource::Fastly),
+    )
 }
 
 /// Fastly's own geolocation for the downstream client address. `Geo::region` is
@@ -869,6 +899,7 @@ pub fn capture_request_ingress(req: &FastlyRequest) -> RequestIngress {
         None
     };
     RequestIngress::new(target, origin, HeaderFidelity::default())
+        .with_ja4(CapturedJa4::from_runtime_tls(req.get_tls_ja4()))
 }
 
 fn origin_from_runtime_uri<'header>(
@@ -1043,6 +1074,7 @@ where
         Stores::default(),
         request_start,
         GeoOutcome::NoSelection,
+        ClientInfo::not_exposed(),
         move || Ok(Some(source)),
     )
     .into_envelope()
@@ -1079,6 +1111,7 @@ where
         Stores::default(),
         request_start,
         GeoOutcome::NoSelection,
+        ClientInfo::not_exposed(),
         move || make_source().map(Some),
     );
     match outcome {
@@ -1113,6 +1146,7 @@ pub fn dispatch_ingress_source_error_for_test(
         Stores::default(),
         request_start,
         GeoOutcome::NoSelection,
+        ClientInfo::not_exposed(),
         || -> Result<Option<Cursor<Vec<u8>>>, EdgeError> {
             Err(EdgeError::internal(anyhow::anyhow!(
                 "fastly source construction failed"
@@ -1991,6 +2025,17 @@ mod ingress_tests {
             CapturedTarget::Unavailable(TargetUnavailable::NotExposed)
         ));
         assert!(ingress.origin().is_none());
+    }
+
+    #[test]
+    fn ingress_ja4_is_missing_for_non_client_request_despite_header() {
+        use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
+        let mut native = FastlyRequest::get("https://example.com/");
+        native.set_header("ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1");
+        assert_eq!(
+            capture_request_ingress(&native).ja4(),
+            Some(&CapturedJa4::Unavailable(Ja4Unavailable::Missing))
+        );
     }
 
     #[test]
