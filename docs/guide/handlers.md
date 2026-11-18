@@ -258,9 +258,12 @@ A handler reads three kinds of client facts without importing an adapter crate:
 - [`ctx.geo()`](./native-geo.md): estimated country and subdivision.
 - [`ctx.ja4()`](./adapters/overview.md#client-tls-fingerprint-ja4): the client's JA4 fingerprint.
 
-The managed adapter captures all three once at ingress. Headers or extensions that
-middleware, pre-dispatch hooks or handlers change do not alter them. Pre-dispatch hooks read
-the same snapshot through `PreDispatchRequest::client_info()`.
+The managed adapter captures all three once at ingress. `client_info()` and `geo()` are a
+private snapshot: headers or extensions that middleware, pre-dispatch hooks or handlers
+change do not alter them. Pre-dispatch hooks read the same `ClientInfo` through
+`PreDispatchRequest::client_info()`. `ja4()` reads the public `RequestIngress` request
+extension, so application code that replaces or removes that extension changes what later
+code sees; see [Client TLS fingerprint (JA4)](./adapters/overview.md#client-tls-fingerprint-ja4).
 
 ```rust
 use edgezero_core::client_info::{Capture, ClientIpSource};

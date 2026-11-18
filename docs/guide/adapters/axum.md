@@ -845,6 +845,11 @@ Startup fails before listening when protected JA4 is selected and Geo is off, Ge
 KV, or the `EDGEZERO__ADAPTER__JA4_*` variables are also set. An unknown country or a failed
 Geo lookup does not change JA4. The credential header is removed before handlers, as for Geo.
 The development runner reads settings only and ignores this manifest table, as it does for Geo.
+A generated project's `main` calls `run_generated_app`, which stays on the development runner
+unless `EDGEZERO__STORE_BINDINGS_FILE` selects a native bindings file. Without that file, call
+`run_production_app` or `run_production_app_with_initializer` from `main`; otherwise protected
+JA4 stays off, and `ctx.ja4()` reports `Unavailable(NotExposed)` unless the generic
+`EDGEZERO__ADAPTER__JA4_*` settings are configured.
 
 The peer check proves the route to Axum, not who generated the header. Before enabling this
 mode, meet two CloudFront requirements that EdgeZero cannot check:
