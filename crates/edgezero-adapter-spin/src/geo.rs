@@ -10,7 +10,7 @@ use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
 use edgezero_core::geo::GeoProviderId;
 use edgezero_core::geo::kv::Receipt;
-use edgezero_core::manifest::{BakedManifest, ManifestGeoProvider};
+use edgezero_core::manifest::{BakedManifest, ManifestAdapterClientInfo, ManifestGeoProvider};
 use std::time::Duration;
 
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
@@ -144,6 +144,30 @@ impl SpinKvGeo {
     }
 }
 
+/// Resolve `[adapters.spin.client_info] direct_ingress` for this deployment.
+///
+/// # Errors
+/// Rejects `direct_ingress = true` beside an authenticated-header Geo selection. One
+/// declares that visitors connect directly, the other that a proxy speaks for them, and
+/// `ClientInfo` and `ctx.geo()` would then describe different addresses.
+#[inline]
+pub fn direct_ingress(baked: BakedManifest, geo: Option<&SpinKvGeo>) -> Result<bool, EdgeError> {
+    let declared = match baked {
+        BakedManifest::Absent => false,
+        BakedManifest::Present(manifest) => manifest
+            .adapter_entry("spin")
+            .and_then(|(_, adapter)| adapter.client_info)
+            .is_some_and(ManifestAdapterClientInfo::direct_ingress),
+        BakedManifest::Malformed(_) | _ => return Err(invalid_selection()),
+    };
+    if declared && geo.is_some() {
+        return Err(EdgeError::validation(
+            "Spin client_info direct_ingress cannot be combined with authenticated-header geo",
+        ));
+    }
+    Ok(declared)
+}
+
 fn valid_variable(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -159,6 +183,7 @@ fn valid_variable(name: &str) -> bool {
 use {
     bytes::Bytes,
     edgezero_core::{
+        client_info::{Capture, ClientAddress, ClientInfo, ClientIpSource, UnavailableReason},
         geo::{GeoOutcome, GeoStatus},
         key_value_store::KvHandle,
         secret_store::SecretStore,
@@ -167,15 +192,61 @@ use {
     std::{future::Future, net::IpAddr},
 };
 
+/// The ingress credential as captured, before any secret comparison.
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+pub(crate) enum TokenCapture {
+    /// No credential header.
+    Absent,
+    /// A malformed or repeated credential header.
+    Invalid,
+    /// Exactly one syntactically valid credential.
+    Valid(Bytes),
+}
+
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 pub(crate) struct CapturedGeo {
     ip: Result<Option<IpAddr>, ()>,
-    token: Option<Bytes>,
+    token: TokenCapture,
+}
+
+/// The authenticated-header result shared by Geo lookup and `ClientInfo`.
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpinIpAdmission {
+    Admitted(IpAddr),
+    InvalidIp,
+    InvalidToken,
+    MissingIp,
+    NoToken,
+    SecretFailure,
+    TokenMismatch,
+}
+
+#[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
+impl SpinIpAdmission {
+    /// Project the admission into the portable snapshot. Spin exposes no peer or viewer TLS here.
+    pub(crate) fn client_info(self) -> ClientInfo {
+        let effective_client = match self {
+            Self::Admitted(ip) => {
+                Capture::Captured(ClientAddress::new(ip, ClientIpSource::AuthenticatedHeader))
+            }
+            Self::MissingIp | Self::NoToken => Capture::Unavailable(UnavailableReason::Missing),
+            Self::InvalidIp | Self::InvalidToken | Self::SecretFailure | Self::TokenMismatch => {
+                Capture::Unavailable(UnavailableReason::Rejected)
+            }
+        };
+        ClientInfo::new(
+            Capture::Unavailable(UnavailableReason::NotExposed),
+            effective_client,
+            Capture::Unavailable(UnavailableReason::NotExposed),
+            Capture::Unavailable(UnavailableReason::NotExposed),
+        )
+    }
 }
 
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 pub(crate) mod ingress {
-    use super::CapturedGeo;
+    use super::{CapturedGeo, TokenCapture};
     use bytes::Bytes;
     use edgezero_core::http::HeaderMap;
     use std::net::IpAddr;
@@ -189,11 +260,13 @@ pub(crate) mod ingress {
 
     pub(crate) fn capture_inputs(headers: &mut HeaderMap) -> CapturedGeo {
         let mut tokens = headers.get_all(TOKEN_HEADER).iter();
-        let token = tokens
-            .next()
-            .filter(|value| valid_token(value.as_bytes()))
-            .filter(|_| tokens.next().is_none())
-            .map(|value| Bytes::copy_from_slice(value.as_bytes()));
+        let token = match (tokens.next(), tokens.next()) {
+            (None, _) => TokenCapture::Absent,
+            (Some(value), None) if valid_token(value.as_bytes()) => {
+                TokenCapture::Valid(Bytes::copy_from_slice(value.as_bytes()))
+            }
+            (Some(_), _) => TokenCapture::Invalid,
+        };
         let mut ips = headers.get_all(IP_HEADER).iter();
         let ip = match ips.next() {
             None => Ok(None),
@@ -218,44 +291,28 @@ pub(crate) mod ingress {
     reason = "request resolution is gated to Spin and portable tests"
 )]
 impl SpinKvGeo {
-    fn outcome(&self, status: GeoStatus) -> GeoOutcome {
-        GeoOutcome::Selected {
-            provider: self.provider.clone(),
-            status,
-        }
-    }
-
-    pub(crate) async fn resolve<Timer, MakeTimer>(
+    /// Verify the ingress credential and the asserted visitor IP. No KV is read.
+    pub(crate) async fn authenticate<Timer, MakeTimer>(
         &self,
         input: CapturedGeo,
         clock: &MonotonicClock,
         admitted_deadline: Deadline,
         secrets: &dyn SecretStore,
-        handle: Option<KvHandle>,
         make_timer: MakeTimer,
-    ) -> GeoOutcome
+    ) -> SpinIpAdmission
     where
         Timer: Future<Output = ()>,
         MakeTimer: Fn(Duration) -> Timer,
     {
-        use edgezero_core::geo::kv::{IndexLimits, Resolver};
-        use edgezero_core::geo::{
-            GeoError, GeoSource, GeoStatus, GeoTrustBasis, GeoUnavailableReason,
-        };
-        use edgezero_core::time::Deadline;
         use futures_util::future::{Either, select};
         use subtle::ConstantTimeEq as _;
-        let failure = || self.outcome(GeoStatus::Error(GeoError::ProviderFailure));
-        let untrusted = || {
-            self.outcome(GeoStatus::Unavailable(
-                GeoUnavailableReason::UntrustedIngress,
-            ))
-        };
-        let Some(token) = input.token else {
-            return untrusted();
+        let token = match input.token {
+            TokenCapture::Absent => return SpinIpAdmission::NoToken,
+            TokenCapture::Invalid => return SpinIpAdmission::InvalidToken,
+            TokenCapture::Valid(token) => token,
         };
         if admitted_deadline.is_expired_at(clock.now()) {
-            return failure();
+            return SpinIpAdmission::SecretFailure;
         }
         let secret = secrets.get_bytes_bounded(
             "",
@@ -272,22 +329,55 @@ impl SpinKvGeo {
             Either::Left((Ok(read), _)) if !admitted_deadline.is_expired_at(clock.now()) => {
                 read.value
             }
-            Either::Left(_) | Either::Right(_) => return failure(),
+            Either::Left(_) | Either::Right(_) => return SpinIpAdmission::SecretFailure,
         };
         let Some(expected) = read_value.filter(|value| ingress::valid_token(value)) else {
-            return failure();
+            return SpinIpAdmission::SecretFailure;
         };
         if !bool::from(token.as_ref().ct_eq(expected.as_ref())) {
-            return untrusted();
+            return SpinIpAdmission::TokenMismatch;
         }
-        let ip = match input.ip {
-            Ok(Some(ip)) => ip,
-            Ok(None) => {
+        match input.ip {
+            Ok(Some(ip)) => SpinIpAdmission::Admitted(ip),
+            Ok(None) => SpinIpAdmission::MissingIp,
+            Err(()) => SpinIpAdmission::InvalidIp,
+        }
+    }
+
+    /// Look up an admitted visitor IP in the pinned dataset. Other admission results map to
+    /// the same Geo outcomes as before the split.
+    pub(crate) async fn lookup<Timer, MakeTimer>(
+        &self,
+        admission: SpinIpAdmission,
+        clock: &MonotonicClock,
+        admitted_deadline: Deadline,
+        handle: Option<KvHandle>,
+        make_timer: MakeTimer,
+    ) -> GeoOutcome
+    where
+        Timer: Future<Output = ()>,
+        MakeTimer: Fn(Duration) -> Timer,
+    {
+        use edgezero_core::geo::kv::{IndexLimits, Resolver};
+        use edgezero_core::geo::{GeoError, GeoSource, GeoTrustBasis, GeoUnavailableReason};
+        use futures_util::future::{Either, select};
+        let failure = || self.outcome(GeoStatus::Error(GeoError::ProviderFailure));
+        let ip = match admission {
+            SpinIpAdmission::Admitted(ip) => ip,
+            SpinIpAdmission::SecretFailure => return failure(),
+            SpinIpAdmission::MissingIp => {
                 return self.outcome(GeoStatus::Unavailable(
                     GeoUnavailableReason::MissingReaderIp,
                 ));
             }
-            Err(()) => return untrusted(),
+            SpinIpAdmission::InvalidIp
+            | SpinIpAdmission::InvalidToken
+            | SpinIpAdmission::NoToken
+            | SpinIpAdmission::TokenMismatch => {
+                return self.outcome(GeoStatus::Unavailable(
+                    GeoUnavailableReason::UntrustedIngress,
+                ));
+            }
         };
         let Some(kv) = handle else { return failure() };
         let deadline = Deadline::at_instant(
@@ -330,6 +420,35 @@ impl SpinKvGeo {
             }
             Either::Left(_) | Either::Right(_) => failure(),
         }
+    }
+
+    fn outcome(&self, status: GeoStatus) -> GeoOutcome {
+        GeoOutcome::Selected {
+            provider: self.provider.clone(),
+            status,
+        }
+    }
+
+    /// Authenticate and look up in one step.
+    #[cfg(test)]
+    pub(crate) async fn resolve<Timer, MakeTimer>(
+        &self,
+        input: CapturedGeo,
+        clock: &MonotonicClock,
+        admitted_deadline: Deadline,
+        secrets: &dyn SecretStore,
+        handle: Option<KvHandle>,
+        make_timer: MakeTimer,
+    ) -> GeoOutcome
+    where
+        Timer: Future<Output = ()>,
+        MakeTimer: Fn(Duration) -> Timer,
+    {
+        let admission = self
+            .authenticate(input, clock, admitted_deadline, secrets, &make_timer)
+            .await;
+        self.lookup(admission, clock, admitted_deadline, handle, make_timer)
+            .await
     }
 
     #[cfg(all(feature = "spin", target_arch = "wasm32"))]

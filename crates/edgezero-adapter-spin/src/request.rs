@@ -11,7 +11,7 @@ pub(crate) mod test_support;
 
 use crate::SpinResponse;
 use crate::config_store::SpinConfigStore;
-use crate::context::{SpinRequestContext, parse_client_addr};
+use crate::context::{SpinRequestContext, context_from_headers, direct_ingress_client_info};
 use crate::geo::{SpinKvGeo, ingress::capture_inputs};
 use crate::ingress::capture_request_ingress;
 use crate::key_value_store::{DEFAULT_MAX_LIST_KEYS, SpinKvStore};
@@ -19,6 +19,7 @@ use crate::response::from_egress_response;
 use crate::secret_store::SpinSecretStore;
 use edgezero_core::app::{App, FrameworkErrorDetail, StoreMetadata};
 use edgezero_core::body::Body;
+use edgezero_core::client_info::ClientInfo;
 use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
@@ -61,6 +62,7 @@ use crate::outbound::{SpinOutboundClient, native_time};
 pub(crate) struct Stores {
     config_registry: Option<ConfigRegistry>,
     config_store: Option<ConfigStoreHandle>,
+    direct_ingress: bool,
     geo: Option<SpinKvGeo>,
     kv: Option<KvHandle>,
     kv_registry: Option<KvRegistry>,
@@ -141,27 +143,12 @@ pub fn send_assembly_error(
 
 fn into_core_request_head(parts: RequestParts, outbound_clock: MonotonicClock) -> Request {
     let ingress = capture_request_ingress(&parts.uri);
-    let client_addr = parts
-        .headers
-        .get("spin-client-addr")
-        .and_then(|value| value.to_str().ok())
-        .and_then(parse_client_addr);
-    let full_url = parts
-        .headers
-        .get("spin-full-url")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let context = context_from_headers(&parts.headers);
 
     let mut request = Request::from_parts(parts, Body::empty());
 
     request.extensions_mut().insert(ingress);
-    SpinRequestContext::insert(
-        &mut request,
-        SpinRequestContext {
-            client_addr,
-            full_url,
-        },
-    );
+    SpinRequestContext::insert(&mut request, context);
     request
         .extensions_mut()
         .insert(outbound_client(outbound_clock));
@@ -406,6 +393,9 @@ where
         )
         .validate_normalized(app.ingress_head_limits());
         let geo_input = capture_inputs(head_request.headers_mut());
+        let direct_client = stores
+            .direct_ingress
+            .then(|| direct_ingress_client_info(head_request.headers()));
         if let Err(error) = head_validation {
             let egress = detached_error_envelope(app, error, request_method, request_start)?;
             return Ok(deliver(egress)?);
@@ -441,21 +431,23 @@ where
                 return Ok(deliver(egress)?);
             }
         };
-        let geo = match stores.geo.as_ref() {
+        let (geo, client_info) = match stores.geo.as_ref() {
             Some(selection) => {
+                let clock = prepared.monotonic_clock();
+                let deadline = prepared.read_deadline();
+                let admission = selection
+                    .authenticate(geo_input, &clock, deadline, geo_secrets, make_timer.clone())
+                    .await;
                 let handle = selection.handle(stores.kv_registry.as_ref());
-                selection
-                    .resolve(
-                        geo_input,
-                        &prepared.monotonic_clock(),
-                        prepared.read_deadline(),
-                        geo_secrets,
-                        handle,
-                        make_timer.clone(),
-                    )
-                    .await
+                let geo = selection
+                    .lookup(admission, &clock, deadline, handle, make_timer.clone())
+                    .await;
+                (geo, admission.client_info())
             }
-            None => GeoOutcome::NoSelection,
+            None => (
+                GeoOutcome::NoSelection,
+                direct_client.unwrap_or_else(ClientInfo::not_exposed),
+            ),
         };
         if !explicit_empty_body(head_request.headers()) {
             let source = match make_source() {
@@ -469,7 +461,15 @@ where
                 make_timer,
             );
         }
-        dispatch_core_request(app, head_request, stores, prepared, geo, deliver).await
+        dispatch_core_request(
+            app,
+            head_request,
+            stores,
+            prepared,
+            (geo, client_info),
+            deliver,
+        )
+        .await
     })
     .await
 }
@@ -479,7 +479,7 @@ async fn dispatch_core_request<Output, Deliver>(
     mut core_request: Request,
     stores: Stores,
     prepared: PreparedIngress,
-    geo: GeoOutcome,
+    (geo, client_info): (GeoOutcome, ClientInfo),
     deliver: Deliver,
 ) -> anyhow::Result<Output>
 where
@@ -510,11 +510,12 @@ where
     if let Some(registry) = secret_registry {
         core_request.extensions_mut().insert(registry);
     }
-    let response = Box::pin(app.dispatch_admitted_with_geo(
+    let response = Box::pin(app.dispatch_admitted_with_client_info(
         prepared,
         core_request,
         FrameworkErrorDetail::Default,
         geo,
+        client_info,
     ))
     .await;
     Ok(deliver(response)?)
@@ -539,7 +540,7 @@ pub(crate) async fn dispatch_with_registries(
     kv_meta: Option<StoreMetadata>,
     secret_meta: Option<StoreMetadata>,
     env: &EnvConfig,
-    geo: Option<SpinKvGeo>,
+    (geo, direct_ingress): (Option<SpinKvGeo>, bool),
 ) -> anyhow::Result<SpinResponse> {
     let request_start = app.monotonic_now();
     let kv_registry = build_kv_registry(kv_meta, env);
@@ -550,6 +551,7 @@ pub(crate) async fn dispatch_with_registries(
         req,
         Stores {
             config_registry,
+            direct_ingress,
             geo,
             kv_registry,
             secret_registry,

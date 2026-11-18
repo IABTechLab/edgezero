@@ -349,7 +349,7 @@ fn duplicate_credentials_and_ip_assertions_are_rejected_and_removed() {
         let captured = ingress::capture_inputs(&mut headers);
         assert!(headers.is_empty());
         if header == ingress::TOKEN_HEADER {
-            assert!(captured.token.is_none());
+            assert!(matches!(captured.token, TokenCapture::Invalid));
         } else {
             assert!(captured.ip.is_err());
         }
@@ -469,4 +469,201 @@ impl KvStore for AdvancingKv {
     async fn put_bytes_with_ttl(&self, _: &str, _: Bytes, _: Duration) -> Result<(), KvError> {
         panic!("read only")
     }
+}
+
+struct UnreadableSecret;
+#[async_trait::async_trait(?Send)]
+impl SecretStore for UnreadableSecret {
+    async fn get_bytes(&self, _: &str, _: &str) -> Result<Option<Bytes>, SecretError> {
+        Ok(None)
+    }
+    async fn get_bytes_bounded(
+        &self,
+        store_name: &str,
+        key: &str,
+        clock: &MonotonicClock,
+        deadline: edgezero_core::time::Deadline,
+        max_backend_bytes: u64,
+        max_value_bytes: u64,
+    ) -> Result<edgezero_core::config_store::BoundedStoreRead<Bytes>, SecretError> {
+        edgezero_core::secret_store::finish_bounded_secret_read(
+            self.get_bytes(store_name, key).await,
+            clock,
+            deadline,
+            max_backend_bytes,
+            max_value_bytes,
+        )
+    }
+}
+
+fn authenticated_selection() -> SpinKvGeo {
+    let env = EnvConfig::from_vars([
+        ("EDGEZERO__ADAPTER__GEO__PROVIDER", "kv"),
+        ("EDGEZERO__ADAPTER__GEO__STORE_ID", "geo"),
+        ("EDGEZERO__ADAPTER__GEO__PIN", PIN),
+        ("EDGEZERO__ADAPTER__GEO__READER_IP", "authenticated-header"),
+        ("EDGEZERO__ADAPTER__GEO__CREDENTIAL_VARIABLE", "geo_token"),
+    ]);
+    SpinKvGeo::from_config(BakedManifest::Absent, &env, metadata())
+        .unwrap()
+        .unwrap()
+}
+
+type AdmissionCase<'case> = (
+    &'case [(&'static str, &'static str)],
+    SpinIpAdmission,
+    edgezero_core::client_info::Capture<edgezero_core::client_info::ClientAddress>,
+);
+
+fn header_admission(
+    fields: &[(&'static str, &'static str)],
+    secrets: &dyn SecretStore,
+) -> SpinIpAdmission {
+    let mut headers = HeaderMap::new();
+    for (name, value) in fields {
+        headers.append(*name, HeaderValue::from_static(value));
+    }
+    let input = ingress::capture_inputs(&mut headers);
+    assert!(headers.is_empty(), "credential headers must be removed");
+    let clock = MonotonicClock::default();
+    block_on(authenticated_selection().authenticate(
+        input,
+        &clock,
+        clock.deadline_after(Duration::from_secs(1)),
+        secrets,
+        |_| pending(),
+    ))
+}
+
+#[test]
+fn authenticated_header_client_info_starts_from_request_headers() {
+    use edgezero_core::client_info::{Capture, ClientAddress, ClientIpSource, UnavailableReason};
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    const WRONG: &str = "ffffffffffffffffffffffffffffffff";
+    let token = ingress::TOKEN_HEADER;
+    let ip = ingress::IP_HEADER;
+    let admitted = |address: &str| {
+        Capture::Captured(ClientAddress::new(
+            address.parse().unwrap(),
+            ClientIpSource::AuthenticatedHeader,
+        ))
+    };
+    let missing = Capture::Unavailable(UnavailableReason::Missing);
+    let rejected = Capture::Unavailable(UnavailableReason::Rejected);
+    let cases: [AdmissionCase<'_>; 10] = [
+        (
+            &[(ip, "192.0.2.1")],
+            SpinIpAdmission::NoToken,
+            missing.clone(),
+        ),
+        (
+            &[(token, "short"), (ip, "192.0.2.1")],
+            SpinIpAdmission::InvalidToken,
+            rejected.clone(),
+        ),
+        (
+            &[(token, TOKEN), (token, TOKEN), (ip, "192.0.2.1")],
+            SpinIpAdmission::InvalidToken,
+            rejected.clone(),
+        ),
+        (
+            &[(token, WRONG), (ip, "192.0.2.1")],
+            SpinIpAdmission::TokenMismatch,
+            rejected.clone(),
+        ),
+        (&[(token, TOKEN)], SpinIpAdmission::MissingIp, missing),
+        (
+            &[(token, TOKEN), (ip, "192.0.2.1"), (ip, "192.0.2.2")],
+            SpinIpAdmission::InvalidIp,
+            rejected.clone(),
+        ),
+        (
+            &[(token, TOKEN), (ip, "192.0.2.1:80")],
+            SpinIpAdmission::InvalidIp,
+            rejected,
+        ),
+        (
+            &[(token, TOKEN), (ip, "192.0.2.1")],
+            SpinIpAdmission::Admitted("192.0.2.1".parse().unwrap()),
+            admitted("192.0.2.1"),
+        ),
+        (
+            &[(token, TOKEN), (ip, "2001:db8::1")],
+            SpinIpAdmission::Admitted("2001:db8::1".parse().unwrap()),
+            admitted("2001:db8::1"),
+        ),
+        (
+            &[(token, TOKEN), (ip, "::ffff:192.0.2.7")],
+            SpinIpAdmission::Admitted("192.0.2.7".parse().unwrap()),
+            admitted("192.0.2.7"),
+        ),
+    ];
+    for (fields, expected_admission, expected_client) in cases {
+        let admission = header_admission(fields, &Secret);
+        assert_eq!(admission, expected_admission, "{fields:?}");
+        let info = admission.client_info();
+        assert_eq!(info.effective_client(), &expected_client, "{fields:?}");
+        assert_eq!(
+            info.direct_peer(),
+            &Capture::Unavailable(UnavailableReason::NotExposed)
+        );
+        assert_eq!(
+            info.tls_cipher(),
+            &Capture::Unavailable(UnavailableReason::NotExposed)
+        );
+    }
+    let unreadable = header_admission(&[(token, TOKEN), (ip, "192.0.2.1")], &UnreadableSecret);
+    assert_eq!(unreadable, SpinIpAdmission::SecretFailure);
+    assert_eq!(
+        unreadable.client_info().effective_client(),
+        &Capture::Unavailable(UnavailableReason::Rejected)
+    );
+}
+
+#[test]
+fn every_admission_keeps_its_previous_geo_outcome_without_reading_kv() {
+    let selection = authenticated_selection();
+    let clock = MonotonicClock::default();
+    let untrusted = GeoStatus::Unavailable(GeoUnavailableReason::UntrustedIngress);
+    for (admission, expected) in [
+        (SpinIpAdmission::NoToken, untrusted.clone()),
+        (SpinIpAdmission::InvalidToken, untrusted.clone()),
+        (SpinIpAdmission::TokenMismatch, untrusted.clone()),
+        (SpinIpAdmission::InvalidIp, untrusted),
+        (
+            SpinIpAdmission::MissingIp,
+            GeoStatus::Unavailable(GeoUnavailableReason::MissingReaderIp),
+        ),
+        (
+            SpinIpAdmission::SecretFailure,
+            GeoStatus::Error(edgezero_core::geo::GeoError::ProviderFailure),
+        ),
+    ] {
+        let outcome = block_on(selection.lookup(
+            admission,
+            &clock,
+            clock.deadline_after(Duration::from_secs(1)),
+            None,
+            |_| pending(),
+        ));
+        assert!(
+            matches!(&outcome, GeoOutcome::Selected { status, .. } if *status == expected),
+            "{admission:?}: {outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn direct_ingress_is_declared_and_conflicts_with_authenticated_geo() {
+    let direct = Manifest::from_baked_json(
+        r#"{"adapters":{"spin":{"client_info":{"direct_ingress":true}}}}"#,
+    );
+    let off = Manifest::from_baked_json(r#"{"adapters":{"spin":{"client_info":{}}}}"#);
+    assert!(!direct_ingress(BakedManifest::Absent, None).unwrap());
+    assert!(!direct_ingress(off, None).unwrap());
+    assert!(direct_ingress(direct, None).unwrap());
+    let selection = authenticated_selection();
+    assert!(!direct_ingress(off, Some(&selection)).unwrap());
+    let error = direct_ingress(direct, Some(&selection)).unwrap_err();
+    assert!(error.to_string().contains("direct_ingress"), "{error}");
 }
