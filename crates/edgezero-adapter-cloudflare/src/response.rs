@@ -466,6 +466,7 @@ mod platform {
     use worker::worker_sys::FixedLengthStream;
     use worker::{AbortSignal, Context, Delay, EncodeBody, Response as CfResponse};
 
+    use crate::after_response::ReleaseGuard;
     use crate::outbound::{copy_header_values, native_time};
 
     const fn public_message(error: DeliveryError) -> &'static str {
@@ -479,6 +480,7 @@ mod platform {
     }
 
     pub(crate) struct CloudflareEgressRuntime {
+        release: Option<ReleaseGuard>,
         context: Arc<Context>,
         signal: AbortSignal,
     }
@@ -486,13 +488,20 @@ mod platform {
     impl CloudflareEgressRuntime {
         pub(crate) fn new(signal: web_sys::AbortSignal, context: Arc<Context>) -> Self {
             Self {
+                release: None,
                 context,
                 signal: signal.into(),
             }
         }
+
+        pub(crate) fn with_after_response(mut self, release: ReleaseGuard) -> Self {
+            self.release = Some(release);
+            self
+        }
     }
 
     struct WorkersCommitter {
+        release: Option<ReleaseGuard>,
         context: Arc<Context>,
         signal: AbortSignal,
     }
@@ -561,7 +570,11 @@ mod platform {
         }
 
         fn spawn(&mut self, task: LocalBoxFuture<'static, ()>) {
-            self.context.wait_until(task);
+            let release = self.release.take();
+            self.context.wait_until(async move {
+                let _release = release;
+                task.await;
+            });
         }
     }
 
@@ -1002,6 +1015,7 @@ mod platform {
     ) -> Result<CfResponse, EdgeError> {
         let request_method = egress.request_method().clone();
         let mut committer = WorkersCommitter {
+            release: runtime.release,
             context: runtime.context,
             signal: runtime.signal,
         };
@@ -1038,6 +1052,7 @@ mod platform {
 
     #[cfg(test)]
     mod race_tests {
+        use crate::after_response;
         use std::cell::Cell;
         use std::rc::Rc;
         use std::sync::Mutex;
@@ -1131,11 +1146,60 @@ mod platform {
             .expect("guest waitUntil");
             (
                 WorkersCommitter {
+                    release: None,
                     context: Arc::new(Context::new(context.unchecked_into())),
                     signal: signal.into(),
                 },
                 pending,
             )
+        }
+
+        fn register_after_response(committer: &mut WorkersCommitter) -> Rc<Cell<bool>> {
+            let (handle, release) =
+                after_response::arm(Arc::clone(&committer.context), MonotonicClock::default());
+            let ran = Rc::new(Cell::new(false));
+            let observed = Rc::clone(&ran);
+            handle
+                .schedule(Duration::from_secs(1), async move {
+                    observed.set(true);
+                })
+                .expect("register task");
+            committer.release = Some(release);
+            ran
+        }
+
+        #[wasm_bindgen_test]
+        async fn after_response_releases_after_failed_fallback() {
+            let _timers = NumericTimeoutGuard::install();
+            let controller = web_sys::AbortController::new().expect("controller");
+            controller.abort();
+            let (mut committer, tasks) = sdk_committer(controller.signal());
+            let ran = register_after_response(&mut committer);
+            let fixture = status_fixture(Response::new(Body::empty()), &Method::HEAD);
+            let StartOutcome::Precommit { attempt, cause } = start_prepared(
+                fixture.prepared,
+                fixture.policy,
+                fixture.attempt,
+                fixture.clock.clone(),
+                EgressKind::Application,
+                &mut committer,
+            ) else {
+                panic!("aborted delivery must fail precommit");
+            };
+            assert!(!ran.get());
+            start_fallback(
+                &Method::HEAD,
+                cause,
+                *attempt,
+                &fixture.clock,
+                &mut committer,
+            )
+            .expect_err("aborted fallback");
+            drop(committer);
+            JsFuture::from(Promise::all(&tasks))
+                .await
+                .expect("released after failed fallback");
+            assert!(ran.get());
         }
 
         fn sdk_io(signal: web_sys::AbortSignal) -> (WorkersEgressIo, wasm_streams::ReadableStream) {
@@ -1321,11 +1385,17 @@ mod platform {
                 .call0(&JsValue::UNDEFINED)
                 .expect("guest-only FixedLengthStream shim");
             for length in [None, Some(7)] {
-                assert_pending_source_cancelled(length).await;
+                assert_pending_source_cancelled(length, false).await;
+                assert_pending_source_cancelled(length, true).await;
             }
         }
 
-        async fn assert_pending_source_cancelled(length: Option<u32>) {
+        #[expect(
+            clippy::cognitive_complexity,
+            clippy::too_many_lines,
+            reason = "keep terminal ownership assertions together for both cancellation sources"
+        )]
+        async fn assert_pending_source_cancelled(length: Option<u32>, abort_request: bool) {
             let source_drops = Rc::new(Cell::new(0));
             let lease = DropCounter(Rc::clone(&source_drops));
             let (notify_pending, entered_pending) = oneshot::channel();
@@ -1366,6 +1436,7 @@ mod platform {
             let deadline = fixture.policy.write_deadline;
             let controller = web_sys::AbortController::new().expect("controller");
             let (mut committer, tasks) = sdk_committer(controller.signal());
+            let task_ran = register_after_response(&mut committer);
             let native_response = match start_prepared(
                 fixture.prepared,
                 fixture.policy,
@@ -1391,14 +1462,27 @@ mod platform {
             assert_eq!(source_drops.get(), 0);
             assert_eq!(owner_drops.get(), 0);
             assert!(!controller.signal().aborted());
-            reader.cancel().await.expect("cancel readable");
+            assert!(!task_ran.get(), "task must wait for terminal delivery");
+            if abort_request {
+                controller.abort();
+            } else {
+                reader.cancel().await.expect("cancel readable");
+            }
             JsFuture::from(Promise::all(&tasks))
                 .await
                 .expect("egress task");
             let reports = fixture.observed.reports();
             assert_eq!(reports.len(), 1);
             assert_eq!(fixture.completed.reports(), reports);
-            assert_eq!(reports[0].outcome, ResponseEgressOutcome::TransportError);
+            assert_eq!(
+                reports[0].outcome,
+                if abort_request {
+                    ResponseEgressOutcome::RequestCancelled
+                } else {
+                    ResponseEgressOutcome::TransportError
+                }
+            );
+            assert!(task_ran.get(), "terminal writer releases task");
             assert!(!deadline.is_expired_at(fixture.clock.now()));
             assert_eq!(reports[0].bytes_written, 6);
             assert_eq!(reports[0].body_kind, ResponseEgressBodyKind::Application);
@@ -1407,7 +1491,7 @@ mod platform {
             assert_eq!(owner_drops.get(), 1);
             assert!(retained.upgrade().is_none());
             assert!(scope.check().is_err());
-            assert!(!controller.signal().aborted());
+            assert_eq!(controller.signal().aborted(), abort_request);
             drop(reader);
             drop(raw);
             assert_eq!(fixture.observed.reports(), reports);

@@ -66,12 +66,13 @@ mod tests {
     use edgezero_core::router::RouterService;
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
     use futures::channel::mpsc::unbounded;
-    use futures::future::{Either, select};
+    use futures::future::{Either, pending, select};
     use futures::{StreamExt as _, pin_mut, stream};
     use std::io::Error as IoError;
     use wasm_bindgen_test::wasm_bindgen_test;
-    use worker::js_sys::{Function, Object, Reflect};
+    use worker::js_sys::{Array, Function, Object, Promise, Reflect};
     use worker::wasm_bindgen::{JsCast as _, JsValue};
+    use worker::wasm_bindgen_futures::JsFuture;
     use worker::worker_sys::Context as WorkerSysContext;
     use worker::{Context, Env, Method as CfMethod, Request as CfRequest, RequestInit};
 
@@ -345,6 +346,321 @@ mod tests {
     #[wasm_bindgen_test]
     fn deadline_body_releases_source_when_timeout_is_emitted() {
         assert!(deadline_body_releases_source_for_test());
+    }
+
+    fn recording_context() -> (Env, Context, Array, NumericTimeoutGuard) {
+        let (env, _ctx, timers) = test_env_ctx();
+        let object = Function::new_no_args(
+            "return { promises: [], waitUntil(p) { this.promises.push(p); } };",
+        )
+        .call0(&JsValue::UNDEFINED)
+        .expect("recording context");
+        let promises = Reflect::get(&object, &JsValue::from_str("promises"))
+            .expect("promise list")
+            .unchecked_into();
+        (env, Context::new(object.unchecked_into()), promises, timers)
+    }
+
+    #[wasm_bindgen_test]
+    async fn after_response_runs_through_service_and_prebuilt_dispatch() {
+        static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+        #[edgezero_core::action]
+        async fn register(ctx: RequestContext) -> Result<Response, EdgeError> {
+            ctx.after_response(Duration::from_secs(1), async {
+                COMPLETED.fetch_add(1, Ordering::SeqCst);
+            })?;
+            Ok(Response::new(Body::text("delivered")))
+        }
+        struct TestApp;
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "test uses default application metadata"
+        )]
+        impl Hooks for TestApp {
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().get("/task", register).build())
+            }
+        }
+        let app = App::build::<TestApp>(edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM)
+            .expect("application");
+        COMPLETED.store(0, Ordering::SeqCst);
+        for prebuilt in [false, true] {
+            let (env, ctx, promises, _timers) = recording_context();
+            let req = cf_request(CfMethod::Get, "/task", None);
+            let mut response = if prebuilt {
+                edgezero_adapter_cloudflare::dispatch_app::<TestApp>(&app, req, env, ctx).await
+            } else {
+                CloudflareService::new(&app).dispatch(req, env, ctx).await
+            }
+            .expect("response");
+            assert_eq!(
+                response.status_code(),
+                200,
+                "registration must be supported"
+            );
+            assert_eq!(response.text().await.expect("body"), "delivered");
+            JsFuture::from(Promise::all(&promises))
+                .await
+                .expect("all waitUntil work completed");
+        }
+        assert_eq!(COMPLETED.load(Ordering::SeqCst), 2);
+    }
+
+    #[wasm_bindgen_test]
+    async fn after_response_waits_for_stream_and_budget_starts_at_release() {
+        use edgezero_core::after_response::AfterResponseHandle;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct State {
+            cancelled: AtomicUsize,
+            completed: AtomicUsize,
+            produced: AtomicUsize,
+            retained: Mutex<Option<AfterResponseHandle>>,
+            started_early: AtomicUsize,
+        }
+        struct DropProbe(Arc<State>);
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.cancelled.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        #[edgezero_core::action]
+        async fn register(ctx: RequestContext) -> Result<Response, EdgeError> {
+            let state = Arc::clone(ctx.extensions().get::<Arc<State>>().expect("state"));
+            *state.retained.lock().unwrap() =
+                ctx.extensions().get::<AfterResponseHandle>().cloned();
+            let task_state = Arc::clone(&state);
+            let local = Rc::new(Cell::new(false));
+            ctx.after_response(Duration::from_millis(60), async move {
+                if task_state.produced.load(Ordering::SeqCst) == 0 {
+                    task_state.started_early.fetch_add(1, Ordering::SeqCst);
+                }
+                local.set(true);
+                worker::Delay::from(Duration::from_millis(25)).await;
+                assert!(local.get(), "non-Send task ran");
+                let handle = task_state.retained.lock().unwrap().clone().unwrap();
+                let late_state = Arc::clone(&task_state);
+                assert!(
+                    handle
+                        .schedule(Duration::from_secs(1), async move {
+                            late_state.started_early.fetch_add(1, Ordering::SeqCst);
+                        })
+                        .is_err()
+                );
+                task_state.completed.fetch_add(1, Ordering::SeqCst);
+            })?;
+            let probe = DropProbe(Arc::clone(&state));
+            ctx.after_response(Duration::from_millis(10), async move {
+                let _probe = probe;
+                pending::<()>().await;
+            })?;
+            Ok(Response::new(Body::stream(stream::once(async move {
+                worker::Delay::from(Duration::from_millis(100)).await;
+                state.produced.store(1, Ordering::SeqCst);
+                Bytes::from_static(b"stream finished")
+            }))))
+        }
+        let state = Arc::new(State::default());
+        let app = App::new(
+            RouterService::builder()
+                .with_state(Arc::clone(&state))
+                .get("/task", register)
+                .build(),
+        );
+        let (env, ctx, promises, _timers) = recording_context();
+        let mut response = CloudflareService::new(&app)
+            .dispatch(cf_request(CfMethod::Get, "/task", None), env, ctx)
+            .await
+            .expect("response");
+        worker::Delay::from(Duration::from_millis(20)).await;
+        assert_eq!(state.completed.load(Ordering::SeqCst), 0);
+        assert_eq!(state.cancelled.load(Ordering::SeqCst), 0);
+        assert_eq!(response.text().await.unwrap(), "stream finished");
+        JsFuture::from(Promise::all(&promises))
+            .await
+            .expect("waitUntil tasks");
+        assert_eq!(
+            state.completed.load(Ordering::SeqCst),
+            1,
+            "response time must not consume task budget"
+        );
+        assert_eq!(
+            state.started_early.load(Ordering::SeqCst),
+            0,
+            "task must not start before the stream finishes"
+        );
+        assert_eq!(
+            state.cancelled.load(Ordering::SeqCst),
+            1,
+            "pending task dropped at budget"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn after_response_owns_fresh_outbound_scope_and_aborts_timed_out_fetch() {
+        struct FetchProbe(JsValue);
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for FetchProbe {
+            fn drop(&mut self) {
+                let restore = Reflect::get(&self.0, &JsValue::from_str("restore"))
+                    .unwrap()
+                    .unchecked_into::<Function>();
+                restore.call0(&JsValue::UNDEFINED).unwrap();
+            }
+        }
+        static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+        #[edgezero_core::action]
+        async fn register(ctx: RequestContext) -> Result<Response, EdgeError> {
+            let client = ctx.http_client().unwrap().clone();
+            let stale = client.send(OutboundRequest::get("https://upstream.example/stale")?);
+            let fresh_client = client.clone();
+            ctx.after_response(Duration::from_secs(1), async move {
+                assert!(stale.await.is_err(), "earlier scope stays revoked");
+                let response = fresh_client
+                    .send(OutboundRequest::get("https://upstream.example/ready").unwrap())
+                    .await
+                    .expect("new callback reaches fetch");
+                assert_eq!(
+                    response
+                        .into_body()
+                        .into_bytes_bounded(64)
+                        .await
+                        .unwrap()
+                        .as_ref(),
+                    b"ready"
+                );
+                COMPLETED.fetch_add(1, Ordering::SeqCst);
+            })?;
+            ctx.after_response(Duration::from_millis(20), async move {
+                let _response = client
+                    .send(OutboundRequest::get("https://upstream.example/pending").unwrap())
+                    .await;
+                COMPLETED.fetch_add(100, Ordering::SeqCst);
+            })?;
+            Ok(Response::new(Body::text("delivered")))
+        }
+        let probe = FetchProbe(
+            Function::new_no_args(
+                "const original = globalThis.fetch; const probe = {calls:0, aborts:0};
+             globalThis.fetch = (request, init) => {
+               probe.calls++;
+               if (request.url.endsWith('/pending')) {
+                 init.signal.addEventListener('abort', () => {probe.aborts++;}, {once:true});
+                 return new Promise(() => {});
+               }
+               return Promise.resolve(new Response('ready'));
+             };
+             probe.restore = () => {globalThis.fetch = original;}; return probe;",
+            )
+            .call0(&JsValue::UNDEFINED)
+            .unwrap(),
+        );
+        COMPLETED.store(0, Ordering::SeqCst);
+        let app = App::new(RouterService::builder().get("/task", register).build());
+        let (env, ctx, promises, _timers) = recording_context();
+        let mut response = CloudflareService::new(&app)
+            .dispatch(cf_request(CfMethod::Get, "/task", None), env, ctx)
+            .await
+            .unwrap();
+        response.bytes().await.unwrap();
+        JsFuture::from(Promise::all(&promises))
+            .await
+            .expect("bounded work");
+        assert_eq!(COMPLETED.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            Reflect::get(&probe.0, &JsValue::from_str("calls"))
+                .unwrap()
+                .as_f64(),
+            Some(2.0_f64)
+        );
+        assert_eq!(
+            Reflect::get(&probe.0, &JsValue::from_str("aborts"))
+                .unwrap()
+                .as_f64(),
+            Some(1.0_f64)
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn after_response_releases_when_dispatch_is_abandoned() {
+        static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+        #[edgezero_core::action]
+        async fn register(ctx: RequestContext) -> Result<Response, EdgeError> {
+            ctx.after_response(Duration::from_secs(1), async {
+                COMPLETED.fetch_add(1, Ordering::SeqCst);
+            })?;
+            pending().await
+        }
+        use futures::FutureExt as _;
+        let app = App::new(RouterService::builder().get("/task", register).build());
+        let (env, ctx, promises, _timers) = recording_context();
+        COMPLETED.store(0, Ordering::SeqCst);
+        assert!(
+            CloudflareService::new(&app)
+                .dispatch(cf_request(CfMethod::Get, "/task", None), env, ctx)
+                .now_or_never()
+                .is_none()
+        );
+        JsFuture::from(Promise::all(&promises))
+            .await
+            .expect("abandoned dispatch task");
+        assert_eq!(COMPLETED.load(Ordering::SeqCst), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn after_response_releases_on_bodyless_fallback_and_source_failure() {
+        static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+        #[edgezero_core::action]
+        async fn register(ctx: RequestContext) -> Result<Response, EdgeError> {
+            ctx.after_response(Duration::from_secs(1), async {
+                COMPLETED.fetch_add(1, Ordering::SeqCst);
+            })?;
+            let mut response = Response::new(Body::empty());
+            match ctx.uri().path() {
+                "/bodyless" => *response.status_mut() = StatusCode::NO_CONTENT,
+                "/fallback" => *response.status_mut() = StatusCode::from_u16(199).unwrap(),
+                _ => {
+                    *response.body_mut() = Body::from_stream(stream::once(async {
+                        Err::<Bytes, _>(EdgeError::internal(IoError::other("source failed")))
+                    }));
+                }
+            }
+            Ok(response)
+        }
+        let app = App::new(
+            RouterService::builder()
+                .get("/bodyless", register)
+                .get("/fallback", register)
+                .get("/source-error", register)
+                .build(),
+        );
+        COMPLETED.store(0, Ordering::SeqCst);
+        for (path, status) in [
+            ("/bodyless", 204),
+            ("/fallback", 500),
+            ("/source-error", 200),
+        ] {
+            let (env, ctx, promises, _timers) = recording_context();
+            let mut response = CloudflareService::new(&app)
+                .dispatch(cf_request(CfMethod::Get, path, None), env, ctx)
+                .await
+                .expect("response");
+            assert_eq!(response.status_code(), status);
+            let body = response.bytes().await;
+            if path == "/source-error" {
+                body.expect_err("failed source must fail body");
+            } else {
+                body.expect("bodyless or fallback body");
+            }
+            JsFuture::from(Promise::all(&promises))
+                .await
+                .expect("all terminal work");
+        }
+        assert_eq!(COMPLETED.load(Ordering::SeqCst), 3);
     }
 
     #[wasm_bindgen_test]

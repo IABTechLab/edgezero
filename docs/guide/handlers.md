@@ -260,7 +260,9 @@ async fn page(ctx: RequestContext) -> Result<&'static str, EdgeError> {
 Registration returns `501 Not Implemented` on adapters without support; see the
 [after-response task matrix](./capabilities.md#after-response-task-matrix). Declare
 `after-response-tasks` as a required capability when the work is not optional. Tasks return `()`, so
-handle and log their own failures. A task cannot register further tasks.
+handle and log their own failures. A task cannot register further tasks. Cloudflare caps the
+effective budget at 30 seconds, and the shared Workers lifetime may end sooner; use durable
+platform queues when completion and retries must survive an invocation.
 
 ### Store Extractors
 

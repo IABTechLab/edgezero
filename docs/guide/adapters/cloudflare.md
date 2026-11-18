@@ -484,3 +484,20 @@ captured separately before that conversion.
 
 - Learn about [Fastly Compute](/guide/adapters/fastly) as an alternative
 - Explore the [Axum adapter](/guide/adapters/axum) for local development
+
+## After-response tasks
+
+`ctx.after_response(budget, task)` uses Workers `waitUntil` and keeps the task unpolled
+until the adapter's response writer terminates, or a bodyless response is handed off.
+Errors, cancellation and bounded fallback also release the tasks. This is a terminal
+host handoff, not confirmation that the client received the response.
+
+The effective cooperative budget is `min(budget, 30 seconds)` and starts after release.
+Construct outbound requests inside the task so they use its fresh callback scope.
+Registration closes at release; retained handles and recursive registrations fail.
+
+Workers shares up to 30 seconds after response completion or disconnect across all
+`waitUntil` work, independently of these task budgets. CPU/memory limits and platform
+termination can shorten execution. Blocking code cannot be preempted within a poll.
+Tasks are not persistent and have no automatic retries. Use a durable queue for work
+that must survive invocation loss. See the [capability matrix](../capabilities.md#after-response-task-matrix).
