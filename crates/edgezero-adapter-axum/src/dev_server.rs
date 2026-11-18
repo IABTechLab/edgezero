@@ -3976,6 +3976,145 @@ mod integration_tests {
         }
     }
 
+    // Test-only label: the snapshot's `Debug` deliberately hides addresses.
+    async fn client_info_state(ctx: RequestContext) -> Result<String, EdgeError> {
+        use edgezero_core::client_info::{Capture, PeerAddress, UnavailableReason};
+        let info = ctx.client_info().expect("managed listener snapshot");
+        let source = match info.effective_client() {
+            Capture::Captured(address) => format!("{:?}", address.source()),
+            Capture::Unavailable(reason) => format!("{reason:?}"),
+            _ => "unexpected".to_owned(),
+        };
+        let ip = info
+            .effective_client_ip()
+            .map_or_else(|| "none".to_owned(), |ip| ip.to_string());
+        let peer = info.direct_peer().captured().map_or_else(
+            || "none".to_owned(),
+            |peer| PeerAddress::ip(peer).to_string(),
+        );
+        assert_eq!(
+            info.tls_version().unavailable_reason(),
+            Some(UnavailableReason::NotExposed)
+        );
+        Ok(format!("{source}|{ip}|{peer}"))
+    }
+
+    async fn client_info_over_tcp(
+        bind: &str,
+        policy: TrustedProxyPolicy,
+        headers: &[(&str, &str)],
+    ) -> String {
+        let listener = TokioTcpListener::bind(bind)
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let config = AxumDevServerConfig {
+            addr,
+            enable_ctrl_c: false,
+            ingress: AxumIngressConfig::default(),
+        };
+        let server = AxumDevServer::with_config(
+            App::new(
+                RouterService::builder()
+                    .get("/client", client_info_state)
+                    .build(),
+            ),
+            config,
+        )
+        .with_trusted_proxy_policy(policy);
+        let handle = tokio::spawn(async move {
+            let _result = server.serve(listener, future::pending()).await;
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/client");
+        let response = send_with_retry(&client, |http_client| {
+            let mut request = http_client.get(url.as_str());
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            request
+        })
+        .await;
+        let body = response.text().await.expect("body");
+        handle.abort();
+        body
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_projects_checked_ingress_into_client_info() {
+        use crate::trusted_proxy::ForwardingHeaderFamily;
+        use edgezero_core::client_info::{ClientIpSource, UnavailableReason};
+        type Case<'case> = (
+            &'case str,
+            TrustedProxyPolicy,
+            &'case [(&'case str, &'case str)],
+            String,
+        );
+
+        let xff = |cidr: &str| {
+            TrustedProxyPolicy::new(ForwardingHeaderFamily::XForwarded, [cidr]).expect("policy")
+        };
+        let direct = format!("{:?}|127.0.0.1|127.0.0.1", ClientIpSource::DirectPeer);
+        let missing = format!(
+            "{:?}|none|127.0.0.1",
+            ClientIpSource::PeerFallback(UnavailableReason::Missing)
+        );
+        let spoofed = [
+            ("x-forwarded-for", "198.51.100.7"),
+            ("forwarded", "for=198.51.100.8"),
+        ];
+        let cases: [Case<'_>; 7] = [
+            (
+                "127.0.0.1:0",
+                TrustedProxyPolicy::no_trust(),
+                &spoofed,
+                direct.clone(),
+            ),
+            ("127.0.0.1:0", xff("192.0.2.0/24"), &spoofed[..1], direct),
+            (
+                "127.0.0.1:0",
+                xff("127.0.0.0/8"),
+                &spoofed[..1],
+                format!(
+                    "{:?}|198.51.100.7|127.0.0.1",
+                    ClientIpSource::TrustedXForwardedFor
+                ),
+            ),
+            ("127.0.0.1:0", xff("127.0.0.0/8"), &[], missing.clone()),
+            (
+                "127.0.0.1:0",
+                xff("127.0.0.0/8"),
+                &[
+                    ("x-forwarded-host", "public.example"),
+                    ("x-forwarded-proto", "https"),
+                ],
+                missing,
+            ),
+            (
+                "127.0.0.1:0",
+                xff("127.0.0.0/8"),
+                &[("x-forwarded-for", "not-an-ip")],
+                format!(
+                    "{:?}|none|127.0.0.1",
+                    ClientIpSource::PeerFallback(UnavailableReason::Rejected)
+                ),
+            ),
+            (
+                "[::1]:0",
+                xff("::1/128"),
+                &[("x-forwarded-for", "2001:db8::7")],
+                format!("{:?}|2001:db8::7|::1", ClientIpSource::TrustedXForwardedFor),
+            ),
+        ];
+        for (bind, policy, headers, expected) in cases {
+            assert_eq!(
+                client_info_over_tcp(bind, policy, headers).await,
+                expected,
+                "{headers:?}"
+            );
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn server_returns_404_for_unknown_routes() {
         let router = RouterService::builder().build();

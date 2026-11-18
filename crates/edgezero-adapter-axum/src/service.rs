@@ -11,6 +11,7 @@ use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Request, Response};
 use edgezero_core::OutboundScopeOwner;
 use edgezero_core::app::{App, FrameworkErrorDetail};
+use edgezero_core::client_info::ClientInfo;
 use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::error::EdgeError;
 use edgezero_core::geo::GeoOutcome;
@@ -355,7 +356,7 @@ impl AxumServiceState {
         native_body: AxumBody,
         connection: &EgressConnection,
         guard: RequestGuard,
-        geo: GeoOutcome,
+        (geo, client_info): (GeoOutcome, ClientInfo),
     ) -> Response<AxumEgressBody> {
         let app = &self.app;
         let read_deadline = prepared.read_deadline();
@@ -393,11 +394,12 @@ impl AxumServiceState {
             core_request.extensions_mut().insert(registry);
         }
         let egress = app
-            .dispatch_admitted_with_geo(
+            .dispatch_admitted_with_client_info(
                 prepared,
                 core_request,
                 FrameworkErrorDetail::CategoryOnly,
                 geo,
+                client_info,
             )
             .await;
         prepare_native_egress(egress, connection, guard).await
@@ -465,6 +467,7 @@ impl AxumServiceState {
             }
         };
         let checked = normalize(&self.trusted_proxy_policy, remote_addr, &parts);
+        let client_info = checked.client_info();
         guard.set_forwarding_result(checked.forwarding_result());
         strip_forwarding_headers(&mut parts.headers);
         parts.extensions.insert(checked.effective_host().clone());
@@ -511,17 +514,24 @@ impl AxumServiceState {
                 .await;
             }
         };
-        let geo = self
-            .geo
+        let facts = (self.resolve_geo(remote_addr, &parts).await, client_info);
+        Ok(self
+            .dispatch_prepared(prepared, parts, native_body, connection, guard, facts)
+            .await)
+    }
+
+    async fn resolve_geo(
+        &self,
+        remote_addr: Option<SocketAddr>,
+        parts: &RequestParts,
+    ) -> GeoOutcome {
+        self.geo
             .resolve_request(
                 remote_addr,
                 &parts.headers,
                 parts.extensions.get::<NativeIngressMetadata>(),
             )
-            .await;
-        Ok(self
-            .dispatch_prepared(prepared, parts, native_body, connection, guard, geo)
-            .await)
+            .await
     }
 }
 

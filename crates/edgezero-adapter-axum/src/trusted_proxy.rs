@@ -8,6 +8,9 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::from_utf8;
 
+use edgezero_core::client_info::{
+    Capture, ClientAddress, ClientInfo, ClientIpSource, PeerAddress, UnavailableReason,
+};
 use edgezero_core::http::{Authority, HeaderMap, HeaderName, RequestParts};
 use edgezero_core::ingress::{CheckedEffectiveHost, CheckedHostSource};
 
@@ -194,6 +197,7 @@ pub struct CheckedProxyMetadata {
     effective_host: CheckedEffectiveHost,
     effective_scheme: Scheme,
     forwarding_result: ForwardingResult,
+    peer_trusted: bool,
     scheme_source: CheckedHostSource,
 }
 
@@ -207,6 +211,45 @@ impl fmt::Debug for CheckedProxyMetadata {
 }
 
 impl CheckedProxyMetadata {
+    /// Project the checked client result into the portable snapshot.
+    ///
+    /// `PeerFallback` means the socket peer is a trusted proxy and no client
+    /// behind it was resolved. An untrusted peer is the client (`DirectPeer`),
+    /// whatever forwarding headers it sent. Viewer TLS is not exposed here.
+    #[must_use]
+    pub(crate) fn client_info(&self) -> ClientInfo {
+        let direct_peer = self.direct_peer.map_or(
+            Capture::Unavailable(UnavailableReason::NotExposed),
+            |peer| Capture::Captured(PeerAddress::new(peer)),
+        );
+        let effective_client = match self.effective_client {
+            None => Capture::Unavailable(UnavailableReason::NotExposed),
+            Some(ip) => Capture::Captured(ClientAddress::new(ip, self.client_ip_source())),
+        };
+        ClientInfo::new(
+            direct_peer,
+            effective_client,
+            Capture::Unavailable(UnavailableReason::NotExposed),
+            Capture::Unavailable(UnavailableReason::NotExposed),
+        )
+    }
+
+    fn client_ip_source(&self) -> ClientIpSource {
+        match self.client_source {
+            CheckedHostSource::TrustedForwarded => ClientIpSource::TrustedForwarded,
+            CheckedHostSource::TrustedXForwarded => ClientIpSource::TrustedXForwardedFor,
+            CheckedHostSource::Direct | CheckedHostSource::Unavailable | _ => {
+                if !self.peer_trusted {
+                    ClientIpSource::DirectPeer
+                } else if self.forwarding_result == ForwardingResult::Malformed {
+                    ClientIpSource::PeerFallback(UnavailableReason::Rejected)
+                } else {
+                    ClientIpSource::PeerFallback(UnavailableReason::Missing)
+                }
+            }
+        }
+    }
+
     #[must_use]
     #[inline]
     pub fn client_source(&self) -> CheckedHostSource {
@@ -286,6 +329,7 @@ pub(crate) fn normalize(
         },
         scheme_source: CheckedHostSource::Direct,
         forwarding_result: ForwardingResult::Absent,
+        peer_trusted: peer.is_some_and(|socket| policy.trusts(socket.ip())),
     };
     let present = match policy.family {
         Some(ForwardingHeaderFamily::Forwarded) => parts.headers.contains_key("forwarded"),
@@ -745,6 +789,13 @@ mod tests {
 
     const PEER: &str = "10.0.0.2:1234";
     const CLIENT: &str = "198.51.100.7";
+
+    type ProjectionCase<'case> = (
+        ForwardingHeaderFamily,
+        &'case [(&'case str, &'case str)],
+        Option<IpAddr>,
+        Option<ClientIpSource>,
+    );
 
     fn policy(family: ForwardingHeaderFamily) -> TrustedProxyPolicy {
         TrustedProxyPolicy::new(family, ["10.0.0.0/24"]).unwrap()
@@ -1780,5 +1831,176 @@ mod tests {
         }
         assert_eq!(Scheme::Http.as_str(), "http");
         assert_eq!(Scheme::Https.as_str(), "https");
+    }
+
+    fn source_of(metadata: &CheckedProxyMetadata) -> (Option<IpAddr>, Option<ClientIpSource>) {
+        let info = metadata.client_info();
+        let address = info.effective_client().captured().copied();
+        (
+            info.effective_client_ip(),
+            address.map(|captured| captured.source()),
+        )
+    }
+
+    #[test]
+    fn client_info_projects_every_fallback_row() {
+        let client: IpAddr = CLIENT.parse().unwrap();
+        let fallback = |reason| Some(ClientIpSource::PeerFallback(reason));
+        let cases: [ProjectionCase<'_>; 9] = [
+            (
+                ForwardingHeaderFamily::XForwarded,
+                &[("x-forwarded-for", CLIENT)],
+                Some(client),
+                Some(ClientIpSource::TrustedXForwardedFor),
+            ),
+            (
+                ForwardingHeaderFamily::Forwarded,
+                &[("forwarded", "for=198.51.100.7")],
+                Some(client),
+                Some(ClientIpSource::TrustedForwarded),
+            ),
+            // Repeated X-Forwarded-For fields join into one chain.
+            (
+                ForwardingHeaderFamily::XForwarded,
+                &[("x-forwarded-for", CLIENT), ("x-forwarded-for", "10.0.0.9")],
+                Some(client),
+                Some(ClientIpSource::TrustedXForwardedFor),
+            ),
+            // Trusted peer that sent no client node.
+            (
+                ForwardingHeaderFamily::XForwarded,
+                &[],
+                None,
+                fallback(UnavailableReason::Missing),
+            ),
+            // Host accepted, client absent: still a fallback.
+            (
+                ForwardingHeaderFamily::XForwarded,
+                &[("x-forwarded-host", "public.example")],
+                None,
+                fallback(UnavailableReason::Missing),
+            ),
+            // Every hop trusted.
+            (
+                ForwardingHeaderFamily::XForwarded,
+                &[("x-forwarded-for", "10.0.0.7")],
+                None,
+                fallback(UnavailableReason::Missing),
+            ),
+            // The proxy withheld the address on purpose.
+            (
+                ForwardingHeaderFamily::Forwarded,
+                &[("forwarded", "for=_hidden")],
+                None,
+                fallback(UnavailableReason::Missing),
+            ),
+            (
+                ForwardingHeaderFamily::XForwarded,
+                &[("x-forwarded-for", "not-an-ip")],
+                None,
+                fallback(UnavailableReason::Rejected),
+            ),
+            // A duplicate X-Forwarded-Host rejects the whole assertion, including a valid client.
+            (
+                ForwardingHeaderFamily::XForwarded,
+                &[
+                    ("x-forwarded-for", CLIENT),
+                    ("x-forwarded-host", "a.example"),
+                    ("x-forwarded-host", "b.example"),
+                ],
+                None,
+                fallback(UnavailableReason::Rejected),
+            ),
+        ];
+        for (family, headers, ip, source) in cases {
+            let metadata = checked(family, headers);
+            assert_eq!(source_of(&metadata), (ip, source), "{headers:?}");
+            assert_eq!(
+                metadata
+                    .client_info()
+                    .direct_peer()
+                    .captured()
+                    .map(PeerAddress::socket_addr),
+                Some(PEER.parse().unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn client_info_duplicate_proto_rejects_a_valid_client() {
+        let peer_ip: IpAddr = "10.0.0.2".parse().unwrap();
+        let fallback = |reason| Some(ClientIpSource::PeerFallback(reason));
+        let duplicate_proto = checked(
+            ForwardingHeaderFamily::XForwarded,
+            &[
+                ("x-forwarded-for", CLIENT),
+                ("x-forwarded-proto", "https"),
+                ("x-forwarded-proto", "http"),
+            ],
+        );
+        assert_eq!(
+            source_of(&duplicate_proto),
+            (None, fallback(UnavailableReason::Rejected))
+        );
+        assert_eq!(
+            duplicate_proto
+                .client_info()
+                .effective_client()
+                .captured()
+                .map(ClientAddress::ip),
+            Some(peer_ip)
+        );
+    }
+
+    #[test]
+    fn client_info_treats_untrusted_peers_as_the_client() {
+        let untrusted: SocketAddr = "203.0.113.4:5000".parse().unwrap();
+        let spoofed = parts(&[
+            ("x-forwarded-for", CLIENT),
+            ("forwarded", "for=198.51.100.8"),
+        ]);
+        for policy in [
+            TrustedProxyPolicy::no_trust(),
+            policy(ForwardingHeaderFamily::XForwarded),
+        ] {
+            let metadata = normalize(&policy, Some(untrusted), &spoofed);
+            assert_eq!(
+                source_of(&metadata),
+                (Some(untrusted.ip()), Some(ClientIpSource::DirectPeer))
+            );
+        }
+        let mapped: SocketAddr = "[::ffff:203.0.113.4]:5000".parse().unwrap();
+        let mapped_metadata = normalize(&TrustedProxyPolicy::no_trust(), Some(mapped), &spoofed);
+        assert_eq!(
+            source_of(&mapped_metadata),
+            (Some(untrusted.ip()), Some(ClientIpSource::DirectPeer))
+        );
+        assert_eq!(
+            mapped_metadata
+                .client_info()
+                .direct_peer()
+                .captured()
+                .map(PeerAddress::socket_addr),
+            Some(mapped)
+        );
+        let ipv6: SocketAddr = "[2001:db8::4]:5000".parse().unwrap();
+        let ipv6_metadata = normalize(&TrustedProxyPolicy::no_trust(), Some(ipv6), &spoofed);
+        assert_eq!(
+            source_of(&ipv6_metadata),
+            (Some(ipv6.ip()), Some(ClientIpSource::DirectPeer))
+        );
+        let peerless = normalize(&TrustedProxyPolicy::no_trust(), None, &spoofed).client_info();
+        assert_eq!(
+            peerless.effective_client(),
+            &Capture::Unavailable(UnavailableReason::NotExposed)
+        );
+        assert_eq!(
+            peerless.direct_peer(),
+            &Capture::Unavailable(UnavailableReason::NotExposed)
+        );
+        assert_eq!(
+            peerless.tls_version(),
+            &Capture::Unavailable(UnavailableReason::NotExposed)
+        );
     }
 }
