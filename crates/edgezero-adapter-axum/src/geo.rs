@@ -214,8 +214,7 @@ impl ProtectedCloudFrontAlb {
         peer: Option<SocketAddr>,
         headers: &'request HeaderMap,
     ) -> Option<ProtectedAssertions<'request>> {
-        peer.filter(|actual_peer| self.networks.trusts(actual_peer.ip()))
-            .map(|_peer| ProtectedAssertions { headers })
+        self.admits(peer).then_some(ProtectedAssertions { headers })
     }
 }
 

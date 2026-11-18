@@ -43,10 +43,10 @@ use edgezero_core::error::EdgeError;
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
 use edgezero_core::key_value_store::KvError;
 use edgezero_core::logging::ManagedLoggerError;
+#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
+use edgezero_core::manifest::BakedManifest;
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
 use edgezero_core::manifest::ResolvedEnvironmentBinding;
-#[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
-use edgezero_core::manifest::{BakedManifest, ManifestAdapterClientInfo};
 #[cfg(all(feature = "cloudflare", target_arch = "wasm32"))]
 use edgezero_core::time::MonotonicClock;
 use log::LevelFilter;
@@ -238,10 +238,7 @@ where
     let runtime_variables = match A::manifest() {
         BakedManifest::Absent => RuntimeVariables::default(),
         BakedManifest::Present(manifest) => {
-            direct_ingress = manifest
-                .adapter_entry("cloudflare")
-                .and_then(|(_, adapter)| adapter.client_info)
-                .is_some_and(ManifestAdapterClientInfo::direct_ingress);
+            direct_ingress = manifest.client_info_direct_ingress("cloudflare");
             let resolved = manifest.environment_for("cloudflare");
             collect_worker_variables(&resolved.variables, |key| {
                 env.var(key).ok().map(|value| value.to_string())

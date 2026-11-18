@@ -341,7 +341,7 @@ pub(crate) fn normalize(
     if !present {
         return metadata;
     }
-    if !peer.is_some_and(|socket| policy.trusts(socket.ip())) {
+    if !metadata.peer_trusted {
         metadata.forwarding_result = ForwardingResult::UntrustedPeer;
         return metadata;
     }

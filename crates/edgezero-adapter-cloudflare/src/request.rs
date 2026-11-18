@@ -523,7 +523,7 @@ where
         core_request,
         Stores::default(),
         request_start,
-        (GeoOutcome::NoSelection, None),
+        (GeoOutcome::NoSelection, ClientInfo::not_exposed()),
         move || Ok(Some(source)),
         Ok,
     ))
@@ -558,7 +558,7 @@ where
         core_request,
         Stores::default(),
         request_start,
-        (GeoOutcome::NoSelection, None),
+        (GeoOutcome::NoSelection, ClientInfo::not_exposed()),
         move || make_source().map(Some),
         deliver,
     ))
@@ -585,7 +585,7 @@ pub async fn dispatch_ingress_source_error_for_test(
         core_request,
         Stores::default(),
         request_start,
-        (GeoOutcome::NoSelection, None),
+        (GeoOutcome::NoSelection, ClientInfo::not_exposed()),
         || -> Result<Option<Empty<Result<Bytes, io::Error>>>, EdgeError> {
             Err(EdgeError::internal(anyhow::anyhow!(
                 "cloudflare source construction failed"
@@ -635,7 +635,7 @@ pub(crate) async fn dispatch_with_handles(
         head_request,
         stores,
         request_start,
-        (geo, Some(client_info)),
+        (geo, client_info),
         move || cloudflare_body_stream(req),
         move |egress| from_egress_response(egress, runtime),
     )
@@ -647,7 +647,7 @@ async fn dispatch_ingress_stream_and<Source, SourceError, MakeSource, Output, De
     mut head_request: Request,
     stores: Stores,
     request_start: MonotonicInstant,
-    facts: (GeoOutcome, Option<ClientInfo>),
+    facts: (GeoOutcome, ClientInfo),
     make_source: MakeSource,
     deliver: Deliver,
 ) -> Result<Output, WorkerError>
@@ -908,7 +908,7 @@ async fn dispatch_core_request<Output, Deliver>(
     mut core_request: Request,
     mut stores: Stores,
     prepared: PreparedIngress,
-    (geo, client_info): (GeoOutcome, Option<ClientInfo>),
+    (geo, client_info): (GeoOutcome, ClientInfo),
     deliver: Deliver,
 ) -> Result<Output, WorkerError>
 where
@@ -943,27 +943,14 @@ where
     if let Some(registry) = secret_registry {
         core_request.extensions_mut().insert(registry);
     }
-    let response = match client_info {
-        Some(info) => {
-            Box::pin(app.dispatch_admitted_with_client_info(
-                prepared,
-                core_request,
-                FrameworkErrorDetail::Default,
-                geo,
-                info,
-            ))
-            .await
-        }
-        None => {
-            Box::pin(app.dispatch_admitted_with_geo(
-                prepared,
-                core_request,
-                FrameworkErrorDetail::Default,
-                geo,
-            ))
-            .await
-        }
-    };
+    let response = Box::pin(app.dispatch_admitted_with_client_info(
+        prepared,
+        core_request,
+        FrameworkErrorDetail::Default,
+        geo,
+        client_info,
+    ))
+    .await;
     deliver(response).map_err(|err| edge_error_to_worker(&err))
 }
 
@@ -2072,7 +2059,7 @@ mod tests {
             head,
             Stores::default(),
             app.monotonic_now(),
-            (GeoOutcome::NoSelection, None),
+            (GeoOutcome::NoSelection, ClientInfo::not_exposed()),
             move || cloudflare_body_stream(req),
             Ok,
         )

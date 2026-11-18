@@ -426,6 +426,16 @@ impl Manifest {
             .find(|(key, _cfg)| key.to_ascii_lowercase() == needle)
     }
 
+    /// Whether `[adapters.<adapter>.client_info] direct_ingress` is on. Off when the adapter
+    /// or its `client_info` table is absent.
+    #[must_use]
+    #[inline]
+    pub fn client_info_direct_ingress(&self, adapter: &str) -> bool {
+        self.adapter_entry(adapter)
+            .and_then(|(_, config)| config.client_info)
+            .is_some_and(ManifestAdapterClientInfo::direct_ingress)
+    }
+
     #[must_use]
     #[inline]
     pub fn environment(&self) -> &ManifestEnvironment {
@@ -3791,6 +3801,10 @@ ids = ["default"]
         assert_eq!(baked.adapters["cloudflare"].client_info, Some(cloudflare));
         assert_eq!(baked.adapters["spin"].client_info, Some(spin));
         assert_eq!(baked.adapters["axum"].ja4, manifest.adapters["axum"].ja4);
+        assert!(baked.client_info_direct_ingress("Cloudflare"));
+        assert!(!baked.client_info_direct_ingress("spin"));
+        assert!(!baked.client_info_direct_ingress("axum"));
+        assert!(!baked.client_info_direct_ingress("fastly"));
         let empty = ManifestAdapterClientInfo::default();
         assert!(!empty.direct_ingress());
     }
