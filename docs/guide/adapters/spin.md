@@ -325,6 +325,111 @@ manifest I/O or parsing. It does not initialize a logger, configure filters, rea
 runtime overrides or change `owns_logging`. Existing runner and application-owned
 logging responsibilities remain unchanged.
 
+## Geographic context from a pinned KV dataset
+
+Spin has no native country/region metadata. Managed `run_app`, `run_app_with_platform`
+and `dispatch_app` can resolve `ctx.geo()` from an immutable KV dataset. Select it in
+the application's baked `edgezero.toml`; no adapter-specific `Hooks::configure` is needed:
+
+```toml
+[stores.kv]
+ids = ["geo"]
+default = "geo"
+
+[adapters.spin.geo]
+provider = "kv"
+store_id = "geo"
+pin = "<generation>@<manifest-sha256>" # Replace with the verified dataset receipt.
+reader_ip = "authenticated-header"
+credential_variable = "geo_token"
+lookup_timeout_ms = 250
+```
+
+The provider defaults to off. `EDGEZERO__ADAPTER__GEO__PROVIDER`, `__STORE_ID`,
+`__PIN`, `__READER_IP`, `__CREDENTIAL_VARIABLE` and `__LOOKUP_TIMEOUT_MS` override
+matching manifest defaults. A timeout must be 1–30000 milliseconds. Invalid pins,
+undeclared logical bindings, unknown geo override keys and mixed provider settings
+are configuration errors; `provider = "off"` must not retain source settings.
+Spin rejects Axum's peer/CloudFront policy and `max_in_flight` fields.
+
+Declare the physical store and credential variable in the consuming component's
+`spin.toml` (replace `my-app` with its component id):
+
+```toml
+[variables]
+geo_token = { required = true, secret = true }
+
+[component.my-app]
+key_value_stores = ["geo_runtime"]
+
+[component.my-app.variables]
+geo_token = "{{ geo_token }}"
+
+[component.my-app.environment]
+EDGEZERO__STORES__KV__GEO__NAME = "geo_runtime"
+```
+
+Supply the variable through the deployment's secret provider. Use a high-entropy
+credential of 32–128 ASCII bytes in `0x21`–`0x7e`, never source, logs or command-line
+arguments. The adapter loads it once per admitted request with a syntactically valid
+token, including wrong tokens. Remote variable providers can incur network cost on
+each read; qualify latency and restrict direct origin access. Rotation requires
+coordinating the proxy and variable update.
+
+A trusted proxy must remove every viewer-supplied instance of these headers and
+replace them with its own values:
+
+| Header                 | Value                                                         |
+| ---------------------- | ------------------------------------------------------------- |
+| `x-edgezero-geo-ip`    | One original visitor IP, such as `192.0.2.1` or `2001:db8::1` |
+| `x-edgezero-geo-token` | The credential shared with Spin                               |
+
+The IP must have no port, list, whitespace or zone identifier. IPv4-mapped IPv6 is
+canonicalized. The proxy needs no geographic database. Protect its transport to a
+fixed Spin origin with TLS or an isolated network, redact both fields in logs, and
+disable credential-bearing redirects. A credential authenticates its holder; the
+operator remains responsible for the claimed visitor IP and network topology.
+`Forwarded`, `X-Forwarded-For`, country headers and `spin-client-addr` are not geo
+trust sources.
+
+Publish the dataset through the separate [Spin operator loader](https://github.com/IABTechLab/edgezero/blob/main/examples/geo-spin-loader/README.md)
+after building and verifying it with the [KV geo tools](https://github.com/IABTechLab/edgezero/blob/main/examples/geo-kv-prototype/README.md).
+The loader uses ordinary binary KV writes, checks immutable conflicts, reads writes
+back, publishes the manifest last and verifies the full tree. It is a temporary
+loopback application, never a route in the serving app. Use the exact same named
+store and backend configuration for loading and serving; local Spin storage requires
+an absolute database path. Select the pin only after verification through the serving
+identity/path. Rollback requires re-verifying the previous permitted generation.
+
+Serving performs exact-key reads only. Each admitted/authenticated request opens the
+pinned manifest, verifies both roots, and looks up the visitor IP through the shared
+portable resolver. All SDK handles and validated cache bytes are request-local,
+including retained `dispatch_app` applications. This repeats manifest/root reads on
+every request; measure cold-request latency and capacity with the selected backend.
+The local cache is limited to 1 MiB/16 entries, objects to 384 KiB and paths to three
+objects. The SDK materializes values before core validates their size, so these are
+not hard host allocation limits. Platform controls govern aggregate concurrency.
+
+One KV deadline covers preparation and lookup. Secret and KV work also share the
+remaining admitted request deadline. Expiry drops guest futures; it does not certify
+cancellation of host/backend work. There is no automatic fallback or previous-request
+result. Outcomes retain provider `kv`; a location has `GeoSource::Kv` and
+`GeoTrustBasis::AuthenticatedIngressHeader`:
+
+- Missing, duplicate, invalid or wrong credentials: `UntrustedIngress`.
+- Authenticated missing IP: `MissingReaderIp`; invalid or duplicate IP: `UntrustedIngress`.
+- Secret/backend errors, expired work, or missing/corrupt pinned objects: `ProviderFailure`.
+- A valid dataset gap: `NoMatch`; a source country unsupported by core: `UnsupportedGeography`.
+- A country without subdivision remains country-only.
+
+The adapter strips both private headers before admission, middleware and handlers,
+even when geo is off; original bytes still count toward header limits. Public header
+or extension mutations cannot change the private outcome. Configuration errors fail
+assembly; ordinary geo errors do not themselves choose an HTTP status or grant
+permission. Applications must define unavailable/error policy and geography-sensitive
+cache behavior, including error responses. Local runtime verification does not certify
+hosted proxy protection, data accuracy, licensed-data permissions or production load.
+
 ## Context Access
 
 Access Spin-specific request metadata via the request context extensions:
