@@ -333,6 +333,7 @@ impl Hooks for FixtureApp {
             .get("/flood", flood)
             .get("/after", after)
             .get("/after-task", after_task)
+            .get("/draining-write", draining_write)
             .get("/write", write)
             .get("/read", read)
             .get("/alias", alias)
@@ -830,6 +831,24 @@ async fn after_task(ctx: RequestContext) -> Result<&'static str, EdgeError> {
         println!("AFTER_TASK_DONE");
     })?;
     Ok("after-task-queued")
+}
+
+/// Registers a KV write after SIGTERM has started draining, while the request is in flight.
+#[action]
+async fn draining_write(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+    let observed = reader(&ctx)?;
+    println!("DISPATCH");
+    while observed.phase() == Some(LifecyclePhase::Ready) {
+        sleep(Duration::from_millis(5)).await;
+    }
+    let store = kv(&ctx, "first")?;
+    ctx.after_response(Duration::from_secs(30), async move {
+        match store.put("persisted", &"after-response-value").await {
+            Ok(()) => println!("AFTER_WRITE_DONE"),
+            Err(error) => println!("AFTER_WRITE_FAILED {error}"),
+        }
+    })?;
+    Ok("draining-write-queued")
 }
 
 #[action]

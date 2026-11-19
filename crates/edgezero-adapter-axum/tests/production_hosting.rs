@@ -1940,6 +1940,46 @@ mod tests {
     }
 
     #[test]
+    fn sigterm_during_a_request_completes_its_after_response_kv_write() {
+        let roots = Roots::new();
+        let addr = address();
+        let mut server = Server::spawn(command("initialized", &roots, addr), addr);
+        server.ready();
+        let mut client = server.socket().expect("draining-write socket");
+        client
+            .write_all(
+                b"GET /draining-write HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n",
+            )
+            .expect("draining-write request");
+        server.wait_line("DISPATCH");
+        server.signal("TERM");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("draining-write response");
+        assert!(response.contains("draining-write-queued"), "{response}");
+        server.wait_line("AFTER_WRITE_DONE");
+        assert!(server.wait().success(), "{}", server.log());
+        assert!(
+            !server.log().contains("grace exhausted"),
+            "{}",
+            server.log()
+        );
+        let mut restarted = Server::spawn(command("initialized", &roots, addr), addr);
+        restarted.ready();
+        assert!(
+            restarted
+                .request("/read")
+                .expect("persisted")
+                .ends_with("after-response-value"),
+            "{}",
+            restarted.log()
+        );
+        restarted.signal("TERM");
+        assert!(restarted.wait().success());
+    }
+
+    #[test]
     fn grace_exhaustion_cancels_after_response_task() {
         let roots = Roots::new();
         let addr = address();
