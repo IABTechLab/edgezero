@@ -28,15 +28,10 @@ use url::Url;
 
 use crate::PreparationError;
 use crate::records::{CelldRecordKvStore, instance_bytes, record_binding};
-use crate::settings::{CelldAccessToken, CelldPreparationLimits, CelldRecordsSettings};
+use crate::settings::{
+    CelldAccessToken, CelldPreparationLimits, CelldRecordsSettings, celld_token_key,
+};
 use crate::wire::{self, ERROR_CAP, Exchange, Exchanger, Head, ResponseKind};
-
-/// The secret key a celld binding reads for KV ID `id`: `KV__<ID>__CELLD_TOKEN`.
-#[inline]
-#[must_use]
-pub fn celld_token_key(id: &str) -> String {
-    format!("KV__{}__CELLD_TOKEN", id.to_ascii_uppercase())
-}
 
 struct Shared {
     endpoint: Url,

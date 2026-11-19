@@ -286,6 +286,29 @@ impl DynamoDbKvLimitsInput {
     }
 }
 
+/// The secret key names a portable `DynamoDB` binding reads for KV ID `id`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DynamoDbCredentialKeys {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+}
+
+impl DynamoDbCredentialKeys {
+    /// `KV__<ID>__AWS_ACCESS_KEY_ID`, `..._AWS_SECRET_ACCESS_KEY` and optional
+    /// `..._AWS_SESSION_TOKEN`. Bindings cannot name other keys.
+    #[inline]
+    #[must_use]
+    pub fn for_kv_id(id: &str) -> Self {
+        let prefix = format!("KV__{}__", id.to_ascii_uppercase());
+        Self {
+            access_key_id: format!("{prefix}AWS_ACCESS_KEY_ID"),
+            secret_access_key: format!("{prefix}AWS_SECRET_ACCESS_KEY"),
+            session_token: format!("{prefix}AWS_SESSION_TOKEN"),
+        }
+    }
+}
+
 /// A logical secrets store ID. Key names derive from the KV ID and are never configured.
 #[derive(Clone, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]

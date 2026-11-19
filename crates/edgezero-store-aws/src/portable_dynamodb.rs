@@ -38,35 +38,12 @@ use crate::records_core::{
     Attr, Item, Operation, RecordCore, RecordScope, RecordTransport, Request, Response,
     TransportError, record_binding, record_partition_base,
 };
-use crate::settings::{DynamoDbKvLimits, DynamoDbRecordsSettings};
+use crate::settings::{DynamoDbCredentialKeys, DynamoDbKvLimits, DynamoDbRecordsSettings};
 
 const CONTENT: &str = "application/x-amz-json-1.0";
 /// A Query or Scan page reads at most 1 MB; JSON and base64 roughly double it.
 const MAX_RESPONSE_BYTES: u64 = 0x0040_0000;
 const MAX_ERROR_BYTES: u64 = 0x1_0000;
-
-/// The secret key names a `DynamoDB` binding reads for KV ID `id`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DynamoDbCredentialKeys {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: String,
-}
-
-impl DynamoDbCredentialKeys {
-    /// `KV__<ID>__AWS_ACCESS_KEY_ID`, `..._AWS_SECRET_ACCESS_KEY` and optional
-    /// `..._AWS_SESSION_TOKEN`. Bindings cannot name other keys.
-    #[inline]
-    #[must_use]
-    pub fn for_kv_id(id: &str) -> Self {
-        let prefix = format!("KV__{}__", id.to_ascii_uppercase());
-        Self {
-            access_key_id: format!("{prefix}AWS_ACCESS_KEY_ID"),
-            secret_access_key: format!("{prefix}AWS_SECRET_ACCESS_KEY"),
-            session_token: format!("{prefix}AWS_SESSION_TOKEN"),
-        }
-    }
-}
 
 struct Shared {
     endpoint: Uri,

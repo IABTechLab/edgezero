@@ -21,10 +21,10 @@ use futures_util::lock::Mutex;
 use serde_json::json;
 use url::Url;
 
-use super::{PortableExchanger, PreparedCelldRecords, Shared, celld_token_key};
+use super::{PortableExchanger, PreparedCelldRecords, Shared};
 use crate::PreparationError;
 use crate::records::{CelldRecordKvStore, record_binding};
-use crate::settings::{CelldPreparationLimits, CelldRecordsSettings};
+use crate::settings::{CelldPreparationLimits, CelldRecordsSettings, celld_token_key};
 use crate::test_support::{Fixture, Reply};
 
 const INSTANCE: &str = "AAAAAAAAAAAAAAAAAAAAAA";

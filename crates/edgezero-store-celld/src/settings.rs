@@ -88,6 +88,14 @@ impl fmt::Debug for SecretsReference {
     }
 }
 
+/// The secret key a portable celld binding reads for KV ID `id`: `KV__<ID>__CELLD_TOKEN`.
+/// Offline preflight reads its token from the environment variable of the same name.
+#[inline]
+#[must_use]
+pub fn celld_token_key(id: &str) -> String {
+    format!("KV__{}__CELLD_TOKEN", id.to_ascii_uppercase())
+}
+
 /// Record-binding access policy. `trusted-network` and `token_env` are native-only;
 /// portable bindings require `authenticated` with a `token_secret`.
 #[derive(Clone, Deserialize, Serialize, Eq, PartialEq)]
