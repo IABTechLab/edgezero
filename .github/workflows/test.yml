@@ -188,6 +188,15 @@ jobs:
         if: matrix.suite == 'workspace'
         run: bash scripts/check_native_store_dependency_contract.sh
 
+      - name: Check portable record providers on wasm targets
+        if: matrix.suite == 'workspace'
+        run: |
+          for target in wasm32-wasip1 wasm32-unknown-unknown wasm32-wasip2; do
+            cargo check --offline --locked -p edgezero-store-aws --no-default-features --features dynamodb-records-portable --target "$target"
+            cargo check --offline --locked -p edgezero-store-celld --no-default-features --features portable-records --target "$target"
+          done
+          # TODO: Check Fastly provider features once the adapter forwards them.
+
       - name: Geo dependency isolation
         run: bash scripts/check_geo_dependency_contract.sh
 
@@ -321,7 +330,7 @@ jobs:
 
       - name: Native provider integration runner tests
         if: matrix.suite == 'cli'
-        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs scripts/run_celld_store_fleet_proof.test.mjs services/celld-store/test/*.test.mjs
+        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs scripts/fetch_official_celld.test.mjs scripts/run_celld_store_fleet_proof.test.mjs services/celld-store/test/*.test.mjs
 
       - name: Generated native AWS independent service contracts
         if: matrix.suite == 'cli'
