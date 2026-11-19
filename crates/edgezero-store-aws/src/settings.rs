@@ -8,12 +8,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::IpAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use percent_encoding::percent_decode_str;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 use url::Url;
+use web_time::Instant;
 
 use crate::PreparationError;
 
@@ -175,6 +176,15 @@ impl Default for DynamoDbKvLimits {
 }
 
 impl DynamoDbKvLimits {
+    /// Enforced defaults for portable bindings: one 1,000 ms operation deadline,
+    /// shared by both calls of an insert, and a 250 ms connect timeout.
+    pub const PORTABLE: Self = Self {
+        max_value_bytes: 393_216,
+        operation_timeout_ms: 1_000,
+        connect_timeout_ms: 250,
+        attempt_timeout_ms: 1_000,
+    };
+
     /// Checks payload bounds and representable, ordered operation budgets.
     ///
     /// # Errors
@@ -244,6 +254,239 @@ impl DynamoDbKvSettings {
         }
         Ok(())
     }
+}
+
+/// Per-binding limits as written. Absent fields take the target's defaults.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DynamoDbKvLimitsInput {
+    pub attempt_timeout_ms: Option<u64>,
+    pub connect_timeout_ms: Option<u64>,
+    pub max_value_bytes: Option<usize>,
+    pub operation_timeout_ms: Option<u64>,
+}
+
+impl DynamoDbKvLimitsInput {
+    /// Fills absent fields from `defaults`, either native or [`DynamoDbKvLimits::PORTABLE`].
+    #[inline]
+    #[must_use]
+    pub fn resolve(self, defaults: DynamoDbKvLimits) -> DynamoDbKvLimits {
+        DynamoDbKvLimits {
+            max_value_bytes: self.max_value_bytes.unwrap_or(defaults.max_value_bytes),
+            operation_timeout_ms: self
+                .operation_timeout_ms
+                .unwrap_or(defaults.operation_timeout_ms),
+            connect_timeout_ms: self
+                .connect_timeout_ms
+                .unwrap_or(defaults.connect_timeout_ms),
+            attempt_timeout_ms: self
+                .attempt_timeout_ms
+                .unwrap_or(defaults.attempt_timeout_ms),
+        }
+    }
+}
+
+/// A logical secrets store ID. Key names derive from the KV ID and are never configured.
+#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SecretsReference {
+    pub secrets: String,
+}
+
+impl fmt::Debug for SecretsReference {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretsReference").finish_non_exhaustive()
+    }
+}
+
+impl SecretsReference {
+    /// Checks the logical ID shape. Whether it is declared is the bindings document's check.
+    ///
+    /// # Errors
+    /// Rejects an empty or non-`[A-Za-z0-9_]` logical ID.
+    #[inline]
+    pub fn validate(&self) -> Result<(), PreparationError> {
+        if self.secrets.is_empty()
+            || self.secrets.len() > MAX_SECRET_KEY_BYTES
+            || !self
+                .secrets
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(PreparationError::InvalidBinding);
+        }
+        Ok(())
+    }
+}
+
+/// The `DescribeTable` identity an offline preflight pinned into the binding.
+#[derive(Clone, Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DynamoDbPinnedIdentity {
+    pub table_arn: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_id: Option<String>,
+}
+
+impl fmt::Debug for DynamoDbPinnedIdentity {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DynamoDbPinnedIdentity")
+            .finish_non_exhaustive()
+    }
+}
+
+impl DynamoDbPinnedIdentity {
+    /// Checks the pinned values' shape. Their truth is only known to preflight.
+    ///
+    /// # Errors
+    /// Rejects empty, oversized or control-character identities.
+    #[inline]
+    pub fn validate(&self) -> Result<(), PreparationError> {
+        let valid = |value: &str| {
+            !value.is_empty() && value.len() <= 2_048 && !value.chars().any(char::is_control)
+        };
+        if !valid(&self.table_arn) || self.table_id.as_deref().is_some_and(|id| !valid(id)) {
+            return Err(PreparationError::InvalidResource);
+        }
+        Ok(())
+    }
+}
+
+/// What offline preflight observed: the endpoint identity it used and the table to pin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DynamoDbRecordIdentity {
+    pub endpoint: String,
+    pub pinned: DynamoDbPinnedIdentity,
+}
+
+/// An `aws-dynamodb-records` binding. Native preparation uses the SDK credential
+/// chain and endpoint resolution; portable bindings use `endpoint`, `pinned` and
+/// `credentials`. Debug never exposes resource names.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DynamoDbRecordsSettings {
+    #[serde(default)]
+    pub credentials: Option<SecretsReference>,
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub limits: DynamoDbKvLimitsInput,
+    pub namespace: String,
+    #[serde(default)]
+    pub pinned: Option<DynamoDbPinnedIdentity>,
+    pub region: String,
+    pub table: String,
+}
+
+impl fmt::Debug for DynamoDbRecordsSettings {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DynamoDbRecordsSettings")
+            .finish_non_exhaustive()
+    }
+}
+
+impl DynamoDbRecordsSettings {
+    /// The table address with limits resolved against `defaults`.
+    #[inline]
+    #[must_use]
+    pub fn kv_settings(&self, defaults: DynamoDbKvLimits) -> DynamoDbKvSettings {
+        DynamoDbKvSettings {
+            region: self.region.clone(),
+            table: self.table.clone(),
+            namespace: self.namespace.clone(),
+            limits: self.limits.resolve(defaults),
+        }
+    }
+
+    /// The endpoint identity a portable transport sends to and binds into cursors.
+    ///
+    /// Without an explicit `endpoint` this is the region's public `DynamoDB` endpoint.
+    /// It is normalized exactly as native preparation normalizes its request URI.
+    ///
+    /// # Errors
+    /// Rejects an endpoint that is not `https`, or `http` on a loopback IP literal,
+    /// and one carrying user information, a query, a fragment or a path.
+    #[inline]
+    pub fn portable_endpoint(&self) -> Result<String, PreparationError> {
+        let explicit = self
+            .endpoint
+            .as_deref()
+            .map(validated_endpoint)
+            .transpose()?;
+        let url = if let Some(url) = explicit {
+            url
+        } else {
+            let suffix = if self.region.starts_with("cn-") {
+                "amazonaws.com.cn"
+            } else {
+                "amazonaws.com"
+            };
+            Url::parse(&format!("https://dynamodb.{}.{suffix}", self.region))
+                .map_err(|_error| PreparationError::InvalidEndpoint)?
+        };
+        endpoint_identity(url.as_str()).ok_or(PreparationError::InvalidEndpoint)
+    }
+
+    /// Structural checks with limits resolved against `defaults`. No I/O.
+    ///
+    /// # Errors
+    /// Rejects invalid addresses, limits, endpoints, pins and secrets references.
+    #[inline]
+    pub fn validate(&self, defaults: DynamoDbKvLimits) -> Result<(), PreparationError> {
+        self.kv_settings(defaults).validate()?;
+        if let Some(endpoint) = &self.endpoint {
+            validated_endpoint(endpoint)?;
+        }
+        if let Some(pinned) = &self.pinned {
+            pinned.validate()?;
+        }
+        if let Some(credentials) = &self.credentials {
+            credentials.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Scheme, host, port and path only. Native binds the same form of its request URI.
+pub(crate) fn endpoint_identity(uri: &str) -> Option<String> {
+    let mut endpoint = Url::parse(uri).ok()?;
+    endpoint.host_str()?;
+    endpoint.set_username("").ok()?;
+    endpoint.set_password(None).ok()?;
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    Some(endpoint.into())
+}
+
+fn validated_endpoint(endpoint: &str) -> Result<Url, PreparationError> {
+    if endpoint
+        .bytes()
+        .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err(PreparationError::InvalidEndpoint);
+    }
+    let url = Url::parse(endpoint).map_err(|_error| PreparationError::InvalidEndpoint)?;
+    let loopback = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(_)) | None => false,
+    };
+    let scheme_allowed = url.scheme() == "https" || (url.scheme() == "http" && loopback);
+    if !scheme_allowed
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+        || url.port() == Some(0)
+    {
+        return Err(PreparationError::InvalidEndpoint);
+    }
+    Ok(url)
 }
 
 /// Exactly one version selector. Omission means AWSCURRENT at startup.
