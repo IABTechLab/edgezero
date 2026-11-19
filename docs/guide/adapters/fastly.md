@@ -470,6 +470,21 @@ async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
 }
 ```
 
+The same address is available without a Fastly import through
+[`ctx.client_info()`](../handlers.md#client-metadata). Fastly captures it from the original
+downstream request before any raw-request hook runs:
+
+| Field            | Source                                           | Unavailable                                             |
+| ---------------- | ------------------------------------------------ | ------------------------------------------------------- |
+| Direct peer      | Not exposed; the SDK reports no peer port        | Always `NotExposed`                                     |
+| Effective client | `get_client_ip_addr()`, source `Fastly`          | `Missing` on non-client requests                        |
+| TLS version      | `get_tls_protocol()`, for example `TLSv1.3`      | `Missing` over plain HTTP; `Rejected` for invalid UTF-8 |
+| TLS cipher       | `get_tls_cipher_openssl_name()`, an OpenSSL name | `Missing` over plain HTTP; `Rejected` for invalid UTF-8 |
+
+Viceroy serves plain HTTP, so local TLS fields are always `Missing`. The address is the client
+that connected to Fastly. If another Fastly service or a proxy forwards to this one, it is that
+hop's address. No header replaces it.
+
 ## Streaming
 
 Fastly provides `stream_to_client`, but that API is incompatible with the standard

@@ -2,6 +2,18 @@
 //!
 //! Settings remain available without either service feature. Service failures
 //! use closed categories; no SDK, HTTP, settings or payload source chain survives.
+//!
+//! The default-off `dynamodb-records` feature adds
+//! `AwsPreparation::prepare_dynamodb_records` on native targets. Its explicit
+//! partitioned format does not read or migrate legacy ordinary KV rows. Inserts
+//! allocate a retained per-key generation with `UpdateItem`, then `PutItem` the value.
+//! Allocators must survive deletion and must not have TTL. Value TTL uses native
+//! `ttl_epoch_s` cleanup, without a hard expiry filter. Body and UTF-8 metadata
+//! share the configured `max_value_bytes` payload budget. Partition pages use
+//! strong base-table Query; ordinary global listing
+//! uses unordered Scan, which reads broadly before namespace/prefix filtering.
+//! Record preparation binds cursors to the resolved endpoint and `DescribeTable`
+//! ARN, plus the table ID when supplied. It does not perform an IAM/write probe.
 
 #![cfg_attr(
     all(

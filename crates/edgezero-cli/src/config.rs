@@ -1575,7 +1575,9 @@ fn load_validated_native_bindings(
             appconfig_agent: true,
             secrets_manager: true,
             dynamodb: true,
+            dynamodb_records: true,
             celld_kv: true,
+            celld_records: true,
         },
         limits,
         None,
@@ -2880,6 +2882,57 @@ application = "demo-app"
 environment = "production"
 profile = "envelope"
 "#;
+
+    #[cfg(feature = "edgezero-adapter-axum")]
+    #[test]
+    fn record_bindings_validation_is_structural_without_runtime_preparation() {
+        let manifest_text = r#"
+[app]
+name = "demo-app"
+[adapters.axum.adapter]
+crate = "crates/demo-axum"
+[adapters.axum.commands]
+build = "echo"
+deploy = "echo"
+serve = "echo"
+[stores.kv]
+ids = ["state"]
+default = "state"
+"#;
+        let (dir, manifest, app_config) = setup_project(manifest_text, "not used");
+        fs::remove_file(app_config).expect("structural record validation does not load app TOML");
+        for (provider, settings) in [
+            (
+                "aws-dynamodb-records",
+                "region='us-east-1'\ntable='record-fixture'\nnamespace='record-fixture'",
+            ),
+            (
+                "celld-records",
+                "endpoint='https://unreachable.invalid'\nstore='record-fixture'\n[kv.state.access]\nmode='authenticated'\ntoken_env='ABSENT_RECORD_TOKEN'",
+            ),
+        ] {
+            let path = dir.path().join("record-bindings.toml");
+            fs::write(
+                &path,
+                format!("version=1\n[kv.state]\nprovider='{provider}'\n{settings}"),
+            )
+            .expect("write explicit record binding");
+            let args = ConfigValidateArgs {
+                app_config: None,
+                adapter: Some("axum".to_owned()),
+                store_bindings: Some(path),
+                target: None,
+                target_features: Vec::new(),
+                target_all_features: false,
+                target_no_default_features: false,
+                manifest: manifest.clone(),
+                no_env: false,
+                strict: false,
+            };
+            run_config_validate(&args)
+                .expect("record settings validate without tokens, SDKs or service I/O");
+        }
+    }
 
     #[cfg(feature = "edgezero-adapter-axum")]
     #[test]

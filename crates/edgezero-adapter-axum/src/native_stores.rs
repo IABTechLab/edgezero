@@ -12,7 +12,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use edgezero_core::app::StoresMetadata;
-use edgezero_core::key_value_store::KvHandle;
+use edgezero_core::key_value_store::{KvError, KvHandle};
 use edgezero_core::store_registry::{BoundSecretStore, ConfigStoreBinding};
 #[cfg(any(
     feature = "aws-appconfig-agent",
@@ -21,6 +21,7 @@ use edgezero_core::store_registry::{BoundSecretStore, ConfigStoreBinding};
     feature = "celld-kv"
 ))]
 use edgezero_core::time::MonotonicClock;
+use edgezero_core::{RecordLayout, RecordStoreRequirements};
 #[cfg(any(
     feature = "aws-appconfig-agent",
     feature = "aws-secrets-manager",
@@ -86,6 +87,11 @@ pub(crate) enum NativeConfigSource {
 
 pub(crate) enum NativeKvSource {
     DynamoDb(DynamoDbKvSettings),
+    DynamoDbRecords(DynamoDbKvSettings),
+    CelldRecords {
+        settings: CelldKvSettings,
+        token: Option<CelldAccessToken>,
+    },
     Celld {
         settings: CelldKvSettings,
         token: Option<CelldAccessToken>,
@@ -300,7 +306,9 @@ impl NativeSourcePlan {
                 appconfig_agent: cfg!(feature = "aws-appconfig-agent"),
                 secrets_manager: cfg!(feature = "aws-secrets-manager"),
                 dynamodb: cfg!(feature = "aws-dynamodb"),
+                dynamodb_records: cfg!(feature = "aws-dynamodb-records"),
                 celld_kv: cfg!(feature = "celld-kv"),
+                celld_records: cfg!(feature = "celld-records"),
             },
             options.bindings_limits(),
             options.preparation_policies(),
@@ -326,23 +334,11 @@ impl NativeSourcePlan {
                 })
             })?,
             kv: resolve(selection.kv, overrides.kv, "kv", |id| {
-                match bindings
+                let binding = bindings
                     .kv()
                     .get(id)
-                    .ok_or_else(|| failure("kv", id, "invalid binding"))?
-                {
-                    NativeKvBinding::DynamoDb(settings) => {
-                        Ok(NativeKvSource::DynamoDb(settings.clone()))
-                    }
-                    NativeKvBinding::Celld(settings) => Ok(NativeKvSource::Celld {
-                        token: settings
-                            .access
-                            .token_env()
-                            .map(|name| options.celld_token(name))
-                            .transpose()?,
-                        settings: settings.clone(),
-                    }),
-                }
+                    .ok_or_else(|| failure("kv", id, "invalid binding"))?;
+                native_kv_source(binding, options)
             })?,
             secrets: resolve(selection.secrets, overrides.secrets, "secrets", |id| {
                 bindings
@@ -361,6 +357,99 @@ impl NativeSourcePlan {
                 .any(|source| matches!(source, NativeStoreSource::Local)),
         )?;
         Ok(plan)
+    }
+
+    /// Validate all record declarations before sessions, futures or local stores open.
+    /// A missing declaration retains ordinary constructor/format semantics. Aliases
+    /// cannot inherit a record layout without silently redirecting their value table.
+    pub(crate) fn validate_record_requirements(
+        &self,
+        requirements: &RecordStoreRequirements,
+        options: &AxumRunOptions,
+    ) -> anyhow::Result<()> {
+        for id in requirements.keys() {
+            if !self.kv.contains_key(id.as_str()) {
+                return Err(failure(
+                    "kv",
+                    id,
+                    "record declaration uses an undeclared ID",
+                ));
+            }
+        }
+        let mut scopes = BTreeMap::new();
+        for (id, source) in &self.kv {
+            let layout = requirements.get(*id);
+            let scope = match source {
+                NativeStoreSource::BuiltIn(
+                    NativeKvSource::DynamoDb(_) | NativeKvSource::Celld { .. },
+                ) if layout.is_some() => {
+                    return Err(failure(
+                        "kv",
+                        id,
+                        "raw binding does not support declared records",
+                    ));
+                }
+                NativeStoreSource::BuiltIn(NativeKvSource::DynamoDbRecords(settings)) => {
+                    if layout.is_none() {
+                        return Err(failure(
+                            "kv",
+                            id,
+                            "record binding requires an application layout",
+                        ));
+                    }
+                    Some(vec![
+                        "dynamodb-records".to_owned(),
+                        settings.region.clone(),
+                        settings.table.clone(),
+                        settings.namespace.clone(),
+                    ])
+                }
+                NativeStoreSource::BuiltIn(NativeKvSource::CelldRecords { settings, .. }) => {
+                    if layout.is_none() {
+                        return Err(failure(
+                            "kv",
+                            id,
+                            "record binding requires an application layout",
+                        ));
+                    }
+                    Some(vec![
+                        "celld-records".to_owned(),
+                        settings.endpoint.clone(),
+                        settings.store.clone(),
+                    ])
+                }
+                NativeStoreSource::Local => Some(vec![
+                    "local".to_owned(),
+                    options.env_config().store_name("kv", id),
+                ]),
+                NativeStoreSource::Ready(handle) if layout.is_some() => {
+                    let records = handle
+                        .require_records()
+                        .map_err(|error| failure("kv", id, record_capability_failure(&error)))?;
+                    if layout != Some(&records.binding().layout) {
+                        return Err(failure("kv", id, "supplied record layout mismatch"));
+                    }
+                    None
+                }
+                NativeStoreSource::Ready(_)
+                | NativeStoreSource::Prepare(_)
+                | NativeStoreSource::BuiltIn(
+                    NativeKvSource::DynamoDb(_) | NativeKvSource::Celld { .. },
+                ) => None,
+            };
+            if let Some(backing_scope) = scope
+                && scopes
+                    .insert(backing_scope, layout)
+                    .is_some_and(|previous| previous != layout)
+            {
+                return Err(failure(
+                    "kv",
+                    id,
+                    "shared backing store has conflicting record layouts",
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[cfg_attr(
@@ -390,7 +479,9 @@ impl NativeSourcePlan {
         }) || self.kv.values().any(|source| {
             matches!(
                 source,
-                NativeStoreSource::BuiltIn(NativeKvSource::DynamoDb(_))
+                NativeStoreSource::BuiltIn(
+                    NativeKvSource::DynamoDb(_) | NativeKvSource::DynamoDbRecords(_)
+                )
             )
         }) || self
             .secrets
@@ -417,7 +508,9 @@ impl NativeSourcePlan {
         let celld = if self.kv.values().any(|source| {
             matches!(
                 source,
-                NativeStoreSource::BuiltIn(NativeKvSource::Celld { .. })
+                NativeStoreSource::BuiltIn(
+                    NativeKvSource::Celld { .. } | NativeKvSource::CelldRecords { .. }
+                )
             )
         }) {
             Some(
@@ -433,6 +526,53 @@ impl NativeSourcePlan {
             NativeCelldSession
         };
         Ok(NativePreparationSessions { aws, celld })
+    }
+}
+
+fn native_kv_source(
+    binding: &NativeKvBinding,
+    options: &AxumRunOptions,
+) -> anyhow::Result<NativeKvSource> {
+    match binding {
+        NativeKvBinding::DynamoDb(settings) => Ok(NativeKvSource::DynamoDb(settings.clone())),
+        NativeKvBinding::DynamoDbRecords(settings) => {
+            Ok(NativeKvSource::DynamoDbRecords(settings.clone()))
+        }
+        NativeKvBinding::Celld(settings) | NativeKvBinding::CelldRecords(settings) => {
+            let token = settings
+                .access
+                .token_env()
+                .map(|name| options.celld_token(name))
+                .transpose()?;
+            let cloned_settings = settings.clone();
+            if matches!(binding, NativeKvBinding::CelldRecords(_)) {
+                Ok(NativeKvSource::CelldRecords {
+                    settings: cloned_settings,
+                    token,
+                })
+            } else {
+                Ok(NativeKvSource::Celld {
+                    settings: cloned_settings,
+                    token,
+                })
+            }
+        }
+    }
+}
+
+#[inline]
+pub(crate) fn record_capability_failure(error: &KvError) -> &'static str {
+    match error {
+        KvError::Unsupported { .. } => "record operations unsupported",
+        KvError::Validation(_) => "invalid record binding",
+        KvError::Internal(_)
+        | KvError::LimitExceeded { .. }
+        | KvError::MutationUncertain
+        | KvError::NotFound { .. }
+        | KvError::OpenFailed { .. }
+        | KvError::Serialization(_)
+        | KvError::Unavailable
+        | _ => "record capability acquisition failed",
     }
 }
 
@@ -537,8 +677,46 @@ impl NativePreparationSessions {
         &mut self,
         builtin: NativeKvSource,
         id: &str,
+        declared_layout: Option<&RecordLayout>,
     ) -> anyhow::Result<KvHandle> {
         match builtin {
+            NativeKvSource::DynamoDbRecords(settings) => {
+                let layout =
+                    declared_layout.ok_or_else(|| failure("kv", id, "record layout required"))?;
+                #[cfg(feature = "aws-dynamodb-records")]
+                {
+                    self.aws
+                        .as_mut()
+                        .ok_or_else(|| failure("kv", id, "invalid preparation session"))?
+                        .prepare_dynamodb_records(&settings, layout)
+                        .await
+                        .map_err(|category| failure("kv", id, &category.to_string()))
+                }
+                #[cfg(not(feature = "aws-dynamodb-records"))]
+                {
+                    let _: (DynamoDbKvSettings, &RecordLayout) = (settings, layout);
+                    Err(failure("kv", id, "record provider not compiled"))
+                }
+            }
+            NativeKvSource::CelldRecords { settings, token } => {
+                let layout =
+                    declared_layout.ok_or_else(|| failure("kv", id, "record layout required"))?;
+                #[cfg(feature = "celld-records")]
+                {
+                    self.celld
+                        .as_mut()
+                        .ok_or_else(|| failure("kv", id, "invalid preparation session"))?
+                        .prepare_record_store(&settings, layout, token.as_ref())
+                        .await
+                        .map_err(|category| failure("kv", id, &category.to_string()))
+                }
+                #[cfg(not(feature = "celld-records"))]
+                {
+                    let _: (CelldKvSettings, &RecordLayout, Option<CelldAccessToken>) =
+                        (settings, layout, token);
+                    Err(failure("kv", id, "record provider not compiled"))
+                }
+            }
             NativeKvSource::DynamoDb(settings) => {
                 #[cfg(feature = "aws-dynamodb")]
                 {

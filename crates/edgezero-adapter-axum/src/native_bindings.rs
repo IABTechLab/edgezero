@@ -93,7 +93,9 @@ pub struct NativeProviderCapabilities {
     pub appconfig_agent: bool,
     pub secrets_manager: bool,
     pub dynamodb: bool,
+    pub dynamodb_records: bool,
     pub celld_kv: bool,
+    pub celld_records: bool,
 }
 
 /// Strict configuration dispatch. Provider-specific fields are validated by AWS settings.
@@ -110,6 +112,10 @@ pub enum NativeConfigBinding {
 pub enum NativeKvBinding {
     #[serde(rename = "aws-dynamodb")]
     DynamoDb(DynamoDbKvSettings),
+    #[serde(rename = "aws-dynamodb-records")]
+    DynamoDbRecords(DynamoDbKvSettings),
+    #[serde(rename = "celld-records")]
+    CelldRecords(CelldKvSettings),
     #[serde(rename = "celld-kv")]
     Celld(CelldKvSettings),
 }
@@ -366,13 +372,14 @@ impl NativeStoreBindings {
         let mut celld_mappings = 0_u64;
         for binding in self.kv.values() {
             let counter = match binding {
-                NativeKvBinding::DynamoDb(settings) => {
+                NativeKvBinding::DynamoDb(settings)
+                | NativeKvBinding::DynamoDbRecords(settings) => {
                     settings
                         .validate()
                         .map_err(|_category| NativeBindingsError::Invalid)?;
                     &mut aws_mappings
                 }
-                NativeKvBinding::Celld(settings) => {
+                NativeKvBinding::Celld(settings) | NativeKvBinding::CelldRecords(settings) => {
                     settings
                         .validate()
                         .map_err(|_category| NativeBindingsError::Invalid)?;
@@ -663,7 +670,9 @@ impl<'declarations> NativeSourceSelection<'declarations> {
             || (!bindings.secrets.is_empty() && !capabilities.secrets_manager)
             || bindings.kv.values().any(|binding| match binding {
                 NativeKvBinding::DynamoDb(_) => !capabilities.dynamodb,
+                NativeKvBinding::DynamoDbRecords(_) => !capabilities.dynamodb_records,
                 NativeKvBinding::Celld(_) => !capabilities.celld_kv,
+                NativeKvBinding::CelldRecords(_) => !capabilities.celld_records,
             })
         {
             return Err(NativeBindingsError::UnsupportedProvider);
@@ -794,6 +803,73 @@ mod tests {
     }
 
     #[test]
+    fn record_binding_tags_require_their_own_compiled_capability() -> Result<(), NativeBindingsError>
+    {
+        let limits = NativeBindingsLimits::default();
+        let metadata = StoresMetadata {
+            kv: Some(StoreMetadata {
+                ids: &["state"],
+                default: "state",
+            }),
+            ..StoresMetadata::default()
+        };
+        for (provider, settings, records) in [
+            (
+                "aws-dynamodb-records",
+                "region='us-east-1'\ntable='edgezero-kv'\nnamespace='records'",
+                NativeProviderCapabilities {
+                    dynamodb_records: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "celld-records",
+                "endpoint='http://127.0.0.1:8788'\nstore='state-fixture'\n[kv.state.access]\nmode='trusted-network'",
+                NativeProviderCapabilities {
+                    celld_records: true,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let input = format!("version=1\n[kv.state]\nprovider='{provider}'\n{settings}");
+            let document = NativeStoreBindings::parse(&input, limits)?;
+            let raw_only = NativeProviderCapabilities {
+                dynamodb: true,
+                celld_kv: true,
+                ..Default::default()
+            };
+            assert_eq!(
+                NativeSourceSelection::validate(
+                    metadata,
+                    &document,
+                    &NativeSuppliedIds::default(),
+                    &EnvConfig::default(),
+                    raw_only,
+                    limits,
+                    None
+                )
+                .err()
+                .expect("record provider requires its own compiled capability"),
+                NativeBindingsError::UnsupportedProvider,
+            );
+            NativeSourceSelection::validate(
+                metadata,
+                &document,
+                &NativeSuppliedIds::default(),
+                &EnvConfig::default(),
+                records,
+                limits,
+                None,
+            )?;
+            assert!(
+                NativeStoreBindings::parse(&format!("{input}\nunknown_record_option=true"), limits)
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn celld_schema_is_structural_strict_and_settings_only() -> Result<(), NativeBindingsError> {
         let limits = NativeBindingsLimits::default();
         for input in [
@@ -852,6 +928,7 @@ mod tests {
                     dynamodb: mask & 2 != 0,
                     celld_kv: mask & 4 != 0,
                     secrets_manager: false,
+                    ..Default::default()
                 };
                 let accepted = (!aws_config || caps.appconfig_agent)
                     && (!aws_state || caps.dynamodb)

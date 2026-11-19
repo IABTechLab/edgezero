@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::future::Future;
+use std::net::IpAddr;
 #[cfg(any(test, feature = "test-utils"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -13,6 +14,10 @@ use bytes::Bytes;
 use edgezero_core::OutboundScopeOwner;
 use edgezero_core::app::{App, FrameworkErrorDetail, StoreMetadata};
 use edgezero_core::body::Body;
+use edgezero_core::client_info::{
+    Capture, ClientAddress, ClientInfo, ClientIpSource, RuntimeTlsField, UnavailableReason,
+    ViewerTlsSource, ViewerTlsValue,
+};
 use edgezero_core::config_store::{ConfigStoreHandle, ConfigStoreOpenFailure};
 use edgezero_core::context::RuntimeVariables;
 use edgezero_core::env_config::EnvConfig;
@@ -25,7 +30,7 @@ use edgezero_core::ingress::{
     Preservation, RequestIngress, TargetSource,
 };
 use edgezero_core::ja4::CapturedJa4;
-use edgezero_core::key_value_store::KvHandle;
+use edgezero_core::key_value_store::{KvError, KvHandle};
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::response_egress::ResponseEgressEnvelope;
 use edgezero_core::secret_store::SecretHandle;
@@ -42,6 +47,8 @@ use futures_util::stream::Empty;
 use futures_util::stream::poll_fn;
 use futures_util::stream::{LocalBoxStream, unfold};
 use futures_util::{StreamExt as _, TryStreamExt as _};
+use worker::js_sys::Reflect;
+use worker::wasm_bindgen::JsValue;
 use worker::{
     Cf, Context, Delay, Env, Error as WorkerError, Method, Request as CfRequest,
     Response as CfResponse,
@@ -65,6 +72,7 @@ use crate::secret_store::CloudflareSecretStore;
 pub(crate) struct Stores {
     config_registry: Option<ConfigRegistry>,
     config_store: Option<ConfigStoreHandle>,
+    direct_ingress: bool,
     kv: Option<KvHandle>,
     kv_registry: Option<KvRegistry>,
     runtime_variables: Option<RuntimeVariables>,
@@ -277,6 +285,7 @@ impl<'app> CloudflareService<'app> {
 /// stays under the `too_many_arguments` ceiling.
 pub(crate) struct RegistryInputs<'env> {
     pub config_meta: Option<StoreMetadata>,
+    pub direct_ingress: bool,
     pub env_config: &'env EnvConfig,
     pub kv_meta: Option<StoreMetadata>,
     pub runtime_variables: RuntimeVariables,
@@ -514,7 +523,7 @@ where
         core_request,
         Stores::default(),
         request_start,
-        GeoOutcome::NoSelection,
+        (GeoOutcome::NoSelection, ClientInfo::not_exposed()),
         move || Ok(Some(source)),
         Ok,
     ))
@@ -549,7 +558,7 @@ where
         core_request,
         Stores::default(),
         request_start,
-        GeoOutcome::NoSelection,
+        (GeoOutcome::NoSelection, ClientInfo::not_exposed()),
         move || make_source().map(Some),
         deliver,
     ))
@@ -576,7 +585,7 @@ pub async fn dispatch_ingress_source_error_for_test(
         core_request,
         Stores::default(),
         request_start,
-        GeoOutcome::NoSelection,
+        (GeoOutcome::NoSelection, ClientInfo::not_exposed()),
         || -> Result<Option<Empty<Result<Bytes, io::Error>>>, EdgeError> {
             Err(EdgeError::internal(anyhow::anyhow!(
                 "cloudflare source construction failed"
@@ -611,6 +620,7 @@ pub(crate) async fn dispatch_with_handles(
     let context = Arc::new(ctx);
     let runtime = CloudflareEgressRuntime::new(signal, Arc::clone(&context));
     let geo = request_geo(&req);
+    let client_info = request_client_info(&req, stores.direct_ingress);
     let head_request = match into_core_request_head(&req, env, context, app.monotonic_clock()) {
         Ok(request) => request,
         Err(error) => {
@@ -625,7 +635,7 @@ pub(crate) async fn dispatch_with_handles(
         head_request,
         stores,
         request_start,
-        geo,
+        (geo, client_info),
         move || cloudflare_body_stream(req),
         move |egress| from_egress_response(egress, runtime),
     )
@@ -637,7 +647,7 @@ async fn dispatch_ingress_stream_and<Source, SourceError, MakeSource, Output, De
     mut head_request: Request,
     stores: Stores,
     request_start: MonotonicInstant,
-    geo: GeoOutcome,
+    facts: (GeoOutcome, ClientInfo),
     make_source: MakeSource,
     deliver: Deliver,
 ) -> Result<Output, WorkerError>
@@ -693,7 +703,53 @@ where
     *head_request.body_mut() = source.map_or_else(Body::empty, |stream| {
         cloudflare_deadline_body(stream, prepared.read_deadline(), prepared.monotonic_clock())
     });
-    dispatch_core_request(app, head_request, stores, prepared, geo, deliver).await
+    dispatch_core_request(app, head_request, stores, prepared, facts, deliver).await
+}
+
+/// Client facts for a managed request. Without the operator's `direct_ingress`
+/// declaration nothing is read: another Worker can set both `CF-Connecting-IP` (through
+/// `x-real-ip`) and the `cf` object (through a service binding).
+fn request_client_info(req: &CfRequest, direct_ingress: bool) -> ClientInfo {
+    if !direct_ingress {
+        return ClientInfo::not_exposed();
+    }
+    let effective_client = match req.headers().get("cf-connecting-ip") {
+        Ok(None) => Capture::Unavailable(UnavailableReason::Missing),
+        Ok(Some(value)) => value
+            .parse::<IpAddr>()
+            .map_or(Capture::Unavailable(UnavailableReason::Rejected), |ip| {
+                Capture::Captured(ClientAddress::new(ip, ClientIpSource::Cloudflare))
+            }),
+        Err(_) => Capture::Unavailable(UnavailableReason::Rejected),
+    };
+    let cf = Reflect::get(req.inner(), &JsValue::from_str("cf"));
+    ClientInfo::new(
+        Capture::Unavailable(UnavailableReason::NotExposed),
+        effective_client,
+        cf_tls_field(&cf, "tlsVersion"),
+        cf_tls_field(&cf, "tlsCipher"),
+    )
+}
+
+/// Read one `cf` TLS property without `worker::Cf`, whose accessors panic on absent values.
+fn cf_tls_field(cf: &Result<JsValue, JsValue>, name: &str) -> Capture<ViewerTlsValue> {
+    let Ok(object) = cf else {
+        return Capture::Unavailable(UnavailableReason::Rejected);
+    };
+    if object.is_undefined() || object.is_null() {
+        return ViewerTlsValue::capture(RuntimeTlsField::Absent, ViewerTlsSource::Cloudflare);
+    }
+    let text = match Reflect::get(object, &JsValue::from_str(name)) {
+        Ok(value) if value.is_undefined() || value.is_null() => {
+            return ViewerTlsValue::capture(RuntimeTlsField::Absent, ViewerTlsSource::Cloudflare);
+        }
+        Ok(value) => value.as_string(),
+        Err(_) => None,
+    };
+    let field = text
+        .as_deref()
+        .map_or(RuntimeTlsField::NotText, RuntimeTlsField::Text);
+    ViewerTlsValue::capture(field, ViewerTlsSource::Cloudflare)
 }
 
 /// Cloudflare's own geolocation from the request's `cf` metadata.
@@ -737,6 +793,7 @@ pub(crate) async fn dispatch_with_registries(
             kv_registry,
             secret_registry,
             runtime_variables: Some(inputs.runtime_variables),
+            direct_ingress: inputs.direct_ingress,
             ..Default::default()
         },
         request_start,
@@ -851,7 +908,7 @@ async fn dispatch_core_request<Output, Deliver>(
     mut core_request: Request,
     mut stores: Stores,
     prepared: PreparedIngress,
-    geo: GeoOutcome,
+    (geo, client_info): (GeoOutcome, ClientInfo),
     deliver: Deliver,
 ) -> Result<Output, WorkerError>
 where
@@ -865,6 +922,18 @@ where
         core_request.extensions_mut().insert(variables);
     }
     let (config_registry, kv_registry, secret_registry) = synthesise_store_registries(stores);
+    if !app.record_store_requirements().is_empty() {
+        let validation = kv_registry
+            .as_ref()
+            .ok_or_else(|| KvError::Validation("required record registry missing".to_owned()))
+            .and_then(|registry| {
+                registry.validate_record_requirements(app.record_store_requirements())
+            });
+        if let Err(error) = validation {
+            return deliver(app.admitted_error_egress(prepared, error.into()))
+                .map_err(|delivery_error| edge_error_to_worker(&delivery_error));
+        }
+    }
     if let Some(registry) = config_registry {
         core_request.extensions_mut().insert(registry);
     }
@@ -874,11 +943,12 @@ where
     if let Some(registry) = secret_registry {
         core_request.extensions_mut().insert(registry);
     }
-    let response = Box::pin(app.dispatch_admitted_with_geo(
+    let response = Box::pin(app.dispatch_admitted_with_client_info(
         prepared,
         core_request,
         FrameworkErrorDetail::Default,
         geo,
+        client_info,
     ))
     .await;
     deliver(response).map_err(|err| edge_error_to_worker(&err))
@@ -1989,7 +2059,7 @@ mod tests {
             head,
             Stores::default(),
             app.monotonic_now(),
-            GeoOutcome::NoSelection,
+            (GeoOutcome::NoSelection, ClientInfo::not_exposed()),
             move || cloudflare_body_stream(req),
             Ok,
         )

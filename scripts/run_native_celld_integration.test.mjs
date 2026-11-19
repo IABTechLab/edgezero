@@ -26,9 +26,9 @@ function fixture(extra = {}) {
 
 test("fixture environment excludes deployment credentials, proxies and inherited trust inputs", () => {
   assert.deepEqual(fixtureEnvironment({
-    PATH: "path", HOME: "home", CARGO_HOME: "cargo", RUSTUP_TOOLCHAIN: "1.95.0", CELLD_BIN: "ignored",
+    PATH: "path", HOME: "home", CARGO_HOME: "cargo", RUSTUP_TOOLCHAIN: "1.95.0", CELLD_BIN: "ignored", TMPDIR: "/fixture/tmp", RUST_TEST_THREADS: "8",
     AWS_ACCESS_KEY_ID: "secret", CELLD_APP_TOKEN: "secret", ALL_PROXY: "proxy", SSL_CERT_FILE: "ca",
-  }, binary, "/fixture/service"), { PATH: "path", HOME: "home", CARGO_HOME: "cargo", RUSTUP_TOOLCHAIN: "1.95.0", CELLD_BIN: binary, EDGEZERO_CELLD_STORE_SERVICE: "/fixture/service" });
+  }, binary, "/fixture/service"), { PATH: "path", HOME: "home", CARGO_HOME: "cargo", RUSTUP_TOOLCHAIN: "1.95.0", CELLD_BIN: binary, EDGEZERO_CELLD_STORE_SERVICE: "/fixture/service", TMPDIR: "/fixture/tmp", RUST_TEST_THREADS: "1" });
 });
 
 test("missing binary is a failed prerequisite, never a passing skip", async () => {
@@ -63,20 +63,25 @@ test("a modified celld cannot masquerade as the official release", async () => {
 test("version and release checks precede the exact nonzero generated proof", async () => {
   const { calls, options } = fixture();
   await runIntegration(options);
-  assert.equal(calls.length, 3);
+  assert.equal(calls.length, 4);
   assert.deepEqual(calls[0].args, ["--version"]);
   assert.deepEqual(calls[1].args, ["--help"]);
   assert.equal(calls[2].command, "scripts/run_test_nonzero.sh");
   assert.equal(calls[2].args[0], "--ignored");
   const sentinel = "generated_native_consumer_uses_stock_celld_store_service";
-  assert.equal(calls[2].args[1], sentinel);
-  assert.equal(calls[2].args.at(-1), sentinel, "test filter must exclude the independent deterministic suite");
+  assert.equal(calls[2].args[1], `${sentinel}\ngenerated_native_consumer_uses_stock_celld_store_records`);
+  assert.equal(calls[2].args.at(-1), "generated_native_consumer_uses_stock_celld_store_", "filter includes ordinary and record consumers, not deterministic suite");
+  assert.equal(calls[3].args[1], "stock_celld_public_contract_races_and_lost_acknowledgement");
+  assert.ok(calls[3].args.includes("records"));
+  assert.ok(calls[3].args.includes("stock_records_interop"));
+  assert.ok(!calls[3].args.includes("records-v2"));
   assert.ok(calls[2].args.includes("--offline"));
   assert.match(calls[2].options.env.EDGEZERO_CELLD_STORE_SERVICE, /services\/celld-store$/);
   for (const call of calls) {
     assert.equal(call.options.env.AWS_SECRET_ACCESS_KEY, undefined);
     assert.equal(call.options.env.HTTP_PROXY, undefined);
     assert.equal(call.options.env.SSL_CERT_FILE, undefined);
+    assert.equal(call.options.env.RUST_TEST_THREADS, "1", "generated builds and fixture state are serialized");
   }
 });
 

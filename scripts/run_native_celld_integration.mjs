@@ -8,11 +8,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const sentinel = "generated_native_consumer_uses_stock_celld_store_service";
+const recordSentinel = "generated_native_consumer_uses_stock_celld_store_records";
 // The official release this proof is pinned to.
 export const CELLD_VERSION = "celld 0.6.3";
 const inherited = [
   "PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "RUSTC", "RUSTDOC",
-  "RUSTFLAGS", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR", "EDGEZERO_GENERATED_TEST_TARGET_DIR",
+  "RUSTFLAGS", "CARGO_BUILD_JOBS", "CARGO_TARGET_DIR", "EDGEZERO_GENERATED_TEST_TARGET_DIR", "TMPDIR",
 ];
 
 export function fixtureEnvironment(source, binary, service = resolve(root, "services/celld-store")) {
@@ -20,6 +21,7 @@ export function fixtureEnvironment(source, binary, service = resolve(root, "serv
   for (const name of inherited) {
     if (source[name] !== undefined) env[name] = source[name];
   }
+  env.RUST_TEST_THREADS = "1";
   env.CELLD_BIN = binary;
   env.EDGEZERO_CELLD_STORE_SERVICE = service;
   return env;
@@ -109,9 +111,14 @@ export async function runIntegration({
   if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw new Error("invalid celld executable fingerprint");
   log(`celld executable SHA-256 ${fingerprint}`);
   await command("scripts/run_test_nonzero.sh", [
-    "--ignored", sentinel,
+    "--ignored", [sentinel, recordSentinel].join("\n"),
     "cargo", "test", "--offline", "--locked", "-p", "edgezero-cli", "--no-default-features",
-    "--features", "cli,edgezero-adapter-axum", "--test", "celld_generated_proof", sentinel,
+    "--features", "cli,edgezero-adapter-axum", "--test", "celld_generated_proof", "generated_native_consumer_uses_stock_celld_store_",
+  ], { cwd, env: childEnv, timeoutMs: 600_000 });
+  await command("scripts/run_test_nonzero.sh", [
+    "--ignored", "stock_celld_public_contract_races_and_lost_acknowledgement",
+    "cargo", "test", "--offline", "--locked", "-p", "edgezero-store-celld", "--no-default-features",
+    "--features", "records", "--test", "stock_records_interop",
   ], { cwd, env: childEnv, timeoutMs: 600_000 });
   if (await digest(binary) !== fingerprint) throw new Error("celld executable changed during proof");
   log("Generated consumer passed against official celld and the EdgeZero store service. Fleet proof is scripts/run_celld_store_fleet_proof.mjs.");

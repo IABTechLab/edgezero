@@ -70,6 +70,8 @@ jobs:
         run: |
           cargo fetch --locked
           cargo fetch --locked --manifest-path examples/app-demo/Cargo.toml
+          cargo fetch --locked --manifest-path examples/geo-kv-prototype/Cargo.toml
+          cargo fetch --locked --manifest-path examples/geo-spin-loader/Cargo.toml
           cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml
           cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
           cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml
@@ -215,6 +217,27 @@ jobs:
       - name: Native Geo real-peer hosting (loopback only)
         run: scripts/run_test_nonzero.sh geo_hosting_proves_real_peer_and_shared_outcome cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features geo-cloudfront,test-utils --test production_hosting geo_hosting_proves_real_peer_and_shared_outcome
 
+      - name: Portable KV Geo and managed listener (loopback only)
+        if: matrix.suite == 'workspace'
+        run: |
+          cargo fmt --manifest-path examples/geo-kv-prototype/Cargo.toml -- --check
+          cargo clippy --offline --locked --manifest-path examples/geo-kv-prototype/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --offline --locked --manifest-path examples/geo-kv-prototype/Cargo.toml
+          cargo test --offline --locked --manifest-path examples/geo-kv-prototype/Cargo.toml --all-features
+          node --test scripts/run_geo_kv_integration.test.mjs
+          cargo test --offline --locked -p edgezero-core --features geo-kv-build --lib geo::kv
+          cargo check --offline --locked -p edgezero-core --no-default-features --features geo-kv --target wasm32-unknown-unknown
+          scripts/run_test_nonzero.sh kv_geo_listener_checks_reader_provenance_and_pinned_objects cargo test --offline --locked -p edgezero-adapter-axum --features geo-kv,geo-cloudfront,test-utils --test production_hosting kv_geo
+
+      - name: Spin KV operator loader
+        if: matrix.suite == 'workspace'
+        run: |
+          cargo fmt --manifest-path examples/geo-spin-loader/Cargo.toml -- --check
+          cargo clippy --offline --locked --manifest-path examples/geo-spin-loader/Cargo.toml --all-targets -- -D warnings
+          cargo test --offline --locked --manifest-path examples/geo-spin-loader/Cargo.toml
+          cargo check --offline --locked --manifest-path examples/geo-spin-loader/Cargo.toml --target wasm32-wasip2
+          python3 -m unittest discover -s examples/geo-spin-loader -p test_load.py
+
       - name: Native Geo public examples
         run: cargo test --offline --locked -p edgezero-adapter-axum --features geo-cloudfront --doc
 
@@ -240,7 +263,7 @@ jobs:
       - name: Bundled demo logging and fallback TCP contracts
         if: matrix.suite == 'cli'
         run: |
-          node --test scripts/run_test_nonzero.test.mjs scripts/check_outbound_legacy_api.test.mjs
+          node --test scripts/run_test_nonzero.test.mjs scripts/check_outbound_legacy_api.test.mjs scripts/portable_dependency_checks.test.mjs
           scripts/run_test_nonzero.sh --include-ignored demo_fallbacks_enforce_body_cap_over_tcp cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging
 
       - name: Run EdgeZero CLI tests
@@ -298,7 +321,7 @@ jobs:
 
       - name: Native provider integration runner tests
         if: matrix.suite == 'cli'
-        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs scripts/run_celld_store_fleet_proof.test.mjs services/celld-store/test/service.test.mjs
+        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs scripts/run_celld_store_fleet_proof.test.mjs services/celld-store/test/*.test.mjs
 
       - name: Generated native AWS independent service contracts
         if: matrix.suite == 'cli'

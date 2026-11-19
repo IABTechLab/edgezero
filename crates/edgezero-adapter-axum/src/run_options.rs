@@ -16,7 +16,9 @@ use edgezero_store_celld::settings::{CelldAccessToken, CelldPreparationLimits};
 use log::LevelFilter;
 
 use crate::diagnostics::NativeDiagnosticsHandle;
-use crate::geo::{self, NativeGeo, NativeGeoCapability, NativeGeoConfigError, NativeGeoSelection};
+use crate::geo::{
+    self, NativeGeoCapability, NativeGeoConfigError, NativeGeoPlan, NativeGeoSelection,
+};
 use crate::native_bindings::{
     NativeBindingsLimits, NativeConfigBinding, NativeKvBinding, NativePreparationPolicySources,
     NativeStoreBindings, NativeStoreBindingsInput,
@@ -219,7 +221,8 @@ impl AxumRunOptions {
                 }
             }
             for binding in document.kv().values() {
-                if let NativeKvBinding::Celld(settings) = binding
+                if let NativeKvBinding::Celld(settings) | NativeKvBinding::CelldRecords(settings) =
+                    binding
                     && let Some(name) = settings.access.token_env()
                 {
                     names.entry(name.to_owned()).or_default().1 = true;
@@ -410,7 +413,7 @@ impl AxumRunOptions {
     pub(crate) fn native_geo(
         &self,
         manifest: &BakedManifest,
-    ) -> Result<NativeGeo, NativeGeoConfigError> {
+    ) -> Result<NativeGeoPlan, NativeGeoConfigError> {
         geo::resolve(self.geo.as_ref(), &self.env, manifest)
     }
 
@@ -785,7 +788,14 @@ pub(crate) fn geo_setting(path: &[String]) -> Option<&'static str> {
         [
             "adapter",
             "geo",
-            "provider" | "alb_peer_cidrs" | "origin_credential_header_name"
+            "provider"
+                | "alb_peer_cidrs"
+                | "origin_credential_header_name"
+                | "store_id"
+                | "pin"
+                | "reader_ip"
+                | "lookup_timeout_ms"
+                | "max_in_flight"
         ]
     )
     .then_some("GEO")
@@ -868,9 +878,17 @@ mod tests {
     }
 
     #[test]
-    fn celld_capture_unions_kv_names_and_validates_shared_aws_use() {
+    fn celld_capture_unions_raw_and_record_names_and_validates_shared_aws_use() {
         for (input, expected) in [
             (CELLD.to_owned(), 1),
+            (
+                CELLD.replace("provider=\'celld-kv\'", "provider=\'celld-records\'"),
+                1,
+            ),
+            (
+                CELLD.replacen("provider=\'celld-kv\'", "provider=\'celld-records\'", 1),
+                1,
+            ),
             (
                 CELLD.replace(
                     "[kv.state.access]\nmode='authenticated'\ntoken_env='CELL_TOKEN'",

@@ -1,0 +1,16 @@
+[package]
+name = "geo-spin-loader"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[workspace]
+[lib]
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+anyhow = "1"
+edgezero-core = { path = "../../crates/edgezero-core", default-features = false }
+edgezero-adapter-spin = { path = "../../crates/edgezero-adapter-spin", features = ["spin"] }
+geo-kv-prototype = { path = "../geo-kv-prototype", features = ["publisher"] }
+serde_json = "1"
+spin-sdk = { version = "=8.0.0", default-features = false, features = ["http"] }
+subtle = "2"

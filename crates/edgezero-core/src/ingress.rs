@@ -21,6 +21,7 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::body::Body;
+use crate::client_info::ClientInfo;
 use crate::config_store::ConfigExtractionLimits;
 use crate::error::EdgeError;
 use crate::geo::GeoOutcome;
@@ -238,6 +239,7 @@ pub struct AdmittedIngress {
     head_limits: IngressHeadLimits,
     monotonic_clock: MonotonicClock,
     read_deadline: Deadline,
+    request_client_info: Option<Box<ClientInfo>>,
     request_geo: GeoOutcome,
     request_start: MonotonicInstant,
 }
@@ -312,8 +314,12 @@ impl AdmittedIngress {
         self.read_deadline
     }
 
-    pub(crate) fn request_context(&self) -> (GeoOutcome, bool) {
-        (self.request_geo.clone(), self.category_only_json_errors)
+    pub(crate) fn request_context(&self) -> (GeoOutcome, Option<ClientInfo>, bool) {
+        (
+            self.request_geo.clone(),
+            self.request_client_info.as_deref().cloned(),
+            self.category_only_json_errors,
+        )
     }
 
     #[must_use]
@@ -322,9 +328,10 @@ impl AdmittedIngress {
         self.request_start
     }
 
-    pub(crate) fn take_request_context(&mut self) -> (GeoOutcome, bool) {
+    pub(crate) fn take_request_context(&mut self) -> (GeoOutcome, Option<ClientInfo>, bool) {
         (
             mem::replace(&mut self.request_geo, GeoOutcome::NoSelection),
+            self.request_client_info.take().map(|info| *info),
             self.category_only_json_errors,
         )
     }
@@ -342,9 +349,11 @@ impl AdmittedIngress {
     pub(crate) fn with_request_context(
         mut self,
         geo: GeoOutcome,
+        client_info: Option<ClientInfo>,
         category_only_json_errors: bool,
     ) -> Self {
         self.request_geo = geo;
+        self.request_client_info = client_info.map(Box::new);
         self.category_only_json_errors = category_only_json_errors;
         self
     }
@@ -893,6 +902,7 @@ pub(crate) fn apply_admission_policy(
     Ok(IngressAdmissionOutcome::Admitted {
         completion,
         ingress: AdmittedIngress {
+            request_client_info: None,
             request_geo: GeoOutcome::NoSelection,
             category_only_json_errors: false,
             config_extraction_limits: ConfigExtractionLimits::default(),

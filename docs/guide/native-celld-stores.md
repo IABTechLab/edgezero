@@ -27,6 +27,30 @@ features = ["celld-kv"]
 
 The provider crate's `kv` feature holds the HTTP client. Its settings compile without live transport dependencies, and applications never depend on celld or V8. AWS features and the `aws-stores` alias keep their membership. A deployment file cannot enable a provider the binary was built without; startup checks compiled capabilities first.
 
+## Conditional records
+
+Build with `celld-records` and select `provider = "celld-records"` for a declared
+logical KV ID. Declare its layout through `App::require_record_store` before
+provider preparation. The initializer acquires the existing prepared record
+view; it does not reopen a provider.
+
+The service in this revision supports record API version 1 over the same
+`rows-v1` table as ordinary KV. Preparation reads its capability and instance.
+Every operation on a record handle carries the expected instance, which the
+service checks before effects. Ordinary replacements clear metadata and issue
+a fresh generation. No-TTL replacements remove prior expiry.
+
+The namespace allocator survives value deletion and sweeping. Conditional
+writes and physical existence use the retained row, while lookup/list filter
+expired values until physical cleanup. Native celld retries are answered from
+the mutation ledger, including the original precondition rejection; the Rust
+client never retries automatically. Same-instance snapshot rollback is still
+not detected.
+
+See [conditional KV records](./kv-records) for the shared API, limits and
+pagination contract. The generated feature is `celld-records`; the provider
+crate feature is `records`. No celld config provider is added.
+
 ## Bind a logical store
 
 The application declares logical IDs in `edgezero.toml`:

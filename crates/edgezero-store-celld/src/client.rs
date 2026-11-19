@@ -35,6 +35,8 @@ const ERROR_CAP: usize = 1_024;
 const INSTANCE_HEADER: &str = "x-edgezero-store-instance";
 const MUTATION_HEADER: &str = "x-edgezero-mutation-id";
 const VERSION_HEADER: &str = "x-edgezero-store-version";
+const RECORD_HEADER: &str = "x-edgezero-record-version";
+const EXPECTED_INSTANCE_HEADER: &str = "x-edgezero-expected-instance";
 
 pub(crate) struct ScopedClient {
     authorization: Option<HeaderValue>,
@@ -56,19 +58,67 @@ pub(crate) enum ResponseKind {
     Mutation,
     Page,
     Value,
+    #[cfg(feature = "records")]
+    RecordCapabilities,
+    #[cfg(feature = "records")]
+    RecordExists([u8; 22]),
+    #[cfg(feature = "records")]
+    RecordMutation([u8; 22]),
+    #[cfg(feature = "records")]
+    RecordPage([u8; 22]),
+    #[cfg(feature = "records")]
+    RecordValue([u8; 22]),
 }
 
 impl ResponseKind {
     const fn mutation(self) -> bool {
-        matches!(self, Self::Mutation)
+        match self {
+            Self::Mutation => true,
+            #[cfg(feature = "records")]
+            Self::RecordMutation(_) => true,
+            _ => false,
+        }
     }
 
     const fn json(self) -> bool {
-        matches!(self, Self::Page)
+        match self {
+            Self::Page => true,
+            #[cfg(feature = "records")]
+            Self::RecordCapabilities | Self::RecordPage(_) | Self::RecordValue(_) => true,
+            _ => false,
+        }
     }
 
     const fn optional(self) -> bool {
-        matches!(self, Self::Value)
+        match self {
+            Self::Value => true,
+            #[cfg(feature = "records")]
+            Self::RecordValue(_) => true,
+            _ => false,
+        }
+    }
+
+    const fn record(self) -> bool {
+        match self {
+            #[cfg(feature = "records")]
+            Self::RecordCapabilities
+            | Self::RecordExists(_)
+            | Self::RecordMutation(_)
+            | Self::RecordPage(_)
+            | Self::RecordValue(_) => true,
+            _ => false,
+        }
+    }
+
+    const fn expected_instance(self) -> Option<[u8; 22]> {
+        match self {
+            #[cfg(feature = "records")]
+            Self::RecordExists(instance)
+            | Self::RecordMutation(instance)
+            | Self::RecordPage(instance)
+            | Self::RecordValue(instance) => Some(instance),
+            _ => None,
+        }
     }
 }
 
@@ -186,93 +236,195 @@ impl ScopedClient {
         if kind.mutation() {
             request = request.header(MUTATION_HEADER, mutation_id()?);
         }
+        if kind.record() {
+            request = request.header(RECORD_HEADER, "1");
+        }
+        if let Some(expected) = kind.expected_instance() {
+            request = request.header(
+                EXPECTED_INSTANCE_HEADER,
+                HeaderValue::from_bytes(&expected).map_err(|_error| PreparationError::Malformed)?,
+            );
+        }
         if let Some(payload) = body {
             request = request
-                .header(CONTENT_TYPE, "application/octet-stream")
+                .header(
+                    CONTENT_TYPE,
+                    if kind.record() {
+                        "application/json"
+                    } else {
+                        "application/octet-stream"
+                    },
+                )
                 .body(payload);
         }
-        let result = timeout(budget, async {
+        let mut definitive_rejection = false;
+        let exchange = timeout(budget, async {
             let response = request.send().await.map_err(http_error)?;
-            let headers = response.headers();
-            validate_headers(headers)?;
-            let instance = instance(headers)?;
-            let status = response.status();
-            let success = status
-                == if kind.mutation() {
-                    StatusCode::NO_CONTENT
-                } else {
-                    StatusCode::OK
-                };
-            let missing = status == StatusCode::NOT_FOUND;
-            // Only the store itself can report a key as absent or present. A 404
-            // from routing, such as a proxy that rewrote the path, has no instance.
-            let logical_miss = missing && (method == Method::HEAD || kind.optional());
-            if (success || logical_miss) && instance.is_none() {
-                return Err(PreparationError::Malformed);
-            }
-            // A mutation acknowledgement carries no body, so it has no media type.
-            if status == StatusCode::NO_CONTENT && success {
-                if headers
-                    .get(CONTENT_LENGTH)
-                    .is_some_and(|length| length.as_bytes() != b"0")
-                {
-                    return Err(PreparationError::Malformed);
-                }
-                return Ok(Exchange {
-                    body: Some(Vec::new()),
-                    instance,
-                });
-            }
-            // The wire HEAD contract has no error body, including non-404 errors.
-            if method == Method::HEAD {
-                return if success {
-                    Ok(Exchange {
-                        body: Some(Vec::new()),
-                        instance,
-                    })
-                } else if missing {
-                    Ok(Exchange {
-                        body: None,
-                        instance,
-                    })
-                } else {
-                    Err(status_error(status)
-                        .map_or(PreparationError::Malformed, |(_, error)| error))
-                };
-            }
-            let expected_type = if !success || kind.json() {
-                "application/json"
-            } else {
-                "application/octet-stream"
-            };
-            validate_content_type(headers, expected_type)?;
-            let response_cap = if success { cap } else { ERROR_CAP };
-            let bytes = collect(response, response_cap, &self.clock, deadline).await?;
-            if success {
-                return Ok(Exchange {
-                    body: Some(bytes),
-                    instance,
-                });
-            }
-            let (expected, error) = status_error(status).ok_or(PreparationError::Malformed)?;
-            let parsed: ErrorBody =
-                serde_json::from_slice(&bytes).map_err(|_error| PreparationError::Malformed)?;
-            if parsed.error != expected {
-                return Err(PreparationError::Malformed);
-            }
-            if missing && kind.optional() {
-                return Ok(Exchange {
-                    body: None,
-                    instance,
-                });
-            }
-            Err(error)
+            self.decode_response(
+                response,
+                method,
+                cap,
+                deadline,
+                kind,
+                &mut definitive_rejection,
+            )
+            .await
         })
         .await
         .map_err(|_elapsed| PreparationError::Deadline);
-        self.check(deadline)?;
-        result?
+        let result = self.check(deadline).and_then(|_remaining| exchange?);
+        #[cfg(feature = "records")]
+        if matches!(kind, ResponseKind::RecordMutation(_)) && !definitive_rejection {
+            return result.map_err(|_error| PreparationError::MutationUncertain);
+        }
+        result
     }
+
+    async fn decode_response(
+        &self,
+        response: reqwest::Response,
+        method: Method,
+        cap: usize,
+        deadline: Deadline,
+        kind: ResponseKind,
+        definitive_rejection: &mut bool,
+    ) -> Result<Exchange, PreparationError> {
+        let status = response.status();
+        let success = status
+            == if kind.mutation() {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::OK
+            };
+        let missing = status == StatusCode::NOT_FOUND;
+        let headers = response.headers();
+        let instance = validated_instance(headers, kind, &method, status, success)?;
+
+        // A mutation acknowledgement carries no body, so it has no media type.
+        if status == StatusCode::NO_CONTENT && success {
+            if headers
+                .get(CONTENT_LENGTH)
+                .is_some_and(|length| length.as_bytes() != b"0")
+            {
+                return Err(PreparationError::Malformed);
+            }
+            return Ok(Exchange {
+                body: Some(Vec::new()),
+                instance,
+            });
+        }
+        // The wire HEAD contract has no error body, including non-404 errors.
+        if method == Method::HEAD {
+            return if success {
+                Ok(Exchange {
+                    body: Some(Vec::new()),
+                    instance,
+                })
+            } else if missing {
+                Ok(Exchange {
+                    body: None,
+                    instance,
+                })
+            } else {
+                Err(status_error(status).map_or(PreparationError::Malformed, |(_, error)| error))
+            };
+        }
+        let expected_type = if !success || kind.json() {
+            "application/json"
+        } else {
+            "application/octet-stream"
+        };
+        validate_content_type(headers, expected_type)?;
+        let response_cap = if success { cap } else { ERROR_CAP };
+        let bytes = collect(response, response_cap, &self.clock, deadline).await?;
+        if success {
+            return Ok(Exchange {
+                body: Some(bytes),
+                instance,
+            });
+        }
+        let error = validated_error(kind, status, &bytes)?;
+        if status.is_client_error() {
+            *definitive_rejection = true;
+        }
+        if missing && kind.optional() {
+            return Ok(Exchange {
+                body: None,
+                instance,
+            });
+        }
+        Err(error)
+    }
+}
+
+fn validated_instance(
+    headers: &HeaderMap,
+    kind: ResponseKind,
+    method: &Method,
+    status: StatusCode,
+    success: bool,
+) -> Result<Option<String>, PreparationError> {
+    validate_headers(headers)?;
+    if kind.record() {
+        let mut versions = headers.get_all(RECORD_HEADER).iter();
+        if versions.next().is_none_or(|value| value.as_bytes() != b"1") || versions.next().is_some()
+        {
+            return Err(PreparationError::UnsupportedVersion);
+        }
+    }
+    let observed = instance(headers)?;
+    if let Some(expected) = kind.expected_instance()
+        && observed
+            .as_ref()
+            .is_some_and(|value| value.as_bytes() != expected)
+    {
+        return Err(PreparationError::InstanceChanged);
+    }
+    let logical_miss =
+        status == StatusCode::NOT_FOUND && (*method == Method::HEAD || kind.optional());
+    if (success || logical_miss || (kind.record() && status == StatusCode::PRECONDITION_FAILED))
+        && observed.is_none()
+    {
+        return Err(PreparationError::Malformed);
+    }
+    Ok(observed)
+}
+
+fn validated_error(
+    kind: ResponseKind,
+    status: StatusCode,
+    bytes: &[u8],
+) -> Result<PreparationError, PreparationError> {
+    if status == StatusCode::PRECONDITION_FAILED && !kind.record() {
+        return Err(PreparationError::Malformed);
+    }
+    let parsed: ErrorBody =
+        serde_json::from_slice(bytes).map_err(|_error| PreparationError::Malformed)?;
+    #[cfg(feature = "records")]
+    let record_error = match (kind, status, parsed.error.as_str()) {
+        (
+            ResponseKind::RecordMutation(_),
+            StatusCode::PRECONDITION_FAILED,
+            "precondition_failed",
+        ) => Some(PreparationError::PreconditionFailed),
+        (_, StatusCode::SERVICE_UNAVAILABLE, "instance_changed") if kind.record() => {
+            Some(PreparationError::InstanceChanged)
+        }
+        _ => None,
+    };
+    #[cfg(not(feature = "records"))]
+    let record_error = None;
+    let error = if let Some(error) = record_error {
+        error
+    } else {
+        let (expected, error) = status_error(status).ok_or(PreparationError::Malformed)?;
+        if parsed.error != expected {
+            return Err(PreparationError::Malformed);
+        }
+        error
+    };
+
+    Ok(error)
 }
 
 /// A fresh 128-bit mutation ID. It is never reused, including after a failure.

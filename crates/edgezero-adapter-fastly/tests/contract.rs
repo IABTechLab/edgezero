@@ -36,6 +36,7 @@ mod tests {
     use edgezero_adapter_fastly::request::{FastlyService, into_core_request};
     use edgezero_core::app::{App, Hooks};
     use edgezero_core::body::Body;
+    use edgezero_core::client_info::{Capture, ClientInfo, UnavailableReason};
     use edgezero_core::config_store::{
         BoundedStoreRead, ConfigStore, ConfigStoreError, ConfigStoreHandle,
         finish_bounded_config_read,
@@ -153,10 +154,34 @@ mod tests {
         GeoOutcome::platform(GeoSource::Fastly, None, None)
     }
 
+    /// Test requests are not client requests: no downstream address and no client TLS.
+    fn platform_client_info() -> ClientInfo {
+        ClientInfo::new(
+            Capture::Unavailable(UnavailableReason::NotExposed),
+            Capture::Unavailable(UnavailableReason::Missing),
+            Capture::Unavailable(UnavailableReason::Missing),
+            Capture::Unavailable(UnavailableReason::Missing),
+        )
+    }
+
     fn build_test_app() -> App {
         async fn capture_uri(ctx: RequestContext) -> Result<Response, EdgeError> {
             assert_eq!(ctx.geo(), &platform_geo());
             assert_eq!(ctx.extensions().get::<GeoOutcome>(), Some(&forged_geo()));
+            assert_eq!(ctx.client_info(), Some(&platform_client_info()));
+            assert_eq!(
+                ctx.extensions().get::<ClientInfo>(),
+                Some(&ClientInfo::not_exposed())
+            );
+            let legacy_ip = ctx
+                .extensions()
+                .get::<FastlyRequestContext>()
+                .expect("fastly context")
+                .client_ip;
+            assert_eq!(
+                ctx.client_info().and_then(ClientInfo::effective_client_ip),
+                legacy_ip
+            );
             let body = Body::text(ctx.uri().to_string());
             let response = response_builder()
                 .status(StatusCode::OK)
@@ -216,6 +241,7 @@ mod tests {
 
         let mut app = App::new(router);
         app.insert_state(forged_geo());
+        app.insert_state(ClientInfo::not_exposed());
         app
     }
 
@@ -611,6 +637,7 @@ mod tests {
                     request_events.lock().expect("events").push("handler");
                     assert_eq!(ctx.geo(), &platform_geo());
                     assert_eq!(ctx.extensions().get::<GeoOutcome>(), Some(&forged_geo()));
+                    assert_eq!(ctx.client_info(), Some(&platform_client_info()));
                     let value = ctx
                         .extensions()
                         .get::<HookValue>()
@@ -632,6 +659,7 @@ mod tests {
                 raw.set_url("http://example.com/hook");
                 extensions.insert(HookValue("visible"));
                 extensions.insert(forged_geo());
+                extensions.insert(ClientInfo::not_exposed());
             },
             move |response| {
                 finalize_events.lock().expect("events").push("finalize");
