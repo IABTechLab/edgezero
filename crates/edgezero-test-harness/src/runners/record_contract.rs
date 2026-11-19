@@ -479,15 +479,6 @@ fn run_portable_cases(port: u16, id: &str, label: &str, records: &mut Records) -
                 "provider":label,"receipt":receipt,"qualification":false}))?;
         }
     }
-    let native = guest(&req(port, &format!("/record-native/{id}"))?)?;
-    require(
-        native["record_native"] == "passed" && native["provider"] == label,
-        format!("native-to-portable interop failed for {label}"),
-    )?;
-    records.push(
-        json!({"event":"portable-record-native-read","status":"pass",
-        "provider":label,"receipt":native,"qualification":false}),
-    )?;
     let receipt = guest(&req(port, &format!("{base}/record-cases/clean"))?)?;
     require(
         receipt["record_cases"] == "clean" && receipt["remaining_keys"] == 0,
@@ -583,6 +574,17 @@ pub(super) fn run_portable(exe: &Path, parent: &Path, records: &mut Records) -> 
             "qualification":false,
         }))?;
         for (id, label) in PORTABLE {
+            // Read, CAS and delete the natively written row first: the shared contract
+            // asserts the exact global listing, so no foreign row may remain.
+            let native = guest(&req(port, &format!("/record-native/{id}"))?)?;
+            require(
+                native["record_native"] == "passed" && native["provider"] == label,
+                format!("native-to-portable interop failed for {label}"),
+            )?;
+            records.push(
+                json!({"event":"portable-record-native-read","status":"pass",
+                "provider":label,"receipt":native,"qualification":false}),
+            )?;
             let reply = req(port, &format!("/record-contract/{id}"))?;
             let receipt = guest(&reply)?;
             validate_portable_receipt(&receipt, label)?;
