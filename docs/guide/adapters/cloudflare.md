@@ -107,6 +107,63 @@ selectors, so prefer `run_app` unless you are mocking a backend.
 Use [application retention](#retaining-an-application) with that function when the
 caller owns a prebuilt app and wants fresh per-request store bindings.
 
+## Geographic context
+
+Managed dispatch (`run_app`, `dispatch_app`, and `CloudflareService`) automatically exposes
+Cloudflare's request geography through `ctx.geo()`. No geo setting or store is required.
+For `GeoOutcome::Selected` with `GeoStatus::Located`, read `location.country().as_str()` and
+`location.subdivision().map(|code| code.as_str())` using the types in `edgezero_core::geo`.
+The provider is `cloudflare`, source is `GeoSource::Cloudflare`, and trust basis is
+`GeoTrustBasis::PlatformMetadata`.
+
+Country comes from `cf.country`; subdivision comes from `cf.regionCode` (for example `CA`),
+not the descriptive `cf.region` (`California`). A valid country with absent or unusable
+subdivision stays country-only. Missing or unusable country, including Cloudflare's `XX`
+and `T1` placeholders, yields selected `GeoUnavailableReason::MissingMetadata`.
+Neither `CF-IPCountry` nor CloudFront geographic headers provide a fallback. Public request
+extensions cannot replace the framework-owned outcome, and a retained application receives
+fresh geography on every dispatch.
+
+Geography is an estimate, not proof of residence, identity, or consent. Local Worker tests
+with host-controlled metadata verify adapter wiring; they do not qualify Cloudflare's live
+IP geolocation accuracy or an application's permission policy.
+
+## Client info
+
+[`ctx.client_info()`](../handlers.md#client-metadata) reports the visitor address and viewer
+TLS only after the operator declares direct ingress in the baked manifest:
+
+```toml
+[adapters.cloudflare.client_info]
+direct_ingress = true
+```
+
+The default is off, and every field is then `NotExposed`. The setting is a declaration the Worker
+cannot check: Cloudflare routes only direct visitor traffic to this entrypoint, and no service
+binding reaches it. Both facts can otherwise come from another Worker:
+
+- In same-zone Worker subrequests, `CF-Connecting-IP` takes the value of `x-real-ip`, which the
+  calling Worker can set ([Cloudflare HTTP headers](https://developers.cloudflare.com/fundamentals/reference/http-headers/)).
+- A Worker can construct a request with its own `cf` object and send it through a service
+  binding, where it becomes the receiving Worker's `request.cf`.
+
+Enforce the routing at the edge, for example with the
+[`cf.worker.upstream_zone`](https://developers.cloudflare.com/ruleset-engine/rules-language/fields/reference/cf.worker.upstream_zone/)
+firewall field. Leave Pseudo IPv4 **Overwrite Headers** disabled: recovering the original IPv6
+address in that mode is not supported.
+
+| Field            | With `direct_ingress`                                    | Unavailable                                                                                 |
+| ---------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Direct peer      | Not exposed                                              | Always `NotExposed`                                                                         |
+| Effective client | `CF-Connecting-IP` parsed as one IP, source `Cloudflare` | `Missing` without the header; `Rejected` for any other value                                |
+| TLS version      | `cf.tlsVersion`, for example `TLSv1.3`                   | `Missing` for `""` (plaintext), no `cf`, `undefined` or `null`; `Rejected` for a non-string |
+| TLS cipher       | `cf.tlsCipher`, for example `AEAD-AES128-GCM-SHA256`     | Same as TLS version                                                                         |
+
+The adapter reads `cf` through `Reflect`, not `worker::Cf::tls_version()`, which panics when the
+value is missing. `ctx.geo()` and `ctx.ja4()` keep reading `cf` in both modes. Manual
+`CloudflareService` dispatch has no manifest, so direct ingress stays off there. Local and test
+Workers carry synthetic or absent `cf` data, which proves adapter wiring, not live provenance.
+
 ## Ingress Body Conversion
 
 The converter preserves a genuine native Fetch request's null `body` as buffered empty, without
@@ -229,6 +286,11 @@ async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
     // ...
 }
 ```
+
+`ctx.ja4()` returns the client's JA4 fingerprint only on zones with Enterprise
+Bot Management. Otherwise, and in local development and tests (no `cf`
+object), it reports `Unavailable(Missing)`. See
+[Client TLS fingerprint](./overview#client-tls-fingerprint-ja4).
 
 ## Environment Variables
 

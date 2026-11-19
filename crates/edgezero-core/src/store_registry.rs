@@ -26,7 +26,8 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 
 use crate::config_store::{BoundedStoreRead, ConfigStoreHandle};
-use crate::key_value_store::KvHandle;
+use crate::key_value_store::{KvError, KvHandle};
+use crate::record_store::RecordStoreRequirements;
 use crate::secret_store::{SecretError, SecretHandle};
 use crate::time::{Deadline, MonotonicClock};
 
@@ -247,6 +248,32 @@ impl<H: Clone> StoreRegistry<H> {
         let mut by_id: BTreeMap<String, H> = BTreeMap::new();
         by_id.insert(id.clone(), handle);
         Self::new(by_id, id)
+    }
+}
+
+impl StoreRegistry<KvHandle> {
+    /// Validate already-prepared handles against immutable application requirements.
+    /// This does not install layouts, alter routing or perform provider I/O.
+    ///
+    /// # Errors
+    /// Rejects missing IDs, unsupported record capability and layout mismatches.
+    #[inline]
+    pub fn validate_record_requirements(
+        &self,
+        requirements: &RecordStoreRequirements,
+    ) -> Result<(), KvError> {
+        for (id, layout) in requirements {
+            let handle = self.named_ref(id).ok_or_else(|| {
+                KvError::Validation("required record store is not registered".to_owned())
+            })?;
+            let records = handle.require_records()?;
+            if records.binding().layout != *layout {
+                return Err(KvError::Validation(
+                    "prepared record store layout does not match its declaration".to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 

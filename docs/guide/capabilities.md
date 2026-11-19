@@ -172,6 +172,23 @@ behavior. Axum dispatches the admission and fallback-drain future directly on it
 executor, so cancellation drops that future and its grant. Cloudflare, Fastly, and Spin retain the
 provider limitations described above.
 
+## Client Metadata Matrix
+
+What each managed adapter supplies through `ctx.client_info()`, `ctx.geo()` and `ctx.ja4()`.
+See [Client metadata](./handlers.md#client-metadata) for the reasons.
+
+| Field            | Axum                                                                           | Cloudflare                                                       | Fastly                                   | Spin                                                                                          |
+| ---------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Direct peer      | Owned socket address                                                           | `NotExposed`                                                     | `NotExposed`                             | Last `spin-client-addr` with `direct_ingress`; otherwise `NotExposed`                         |
+| Effective client | Socket peer or trusted forwarding chain; `PeerFallback` behind a trusted proxy | `CF-Connecting-IP` with `direct_ingress`; otherwise `NotExposed` | Runtime downstream address               | Socket peer with `direct_ingress`, or the authenticated KV Geo header; otherwise `NotExposed` |
+| TLS version      | `NotExposed`                                                                   | `cf.tlsVersion` with `direct_ingress`; otherwise `NotExposed`    | Runtime TLS protocol                     | `NotExposed`                                                                                  |
+| TLS cipher       | `NotExposed`                                                                   | `cf.tlsCipher` with `direct_ingress`; otherwise `NotExposed`     | Runtime cipher, OpenSSL name             | `NotExposed`                                                                                  |
+| Geo              | Off, CloudFront, supplied or KV provider                                       | `cf` country and region                                          | Runtime lookup of the downstream address | Off or authenticated KV lookup                                                                |
+| JA4              | `NotExposed`; generic trusted proxy or protected CloudFront when configured    | Bot Management, otherwise `Missing`                              | Runtime TLS                              | `NotExposed`                                                                                  |
+
+Local runtimes serve plain HTTP, so Fastly TLS and JA4 are `Missing` under Viceroy. Tests and
+local Workers carry synthetic or absent `cf` data.
+
 ## Config Matrix
 
 | Capability                      | Axum        | Cloudflare  | Fastly      | Spin        |

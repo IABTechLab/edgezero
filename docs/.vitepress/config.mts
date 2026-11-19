@@ -40,6 +40,7 @@ export default defineConfig({
           { text: 'Streaming', link: '/guide/streaming' },
           { text: 'Outbound HTTP', link: '/guide/proxying' },
           { text: 'KV Storage', link: '/guide/kv' },
+          { text: 'Conditional records', link: '/guide/kv-records' },
         ],
       },
       {
@@ -50,6 +51,14 @@ export default defineConfig({
           { text: 'Cloudflare Workers', link: '/guide/adapters/cloudflare' },
           { text: 'Fermyon Spin', link: '/guide/adapters/spin' },
           { text: 'Axum (Native)', link: '/guide/adapters/axum' },
+          {
+            text: 'Axum diagnostics and trusted proxies',
+            link: '/guide/axum-diagnostics',
+          },
+          { text: 'Native Geo providers', link: '/guide/native-geo' },
+          { text: 'Native AWS stores', link: '/guide/native-aws-stores' },
+          { text: 'Native celld stores', link: '/guide/native-celld-stores' },
+          { text: 'DynamoDB KV', link: '/guide/dynamodb-kv' },
         ],
       },
       {
