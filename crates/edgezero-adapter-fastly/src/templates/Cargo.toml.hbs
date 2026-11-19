@@ -17,6 +17,9 @@ path = "src/main.rs"
 [features]
 default = []
 fastly = ["edgezero-adapter-fastly/fastly"]
+# Portable record providers, selected per KV ID by the runtime bindings document.
+aws-dynamodb-records = ["edgezero-adapter-fastly/aws-dynamodb-records"]
+celld-records = ["edgezero-adapter-fastly/celld-records"]
 
 [dependencies]
 {{proj_core}} = { path = "../{{proj_core}}" }

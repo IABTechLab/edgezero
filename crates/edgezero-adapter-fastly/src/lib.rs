@@ -30,6 +30,8 @@ pub mod logger;
 #[cfg(any(test, feature = "test-utils", feature = "fastly"))]
 pub mod outbound;
 #[cfg(feature = "fastly")]
+mod portable_bindings;
+#[cfg(feature = "fastly")]
 pub mod request;
 #[cfg(any(test, feature = "fastly"))]
 pub mod response;
@@ -107,7 +109,11 @@ fn build_target_app<A>() -> Result<App, EdgeError>
 where
     A: Hooks,
 {
-    let app = App::build::<A>(FASTLY_PLATFORM)?;
+    #[cfg_attr(
+        not(feature = "fastly"),
+        expect(unused_mut, reason = "only Fastly installs portable providers")
+    )]
+    let mut app = App::build::<A>(FASTLY_PLATFORM)?;
     let metadata = A::stores().kv;
     if app
         .record_store_requirements()
@@ -118,6 +124,8 @@ where
             KvError::Validation("record declaration uses an undeclared ID".to_owned()).into(),
         );
     }
+    #[cfg(feature = "fastly")]
+    portable_bindings::install(&mut app, A::stores())?;
     Ok(app)
 }
 

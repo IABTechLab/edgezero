@@ -17,6 +17,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 
+/// Comma-separated `[adapters.<name>.build] features` for provider-CLI builds.
+const BUILD_FEATURES_VAR: &str = "EDGEZERO_BUILD_FEATURES";
+
 include!(concat!(env!("OUT_DIR"), "/linked_adapters.rs"));
 
 #[derive(Debug, Clone, Copy)]
@@ -602,6 +605,13 @@ fn build_shell_command(
         None => shell_command(command, adapter_args, cwd),
     };
 
+    // Axum receives manifest build features as Cargo arguments above. Adapters whose
+    // provider CLI runs the Cargo build, such as Fastly's `[scripts] build`, read them
+    // from this variable; the generated build scripts append `--features`.
+    if !adapter_name.eq_ignore_ascii_case("axum") && !manifest_features.is_empty() {
+        cmd.env(BUILD_FEATURES_VAR, manifest_features.join(","));
+    }
+
     // Precedence (high to low) for `EDGEZERO__ADAPTER__HOST/PORT` on the
     // subprocess:
     //   1. Parent env — propagated through std::process::Command's default
@@ -854,8 +864,8 @@ mod tests {
     #[cfg(feature = "edgezero-adapter-axum")]
     use super::native_axum_cargo_command;
     use super::{
-        AdapterDeployContext, ResolvedEnvironment, apply_environment, deploy, ensure_capabilities,
-        execute_runtime,
+        AdapterDeployContext, BUILD_FEATURES_VAR, ResolvedEnvironment, apply_environment,
+        build_shell_command, deploy, ensure_capabilities, execute_runtime,
     };
     use crate::adapter::Action;
     use crate::manifest_source::resolve_runtime_from;
@@ -870,7 +880,7 @@ mod tests {
     use std::env;
     use std::ffi::{OsStr, OsString};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -1108,6 +1118,38 @@ mod tests {
                 && value.and_then(|val| val.to_str()) == Some("https://demo")
         });
         assert!(has_var);
+    }
+
+    #[test]
+    fn provider_cli_builds_receive_manifest_features_and_axum_does_not() {
+        let features = [
+            "aws-dynamodb-records".to_owned(),
+            "celld-records".to_owned(),
+        ];
+        let env_of = |adapter: &str, selected: &[String]| {
+            build_shell_command(
+                "true",
+                Path::new("."),
+                adapter,
+                Action::Build,
+                None,
+                (None, None),
+                &[],
+                selected,
+            )
+            .expect("command")
+            .get_envs()
+            .find(|(key, _)| key.to_str() == Some(BUILD_FEATURES_VAR))
+            .and_then(|(_, value)| value)
+            .and_then(OsStr::to_str)
+            .map(str::to_owned)
+        };
+        assert_eq!(
+            env_of("fastly", &features).as_deref(),
+            Some("aws-dynamodb-records,celld-records")
+        );
+        assert_eq!(env_of("fastly", &[]), None);
+        assert_eq!(env_of("axum", &features), None);
     }
 
     #[test]

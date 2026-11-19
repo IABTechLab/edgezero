@@ -240,6 +240,18 @@ impl ConfigStore for FastlyConfigStore {
     }
 }
 
+/// The optional portable store bindings document. A missing store or entry is `None`;
+/// an unreadable, oversized or non-UTF-8 entry is an error, never a silent default.
+pub(crate) fn portable_bindings_document(
+    store: &str,
+    entry: &str,
+) -> Result<Option<String>, ConfigStoreError> {
+    let Some(opened) = FastlyConfigStore::try_open_optional(store)? else {
+        return Ok(None);
+    };
+    opened.read_entry(entry, MAX_ENTRY_BYTES)
+}
+
 pub(crate) fn logging_level_override() -> Result<Option<String>, ManagedLoggerError> {
     let binding = FastlyConfigStore::try_open_optional("edgezero_logging")
         .map_err(|_error| ManagedLoggerError::ConfigurationUnavailable)?;

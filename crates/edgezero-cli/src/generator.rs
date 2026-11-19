@@ -2083,6 +2083,29 @@ git = "https://example.invalid/spin-sdk-test"
     }
 
     fn assert_generated_fastly_entrypoint(project_dir: &Path) {
+        let cargo =
+            fs::read_to_string(project_dir.join("crates/demo-app-adapter-fastly/Cargo.toml"))
+                .expect("read generated Fastly Cargo.toml");
+        let parsed: toml::Value =
+            toml::from_str(&cargo).expect("parse generated Fastly Cargo.toml");
+        let features = parsed
+            .get("features")
+            .and_then(toml::Value::as_table)
+            .expect("generated Fastly features");
+        for feature in ["aws-dynamodb-records", "celld-records"] {
+            assert_eq!(
+                features.get(feature),
+                Some(&toml::Value::Array(vec![toml::Value::String(format!(
+                    "edgezero-adapter-fastly/{feature}"
+                ))])),
+                "incorrect generated Fastly portable forwarding for {feature}",
+            );
+        }
+        assert_eq!(
+            features.get("default"),
+            Some(&toml::Value::Array(Vec::new())),
+            "Fastly providers must be opt-in"
+        );
         let entrypoint =
             fs::read_to_string(project_dir.join("crates/demo-app-adapter-fastly/src/main.rs"))
                 .expect("read fastly main.rs");
@@ -2333,6 +2356,18 @@ git = "https://example.invalid/spin-sdk-test"
             "<name>-cli/Cargo.toml must depend on <name>-core (typed config lives there): {cargo}"
         );
 
+        let parsed: toml::Value = toml::from_str(&cargo).expect("parse generated CLI Cargo.toml");
+        assert_eq!(
+            parsed["features"]["bindings-pin"],
+            toml::Value::Array(vec![toml::Value::String(
+                "edgezero-cli/bindings-pin".to_owned()
+            )])
+        );
+        assert_eq!(
+            parsed["features"]["default"],
+            toml::Value::Array(vec![toml::Value::String("bindings-pin".to_owned())])
+        );
+
         let main_path = project_dir.join("crates/demo-app-cli/src/main.rs");
         let main = fs::read_to_string(&main_path).expect("read cli main.rs");
 
@@ -2342,6 +2377,7 @@ git = "https://example.invalid/spin-sdk-test"
         for import in [
             "ActiveVersionArgs",
             "AuthArgs",
+            "BindingsCmd",
             "BuildArgs",
             "ConfigGcArgs",
             "ConfigPushArgs",
@@ -2387,6 +2423,10 @@ git = "https://example.invalid/spin-sdk-test"
                 "<name>-cli Cmd must include `{variant}`: {main}"
             );
         }
+
+        assert!(main.contains("Bindings(BindingsCmd)"));
+        assert!(main.contains("DemoAppConfigCmd::Bindings(BindingsCmd::Pin(args))"));
+        assert!(main.contains("edgezero_cli::run_config_bindings_pin(&args)"));
 
         // `config gc` reclaims leaked chunk entries. It is UNTYPED on purpose:
         // it inspects the store's physical entries, not the app-config struct,

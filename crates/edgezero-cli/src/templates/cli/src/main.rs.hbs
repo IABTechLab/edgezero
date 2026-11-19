@@ -13,7 +13,7 @@
 use clap::{Parser, Subcommand};
 use edgezero_cli::DiffExit;
 use edgezero_cli::args::{
-    ActiveVersionArgs, AuthArgs, BuildArgs, ConfigDiffArgs, ConfigGcArgs, ConfigPushArgs,
+    ActiveVersionArgs, AuthArgs, BindingsCmd, BuildArgs, ConfigDiffArgs, ConfigGcArgs, ConfigPushArgs,
     ConfigValidateArgs, DeployArgs, HealthcheckArgs, NewArgs, ProvisionArgs, RollbackArgs,
     ServeArgs,
 };
@@ -69,6 +69,9 @@ enum Cmd {
 /// path skips.
 #[derive(Subcommand, Debug)]
 enum {{NameUpperCamel}}ConfigCmd {
+    /// Preflight and pin portable store identities. No typed app-config is read.
+    #[command(subcommand)]
+    Bindings(BindingsCmd),
     /// Diff `{{name}}.toml` against the live (or local-emulator) config
     /// store and report changes. Exits 0 (no changes), 1 (changes with
     /// `--exit-code`), or 2 (unsupported / error).
@@ -112,6 +115,9 @@ fn main() {
         // `gc` inspects the STORE, not the typed config, so it is not
         // parameterised over `{{NameUpperCamel}}Config`.
         Cmd::Config({{NameUpperCamel}}ConfigCmd::Gc(args)) => edgezero_cli::run_config_gc(&args),
+        Cmd::Config({{NameUpperCamel}}ConfigCmd::Bindings(BindingsCmd::Pin(args))) => {
+            edgezero_cli::run_config_bindings_pin(&args)
+        }
         Cmd::Config({{NameUpperCamel}}ConfigCmd::Push(args)) => {
             edgezero_cli::run_config_push_typed::<{{NameUpperCamel}}Config>(&args)
         }
