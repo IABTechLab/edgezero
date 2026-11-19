@@ -69,7 +69,11 @@ assert_sigv4 absent -p edgezero-adapter-cloudflare --target wasm32-unknown-unkno
 assert_sigv4 absent -p edgezero-adapter-fastly --target wasm32-wasip1 --features fastly
 assert_sigv4 absent -p edgezero-adapter-spin --target wasm32-wasip2 --features spin
 # Native DynamoDB's AWS SDK also requires aws-sigv4; do not ban it there.
-# TODO: Check isolated and combined Fastly portable features once they exist.
+for features in fastly,aws-dynamodb-records fastly,celld-records fastly,aws-dynamodb-records,celld-records; do
+  assert_no_native_runtime wasm -p edgezero-adapter-fastly --target wasm32-wasip1 --features "$features"
+done
+assert_sigv4 present -p edgezero-adapter-fastly --target wasm32-wasip1 --features fastly,aws-dynamodb-records
+assert_sigv4 absent -p edgezero-adapter-fastly --target wasm32-wasip1 --features fastly,celld-records
 
 assert_no_sdk -p edgezero-cli --no-default-features --features cli,edgezero-adapter-axum
 assert_no_sdk -p edgezero-store-aws --no-default-features
