@@ -367,18 +367,34 @@ impl App {
                 } else {
                     None
                 };
-                let required_headers = self
-                    .admitted_error_response_finalizer
-                    .as_ref()
-                    .and_then(|_| error.required_response_headers().ok());
                 let mut response = self.render_error_response_with_message(error, fixed);
                 if let Some(finalizer) = &self.admitted_error_response_finalizer {
+                    // Keep framework metadata outside the callback, which can replace the response.
                     let status = response.status();
+                    let required_headers = response
+                        .extensions_mut()
+                        .remove::<RequiredErrorResponseHeaders>();
+                    let overflow_marker = response
+                        .extensions_mut()
+                        .remove::<RequestBodyOverflowResponse>();
                     finalizer(&error_geo, &mut response);
                     *response.status_mut() = status;
                     if let Some(headers) = required_headers {
-                        response.headers_mut().extend(headers);
+                        headers.clone().apply(response.headers_mut());
+                        response.extensions_mut().insert(headers);
+                    } else {
+                        response
+                            .extensions_mut()
+                            .remove::<RequiredErrorResponseHeaders>();
                     }
+                    if let Some(overflow) = overflow_marker {
+                        response.extensions_mut().insert(overflow);
+                    } else {
+                        response
+                            .extensions_mut()
+                            .remove::<RequestBodyOverflowResponse>();
+                    }
+                    suppress_overflow_retry_after(&mut response);
                 }
                 response
             }
@@ -2845,7 +2861,10 @@ mod tests {
             app.set_error_response_renderer(move |error| {
                 rendered.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(error.message(), "private-sentinel");
-                Response::new(Body::from("application-owned"))
+                response_builder()
+                    .header("connection", "retry-after")
+                    .body(Body::from("application-owned"))
+                    .unwrap()
             });
             let finalizer_calls = Arc::new(AtomicUsize::new(0));
             let finalized = Arc::clone(&finalizer_calls);
@@ -2860,6 +2879,7 @@ mod tests {
                     .headers_mut()
                     .insert("x-geo-finalized", HeaderValue::from_static("yes"));
                 response.headers_mut().remove("retry-after");
+                response.extensions_mut().clear();
                 *response.status_mut() = StatusCode::OK;
             });
             let request = request_builder().uri("/fails").body(Body::empty()).unwrap();
@@ -2956,6 +2976,35 @@ mod tests {
             assert_eq!(payload["error"]["message"], message);
         }
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn admitted_error_finalizer_preserves_body_overflow_retry_policy() {
+        let mut app = App::new(
+            RouterService::builder()
+                .get("/overflow", |_ctx: RequestContext| async {
+                    Err::<&str, _>(EdgeError::payload_too_large(
+                        crate::RequestBodyOverflowOrigin::Inbound,
+                    ))
+                })
+                .build(),
+        );
+        app.set_admitted_error_response_finalizer(|_, response| {
+            *response = response_builder()
+                .header("retry-after", "120")
+                .header("x-finalized", "yes")
+                .body(Body::empty())
+                .unwrap();
+        });
+        let response = complete_envelope(managed_dispatch(
+            &app,
+            Method::GET,
+            "/overflow",
+            FrameworkErrorDetail::CategoryOnly,
+        ));
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.headers()["x-finalized"], "yes");
+        assert!(!response.headers().contains_key("retry-after"));
     }
 
     #[test]
