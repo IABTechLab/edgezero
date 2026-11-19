@@ -57,10 +57,13 @@ mod spin;
 use async_trait::async_trait;
 use edgezero_core::app::Hooks;
 use edgezero_core::body::Body;
+use edgezero_core::client_info::{Capture, UnavailableReason};
 use edgezero_core::context::RequestContext;
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::{Response, response_builder};
 use edgezero_core::ingress::{CapturedTarget, Preservation, RequestIngress};
+use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
+use edgezero_core::manifest::{BakedManifest, Manifest};
 use edgezero_core::middleware::{Middleware, Next};
 use edgezero_core::router::{PreDispatchHook, RouterService};
 use edgezero_core::{PreDispatchRequest, action};
@@ -77,6 +80,13 @@ pub struct Fixture;
 pub struct NativeClient(pub Option<std::net::IpAddr>);
 
 impl Hooks for Fixture {
+    /// Spin declares direct ingress so its `spoof` case proves the last-field rule.
+    fn manifest() -> BakedManifest {
+        Manifest::from_baked_json(
+            r#"{"adapters":{"spin":{"client_info":{"direct_ingress":true}}}}"#,
+        )
+    }
+
     fn owns_logging() -> bool {
         true
     }
@@ -163,6 +173,15 @@ impl PreDispatchHook for Probe {
         let same_name_order = cookies == [b"a=1".as_slice(), b"b=2".as_slice()];
         let cookie_name = "cookie".parse().map_err(EdgeError::internal)?;
         let fidelity = ingress.header_fidelity(&cookie_name);
+        // A fixed state label only; the fingerprint itself is never echoed.
+        let ja4_state = match ingress.ja4() {
+            None => "none",
+            Some(CapturedJa4::Captured { .. }) => "captured",
+            Some(CapturedJa4::Unavailable(Ja4Unavailable::Missing)) => "missing",
+            Some(CapturedJa4::Unavailable(Ja4Unavailable::Malformed)) => "malformed",
+            Some(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed)) => "not_exposed",
+            Some(CapturedJa4::Unavailable(_)) => "other",
+        };
         #[cfg(feature = "fastly")]
         let native_client_preserved =
             request
@@ -206,6 +225,8 @@ impl PreDispatchHook for Probe {
             "origin_matches_expected": ingress.origin().is_some_and(|origin| origin.scheme() == "http" && origin.authority() == "example.com"),
             "spoofed_origin_ignored": ingress.origin().is_none_or(|origin| !origin.authority().contains("spoof")),
             "global_order_unavailable": fidelity.global_field_order() == Preservation::Unavailable,
+            "ja4_state": ja4_state,
+            "client_state": client_state(request),
         });
         Ok(Some(
             response_builder()
@@ -213,5 +234,22 @@ impl PreDispatchHook for Probe {
                 .body(Body::text(verdict.to_string()))
                 .map_err(EdgeError::internal)?,
         ))
+    }
+}
+
+/// A fixed client-address label. The address itself is never echoed: loopback is the
+/// local runtime's own peer, `192.0.2.1` is the `spoof` case's forged value.
+fn client_state(request: &PreDispatchRequest) -> &'static str {
+    let Some(info) = request.client_info() else {
+        return "none";
+    };
+    match info.effective_client() {
+        Capture::Captured(address) if address.ip().is_loopback() => "runtime",
+        Capture::Captured(address) if address.ip().to_string() == "192.0.2.1" => "spoofed",
+        Capture::Captured(_) => "captured",
+        Capture::Unavailable(UnavailableReason::NotExposed) => "not_exposed",
+        Capture::Unavailable(UnavailableReason::Missing) => "missing",
+        Capture::Unavailable(UnavailableReason::Rejected) => "rejected",
+        Capture::Unavailable(_) | _ => "other",
     }
 }

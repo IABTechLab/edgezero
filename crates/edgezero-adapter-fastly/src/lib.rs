@@ -44,6 +44,8 @@ use edgezero_core::app::{App, Hooks};
 use edgezero_core::error::EdgeError;
 #[cfg(feature = "fastly")]
 use edgezero_core::http::{Extensions, Response};
+#[cfg(any(feature = "fastly", test))]
+use edgezero_core::key_value_store::KvError;
 use edgezero_core::logging::ManagedLoggerError;
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::manifest::ResolvedLoggingConfig;
@@ -107,7 +109,18 @@ fn build_target_app<A>() -> Result<App, EdgeError>
 where
     A: Hooks,
 {
-    App::build::<A>(FASTLY_PLATFORM)
+    let app = App::build::<A>(FASTLY_PLATFORM)?;
+    let metadata = A::stores().kv;
+    if app
+        .record_store_requirements()
+        .keys()
+        .any(|id| !metadata.is_some_and(|meta| meta.ids.contains(&id.as_str())))
+    {
+        return Err(
+            KvError::Validation("record declaration uses an undeclared ID".to_owned()).into(),
+        );
+    }
+    Ok(app)
 }
 
 #[cfg(feature = "fastly")]
@@ -324,6 +337,71 @@ mod fastly_logging_tests {
         assert_eq!(logging.endpoint, None);
         assert!(!logging.use_fastly_logger);
         assert!(logging.echo_stdout);
+    }
+}
+
+#[cfg(test)]
+mod record_requirement_tests {
+    use edgezero_core::app::{App, Hooks, StoreMetadata, StoresMetadata};
+    use edgezero_core::key_value_store::KvError;
+    use edgezero_core::router::RouterService;
+    use edgezero_core::{EdgeError, RecordKeyLayout};
+
+    struct Layout;
+    impl RecordKeyLayout for Layout {
+        fn id(&self) -> &'static str {
+            "platform.record-test"
+        }
+
+        fn partition_prefix<'key>(&self, _key: &'key str) -> Result<&'key str, KvError> {
+            Ok("group/")
+        }
+
+        fn validate(&self) -> Result<(), KvError> {
+            Ok(())
+        }
+
+        fn validate_partition(&self, prefix: &str) -> Result<(), KvError> {
+            if prefix == "group/" {
+                Ok(())
+            } else {
+                Err(KvError::Validation("incomplete partition".to_owned()))
+            }
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+    }
+
+    struct Required<const DECLARED: bool>;
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "record startup fixture retains unrelated Hooks defaults"
+    )]
+    impl<const DECLARED: bool> Hooks for Required<DECLARED> {
+        fn configure(app: &mut App) -> Result<(), EdgeError> {
+            app.require_record_store("identity", Layout)?;
+            Ok(())
+        }
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder().build())
+        }
+        fn stores() -> StoresMetadata {
+            StoresMetadata {
+                kv: DECLARED.then_some(StoreMetadata {
+                    ids: &["identity"],
+                    default: "identity",
+                }),
+                ..StoresMetadata::default()
+            }
+        }
+    }
+
+    #[test]
+    fn record_layouts_must_name_declared_ids_without_opening_a_provider() {
+        super::build_target_app::<Required<true>>().unwrap();
+        assert!(super::build_target_app::<Required<false>>().is_err());
     }
 }
 

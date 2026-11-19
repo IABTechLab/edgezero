@@ -91,27 +91,29 @@ entrypoint; use the canonical send-owning helper below. Logging endpoint and std
 behavior come from `Hooks::logging_for("fastly")`. Its level is the default;
 the logging-only override described below can change it without rebuilding.
 
-### Capturing raw-request signals (JA4, H2 fingerprint)
+### Capturing raw-request signals (H2 fingerprint and others)
 
 `run_app` receives and converts the `fastly::Request` into a neutral core request before
 dispatch. The client IP is carried across automatically; read it via
-`FastlyRequestContext` (see [Context Access](#context-access) below). Other
-Fastly-only signals that are readable only on the raw request
-(`get_tls_ja4()`, `get_client_h2_fingerprint()`) aren't reachable from handlers
-by default. Use `run_app_with_hooks`, which runs a request closure against a
-scratch `Extensions` **before** conversion and merges the values into the core
-request. Its response closure runs only for routed responses before egress
-policy and framing; EdgeZero retains delivery ownership:
+`FastlyRequestContext` (see [Context Access](#context-access) below). The JA4
+TLS fingerprint is also captured automatically: read it with `ctx.ja4()` (see
+[Client TLS fingerprint](./overview#client-tls-fingerprint-ja4)). Other
+Fastly-only signals that are readable only on the raw request (such as
+`get_client_h2_fingerprint()`) aren't reachable from handlers by default. Use
+`run_app_with_hooks`, which runs a request closure against a scratch
+`Extensions` **before** conversion and merges the values into the core request.
+Its response closure runs only for routed responses before egress policy and
+framing; EdgeZero retains delivery ownership:
 
 ```rust
 #[derive(Clone)]
-struct Ja4(String);
+struct H2Fingerprint(String);
 
 pub fn main() -> Result<(), fastly::Error> {
     edgezero_adapter_fastly::run_app_with_hooks::<App, _, _, ()>(
         |raw, ext| {
-            if let Some(ja4) = raw.get_tls_ja4() {
-                ext.insert(Ja4(ja4.to_owned()));
+            if let Some(fingerprint) = raw.get_client_h2_fingerprint() {
+                ext.insert(H2Fingerprint(fingerprint.to_owned()));
             }
         },
         |_response| (),
@@ -122,7 +124,7 @@ pub fn main() -> Result<(), fastly::Error> {
 
 The request closure runs once before admission for each request that reaches
 preparation; insert whatever typed values your handlers need, then read them via a custom extractor or
-`ctx.extensions().get::<Ja4>()`. The optional state returned by
+`ctx.extensions().get::<H2Fingerprint>()`. The optional state returned by
 `run_app_with_hooks` is available only after EdgeZero reaches its strongest
 terminal delivery boundary. Detached admission responses skip the response
 closure and return `None`.
@@ -467,6 +469,21 @@ async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
     Ok(Response::new(Body::from(body)))
 }
 ```
+
+The same address is available without a Fastly import through
+[`ctx.client_info()`](../handlers.md#client-metadata). Fastly captures it from the original
+downstream request before any raw-request hook runs:
+
+| Field            | Source                                           | Unavailable                                             |
+| ---------------- | ------------------------------------------------ | ------------------------------------------------------- |
+| Direct peer      | Not exposed; the SDK reports no peer port        | Always `NotExposed`                                     |
+| Effective client | `get_client_ip_addr()`, source `Fastly`          | `Missing` on non-client requests                        |
+| TLS version      | `get_tls_protocol()`, for example `TLSv1.3`      | `Missing` over plain HTTP; `Rejected` for invalid UTF-8 |
+| TLS cipher       | `get_tls_cipher_openssl_name()`, an OpenSSL name | `Missing` over plain HTTP; `Rejected` for invalid UTF-8 |
+
+Viceroy serves plain HTTP, so local TLS fields are always `Missing`. The address is the client
+that connected to Fastly. If another Fastly service or a proxy forwards to this one, it is that
+hop's address. No header replaces it.
 
 ## Streaming
 

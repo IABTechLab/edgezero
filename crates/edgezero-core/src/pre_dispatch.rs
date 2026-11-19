@@ -1,5 +1,6 @@
 use bytes::Bytes;
 
+use crate::client_info::ClientInfo;
 use crate::context::{BodyKind, FallbackDrainOutcome, RequestContext};
 use crate::error::EdgeError;
 use crate::http::{Extensions, HeaderMap, Method, Request, RequestParts, Uri, Version};
@@ -26,6 +27,16 @@ impl PreDispatchRequest {
     #[inline]
     pub fn body_kind(&self) -> BodyKind {
         self.context.body_kind()
+    }
+
+    /// Returns the client network facts the managed adapter captured at ingress.
+    ///
+    /// This is the same snapshot middleware and handlers read. Header and extension
+    /// edits made by this hook do not change it.
+    #[must_use]
+    #[inline]
+    pub fn client_info(&self) -> Option<&ClientInfo> {
+        self.context.client_info()
     }
 
     pub(crate) async fn discard(self) -> Result<FallbackDrainOutcome, EdgeError> {
