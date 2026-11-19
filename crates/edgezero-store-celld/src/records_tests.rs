@@ -16,6 +16,7 @@ use super::CelldRecordKvStore;
 use crate::client::ScopedClient;
 use crate::settings::{CelldAccess, CelldKvSettings, CelldPreparationLimits};
 use crate::test_support::{Fixture, Reply};
+use crate::wire::Exchanger as _;
 use crate::{CelldPreparation, PreparationError};
 
 const INSTANCE: &str = "AAAAAAAAAAAAAAAAAAAAAA";
@@ -75,7 +76,7 @@ fn capabilities() -> Reply {
 async fn store_with_limits(
     fixture: &Fixture,
     limits: CelldPreparationLimits,
-) -> CelldRecordKvStore {
+) -> CelldRecordKvStore<ScopedClient> {
     let endpoint = Url::parse(fixture.endpoint()).unwrap();
     let clock = MonotonicClock::default();
     let client = Arc::new(ScopedClient::new(endpoint.clone(), None, clock, limits).unwrap());
@@ -91,7 +92,7 @@ async fn store_with_limits(
     .await
     .unwrap()
 }
-async fn store(fixture: &Fixture) -> CelldRecordKvStore {
+async fn store(fixture: &Fixture) -> CelldRecordKvStore<ScopedClient> {
     store_with_limits(fixture, CelldPreparationLimits::default()).await
 }
 fn write(mode: RecordWriteMode) -> RecordWrite<'static> {

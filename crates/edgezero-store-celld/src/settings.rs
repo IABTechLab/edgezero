@@ -74,6 +74,179 @@ impl fmt::Debug for CelldKvSettings {
     }
 }
 
+/// A logical secrets store ID. The token key derives from the KV ID and is never configured.
+#[derive(Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SecretsReference {
+    pub secrets: String,
+}
+
+impl fmt::Debug for SecretsReference {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretsReference").finish_non_exhaustive()
+    }
+}
+
+/// Record-binding access policy. `trusted-network` and `token_env` are native-only;
+/// portable bindings require `authenticated` with a `token_secret`.
+#[derive(Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum CelldRecordAccess {
+    TrustedNetwork {
+        #[serde(default)]
+        allow_remote_http: bool,
+    },
+    Authenticated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_env: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_secret: Option<SecretsReference>,
+    },
+}
+
+impl fmt::Debug for CelldRecordAccess {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CelldRecordAccess").finish_non_exhaustive()
+    }
+}
+
+/// The store instance an offline preflight pinned into the binding.
+#[derive(Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CelldPinnedIdentity {
+    pub instance: String,
+}
+
+impl fmt::Debug for CelldPinnedIdentity {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CelldPinnedIdentity")
+            .finish_non_exhaustive()
+    }
+}
+
+/// A `celld-records` binding. Debug never exposes the endpoint or store.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CelldRecordsSettings {
+    pub endpoint: String,
+    pub access: CelldRecordAccess,
+    pub store: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<CelldPinnedIdentity>,
+}
+
+impl fmt::Debug for CelldRecordsSettings {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CelldRecordsSettings")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CelldRecordsSettings {
+    /// Structural checks valid for any target. No I/O.
+    ///
+    /// # Errors
+    /// Rejects invalid endpoints, aliases, pins, and an authenticated policy
+    /// without exactly one token source.
+    #[inline]
+    pub fn validate(&self) -> Result<(), PreparationError> {
+        match &self.access {
+            CelldRecordAccess::TrustedNetwork { allow_remote_http } => {
+                checked_endpoint(&self.endpoint, Some(*allow_remote_http))?;
+            }
+            CelldRecordAccess::Authenticated {
+                token_env,
+                token_secret,
+            } => {
+                match (token_env, token_secret) {
+                    (Some(name), None) if valid_variable(name) => {}
+                    (None, Some(reference)) if valid_logical_id(&reference.secrets) => {}
+                    _ => return Err(PreparationError::InvalidBinding),
+                }
+                checked_endpoint(&self.endpoint, None)?;
+            }
+        }
+        if !valid_alias(&self.store) {
+            return Err(PreparationError::InvalidResource);
+        }
+        if let Some(pinned) = &self.pinned
+            && !valid_instance(&pinned.instance)
+        {
+            return Err(PreparationError::InvalidResource);
+        }
+        Ok(())
+    }
+
+    /// The native settings Axum prepares. Native keeps `trusted-network` and
+    /// `token_env`; it has no secrets-store token source.
+    ///
+    /// # Errors
+    /// Rejects a `token_secret` and any structurally invalid binding.
+    #[inline]
+    pub fn native_settings(&self) -> Result<CelldKvSettings, PreparationError> {
+        self.validate()?;
+        let access = match &self.access {
+            CelldRecordAccess::TrustedNetwork { allow_remote_http } => {
+                CelldAccess::TrustedNetwork {
+                    allow_remote_http: *allow_remote_http,
+                }
+            }
+            CelldRecordAccess::Authenticated {
+                token_env: Some(name),
+                token_secret: None,
+            } => CelldAccess::Authenticated {
+                token_env: name.clone(),
+            },
+            CelldRecordAccess::Authenticated { .. } => {
+                return Err(PreparationError::InvalidBinding);
+            }
+        };
+        Ok(CelldKvSettings {
+            endpoint: self.endpoint.clone(),
+            access,
+            store: self.store.clone(),
+        })
+    }
+
+    /// The HTTPS endpoint a portable transport uses. Portable access is
+    /// `authenticated` with a `token_secret` only.
+    ///
+    /// # Errors
+    /// Rejects `trusted-network`, `token_env` and any structurally invalid binding.
+    #[inline]
+    pub fn portable_endpoint(&self) -> Result<Url, PreparationError> {
+        self.validate()?;
+        match &self.access {
+            CelldRecordAccess::Authenticated {
+                token_env: None,
+                token_secret: Some(_),
+            } => checked_endpoint(&self.endpoint, None),
+            CelldRecordAccess::Authenticated { .. } | CelldRecordAccess::TrustedNetwork { .. } => {
+                Err(PreparationError::InvalidBinding)
+            }
+        }
+    }
+
+    /// The logical secrets ID a portable binding reads its token from.
+    #[inline]
+    #[must_use]
+    pub fn token_secret(&self) -> Option<&str> {
+        match &self.access {
+            CelldRecordAccess::Authenticated {
+                token_secret: Some(reference),
+                ..
+            } => Some(&reference.secrets),
+            CelldRecordAccess::Authenticated { .. } | CelldRecordAccess::TrustedNetwork { .. } => {
+                None
+            }
+        }
+    }
+}
+
 /// Captured application bearer token. Debug reveals neither value nor length.
 #[derive(Clone)]
 pub struct CelldAccessToken(String);
@@ -136,6 +309,18 @@ impl Default for CelldPreparationLimits {
 }
 
 impl CelldPreparationLimits {
+    /// Enforced defaults for portable bindings: one 1,000 ms operation deadline and a
+    /// 250 ms connect timeout. Portable bindings perform no preparation.
+    pub const PORTABLE: Self = Self {
+        max_remote_values: 1_024,
+        max_metadata_bytes: 0x0010_0000,
+        max_value_bytes: 0x0010_0000,
+        max_page_bytes: 0x0020_0000,
+        preparation_timeout_ms: 1_000,
+        operation_timeout_ms: 1_000,
+        connect_timeout_ms: 250,
+    };
+
     /// Checks positive, representable quotas and ordered finite deadlines.
     ///
     /// # Errors
@@ -163,7 +348,7 @@ impl CelldPreparationLimits {
     }
 }
 
-pub(crate) fn endpoint(value: &str, access: &CelldAccess) -> Result<Url, PreparationError> {
+fn parsed_endpoint(value: &str) -> Result<(Url, bool), PreparationError> {
     if value.len() > 4_096
         || value
             .bytes()
@@ -221,22 +406,64 @@ pub(crate) fn endpoint(value: &str, access: &CelldAccess) -> Result<Url, Prepara
         }
         None => return Err(PreparationError::InvalidEndpoint),
     };
+    Ok((parsed, loopback))
+}
+
+/// `trusted` is `None` for authenticated access, which always requires HTTPS, or the
+/// trusted-network `allow_remote_http` choice.
+fn scheme_allowed(
+    url: &Url,
+    loopback: bool,
+    trusted: Option<bool>,
+) -> Result<(), PreparationError> {
+    let allowed = match trusted {
+        None => url.scheme() == "https",
+        Some(allow_remote_http) => url.scheme() != "http" || loopback || allow_remote_http,
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(PreparationError::InvalidEndpoint)
+    }
+}
+
+pub(crate) fn endpoint(value: &str, access: &CelldAccess) -> Result<Url, PreparationError> {
+    let (parsed, loopback) = parsed_endpoint(value)?;
     match access {
         CelldAccess::Authenticated { token_env } => {
             if !valid_variable(token_env) {
                 return Err(PreparationError::InvalidBinding);
             }
-            if parsed.scheme() != "https" {
-                return Err(PreparationError::InvalidEndpoint);
-            }
+            scheme_allowed(&parsed, loopback, None)?;
         }
         CelldAccess::TrustedNetwork { allow_remote_http } => {
-            if parsed.scheme() == "http" && !loopback && !allow_remote_http {
-                return Err(PreparationError::InvalidEndpoint);
-            }
+            scheme_allowed(&parsed, loopback, Some(*allow_remote_http))?;
         }
     }
     Ok(parsed)
+}
+
+fn checked_endpoint(value: &str, trusted: Option<bool>) -> Result<Url, PreparationError> {
+    let (parsed, loopback) = parsed_endpoint(value)?;
+    scheme_allowed(&parsed, loopback, trusted)?;
+    Ok(parsed)
+}
+
+/// A logical store ID: nonempty `[A-Za-z0-9_]`, at most 512 bytes.
+fn valid_logical_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// A store instance as the service reports it: 22 URL-safe base64 bytes.
+fn valid_instance(value: &str) -> bool {
+    value.len() == 22
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 pub(crate) fn valid_alias(value: &str) -> bool {
@@ -247,7 +474,10 @@ pub(crate) fn valid_alias(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
+#[cfg(any(
+    all(not(target_arch = "wasm32"), feature = "kv"),
+    feature = "portable-records"
+))]
 pub(crate) fn valid_key(value: &str, empty: bool) -> bool {
     (empty || !value.is_empty()) && value.len() <= 512 && !value.chars().any(char::is_control)
 }

@@ -13,34 +13,48 @@ workspace = true
 [features]
 default = []
 kv = [
-    "dep:edgezero-core",
+    "wire",
     "dep:bytes",
     "dep:async-trait",
     "dep:reqwest",
     "dep:tokio",
     "dep:futures-util",
+    "dep:sha2",
+]
+records = ["kv", "record-wire"]
+# Shared request and response policy. Not a public selection.
+wire = [
+    "dep:edgezero-core",
     "dep:serde_json",
     "dep:base64",
-    "dep:sha2",
     "dep:getrandom",
+    "dep:bytes",
+    "dep:async-trait",
 ]
-records = ["kv"]
+# Shared record format and record wire variants. Not a public selection.
+record-wire = ["wire", "dep:sha2", "dep:bytes", "dep:async-trait"]
+# Portable record transport over EdgeZero outbound HTTP.
+portable-records = ["record-wire", "dep:futures-util", "futures-util/std"]
 
 [dependencies]
-serde = { workspace = true }
-thiserror = { workspace = true }
-url = { workspace = true }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 async-trait = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 edgezero-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
-reqwest = { workspace = true, optional = true, features = ["stream"] }
+serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+# The JavaScript host supplies randomness on wasm32-unknown-unknown (Cloudflare).
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, optional = true, features = ["wasm_js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true, optional = true, features = ["stream"] }
 tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
