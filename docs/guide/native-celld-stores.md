@@ -1,6 +1,6 @@
-# Native celld stores
+# celld stores
 
-The native `celld-kv` provider gives an Axum application live KV backed by [celld](https://celld.dev). It talks over HTTP to the EdgeZero store service, a small Worker and Durable Object application in [`services/celld-store`](https://github.com/IABTechLab/edgezero/tree/main/services/celld-store) that the official celld release runs unmodified.
+The native `celld-kv` provider gives an Axum application live KV backed by [celld](https://celld.dev). It talks over HTTP to the EdgeZero store service, a small Worker and Durable Object application in [`services/celld-store`](https://github.com/IABTechLab/edgezero/tree/main/services/celld-store) that the official celld release runs unmodified. Fastly can use the same service through the [portable celld record provider](#portable-celld-records-on-fastly).
 
 This page targets celld v0.6.3. Local tests do not establish fleet capacity, production bucket durability or deployment security.
 
@@ -42,14 +42,87 @@ a fresh generation. No-TTL replacements remove prior expiry.
 
 The namespace allocator survives value deletion and sweeping. Conditional
 writes and physical existence use the retained row, while lookup/list filter
-expired values until physical cleanup. Native celld retries are answered from
-the mutation ledger, including the original precondition rejection; the Rust
+expired values until physical cleanup. celld's internal redeliveries are answered
+from the mutation ledger, including the original precondition rejection; the Rust
 client never retries automatically. Same-instance snapshot rollback is still
 not detected.
 
 See [conditional KV records](./kv-records) for the shared API, limits and
 pagination contract. The generated feature is `celld-records`; the provider
 crate feature is `records`. No celld config provider is added.
+
+## Portable celld records on Fastly
+
+Enable the generated Fastly adapter's default-off `celld-records` feature:
+
+```toml
+[adapters.fastly.build]
+features = ["celld-records"]
+```
+
+The standalone store crate feature is `portable-records`; native Axum continues
+using `records`. Both transports share record API version 1, `rows-v1` encoding,
+metadata limits, mutation IDs and cursor validation. No celld server, V8, reqwest
+or native executor is linked into the portable provider.
+
+Use this unpinned input alongside the logical `[stores.kv]` ID `sessions` and
+`[stores.secrets]` ID `stores` in the application manifest:
+
+```toml
+version = 1
+
+[kv.sessions]
+provider = "celld-records"
+endpoint = "https://celld.example.net"
+store = "sessions"
+access = { mode = "authenticated", token_secret = { secrets = "stores" } }
+```
+
+Portable celld accepts only authenticated HTTPS with `token_secret`.
+`trusted-network` and `token_env` are native-only. Axum rejects `token_secret` and
+keeps its startup environment token source. For authenticated access, put a TLS
+terminator with a valid certificate in front of stock celld. Authentication does
+not disable certificate verification.
+
+For preflight, supply `KV__SESSIONS__CELLD_TOKEN` through the operator process's
+environment, then run:
+
+```sh
+edgezero config bindings pin --adapter fastly --store-bindings portable-stores.toml
+edgezero config validate --adapter fastly \
+  --store-bindings portable-stores.toml --manifest edgezero.toml
+```
+
+The environment variable name is exactly the derived runtime secret key for this
+KV ID. Pinning calls the read-only capabilities endpoint and inserts
+`pinned = { instance = "<observed-store-instance>" }` without changing the
+`token_secret` reference. It never probes with a write or stores the token value.
+Validation is offline and reads no token.
+
+At runtime, the logical Fastly Secret Store supplies `KV__SESSIONS__CELLD_TOKEN`
+on the provider's first operation per request. It is reused within that request
+only. The next request reads the current value, so updates and revocation do not
+wait for a cached token in a retained application. Service policy changes still
+follow celld's deployment adoption described below.
+
+Every record request sends `x-edgezero-expected-instance` with the pinned instance.
+A store reset or replacement fails requests until the bindings are re-pinned and
+redeployed. Restoring a snapshot with the same instance is not detected.
+The Fastly runtime does no capabilities discovery or other preparation I/O.
+
+Portable celld uses a 1,000 ms operation deadline and a 250 ms connect timeout,
+compared with native defaults of 5,000 ms and 1,000 ms. A write is one service call;
+the portable client never retries it. A definitive Add/CAS rejection is
+`PreconditionFailed`. A failure before dispatch or definitive service rejection is
+`Unavailable`; a dispatched value mutation whose result is unknown is
+`MutationUncertain`. Reconcile before issuing a new write.
+
+Follow [portable providers on Fastly](./kv-records#portable-providers-on-fastly)
+for the Config Store entry, build-feature forwarding, manual upload, no-fallback
+rules and pending hosted latency evidence. The provider also compiles for
+Cloudflare and Spin targets; their runtime wiring remains
+[#479](https://github.com/IABTechLab/edgezero/issues/479) and
+[#484](https://github.com/IABTechLab/edgezero/issues/484).
 
 ## Bind a logical store
 
