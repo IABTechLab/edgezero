@@ -161,7 +161,8 @@ impl Adapter for SpinCliAdapter {
             | Capability::ResponseEgressCompletion
             | Capability::ResponseWriteDeadlines
             | Capability::StreamedUploadDeadlines => CapabilitySupport::BestEffort,
-            Capability::ConfigReadAllocationBounds
+            Capability::AfterResponseTasks
+            | Capability::ConfigReadAllocationBounds
             | Capability::OutboundAuthorityOverride
             | Capability::OutboundCompleteResourceAccounting
             | Capability::RawIngressFramingValidation
@@ -1410,6 +1411,10 @@ mod tests {
     )]
     fn adapter_capability_matrix_matches_contracts() {
         for (capability, support) in [
+            (
+                Capability::AfterResponseTasks,
+                CapabilitySupport::Unsupported,
+            ),
             (
                 Capability::ConfigReadAllocationBounds,
                 CapabilitySupport::Unsupported,

@@ -1,6 +1,8 @@
 //! Axum adapter for `EdgeZero` routers and applications.
 
 #[cfg(feature = "axum")]
+mod after_response;
+#[cfg(feature = "axum")]
 mod config_snapshot;
 #[cfg(feature = "axum")]
 pub mod config_store;

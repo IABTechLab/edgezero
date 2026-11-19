@@ -9,6 +9,8 @@
     )
 )]
 
+#[cfg(any(feature = "fastly", test))]
+mod after_response;
 // Compile storage helpers only for their runtime, CLI or colocated tests.
 #[cfg(any(
     feature = "fastly",
