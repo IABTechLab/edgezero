@@ -60,7 +60,7 @@ pub struct OutboundBatchItem {
     target_pointer_width = "64",
     expect(
         clippy::large_enum_variant,
-        reason = "terminal positional results stay inline; scalar Body framing metadata does not warrant a per-slot allocation"
+        reason = "terminal positional results stay inline; ingress body policy and scalar Body framing metadata do not warrant a per-slot allocation"
     )
 )]
 #[derive(Debug)]

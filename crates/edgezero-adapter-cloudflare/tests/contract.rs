@@ -53,29 +53,70 @@ mod tests {
     use edgezero_adapter_cloudflare::request::{CloudflareService, into_core_request};
     use edgezero_core::app::{App, Hooks};
     use edgezero_core::body::Body;
+    use edgezero_core::client_info::{
+        Capture, ClientIpSource, UnavailableReason, ViewerTlsSource, ViewerTlsValue,
+    };
     use edgezero_core::config_store::{
         BoundedStoreRead, ConfigStore, ConfigStoreError, ConfigStoreHandle,
         finish_bounded_config_read,
     };
     use edgezero_core::context::RequestContext;
     use edgezero_core::error::EdgeError;
+    use edgezero_core::geo::{
+        GeoError, GeoOutcome, GeoProviderId, GeoSource, GeoStatus, GeoTrustBasis,
+        GeoUnavailableReason, SubdivisionCode,
+    };
     use edgezero_core::http::{Method, Response, StatusCode, response_builder};
+    use edgezero_core::manifest::{BakedManifest, Manifest};
     use edgezero_core::outbound::{
         HttpClient, OutboundCollectedSlot, OutboundRequest, OutboundSlotResult, OutboundTime,
     };
     use edgezero_core::router::RouterService;
     use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
     use futures::channel::mpsc::unbounded;
-    use futures::future::{Either, select};
+    use futures::future::{Either, pending, select};
     use futures::{StreamExt as _, pin_mut, stream};
     use std::io::Error as IoError;
     use wasm_bindgen_test::wasm_bindgen_test;
-    use worker::js_sys::{Function, Object, Reflect};
+    use worker::js_sys::{Array, Function, Object, Promise, Reflect};
     use worker::wasm_bindgen::{JsCast as _, JsValue};
+    use worker::wasm_bindgen_futures::JsFuture;
     use worker::worker_sys::Context as WorkerSysContext;
     use worker::{Context, Env, Method as CfMethod, Request as CfRequest, RequestInit};
 
     struct FixedConfigStore(&'static str);
+
+    type ClientInfoCase = (
+        Option<&'static str>,
+        Option<Vec<(&'static str, JsValue)>>,
+        &'static str,
+    );
+
+    struct ClientInfoApp<const DIRECT: bool>;
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "store-free fixture deliberately uses default application configuration"
+    )]
+    impl<const DIRECT: bool> Hooks for ClientInfoApp<DIRECT> {
+        fn manifest() -> BakedManifest {
+            Manifest::from_baked_json(if DIRECT {
+                r#"{"adapters":{"cloudflare":{"client_info":{"direct_ingress":true}}}}"#
+            } else {
+                r#"{"adapters":{"cloudflare":{}}}"#
+            })
+        }
+
+        fn owns_logging() -> bool {
+            true
+        }
+
+        fn routes() -> Result<RouterService, EdgeError> {
+            Ok(RouterService::builder()
+                .get("/client", client_info_json)
+                .build())
+        }
+    }
 
     #[cfg(feature = "test-utils")]
     struct FailingConfiguration;
@@ -134,6 +175,13 @@ mod tests {
                 max_backend_bytes,
                 max_value_bytes,
             )
+        }
+    }
+
+    fn forged_geo() -> GeoOutcome {
+        GeoOutcome::Selected {
+            provider: GeoProviderId::new("forged-portable").expect("fixture provider ID"),
+            status: GeoStatus::Error(GeoError::ProviderFailure),
         }
     }
 
@@ -208,8 +256,16 @@ mod tests {
         }
     }
 
+    /// Requests built in the test runtime carry no `cf` object, so Cloudflare geo is
+    /// selected but unavailable.
+    fn platform_geo() -> GeoOutcome {
+        GeoOutcome::platform(GeoSource::Cloudflare, None, None)
+    }
+
     fn build_test_app() -> App {
         async fn capture_uri(ctx: RequestContext) -> Result<Response, EdgeError> {
+            assert_eq!(ctx.geo(), &platform_geo());
+            assert_eq!(ctx.extensions().get::<GeoOutcome>(), Some(&forged_geo()));
             let body = Body::text(ctx.uri().to_string());
             let response = response_builder()
                 .status(StatusCode::OK)
@@ -284,7 +340,9 @@ mod tests {
             .get("/config-value", config_value)
             .build();
 
-        App::new(router)
+        let mut app = App::new(router);
+        app.insert_state(forged_geo());
+        app
     }
 
     fn cf_request(method: CfMethod, path: &str, body: Option<&[u8]>) -> CfRequest {
@@ -295,6 +353,12 @@ mod tests {
 
         let headers = worker::Headers::new();
         headers.set("host", "example.com").expect("host header");
+        headers
+            .set("cloudfront-viewer-country", "US")
+            .expect("country header");
+        headers
+            .set("cloudfront-viewer-country-region", "CA")
+            .expect("subdivision header");
         headers.set("x-edgezero-test", "1").expect("custom header");
         init.with_headers(headers);
 
@@ -347,6 +411,321 @@ mod tests {
         assert!(deadline_body_releases_source_for_test());
     }
 
+    fn recording_context() -> (Env, Context, Array, NumericTimeoutGuard) {
+        let (env, _ctx, timers) = test_env_ctx();
+        let object = Function::new_no_args(
+            "return { promises: [], waitUntil(p) { this.promises.push(p); } };",
+        )
+        .call0(&JsValue::UNDEFINED)
+        .expect("recording context");
+        let promises = Reflect::get(&object, &JsValue::from_str("promises"))
+            .expect("promise list")
+            .unchecked_into();
+        (env, Context::new(object.unchecked_into()), promises, timers)
+    }
+
+    #[wasm_bindgen_test]
+    async fn after_response_runs_through_service_and_prebuilt_dispatch() {
+        static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+        #[edgezero_core::action]
+        async fn register(ctx: RequestContext) -> Result<Response, EdgeError> {
+            ctx.after_response(Duration::from_secs(1), async {
+                COMPLETED.fetch_add(1, Ordering::SeqCst);
+            })?;
+            Ok(Response::new(Body::text("delivered")))
+        }
+        struct TestApp;
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "test uses default application metadata"
+        )]
+        impl Hooks for TestApp {
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().get("/task", register).build())
+            }
+        }
+        let app = App::build::<TestApp>(edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM)
+            .expect("application");
+        COMPLETED.store(0, Ordering::SeqCst);
+        for prebuilt in [false, true] {
+            let (env, ctx, promises, _timers) = recording_context();
+            let req = cf_request(CfMethod::Get, "/task", None);
+            let mut response = if prebuilt {
+                edgezero_adapter_cloudflare::dispatch_app::<TestApp>(&app, req, env, ctx).await
+            } else {
+                CloudflareService::new(&app).dispatch(req, env, ctx).await
+            }
+            .expect("response");
+            assert_eq!(
+                response.status_code(),
+                200,
+                "registration must be supported"
+            );
+            assert_eq!(response.text().await.expect("body"), "delivered");
+            JsFuture::from(Promise::all(&promises))
+                .await
+                .expect("all waitUntil work completed");
+        }
+        assert_eq!(COMPLETED.load(Ordering::SeqCst), 2);
+    }
+
+    #[wasm_bindgen_test]
+    async fn after_response_waits_for_stream_and_budget_starts_at_release() {
+        use edgezero_core::after_response::AfterResponseHandle;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct State {
+            cancelled: AtomicUsize,
+            completed: AtomicUsize,
+            produced: AtomicUsize,
+            retained: Mutex<Option<AfterResponseHandle>>,
+            started_early: AtomicUsize,
+        }
+        struct DropProbe(Arc<State>);
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.cancelled.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        #[edgezero_core::action]
+        async fn register(ctx: RequestContext) -> Result<Response, EdgeError> {
+            let state = Arc::clone(ctx.extensions().get::<Arc<State>>().expect("state"));
+            *state.retained.lock().unwrap() =
+                ctx.extensions().get::<AfterResponseHandle>().cloned();
+            let task_state = Arc::clone(&state);
+            let local = Rc::new(Cell::new(false));
+            ctx.after_response(Duration::from_millis(60), async move {
+                if task_state.produced.load(Ordering::SeqCst) == 0 {
+                    task_state.started_early.fetch_add(1, Ordering::SeqCst);
+                }
+                local.set(true);
+                worker::Delay::from(Duration::from_millis(25)).await;
+                assert!(local.get(), "non-Send task ran");
+                let handle = task_state.retained.lock().unwrap().clone().unwrap();
+                let late_state = Arc::clone(&task_state);
+                assert!(
+                    handle
+                        .schedule(Duration::from_secs(1), async move {
+                            late_state.started_early.fetch_add(1, Ordering::SeqCst);
+                        })
+                        .is_err()
+                );
+                task_state.completed.fetch_add(1, Ordering::SeqCst);
+            })?;
+            let probe = DropProbe(Arc::clone(&state));
+            ctx.after_response(Duration::from_millis(10), async move {
+                let _probe = probe;
+                pending::<()>().await;
+            })?;
+            Ok(Response::new(Body::stream(stream::once(async move {
+                worker::Delay::from(Duration::from_millis(100)).await;
+                state.produced.store(1, Ordering::SeqCst);
+                Bytes::from_static(b"stream finished")
+            }))))
+        }
+        let state = Arc::new(State::default());
+        let app = App::new(
+            RouterService::builder()
+                .with_state(Arc::clone(&state))
+                .get("/task", register)
+                .build(),
+        );
+        let (env, ctx, promises, _timers) = recording_context();
+        let mut response = CloudflareService::new(&app)
+            .dispatch(cf_request(CfMethod::Get, "/task", None), env, ctx)
+            .await
+            .expect("response");
+        worker::Delay::from(Duration::from_millis(20)).await;
+        assert_eq!(state.completed.load(Ordering::SeqCst), 0);
+        assert_eq!(state.cancelled.load(Ordering::SeqCst), 0);
+        assert_eq!(response.text().await.unwrap(), "stream finished");
+        JsFuture::from(Promise::all(&promises))
+            .await
+            .expect("waitUntil tasks");
+        assert_eq!(
+            state.completed.load(Ordering::SeqCst),
+            1,
+            "response time must not consume task budget"
+        );
+        assert_eq!(
+            state.started_early.load(Ordering::SeqCst),
+            0,
+            "task must not start before the stream finishes"
+        );
+        assert_eq!(
+            state.cancelled.load(Ordering::SeqCst),
+            1,
+            "pending task dropped at budget"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn after_response_owns_fresh_outbound_scope_and_aborts_timed_out_fetch() {
+        struct FetchProbe(JsValue);
+        #[expect(clippy::missing_trait_methods, reason = "Drop::pin_drop is unstable")]
+        impl Drop for FetchProbe {
+            fn drop(&mut self) {
+                let restore = Reflect::get(&self.0, &JsValue::from_str("restore"))
+                    .unwrap()
+                    .unchecked_into::<Function>();
+                restore.call0(&JsValue::UNDEFINED).unwrap();
+            }
+        }
+        static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+        #[edgezero_core::action]
+        async fn register(ctx: RequestContext) -> Result<Response, EdgeError> {
+            let client = ctx.http_client().unwrap().clone();
+            let stale = client.send(OutboundRequest::get("https://upstream.example/stale")?);
+            let fresh_client = client.clone();
+            ctx.after_response(Duration::from_secs(1), async move {
+                assert!(stale.await.is_err(), "earlier scope stays revoked");
+                let response = fresh_client
+                    .send(OutboundRequest::get("https://upstream.example/ready").unwrap())
+                    .await
+                    .expect("new callback reaches fetch");
+                assert_eq!(
+                    response
+                        .into_body()
+                        .into_bytes_bounded(64)
+                        .await
+                        .unwrap()
+                        .as_ref(),
+                    b"ready"
+                );
+                COMPLETED.fetch_add(1, Ordering::SeqCst);
+            })?;
+            ctx.after_response(Duration::from_millis(20), async move {
+                let _response = client
+                    .send(OutboundRequest::get("https://upstream.example/pending").unwrap())
+                    .await;
+                COMPLETED.fetch_add(100, Ordering::SeqCst);
+            })?;
+            Ok(Response::new(Body::text("delivered")))
+        }
+        let probe = FetchProbe(
+            Function::new_no_args(
+                "const original = globalThis.fetch; const probe = {calls:0, aborts:0};
+             globalThis.fetch = (request, init) => {
+               probe.calls++;
+               if (request.url.endsWith('/pending')) {
+                 init.signal.addEventListener('abort', () => {probe.aborts++;}, {once:true});
+                 return new Promise(() => {});
+               }
+               return Promise.resolve(new Response('ready'));
+             };
+             probe.restore = () => {globalThis.fetch = original;}; return probe;",
+            )
+            .call0(&JsValue::UNDEFINED)
+            .unwrap(),
+        );
+        COMPLETED.store(0, Ordering::SeqCst);
+        let app = App::new(RouterService::builder().get("/task", register).build());
+        let (env, ctx, promises, _timers) = recording_context();
+        let mut response = CloudflareService::new(&app)
+            .dispatch(cf_request(CfMethod::Get, "/task", None), env, ctx)
+            .await
+            .unwrap();
+        response.bytes().await.unwrap();
+        JsFuture::from(Promise::all(&promises))
+            .await
+            .expect("bounded work");
+        assert_eq!(COMPLETED.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            Reflect::get(&probe.0, &JsValue::from_str("calls"))
+                .unwrap()
+                .as_f64(),
+            Some(2.0_f64)
+        );
+        assert_eq!(
+            Reflect::get(&probe.0, &JsValue::from_str("aborts"))
+                .unwrap()
+                .as_f64(),
+            Some(1.0_f64)
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn after_response_releases_when_dispatch_is_abandoned() {
+        static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+        #[edgezero_core::action]
+        async fn register(ctx: RequestContext) -> Result<Response, EdgeError> {
+            ctx.after_response(Duration::from_secs(1), async {
+                COMPLETED.fetch_add(1, Ordering::SeqCst);
+            })?;
+            pending().await
+        }
+        use futures::FutureExt as _;
+        let app = App::new(RouterService::builder().get("/task", register).build());
+        let (env, ctx, promises, _timers) = recording_context();
+        COMPLETED.store(0, Ordering::SeqCst);
+        assert!(
+            CloudflareService::new(&app)
+                .dispatch(cf_request(CfMethod::Get, "/task", None), env, ctx)
+                .now_or_never()
+                .is_none()
+        );
+        JsFuture::from(Promise::all(&promises))
+            .await
+            .expect("abandoned dispatch task");
+        assert_eq!(COMPLETED.load(Ordering::SeqCst), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn after_response_releases_on_bodyless_fallback_and_source_failure() {
+        static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+        #[edgezero_core::action]
+        async fn register(ctx: RequestContext) -> Result<Response, EdgeError> {
+            ctx.after_response(Duration::from_secs(1), async {
+                COMPLETED.fetch_add(1, Ordering::SeqCst);
+            })?;
+            let mut response = Response::new(Body::empty());
+            match ctx.uri().path() {
+                "/bodyless" => *response.status_mut() = StatusCode::NO_CONTENT,
+                "/fallback" => *response.status_mut() = StatusCode::from_u16(199).unwrap(),
+                _ => {
+                    *response.body_mut() = Body::from_stream(stream::once(async {
+                        Err::<Bytes, _>(EdgeError::internal(IoError::other("source failed")))
+                    }));
+                }
+            }
+            Ok(response)
+        }
+        let app = App::new(
+            RouterService::builder()
+                .get("/bodyless", register)
+                .get("/fallback", register)
+                .get("/source-error", register)
+                .build(),
+        );
+        COMPLETED.store(0, Ordering::SeqCst);
+        for (path, status) in [
+            ("/bodyless", 204),
+            ("/fallback", 500),
+            ("/source-error", 200),
+        ] {
+            let (env, ctx, promises, _timers) = recording_context();
+            let mut response = CloudflareService::new(&app)
+                .dispatch(cf_request(CfMethod::Get, path, None), env, ctx)
+                .await
+                .expect("response");
+            assert_eq!(response.status_code(), status);
+            let body = response.bytes().await;
+            if path == "/source-error" {
+                body.expect_err("failed source must fail body");
+            } else {
+                body.expect("bodyless or fallback body");
+            }
+            JsFuture::from(Promise::all(&promises))
+                .await
+                .expect("all terminal work");
+        }
+        assert_eq!(COMPLETED.load(Ordering::SeqCst), 3);
+    }
+
     #[wasm_bindgen_test]
     async fn dispatch_app_reuses_router_with_fresh_request_bodies() {
         struct TestApp;
@@ -388,6 +767,280 @@ mod tests {
         assert_eq!(response.status_code(), StatusCode::OK.as_u16());
         let bytes = response.bytes().await.expect("bytes");
         assert_eq!(bytes.as_slice(), b"echo");
+    }
+
+    #[wasm_bindgen_test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one matrix compares all three managed entrypoints across the same ordered requests"
+    )]
+    async fn managed_entrypoints_keep_platform_geo_per_request() {
+        struct GeoApp;
+
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "store-free fixture deliberately uses default application configuration"
+        )]
+        impl Hooks for GeoApp {
+            fn owns_logging() -> bool {
+                true
+            }
+
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().get("/geo", geo).build())
+            }
+        }
+
+        #[edgezero_core::action]
+        async fn geo(ctx: RequestContext) -> String {
+            let GeoOutcome::Selected { provider, status } = ctx.geo() else {
+                return serde_json::json!({"status": "no-selection"}).to_string();
+            };
+            assert_eq!(provider.as_str(), "cloudflare");
+            match status {
+                GeoStatus::Located {
+                    location,
+                    source,
+                    trust_basis,
+                } => {
+                    assert_eq!(*source, GeoSource::Cloudflare);
+                    assert_eq!(*trust_basis, GeoTrustBasis::PlatformMetadata);
+                    serde_json::json!({
+                        "status": "located",
+                        "country": location.country().as_str(),
+                        "subdivision": location.subdivision().map(SubdivisionCode::as_str),
+                    })
+                    .to_string()
+                }
+                GeoStatus::Unavailable(reason) => {
+                    assert_eq!(*reason, GeoUnavailableReason::MissingMetadata);
+                    serde_json::json!({"status": "missing"}).to_string()
+                }
+                GeoStatus::Error(error) => {
+                    serde_json::json!({"unexpected_error": error.to_string()}).to_string()
+                }
+            }
+        }
+
+        let app = App::build::<GeoApp>(edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM)
+            .expect("store-free application");
+        let cases: &[(&[(&str, &str)], serde_json::Value)] = &[
+            (
+                &[
+                    ("country", "US"),
+                    ("region", "California"),
+                    ("regionCode", "CA"),
+                ],
+                serde_json::json!({"status": "located", "country": "US", "subdivision": "CA"}),
+            ),
+            (&[], serde_json::json!({"status": "missing"})),
+            (
+                &[("country", "gb")],
+                serde_json::json!({"status": "located", "country": "GB", "subdivision": null}),
+            ),
+            (
+                &[("country", "us"), ("regionCode", "01")],
+                serde_json::json!({"status": "located", "country": "US", "subdivision": "01"}),
+            ),
+            (
+                &[("country", "US"), ("regionCode", "US-CA")],
+                serde_json::json!({"status": "located", "country": "US", "subdivision": null}),
+            ),
+            (
+                &[("country", "XX")],
+                serde_json::json!({"status": "missing"}),
+            ),
+            (
+                &[("country", "T1")],
+                serde_json::json!({"status": "missing"}),
+            ),
+            (
+                &[("regionCode", "CA")],
+                serde_json::json!({"status": "missing"}),
+            ),
+        ];
+
+        for entrypoint in ["service", "run_app", "dispatch_app"] {
+            for (fields, expected) in cases {
+                let inner = Clone::clone(cf_request(CfMethod::Get, "/geo", None).inner());
+                if !fields.is_empty() {
+                    let cf = Object::new();
+                    for (key, value) in *fields {
+                        Reflect::set(&cf, &JsValue::from_str(key), &JsValue::from_str(value))
+                            .expect("platform metadata field");
+                    }
+                    Reflect::set(&inner, &JsValue::from_str("cf"), &cf).expect("cf metadata");
+                }
+                for (name, value) in [
+                    ("cf-ipcountry", "DE"),
+                    ("cloudfront-viewer-country", "DE"),
+                    ("cloudfront-viewer-country-region", "BE"),
+                ] {
+                    inner.headers().set(name, value).expect("spoofed header");
+                }
+                let request = CfRequest::from(inner);
+                let (env, ctx, _timers) = test_env_ctx();
+                let mut response = match entrypoint {
+                    "service" => {
+                        CloudflareService::new(&app)
+                            .dispatch(request, env, ctx)
+                            .await
+                    }
+                    "run_app" => {
+                        edgezero_adapter_cloudflare::run_app::<GeoApp>(request, env, ctx).await
+                    }
+                    _ => {
+                        edgezero_adapter_cloudflare::dispatch_app::<GeoApp>(&app, request, env, ctx)
+                            .await
+                    }
+                }
+                .expect("managed geo response");
+                assert_eq!(response.status_code(), StatusCode::OK.as_u16());
+                let actual: serde_json::Value =
+                    serde_json::from_str(&response.text().await.expect("geo response body"))
+                        .expect("geo response JSON");
+                assert_eq!(&actual, expected, "{entrypoint}, metadata {fields:?}");
+            }
+        }
+    }
+
+    fn capture_label<T>(capture: &Capture<T>, value: impl Fn(&T) -> String) -> String {
+        match capture {
+            Capture::Captured(captured) => value(captured),
+            Capture::Unavailable(reason) => format!("{reason:?}"),
+            _ => "unexpected".to_owned(),
+        }
+    }
+
+    // Test-only labels: the snapshot's `Debug` deliberately hides values.
+    #[edgezero_core::action]
+    async fn client_info_json(ctx: RequestContext) -> String {
+        let Some(info) = ctx.client_info() else {
+            return "no-snapshot".to_owned();
+        };
+        assert_eq!(
+            info.direct_peer().unavailable_reason(),
+            Some(UnavailableReason::NotExposed)
+        );
+        let tls = |value: &ViewerTlsValue| {
+            assert_eq!(value.source(), ViewerTlsSource::Cloudflare);
+            value.as_str().to_owned()
+        };
+        format!(
+            "{}|{}|{}",
+            capture_label(info.effective_client(), |address| {
+                assert_eq!(address.source(), ClientIpSource::Cloudflare);
+                address.ip().to_string()
+            }),
+            capture_label(info.tls_version(), tls),
+            capture_label(info.tls_cipher(), tls),
+        )
+    }
+
+    fn client_info_request(header: Option<&str>, cf: Option<&[(&str, JsValue)]>) -> CfRequest {
+        let inner = Clone::clone(cf_request(CfMethod::Get, "/client", None).inner());
+        if let Some(fields) = cf {
+            let object = Object::new();
+            for (key, value) in fields {
+                Reflect::set(&object, &JsValue::from_str(key), value).expect("cf field");
+            }
+            Reflect::set(&inner, &JsValue::from_str("cf"), &object).expect("cf metadata");
+        }
+        if let Some(value) = header {
+            inner
+                .headers()
+                .set("cf-connecting-ip", value)
+                .expect("client IP header");
+        }
+        CfRequest::from(inner)
+    }
+
+    async fn client_info_body<A>(request: CfRequest) -> String
+    where
+        A: Hooks,
+    {
+        let app = App::build::<A>(edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM)
+            .expect("store-free application");
+        let (env, ctx, _timers) = test_env_ctx();
+        let mut response = edgezero_adapter_cloudflare::dispatch_app::<A>(&app, request, env, ctx)
+            .await
+            .expect("managed response");
+        assert_eq!(response.status_code(), StatusCode::OK.as_u16());
+        response.text().await.expect("client info body")
+    }
+
+    fn full_tls() -> Vec<(&'static str, JsValue)> {
+        vec![
+            ("tlsVersion", JsValue::from_str("TLSv1.3")),
+            ("tlsCipher", JsValue::from_str("AEAD-AES128-GCM-SHA256")),
+        ]
+    }
+
+    #[wasm_bindgen_test]
+    async fn direct_ingress_off_ignores_forged_client_ip_and_cf_tls() {
+        // The shape a service-binding caller can send: its own `cf` object and header.
+        let forged = || client_info_request(Some("203.0.113.5"), Some(&full_tls()));
+        let not_exposed = "NotExposed|NotExposed|NotExposed";
+        assert_eq!(
+            client_info_body::<ClientInfoApp<false>>(forged()).await,
+            not_exposed
+        );
+        let app =
+            App::build::<ClientInfoApp<true>>(edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM)
+                .expect("store-free application");
+        let (env, ctx, _timers) = test_env_ctx();
+        let mut response = CloudflareService::new(&app)
+            .dispatch(forged(), env, ctx)
+            .await
+            .expect("service response");
+        assert_eq!(response.text().await.expect("body"), not_exposed);
+    }
+
+    #[wasm_bindgen_test]
+    async fn direct_ingress_on_maps_client_ip_and_tls_fields() {
+        let cases: Vec<ClientInfoCase> = vec![
+            (
+                Some("203.0.113.5"),
+                Some(full_tls()),
+                "203.0.113.5|TLSv1.3|AEAD-AES128-GCM-SHA256",
+            ),
+            (Some("2001:db8::5"), None, "2001:db8::5|Missing|Missing"),
+            (
+                None,
+                Some(vec![("tlsVersion", JsValue::from_str(""))]),
+                "Missing|Missing|Missing",
+            ),
+            (
+                Some("198.51.100.1, 198.51.100.2"),
+                None,
+                "Rejected|Missing|Missing",
+            ),
+            (Some("not-an-ip"), None, "Rejected|Missing|Missing"),
+            (
+                Some("203.0.113.5"),
+                Some(vec![
+                    ("tlsVersion", JsValue::from_f64(13.0)),
+                    ("tlsCipher", JsValue::NULL),
+                ]),
+                "203.0.113.5|Rejected|Missing",
+            ),
+            (
+                Some("203.0.113.5"),
+                Some(vec![
+                    ("tlsVersion", JsValue::from_str("TLSv1.2")),
+                    ("tlsCipher", JsValue::UNDEFINED),
+                ]),
+                "203.0.113.5|TLSv1.2|Missing",
+            ),
+        ];
+        for (header, cf, expected) in cases {
+            let request = client_info_request(header, cf.as_deref());
+            assert_eq!(
+                client_info_body::<ClientInfoApp<true>>(request).await,
+                expected,
+                "{header:?}"
+            );
+        }
     }
 
     #[wasm_bindgen_test]

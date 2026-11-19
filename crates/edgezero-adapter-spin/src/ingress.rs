@@ -3,6 +3,7 @@ use edgezero_core::ingress::{
     CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
     TargetSource,
 };
+use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
 
 pub(crate) fn capture_request_ingress(uri: &Uri) -> RequestIngress {
     let origin = uri
@@ -19,6 +20,7 @@ pub(crate) fn capture_request_ingress(uri: &Uri) -> RequestIngress {
     let target = CapturedTarget::capture(&uri.to_string(), source, Preservation::Unknown);
     let headers = HeaderFidelity::RUNTIME_HEADER_MAP;
     RequestIngress::new(target, origin, headers)
+        .with_ja4(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed))
 }
 
 #[cfg(test)]
@@ -26,6 +28,16 @@ mod ingress_tests {
     use super::capture_request_ingress;
     use edgezero_core::http::Uri;
     use edgezero_core::ingress::{CapturedTarget, OriginSource, Preservation};
+    use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
+
+    #[test]
+    fn ingress_reports_ja4_not_exposed() {
+        let uri: Uri = "https://example.com/".parse().expect("should parse URI");
+        assert_eq!(
+            capture_request_ingress(&uri).ja4(),
+            Some(&CapturedJa4::Unavailable(Ja4Unavailable::NotExposed))
+        );
+    }
 
     #[test]
     fn ingress_captures_runtime_uri_and_origin_only() {

@@ -9,6 +9,9 @@ language = "rust"
 format = "inline-toml"
 [local_server.config_stores.fixture_config.contents]
 marker = "local-fixture"
+[local_server.kv_stores]
+fixture_records = []
+
 [[local_server.kv_stores.fixture_kv]]
 key = "__init__"
 data = ""

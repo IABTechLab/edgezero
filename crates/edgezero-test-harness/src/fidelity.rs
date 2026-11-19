@@ -744,6 +744,11 @@ fn cases() -> Vec<Case> {
                     (b"Forwarded", b"proto=https;host=spoof.example.com"),
                     (b"spin-full-url", b"https://spoof.example.com/reserved"),
                     (b"spin-client-addr", b"192.0.2.1:1"),
+                    (b"ja4", b"t13d1516h2_8daaf6152771_e5627efa2ab1"),
+                    (
+                        b"cloudfront-viewer-ja4-fingerprint",
+                        b"t13d1516h2_8daaf6152771_e5627efa2ab1",
+                    ),
                 ]
             }
             "length-identical" | "length-conflict" => {
@@ -818,6 +823,34 @@ fn verify_observation(platform: &str, case: &str, status: u16, verdict: &Value) 
             platform,
             case,
             "order capability and origin provenance must remain explicit",
+        )?;
+        // Local runtimes serve plain HTTP: Fastly and Cloudflare expose JA4
+        // but have none to report; Spin never exposes it. Spoofed JA4 headers
+        // in the `spoof` case must not change this.
+        let expected_ja4_state = if platform == "spin" {
+            "not_exposed"
+        } else {
+            "missing"
+        };
+        require(
+            verdict["ja4_state"] == expected_ja4_state,
+            platform,
+            case,
+            "JA4 must come only from the runtime TLS API",
+        )?;
+        // Fastly reports its runtime client address. Cloudflare has no direct-ingress
+        // declaration here, so nothing is exposed. Spin declares direct ingress and must
+        // keep its own appended `spin-client-addr` even when the `spoof` case sends one first.
+        let expected_client_state = if platform == "cloudflare" {
+            "not_exposed"
+        } else {
+            "runtime"
+        };
+        require(
+            verdict["client_state"] == expected_client_state,
+            platform,
+            case,
+            "client address must come only from the runtime",
         )?;
         require(
             verdict["target_available"] == (platform != "fastly"),

@@ -60,6 +60,10 @@ use serde::{Deserialize, Serialize};
 use web_time::Instant;
 
 use crate::error::EdgeError;
+use crate::record_store::{
+    Record, RecordBinding, RecordHandle, RecordPage, RecordPartition, RecordWrite,
+    RecordWriteOutcome,
+};
 
 // ---------------------------------------------------------------------------
 // Contract test macro
@@ -225,9 +229,10 @@ macro_rules! key_value_store_contract_tests {
 
                     let mut cursor = None;
                     let mut seen = std::collections::HashSet::new();
+                    let mut seen_cursors = std::collections::HashSet::new();
                     let mut collected = Vec::new();
 
-                    for _ in 0..expected.len() {
+                    loop {
                         let page = store
                             .list_keys_page("", cursor.as_deref(), 1)
                             .await
@@ -242,9 +247,11 @@ macro_rules! key_value_store_contract_tests {
                         }
 
                         cursor = page.cursor;
-                        if cursor.is_none() {
-                            break;
-                        }
+                        let Some(next_cursor) = &cursor else { break };
+                        assert!(
+                            seen_cursors.insert(next_cursor.clone()),
+                            "repeated continuation in pagination"
+                        );
                     }
 
                     collected.sort();
@@ -330,6 +337,11 @@ pub enum KvError {
     /// `max_list_keys` cap on `get_keys`).
     #[error("kv backend limit exceeded: {message}")]
     LimitExceeded { message: String },
+
+    /// A mutation may have committed, but its acknowledgement was lost.
+    /// The caller owns reconciliation. Replaying insert or delete is not safe by default.
+    #[error("kv mutation may have committed")]
+    MutationUncertain,
 
     /// The requested key was not found (used by `delete` when strict).
     #[error("key not found: {key}")]
@@ -757,7 +769,16 @@ impl KvHandle {
         Ok(updated)
     }
 
-    fn validate_key(key: &str) -> Result<(), KvError> {
+    /// Acquire a record view over this exact prepared provider, without I/O or mutation.
+    ///
+    /// # Errors
+    /// Returns Unsupported for ordinary-only bindings or validation errors for invalid bindings.
+    #[inline]
+    pub fn require_records(&self) -> Result<RecordHandle, KvError> {
+        RecordHandle::new(Arc::clone(&self.store))
+    }
+
+    pub(crate) fn validate_key(key: &str) -> Result<(), KvError> {
         if key.is_empty() {
             return Err(KvError::Validation("key cannot be empty".to_owned()));
         }
@@ -781,7 +802,7 @@ impl KvHandle {
         Ok(())
     }
 
-    fn validate_list_limit(limit: usize) -> Result<(), KvError> {
+    pub(crate) fn validate_list_limit(limit: usize) -> Result<(), KvError> {
         if limit == 0 {
             return Err(KvError::Validation(
                 "list limit must be greater than zero".to_owned(),
@@ -797,7 +818,7 @@ impl KvHandle {
         Ok(())
     }
 
-    fn validate_prefix(prefix: &str) -> Result<(), KvError> {
+    pub(crate) fn validate_prefix(prefix: &str) -> Result<(), KvError> {
         if prefix.len() > Self::MAX_KEY_SIZE {
             return Err(KvError::Validation(format!(
                 "prefix length {} exceeds limit of {} bytes",
@@ -813,7 +834,7 @@ impl KvHandle {
         Ok(())
     }
 
-    fn validate_ttl(ttl: Duration) -> Result<(), KvError> {
+    pub(crate) fn validate_ttl(ttl: Duration) -> Result<(), KvError> {
         if ttl < Self::MIN_TTL {
             return Err(KvError::Validation(format!(
                 "TTL {ttl:?} is less than minimum of at least 60 seconds"
@@ -827,7 +848,7 @@ impl KvHandle {
         Ok(())
     }
 
-    fn validate_value(value: &[u8]) -> Result<(), KvError> {
+    pub(crate) fn validate_value(value: &[u8]) -> Result<(), KvError> {
         if value.len() > Self::MAX_VALUE_SIZE {
             return Err(KvError::Validation(format!(
                 "value size {} exceeds limit of {} bytes",
@@ -844,6 +865,9 @@ impl From<KvError> for EdgeError {
     fn from(err: KvError) -> Self {
         match err {
             KvError::NotFound { key } => EdgeError::not_found(format!("kv key: {key}")),
+            KvError::MutationUncertain => {
+                EdgeError::service_unavailable("kv mutation may have committed")
+            }
             KvError::Unavailable
             | KvError::OpenFailed {
                 reason: KvStoreOpenFailure::Unavailable,
@@ -893,9 +917,9 @@ pub struct KvPage {
 ///
 /// # Pre-validation contract
 ///
-/// This trait is always called through [`KvHandle`], which validates all
+/// This trait is called through [`KvHandle`] or [`RecordHandle`], which validate
 /// inputs (key length/format, value size, TTL bounds, list limits) before
-/// delegating here. Implementations may therefore assume that:
+/// delegating here. Record handles also validate application layout membership. Implementations may therefore assume that:
 /// - Keys are non-empty and within [`KvHandle::MAX_KEY_SIZE`]
 /// - Values are within [`KvHandle::MAX_VALUE_SIZE`]
 /// - TTLs are within `[MIN_TTL, MAX_TTL]`
@@ -925,7 +949,10 @@ pub trait KvStore: Send + Sync {
     /// Retrieve raw bytes for a key. Returns `Ok(None)` if the key does not exist.
     async fn get_bytes(&self, key: &str) -> Result<Option<Bytes>, KvError>;
 
-    /// List keys in lexicographic order, returning at most `limit` keys.
+    /// List keys matching an arbitrary prefix, returning at most `limit` keys.
+    /// Ordering and consistency are provider-specific. Empty/short pages may
+    /// carry continuation; only its absence ends traversal. This is separate
+    /// from authoritative record partition listing.
     ///
     /// The `cursor` is opaque. Pass the cursor from a previous page back to
     /// continue listing. Implementations should keep memory usage bounded to a
@@ -940,21 +967,95 @@ pub trait KvStore: Send + Sync {
     /// Store raw bytes for a key, overwriting any existing value.
     async fn put_bytes(&self, key: &str, value: Bytes) -> Result<(), KvError>;
 
-    /// Store raw bytes with a time-to-live. After `ttl` has elapsed the key
-    /// should be treated as expired. Eviction timing is backend-specific:
+    /// Store raw bytes with a provider-native time-to-live.
+    /// Visibility after expiry and physical removal are backend-specific;
+    /// there is no portable exact-deadline read or listing guarantee:
     /// - **Axum (`PersistentKvStore`)**: lazy eviction — expired keys are removed
     ///   on the next `get_bytes` call for that key, or by any `list_keys` scan
     ///   that reaches them. Keys neither read nor listed after expiration remain
     ///   in the store's `.edgezero/kv-<slug>-<hash>.redb` file, which grows
     ///   without bound on long-running dev servers.
-    /// - **Fastly/Cloudflare**: eviction is managed by the platform and is not
-    ///   guaranteed to be immediate.
+    /// - **Fastly/Cloudflare**: expiry and eviction are managed by the platform;
+    ///   physical removal is not guaranteed to be immediate.
+    /// - **`DynamoDB` record bindings**: native TTL marks a row for asynchronous
+    ///   deletion. Reads, authoritative existence and listings can still expose
+    ///   the expired row until `DynamoDB` removes it. Legacy ordinary bindings
+    ///   retain their existing logical-expiry behavior.
     async fn put_bytes_with_ttl(
         &self,
         key: &str,
         value: Bytes,
         ttl: Duration,
     ) -> Result<(), KvError>;
+
+    /// Return immutable, already-prepared record capability without I/O.
+    /// Default ordinary-only providers advertise no record operations.
+    #[inline]
+    fn record_binding(&self) -> Option<RecordBinding> {
+        None
+    }
+
+    /// Delete the same value ordinary KV uses, preserving generation allocation history.
+    /// Do not retry a delete after ambiguous completion.
+    #[inline]
+    async fn record_delete(&self, _key: &str, _partition: &RecordPartition) -> Result<(), KvError> {
+        Err(KvError::Unsupported {
+            operation: "record_delete".to_owned(),
+        })
+    }
+
+    /// Establish exact-key existence against authoritative state, not a lookup miss.
+    #[inline]
+    async fn record_exists_strong(
+        &self,
+        _key: &str,
+        _partition: &RecordPartition,
+    ) -> Result<bool, KvError> {
+        Err(KvError::Unsupported {
+            operation: "record_exists_strong".to_owned(),
+        })
+    }
+
+    /// Atomically evaluate Add/CAS and replace the same value ordinary KV uses.
+    /// Do not replay mutations. Uncertain completion must remain a distinct error.
+    #[inline]
+    async fn record_insert(
+        &self,
+        _key: &str,
+        _partition: &RecordPartition,
+        _write: RecordWrite<'_>,
+    ) -> Result<RecordWriteOutcome, KvError> {
+        Err(KvError::Unsupported {
+            operation: "record_insert".to_owned(),
+        })
+    }
+
+    /// Strongly read one complete partition using the native inner continuation.
+    /// Validate native continuation structure and progress, preserve empty pages
+    /// with continuation, and never substitute ordinary global enumeration.
+    #[inline]
+    async fn record_list_partition(
+        &self,
+        _partition: &RecordPartition,
+        _cursor: Option<&str>,
+        _limit: usize,
+    ) -> Result<RecordPage, KvError> {
+        Err(KvError::Unsupported {
+            operation: "record_list_partition".to_owned(),
+        })
+    }
+
+    /// Read a record, retaining native lookup consistency. Decode metadata as UTF-8.
+    #[inline]
+    async fn record_lookup(
+        &self,
+        _key: &str,
+        _partition: &RecordPartition,
+    ) -> Result<Option<Record>, KvError> {
+        Err(KvError::Unsupported {
+            operation: "record_lookup".to_owned(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +1079,10 @@ pub struct NoopKvStore;
 
 #[cfg(any(test, feature = "test-utils"))]
 #[async_trait(?Send)]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "ordinary-only provider intentionally retains Unsupported record defaults"
+)]
 impl KvStore for NoopKvStore {
     #[inline]
     async fn delete(&self, _key: &str) -> Result<(), KvError> {
@@ -1045,6 +1150,10 @@ mod tests {
     }
 
     #[async_trait(?Send)]
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "ordinary-only provider intentionally retains Unsupported record defaults"
+    )]
     impl KvStore for Failed {
         async fn delete(&self, _key: &str) -> Result<(), KvError> {
             Err(KvError::OpenFailed { reason: self.0 })
@@ -1077,6 +1186,10 @@ mod tests {
     }
 
     #[async_trait(?Send)]
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "ordinary-only provider intentionally retains Unsupported record defaults"
+    )]
     impl KvStore for MockStore {
         async fn delete(&self, key: &str) -> Result<(), KvError> {
             let mut data = self.data.lock().unwrap();

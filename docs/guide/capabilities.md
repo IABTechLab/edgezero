@@ -172,6 +172,23 @@ behavior. Axum dispatches the admission and fallback-drain future directly on it
 executor, so cancellation drops that future and its grant. Cloudflare, Fastly, and Spin retain the
 provider limitations described above.
 
+## Client Metadata Matrix
+
+What each managed adapter supplies through `ctx.client_info()`, `ctx.geo()` and `ctx.ja4()`.
+See [Client metadata](./handlers.md#client-metadata) for the reasons.
+
+| Field            | Axum                                                                           | Cloudflare                                                       | Fastly                                   | Spin                                                                                          |
+| ---------------- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Direct peer      | Owned socket address                                                           | `NotExposed`                                                     | `NotExposed`                             | Last `spin-client-addr` with `direct_ingress`; otherwise `NotExposed`                         |
+| Effective client | Socket peer or trusted forwarding chain; `PeerFallback` behind a trusted proxy | `CF-Connecting-IP` with `direct_ingress`; otherwise `NotExposed` | Runtime downstream address               | Socket peer with `direct_ingress`, or the authenticated KV Geo header; otherwise `NotExposed` |
+| TLS version      | `NotExposed`                                                                   | `cf.tlsVersion` with `direct_ingress`; otherwise `NotExposed`    | Runtime TLS protocol                     | `NotExposed`                                                                                  |
+| TLS cipher       | `NotExposed`                                                                   | `cf.tlsCipher` with `direct_ingress`; otherwise `NotExposed`     | Runtime cipher, OpenSSL name             | `NotExposed`                                                                                  |
+| Geo              | Off, CloudFront, supplied or KV provider                                       | `cf` country and region                                          | Runtime lookup of the downstream address | Off or authenticated KV lookup                                                                |
+| JA4              | `NotExposed`; generic trusted proxy or protected CloudFront when configured    | Bot Management, otherwise `Missing`                              | Runtime TLS                              | `NotExposed`                                                                                  |
+
+Local runtimes serve plain HTTP, so Fastly TLS and JA4 are `Missing` under Viceroy. Tests and
+local Workers carry synthetic or absent `cf` data.
+
 ## Config Matrix
 
 | Capability                      | Axum        | Cloudflare  | Fastly      | Spin        |
@@ -330,9 +347,9 @@ not included. These limitations block whole-response-lifetime certification.
 
 ## After-Response Task Matrix
 
-| Capability             | Axum               | Cloudflare  | Fastly             | Spin        |
-| ---------------------- | ------------------ | ----------- | ------------------ | ----------- |
-| `after-response-tasks` | BoundedCooperative | Unsupported | BoundedCooperative | Unsupported |
+| Capability             | Axum               | Cloudflare         | Fastly             | Spin        |
+| ---------------------- | ------------------ | ------------------ | ------------------ | ----------- |
+| `after-response-tasks` | BoundedCooperative | BoundedCooperative | BoundedCooperative | Unsupported |
 
 `ctx.after_response(budget, task)` registers a task while a request is handled. The adapter starts
 the task once the response attempt ends at its terminal egress boundary, whatever the outcome. That
@@ -341,7 +358,7 @@ response. The task is dropped, and so cancelled, when its budget elapses. Regist
 the request's tasks are released, so a task cannot register more tasks. Start outbound requests
 inside the task.
 
-Both supporting adapters are `BoundedCooperative`: the budget cancels a task only when it yields,
+All three supporting adapters are `BoundedCooperative`: the budget cancels a task only when it yields,
 so CPU-bound or blocking work overruns it.
 
 - Axum spawns each task on the server's executor and releases it when Hyper drops the response body.
@@ -355,8 +372,13 @@ so CPU-bound or blocking work overruns it.
   the same outbound scope. The budget is checked whenever a task yields to the adapter's progress
   driver; a blocked hostcall cannot be preempted. The tasks delay the next request on a reused
   `serve_app` instance, and a caller-sent native replacement after an uncommitted delivery.
-- Cloudflare installs no scheduler, so registration returns `501 Not Implemented`. Cloudflare
-  `waitUntil` support is tracked in [#478](https://github.com/IABTechLab/edgezero/issues/478).
+- Cloudflare registers gated tasks with Workers `waitUntil`. Tasks start after the adapter's
+  response writer terminates (or bodyless native handoff), including delivery failure and
+  disconnect. Each task gets an effective budget of `min(budget, 30 seconds)` starting at release,
+  with a fresh outbound callback scope. Workers independently shares an allowance of up to
+  30 seconds after response completion or disconnect across all `waitUntil` calls; platform
+  CPU/memory limits or earlier termination can shorten execution. Tasks have no persistence or
+  automatic retry. See [Workers context limits](https://developers.cloudflare.com/workers/runtime-apis/context/#waituntil).
 - Spin rejects every registration with a positive budget with `501 Not Implemented` and the
   message `after-response tasks are not supported by the Spin adapter`
   (`edgezero_adapter_spin::AFTER_RESPONSE_UNSUPPORTED`). The task is dropped without being polled.

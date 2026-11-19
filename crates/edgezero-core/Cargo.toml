@@ -57,6 +57,8 @@ simd-adler32 = { workspace = true }
 web-time = { workspace = true }
 
 [features]
+geo-kv = []
+geo-kv-build = ["geo-kv"]
 # Exposes `NoopKvStore` for use in downstream adapter and integration tests
 # that need a `KvHandle` without real storage. Add this feature to your crate's
 # `[dev-dependencies]` entry for `edgezero-core` to use it.

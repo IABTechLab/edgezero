@@ -73,7 +73,7 @@
   - `FastlyAfterResponse` schedules into the queue, or errors when it is not armed.
   - One helper, `with_after_response(clock, dispatch_and_finish)`, arms, runs the closure, then `drain(clock)`. `drain` disarms and takes the tasks (no borrow is held while polling), then joins them, each raced against `native_time(clock).wait_until(start + budget)`, under `block_on(drive_callback(..))`. It warns on timeout or on a driver error. Each deadline is `Deadline::at_instant(start + budget)`, saturating.
 - [x] `dispatch_with_handles` inserts `AfterResponseHandle::new(FastlyAfterResponse)` only while a queue is armed, after the `prepare` scratch extensions are copied. `into_core_request` and `capture_egress_for_test` get no handle.
-- [x] `run_request_with_delivery` and `send_request_with_registries_and_hooks` both call `with_after_response` inside `with_callback`, with the clock read from the app before dispatch. The registries funnel gains `send_request_with_registries_and_hooks_for_test`. Each lifecycle has a generation, so a retained handle is rejected.
+- [x] `run_request_with_delivery` and `send_request_with_registries_and_hooks` both call `with_after_response` inside `with_callback`, with the clock read from the app before dispatch. The registries funnel gains `run_request_with_registries_and_hooks_for_test`. Each lifecycle has a generation, so a retained handle is rejected.
 - [x] Host unit tests (feature off):
   - The handle is inserted only while armed.
   - An armed queue collects tasks, and the guard restores the previous queue.

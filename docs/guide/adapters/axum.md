@@ -35,9 +35,15 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-`run_app` installs `simple_logger` (unless `owns_logging = true`), builds the app, and reads bind /
-store / logging config at runtime from `EDGEZERO__*` environment
-variables (see [the migration guide](../manifest-store-migration.md)).
+`run_app` installs `simple_logger` unless `owns_logging = true`, builds the app, and reads bind,
+store, and logging config at runtime from `EDGEZERO__*` environment
+variables. See [the migration guide](../manifest-store-migration.md).
+
+Incoming proxy trust defaults to no trusted networks. Managed hosting strips raw forwarding
+headers before admission and exposes checked ingress metadata instead. See
+[Axum diagnostics and trusted proxies](/guide/axum-diagnostics) for configuration, migration,
+request records, and work snapshots.
+
 The portable store metadata baked into `App` by the `app!` macro
 drives which logical stores are exposed; no `edgezero.toml` needs to
 be loaded by the runtime.
@@ -94,6 +100,53 @@ cargo build -p my-app-adapter-axum --release
 ```
 
 The binary is placed in `target/release/my-app-adapter-axum`.
+
+## Buffered JSON body limits
+
+Every standard Axum hosting path defaults framework-managed JSON buffering to 2 MiB,
+exactly 2,097,152 bytes. Valid JSON at the effective limit succeeds; one byte over returns
+HTTP 413. Malformed JSON within the limit remains HTTP 400.
+
+For standalone development or production, select decimal integer bytes at startup:
+
+```bash
+EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES=4194304 cargo run -p my-app-adapter-axum
+```
+
+The value must be positive and representable by the collector. Zero, signs, whitespace,
+suffixes, fractions, overflowing values, and non-Unicode values fail startup before application
+configuration or readiness. There is no unlimited sentinel, CLI flag, or manifest setting.
+The selected value is captured once per run.
+
+For explicit production embedding or a router-only server, use the fallible builder:
+
+```rust
+use edgezero_adapter_axum::dev_server::{AxumDevServer, AxumRunOptions};
+
+let options = AxumRunOptions::new("127.0.0.1:8787".parse()?)?
+    .with_json_body_limit_bytes(4 * 1024 * 1024)?;
+let server = AxumDevServer::new(app).with_json_body_limit_bytes(4 * 1024 * 1024)?;
+```
+
+Explicit options and router builders do not merge ambient settings. `AxumRunOptions::from_env`
+is the deliberate environment-driven alternative. The low-level `into_core_request` converter
+attaches the finite default without reading this environment setting.
+
+Ordinary `Json` and `ValidatedJson` use the selected ceiling, including overrides above the
+portable 8 MiB fallback. Explicit JSON caps take the minimum of the caller cap and native ceiling.
+JSON helpers enforce it regardless of Content-Type; generic buffered helpers enforce it for the
+original `application/json` or `application/*+json` ingress classification. Ordinary Form retains
+its 1 MiB caller cap. Header/extension mutation and context reconstruction cannot loosen policy.
+
+Native-managed JSON deserialization failures return HTTP 400 with the fixed text
+`invalid JSON payload`. Custom renderers receive that same fixed error, not serde detail.
+Legacy/unmanaged JSON errors and application-authored `EdgeError` messages retain their
+existing behavior. See [privacy limits](/guide/axum-diagnostics#timing-failures-and-privacy-limits).
+
+Taken streams and proxy forwarding receive no new aggregate size cap. Manual body collection
+keeps its supplied cap and existing typed 413 overflow behavior. The ceiling bounds logical buffered
+body bytes, not parsed JSON allocations, host buffers, concurrent requests, or process memory.
+It does not promise client receipt or keep-alive reuse after rejection.
 
 ## Bounded HTTP/1 Ingress
 
@@ -225,6 +278,52 @@ field-section accounting or raw framing-rejection policy. Admission still receiv
 `IngressHeadAccounting::HostManaged` and `IngressFraming::HostManaged`; both raw-ingress
 capabilities remain `Unsupported`. See [Capabilities](/guide/capabilities).
 
+## Checked ingress and diagnostics
+
+Managed hosting validates the original normalized request head, removes raw forwarding fields,
+and exposes checked metadata from the actual socket peer. Proxy trust is off by default.
+Configure a bounded `TrustedProxyPolicy` only for deployment-owned peers. Native request records
+omit raw headers, addresses, paths/queries, and source error strings; application-owned loggers
+and observers remain responsible for their own output. See
+[Axum diagnostics and trusted proxies](../axum-diagnostics.md) for configuration, metadata,
+request identity, counters, and deployment examples.
+
+## Client info
+
+[`ctx.client_info()`](../handlers.md#client-metadata) projects the same checked ingress result.
+`direct_peer()` is the listener's owned socket address. `effective_client()` follows the
+trusted proxy policy and never parses forwarding headers a second time:
+
+| Checked ingress                                                              | `effective_client()`                         | `effective_client_ip()` |
+| ---------------------------------------------------------------------------- | -------------------------------------------- | ----------------------- |
+| Client accepted from a trusted chain                                         | `TrustedForwarded` or `TrustedXForwardedFor` | The client              |
+| Peer not trusted, including the default no-trust policy                      | `DirectPeer`                                 | The peer                |
+| Trusted peer that sent no client node, or a chain whose every hop is trusted | `PeerFallback(Missing)`                      | `None`                  |
+| Trusted peer with an obfuscated node such as `for=_hidden`                   | `PeerFallback(Missing)`                      | `None`                  |
+| Trusted peer with a malformed assertion                                      | `PeerFallback(Rejected)`                     | `None`                  |
+
+An untrusted peer that sends `Forwarded` or `X-Forwarded-For` is reported as `DirectPeer`: its
+socket address is the client. A host accepted from a trusted proxy does not mean the client
+was: the client can still fall back to the proxy while the host is forwarded. Repeated
+`X-Forwarded-For` fields join into one chain, but a duplicate `X-Forwarded-Host` or
+`X-Forwarded-Proto` rejects the whole assertion, including a valid client. IPv4-mapped IPv6
+addresses are reported as IPv4. Viewer TLS is `NotExposed`: the listener serves plain HTTP, and
+a forwarded `https` scheme or a trusted JA4 does not change that.
+
+## Native Geo providers
+
+Geo is off by default. Select it with `[adapters.axum.geo]` in `edgezero.toml` and
+`EDGEZERO__ADAPTER__GEO__*` settings, or in code with `AxumRunOptions::with_geo`. The opt-in
+`geo-cloudfront` feature adds a bounded local CloudFront parser, not AWS SDKs or store setup.
+Both built-in and supplied providers require a separate `ProtectedCloudFrontAlb` policy using
+the actual socket peer. Ordinary trusted-proxy configuration does not admit geographic assertions.
+
+Read the immutable outcome through `RequestContext::geo()`. Missing metadata, untrusted ingress,
+invalid assertions, and provider failures remain distinct; none grants permission or chooses an
+HTTP status. The [native Geo guide](../native-geo.md) covers the Rust API, mandatory HTTPS origin
+credential gate and network isolation, header generation, disabled shared caching, rotation,
+and the separate cloud/downstream acceptance checks.
+
 ## Outbound HTTP
 
 The Axum adapter uses a `HttpClient` registered in the assembled app's router state when present,
@@ -332,9 +431,26 @@ address takes precedence over `config.addr`. Resolving the shutdown future cance
 connections and waits for the local worker and its resources; it does not drain responses.
 Dropping the serving future signals cancellation but cannot wait for cleanup.
 
-::: tip Logging status
-`run_app` wires logging automatically; custom entrypoints should install a logger explicitly.
-:::
+The development `run_app` helper installs `simple_logger` at the level read from
+`EDGEZERO__LOGGING__LEVEL`, falling back to `info` when that variable is unset or unparseable.
+Production `AxumRunOptions` rejects an invalid supplied level. Neither reads `edgezero.toml`
+for logger setup, and `echo_stdout` has no runtime effect.
+
+To install your own logger, set `owns_logging = true` in the `app!` declaration and initialize
+it once in `main` before entering the runner. Ownership controls installation, not framework
+facade output. Safe native request and lifecycle records use target `edgezero::native`.
+
+Request records are on by default. `EDGEZERO__LOGGING__REQUEST_RECORDS` accepts exactly
+`true` or `false`; invalid supplied values fail startup in development and production.
+`AxumRunOptions::with_request_records(false)` and `AxumDevServer::with_request_records(false)`
+suppress only default native request logs. Application/native observers, lifecycle records,
+counts, and snapshots remain active. Explicit builders do not merge ambient record settings.
+
+Use `with_diagnostics` to attach a `NativeDiagnosticsHandle` for snapshots or an optional
+native request observer. No exporter or public metrics endpoint is installed. See
+[logger ownership](/guide/axum-diagnostics#records-and-logger-ownership) and
+[snapshots and metrics](/guide/axum-diagnostics#snapshots-and-optional-metrics) for examples
+and the synchronous sink limitations.
 
 ## Testing
 
@@ -402,7 +518,21 @@ The database file grows over time and does not shrink after deletions. To reclai
 space, delete the file in `.edgezero/`; the data is lost. See [KV Storage](/guide/kv)
 for the portable API.
 
-## Secret Store
+## Native store providers
+
+Axum keeps the existing local defaults, but native applications can select a provider
+per logical store ID. The portable manifest still declares IDs and defaults only. A
+separate, strict native bindings file selects supported providers; it does not change
+store metadata or add AWS dependencies to Fastly, Cloudflare, or Spin builds.
+
+Without a bindings file, config uses local `.edgezero/local-config-<id>.json`
+snapshots, secrets use environment variables, and KV uses the existing local backend.
+With explicit AWS bindings, the runner fetches mapped values before its initializer
+and before it accepts requests. It does not fall back to a local provider when an AWS
+lookup or preparation fails. See the [native AWS stores guide](../native-aws-stores.md)
+for the schema, feature selection, permissions, and lifecycle limits.
+The independent [native celld KV provider](../native-celld-stores.md) adds live KV
+through the EdgeZero store service, which runs on an official celld release.
 
 A declared `[stores.secrets]` id resolves to an `EnvSecretStore`, which reads
 secret key `api_key` from the environment variable `EDGEZERO__SECRETS__API_KEY`,
@@ -415,17 +545,23 @@ only one secrets id may be declared:
 EDGEZERO__SECRETS__API_KEY=mysecret edgezero serve --adapter axum
 ```
 
-## Config Store
+The native binding file path must be absolute. `EDGEZERO__STORE_BINDINGS_FILE` is
+read only by the environment-loading runner. Explicit `AxumRunOptions` selection
+uses only values supplied in code. Programmatic applications may also inject existing
+handles or deferred setup through `run_app_with_native_stores`; deferred setup is
+polled after source validation, in the current native runtime. Its construction must
+not perform provider work.
 
-For local development, each declared `[stores.config]` id resolves to a
-local-file config store backed by `.edgezero/local-config-<id>.json`.
-The standard runner loads immutable snapshots before binding its listener.
-Missing files create empty declared stores. Malformed files retain typed failing
-bindings, while allocation-limit violations fail startup. Changes made by `config
-push` take effect after restart, not on the next request.
-The portable manifest carries no inline defaults — the
-pre-rewrite `[stores.config.defaults]` table is gone (see
-[the migration guide](../manifest-store-migration.md)).
+A declared `[stores.secrets]` ID still defaults to an environment-backed store when
+not explicitly bound. It is no longer limited to one ID by Axum. Existing
+`EDGEZERO__STORES__SECRETS__<ID>__NAME` and config/KV local overrides retain their
+meaning for implicit local bindings; they cannot override an explicitly bound ID.
+
+`config push --adapter axum` remains a local-file writer. It does not publish to
+AppConfig. If passed an explicit `--store-bindings` file that binds the selected ID
+to AWS, the guard rejects the operation before writing anything. A push
+without that explicit file still only updates the local snapshot file; it does not
+update an AWS-bound deployment.
 
 ```toml
 [stores.config]
@@ -514,6 +650,22 @@ secrets. Kernel buffers, filesystem page cache, allocator fragmentation and tota
 not guaranteed. Local file reads are synchronous; no finite startup I/O interruption is
 claimed. The broad `config-read-allocation-bounds` capability remains `Unsupported`;
 this bounded local config-snapshot path does not certify every secret/provider allocation.
+
+## Optional AWS features
+
+Generated native targets opt into `aws-appconfig-agent` and
+`aws-secrets-manager` independently, or use the `aws-stores` alias for both. These
+features are separate from the CLI binary's own dependencies. A bindings file cannot
+enable a provider that was not compiled into the application. The AWS SDK and service
+clients stay out of default native and WASM target graphs.
+
+The native AWS SDK can emit diagnostic fields at dependency `DEBUG`/`TRACE` levels.
+Those events may include secret ARNs, credential-source metadata, or response details
+when sensitive-body logging is enabled. EdgeZero redacts its own errors and diagnostics,
+but the first version does not suppress dependency events because scoped suppression
+can break an application's tracing-to-log fallback. Do not enable dependency
+`DEBUG`/`TRACE` in production unless the process logging policy has been reviewed.
+This limitation must be disclosed in release and PR review notes.
 
 ## Container Deployment
 
@@ -616,8 +768,117 @@ Origin validation checks HTTP(S) URI authority syntax, including registered
 names and trailing-dot hosts. It does not establish DNS resolution or ownership.
 Consumers that require DNS-label syntax must apply that additional policy.
 
+## JA4 from a trusted proxy
+
+The Axum adapter serves plain HTTP and never sees a TLS handshake, so by
+default `ctx.ja4()` reports `Unavailable(NotExposed)` and JA4 headers such as
+`cloudfront-viewer-ja4-fingerprint` are ignored. See
+[Client TLS fingerprint](./overview#client-tls-fingerprint-ja4).
+
+When a TLS-terminating proxy in front of Axum computes JA4 (FoxIO's
+[ja4-nginx-module](https://github.com/FoxIO-LLC/ja4-nginx-module), HAProxy's
+ja4 module, the Apache Traffic Server JA4 plugin, …), Axum can read it from a
+header, but only when the direct TCP peer is one of the proxies you name:
+
+```sh
+EDGEZERO__ADAPTER__JA4_HEADER=x-ja4
+EDGEZERO__ADAPTER__JA4_TRUSTED_PROXY_CIDRS=10.0.0.0/8,192.0.2.7
+```
+
+Both variables must be set together. Entries are CIDRs or bare IPs; startup
+fails on an invalid entry, an empty list or a `/0` network. IPv4-mapped IPv6
+peers match their IPv4 networks.
+
+| Request                                          | `ctx.ja4()`                                      |
+| ------------------------------------------------ | ------------------------------------------------ |
+| From a trusted proxy, one valid header           | `Captured { source: TrustedProxyHeader, .. }`    |
+| From a trusted proxy, no or empty header         | `Unavailable(Missing)`                           |
+| From a trusted proxy, invalid or repeated header | `Unavailable(Malformed)`                         |
+| From any other peer                              | `Unavailable(NotExposed)`; the header is ignored |
+
+::: warning The proxy must overwrite the header
+The peer check proves which hop sent the request, not who wrote the header.
+Configure the proxy to set the header on every request and drop any copy the
+client sent, including when it has no JA4. With FoxIO's nginx module,
+`proxy_set_header` does both, because it replaces the client's header and
+omits it when the value is empty:
+
+```nginx
+proxy_set_header X-JA4 $http_ssl_ja4;
+```
+
+nginx inherits `proxy_set_header` from an enclosing block only when the
+current block defines none. A `location` that sets its own
+`proxy_set_header Host …` silently drops an `X-JA4` set at the `server` or
+`http` level, and the client's own `X-JA4` then reaches Axum from a trusted
+peer. Set it in every block that has its own `proxy_set_header`, and in every
+server block that proxies to Axum, including plain-HTTP ones.
+:::
+
+::: danger Only list proxies you operate
+The allowlist works only when nobody else can send requests from those
+addresses. Do not list shared provider ranges such as CloudFront's: any AWS
+customer can point their own distribution at your origin and add any header
+they like, so its requests pass the peer check. Use
+[protected CloudFront JA4](#ja4-from-protected-cloudfront) instead.
+:::
+
+In code, build the setting with `TrustedJa4Header::parse(header, cidrs)` and
+pass it to `AxumDevServer::with_trusted_ja4_header`.
+
+The managed listener checks the peer against its own socket address. An
+application's received-head preparer cannot change the decision by editing
+request extensions.
+
+### JA4 from protected CloudFront
+
+Behind CloudFront and an ALB, select the fixed `CloudFront-Viewer-JA4-Fingerprint`
+header in the manifest. It reuses the protected path of the
+[CloudFront Geo selection](../native-geo.md), so there are no separate JA4 network
+settings:
+
+```toml
+[adapters.axum.geo]
+provider = "cloudfront"
+origin_credential_header_name = "x-origin-verify"
+# alb_peer_cidrs usually comes from EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS
+
+[adapters.axum.ja4]
+source = "protected-cloudfront"
+```
+
+| Request                                       | `ctx.ja4()`                                   |
+| --------------------------------------------- | --------------------------------------------- |
+| Admitted ALB peer, one valid header           | `Captured { source: TrustedProxyHeader, .. }` |
+| Admitted ALB peer, no or empty header         | `Unavailable(Missing)`                        |
+| Admitted ALB peer, invalid or repeated header | `Unavailable(Malformed)`                      |
+| Any other peer                                | `Unavailable(NotExposed)`; header not parsed  |
+
+Startup fails before listening when protected JA4 is selected and Geo is off, Geo uses
+KV, or the `EDGEZERO__ADAPTER__JA4_*` variables are also set. An unknown country or a failed
+Geo lookup does not change JA4. The credential header is removed before handlers, as for Geo.
+The development runner reads settings only and ignores this manifest table, as it does for Geo.
+A generated project's `main` calls `run_generated_app`, which stays on the development runner
+unless `EDGEZERO__STORE_BINDINGS_FILE` selects a native bindings file. Without that file, call
+`run_production_app` or `run_production_app_with_initializer` from `main`; otherwise protected
+JA4 stays off, and `ctx.ja4()` reports `Unavailable(NotExposed)` unless the generic
+`EDGEZERO__ADAPTER__JA4_*` settings are configured.
+
+The peer check proves the route to Axum, not who generated the header. Before enabling this
+mode, meet two CloudFront requirements that EdgeZero cannot check:
+
+1. The origin request policy includes `CloudFront-Viewer-JA4-Fingerprint`, so CloudFront
+   generates it. CloudFront adds it only to HTTPS requests.
+2. No viewer-supplied header of that name reaches the origin. AWS does not document what
+   CloudFront does with one, so verify it on your distribution.
+
+Then check the live deployment: an HTTPS request carries a fingerprint, a plain HTTP request
+carries none, and a request with a forged `CloudFront-Viewer-JA4-Fingerprint` header arrives
+without the forged value.
+
 ## Next Steps
 
+- Configure [native diagnostics and trusted proxies](/guide/axum-diagnostics)
 - Deploy to [Fastly Compute](/guide/adapters/fastly) for production
 - Deploy to [Cloudflare Workers](/guide/adapters/cloudflare) as an alternative
 - Explore [Configuration](/guide/configuration) for manifest options

@@ -236,6 +236,29 @@ fn pinned_tool(
 
 pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     if args.adapter != "spin" {
+        if args.adapter == "fastly" {
+            let output = run.join("record-contract");
+            phase(
+                "fastly",
+                "record-contract",
+                Command::new(std::env::current_exe()?)
+                    .args([
+                        "--adapter",
+                        "fastly",
+                        "--suite",
+                        "record-contract",
+                        "--output",
+                    ])
+                    .arg(&output),
+                &repository_root(),
+                run,
+                records,
+            )?;
+            super::record_contract::validate_events(&read_events(
+                &output.join("events.jsonl"),
+                CI_ARTIFACT_RECORDS,
+            )?)?;
+        }
         return platforms::run(args, run, records);
     }
     require(

@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use axum::body::{Body as AxumBody, BodyDataStream};
 use axum::extract::connect_info::ConnectInfo;
@@ -7,12 +8,13 @@ use axum::http::{Request, request::Parts};
 use edgezero_core::body::Body;
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::Request as CoreRequest;
-use edgezero_core::http::header::HOST;
+use edgezero_core::http::header::{CONTENT_TYPE, HOST};
 use edgezero_core::http::{HeaderMap, Uri};
 use edgezero_core::ingress::{
     CapturedTarget, HeaderFidelity, InboundOrigin, OriginSource, Preservation, RequestIngress,
     TargetSource,
 };
+use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::time::{Deadline, MonotonicClock};
 use futures_util::{StreamExt as _, stream};
@@ -20,8 +22,10 @@ use http_body::Body as _;
 use tokio::time::{Instant as TokioInstant, timeout_at};
 
 use crate::context::AxumRequestContext;
+use crate::ja4::TrustedJa4Header;
 use crate::outbound::AxumOutboundClient;
 use crate::outbound_executor::AxumOutboundExecutorHandle;
+use crate::run_options::JsonBodyLimit;
 
 /// Marks the plain HTTP listener owned by this adapter.
 #[derive(Clone, Copy)]
@@ -29,6 +33,8 @@ pub(crate) struct HttpTransport;
 
 /// Convert an Axum/Hyper request into an `EdgeZero` core request while preserving streaming bodies
 /// and exposing connection metadata through `AxumRequestContext`.
+/// Attaches a finite 2 MiB JSON buffering policy without reading ambient configuration.
+/// Taken streams and manual body collection do not enforce this policy.
 ///
 /// # Errors
 /// Returns an error if the outbound client cannot be initialized.
@@ -53,6 +59,8 @@ pub async fn into_core_request(
         axum_body,
         None,
         HttpClient::with_client(client),
+        JsonBodyLimit::DEFAULT,
+        None,
     ))
 }
 
@@ -61,9 +69,29 @@ pub(crate) fn into_core_request_parts(
     axum_body: AxumBody,
     read_lifetime: Option<(Deadline, MonotonicClock)>,
     outbound_client: HttpClient,
+    json_body_limit: JsonBodyLimit,
+    managed_ja4: Option<CapturedJa4>,
 ) -> CoreRequest {
+    let ingress_is_json = parts
+        .headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_json_media_type);
     let transport = parts.extensions.remove::<HttpTransport>();
-    let ingress = capture_request_ingress(&parts.uri, &parts.headers, transport);
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| *addr);
+    // The managed listener captures JA4 from its owned socket. Only the public converter,
+    // which is not the managed trust boundary, still reads a caller-supplied extension.
+    let extension_ja4 = parts.extensions.remove::<Arc<TrustedJa4Header>>();
+    let ja4 = managed_ja4.unwrap_or_else(|| {
+        extension_ja4.map_or(
+            CapturedJa4::Unavailable(Ja4Unavailable::NotExposed),
+            |trusted| trusted.capture(peer, &parts.headers),
+        )
+    });
+    let ingress = capture_request_ingress(&parts.uri, &parts.headers, transport, ja4);
     // A zero size hint can still leave trailers; only the transport's terminal signal is enough.
     let body = if axum_body.is_end_stream() {
         Body::empty()
@@ -76,14 +104,11 @@ pub(crate) fn into_core_request_parts(
         }
     };
 
-    let mut core_request = CoreRequest::from_parts(parts, body);
+    let managed_body = body.with_buffered_json_policy(json_body_limit.get(), ingress_is_json);
+    let mut core_request = CoreRequest::from_parts(parts, managed_body);
     core_request.extensions_mut().insert(ingress);
 
-    if let Some(remote_addr) = core_request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| *addr)
-    {
+    if let Some(remote_addr) = peer {
         core_request
             .extensions_mut()
             .remove::<ConnectInfo<SocketAddr>>();
@@ -104,6 +129,7 @@ fn capture_request_ingress(
     uri: &Uri,
     headers: &HeaderMap,
     transport: Option<HttpTransport>,
+    ja4: CapturedJa4,
 ) -> RequestIngress {
     let source = if uri.scheme().is_some() {
         TargetSource::RuntimeUrl
@@ -116,6 +142,7 @@ fn capture_request_ingress(
         inbound_origin(uri, headers, transport),
         HeaderFidelity::RUNTIME_HEADER_MAP,
     )
+    .with_ja4(ja4)
 }
 
 fn inbound_origin(
@@ -145,6 +172,13 @@ fn inbound_origin(
         }
     }
     Some(origin)
+}
+
+fn is_json_media_type(raw: &str) -> bool {
+    raw.parse::<mime::Mime>().is_ok_and(|media| {
+        media.type_() == mime::APPLICATION
+            && (media.subtype() == mime::JSON || media.suffix() == Some(mime::JSON))
+    })
 }
 
 fn deadline_body(
@@ -354,7 +388,14 @@ mod tests {
             let lifetime =
                 admitted.then(|| (Deadline::at_instant(now), MonotonicClock::new(move || now)));
             let (parts, native) = request.into_parts();
-            let core = into_core_request_parts(parts, native, lifetime, client.clone());
+            let core = into_core_request_parts(
+                parts,
+                native,
+                lifetime,
+                client.clone(),
+                JsonBodyLimit::DEFAULT,
+                None,
+            );
             assert_eq!(core.body().as_bytes(), Some(b"".as_slice()));
             assert_eq!(polls.load(Ordering::SeqCst), 0);
             assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -488,7 +529,8 @@ mod tests {
             .expect("request");
         let (parts, body) = request.into_parts();
 
-        let core_request = into_core_request_parts(parts, body, None, client);
+        let core_request =
+            into_core_request_parts(parts, body, None, client, JsonBodyLimit::DEFAULT, None);
         assert!(
             !core_request
                 .extensions()
@@ -512,6 +554,28 @@ mod tests {
             .await
             .expect("request conversion");
         assert!(AxumRequestContext::get(&core_request).is_none());
+    }
+
+    #[test]
+    fn ingress_json_classifier_validates_media_type_syntax() {
+        for raw in [
+            "application/json",
+            "APPLICATION/JSON; charset=utf-8",
+            "application/problem+json",
+            "application/vnd.fixture+json; profile=\"a;b\"",
+        ] {
+            assert!(is_json_media_type(raw), "{raw}");
+        }
+        for raw in [
+            "text/json",
+            "application/jsonp",
+            "application/json; broken",
+            "application/json extra",
+            "application/",
+            "",
+        ] {
+            assert!(!is_json_media_type(raw), "{raw}");
+        }
     }
 
     #[tokio::test]
@@ -563,6 +627,33 @@ mod ingress_tests {
         CapturedTarget, MAX_TARGET_BYTES, OriginSource, Preservation, RequestIngress,
         TargetUnavailable,
     };
+    use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
+
+    #[tokio::test]
+    async fn ingress_ja4_is_not_exposed_even_with_ja4_headers() {
+        let executor_owner = AxumOutboundExecutor::new();
+        let executor_handle = executor_owner.handle();
+        let request = request_builder()
+            .uri("/")
+            .header("ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1")
+            .header(
+                "cloudfront-viewer-ja4-fingerprint",
+                "t13d1516h2_8daaf6152771_e5627efa2ab1",
+            )
+            .body(AxumBody::empty())
+            .expect("should build request");
+        let core = into_core_request(request, executor_handle.clone())
+            .await
+            .expect("should convert request");
+        let ingress = core
+            .extensions()
+            .get::<RequestIngress>()
+            .expect("should insert metadata");
+        assert_eq!(
+            ingress.ja4(),
+            Some(&CapturedJa4::Unavailable(Ja4Unavailable::NotExposed))
+        );
+    }
 
     #[tokio::test]
     async fn ingress_retains_runtime_parts_without_trusting_headers() {
