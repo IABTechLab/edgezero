@@ -133,7 +133,10 @@ pub(crate) trait Exchanger: Send + Sync {
 /// A validated exchange. The instance identifies the store's durable state.
 #[cfg_attr(
     not(all(not(target_arch = "wasm32"), feature = "kv")),
-    expect(dead_code, reason = "only native preparation reads the reported instance")
+    expect(
+        dead_code,
+        reason = "only native preparation reads the reported instance"
+    )
 )]
 pub(crate) struct Exchange {
     pub body: Option<Vec<u8>>,

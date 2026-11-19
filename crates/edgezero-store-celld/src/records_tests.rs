@@ -14,7 +14,7 @@ use url::Url;
 
 use super::CelldRecordKvStore;
 use crate::client::ScopedClient;
-use crate::settings::{CelldAccess, CelldKvSettings, CelldPreparationLimits};
+use crate::settings::{CelldAccess, CelldKvSettings, CelldPinnedIdentity, CelldPreparationLimits};
 use crate::test_support::{Fixture, Reply};
 use crate::wire::Exchanger as _;
 use crate::{CelldPreparation, PreparationError};
@@ -436,4 +436,34 @@ async fn value_limits_are_effective_and_record_ttl_is_encoded_as_integer_millise
         1_u64
     );
     assert!(serde_json::from_slice::<Value>(&requests[2].body).unwrap()["metadata"].is_null());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn pinned_preparation_requires_the_observed_instance() {
+    for (pinned, accepted) in [(INSTANCE, true), (OTHER_INSTANCE, false)] {
+        let fixture = Fixture::new(vec![capabilities()]).await;
+        let mut prep =
+            CelldPreparation::new(MonotonicClock::default(), CelldPreparationLimits::default())
+                .unwrap();
+        let result = prep
+            .prepare_record_store_pinned(
+                &settings(&fixture),
+                &layout(),
+                None,
+                Some(&CelldPinnedIdentity {
+                    instance: pinned.to_owned(),
+                }),
+            )
+            .await;
+        if accepted {
+            result.unwrap();
+        } else {
+            assert_eq!(
+                result.map(|_kv| ()).unwrap_err(),
+                PreparationError::PinnedIdentityMismatch
+            );
+        }
+        // Only the read-only capability exchange, never a write probe.
+        assert_eq!(fixture.count().await, 1);
+    }
 }

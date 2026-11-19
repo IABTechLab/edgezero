@@ -7,3 +7,6 @@ pub mod cli_support;
 
 #[cfg(feature = "cli")]
 pub mod release;
+
+#[cfg(feature = "store-bindings")]
+pub mod store_bindings;

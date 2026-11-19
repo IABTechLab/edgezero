@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::dynamodb_kv::sdk_tests::{active_table, loopback_client, read_request};
-use crate::settings::{AwsPreparationLimits, DynamoDbKvLimits};
+use crate::settings::{AwsPreparationLimits, DynamoDbKvLimits, DynamoDbPinnedIdentity};
 use bytes::Bytes;
 use edgezero_core::key_value_store::KvStore as _;
 use edgezero_core::record_store::{RecordKeyLayout, contract};
@@ -1159,6 +1159,64 @@ fn partition_encoding_is_collision_free_and_preserves_full_unicode_keys() {
     assert_eq!(
         provider_a.key(key, &key_partition, "r").unwrap()["sk"],
         Attr::Text(format!("r#{key}"))
+    );
+}
+
+#[test]
+fn pinned_preparation_and_preflight_use_the_same_table_identity() {
+    let runtime = runtime();
+    let fixture = Fixture::start();
+    let settings = settings();
+    let endpoint = format!("http://{}", fixture.address);
+    let prepare = || {
+        let client = loopback_client(&runtime, &endpoint, settings.limits);
+        runtime.block_on(async {
+            let mut preparation =
+                AwsPreparation::new(MonotonicClock::default(), AwsPreparationLimits::default())
+                    .unwrap();
+            preparation.validate_dynamodb_mapping(&settings).unwrap();
+            preparation
+                .finish_dynamodb_preparation(&settings, client)
+                .await
+                .unwrap()
+        })
+    };
+    // Preflight reports exactly the identity native preparation binds into cursors.
+    let identity = preflight_identity(&prepare(), &format!("{endpoint}/")).unwrap();
+    assert_eq!(
+        identity.pinned,
+        DynamoDbPinnedIdentity {
+            table_arn: "arn:aws:dynamodb:us-east-1:111111111111:table/fixture-kv".to_owned(),
+            table_id: Some("fixture-table-id".to_owned()),
+        }
+    );
+    assert_eq!(
+        preflight_identity(&prepare(), "https://dynamodb.us-east-1.amazonaws.com/").unwrap_err(),
+        PreparationError::InvalidEndpoint
+    );
+    // Preflight only describes the table.
+    assert!(
+        fixture
+            .requests()
+            .iter()
+            .all(|(target, _)| target == "DescribeTable")
+    );
+    let layout = RecordLayout::new(Groups).unwrap();
+    let base = record_partition_base(&settings, &layout).unwrap();
+    pinned_store(
+        prepare(),
+        layout.clone(),
+        base.clone(),
+        Some(&identity.pinned),
+    )
+    .unwrap();
+    let mut recreated = identity.pinned;
+    recreated.table_id = Some("recreated-table".to_owned());
+    assert_eq!(
+        pinned_store(prepare(), layout, base, Some(&recreated))
+            .map(|_store| ())
+            .unwrap_err(),
+        PreparationError::PinnedIdentityMismatch
     );
 }
 

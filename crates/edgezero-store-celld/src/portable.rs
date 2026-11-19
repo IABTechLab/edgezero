@@ -288,3 +288,8 @@ fn valid_portable_id(id: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
+
+#[cfg(test)]
+#[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
+#[path = "portable_tests.rs"]
+mod tests;

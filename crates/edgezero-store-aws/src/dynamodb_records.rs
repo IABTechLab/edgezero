@@ -95,16 +95,11 @@ impl AwsPreparation {
     ) -> Result<KvHandle, PreparationError> {
         let partition_base = record_partition_base(settings, layout)?;
         let inner = self.prepare_dynamodb_store(settings, None).await?;
-        if let Some(expected) = pinned {
-            let identity = observed_identity(&inner)?;
-            if identity.pinned != *expected {
-                return Err(PreparationError::PinnedIdentityMismatch);
-            }
-        }
-        Ok(KvHandle::new(Arc::new(DynamoDbRecordStore::new(
+        Ok(KvHandle::new(Arc::new(pinned_store(
             inner,
             layout.clone(),
             partition_base,
+            pinned,
         )?)))
     }
 
@@ -125,12 +120,35 @@ impl AwsPreparation {
         let inner = self
             .prepare_dynamodb_store(&address, Some(&endpoint))
             .await?;
-        let identity = observed_identity(&inner)?;
-        if identity.endpoint != endpoint {
-            return Err(PreparationError::InvalidEndpoint);
-        }
-        Ok(identity)
+        preflight_identity(&inner, &endpoint)
     }
+}
+
+/// Requires the observed table identity to equal `pinned` when one is supplied.
+fn pinned_store(
+    inner: DynamoDbStore,
+    layout: RecordLayout,
+    partition_base: String,
+    pinned: Option<&DynamoDbPinnedIdentity>,
+) -> Result<DynamoDbRecordStore, PreparationError> {
+    if let Some(expected) = pinned
+        && observed_identity(&inner)?.pinned != *expected
+    {
+        return Err(PreparationError::PinnedIdentityMismatch);
+    }
+    DynamoDbRecordStore::new(inner, layout, partition_base)
+}
+
+/// The identity to pin, if the SDK used exactly the endpoint a portable transport uses.
+fn preflight_identity(
+    inner: &DynamoDbStore,
+    endpoint: &str,
+) -> Result<DynamoDbRecordIdentity, PreparationError> {
+    let identity = observed_identity(inner)?;
+    if identity.endpoint != endpoint {
+        return Err(PreparationError::InvalidEndpoint);
+    }
+    Ok(identity)
 }
 
 fn observed_identity(inner: &DynamoDbStore) -> Result<DynamoDbRecordIdentity, PreparationError> {

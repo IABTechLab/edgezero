@@ -1171,10 +1171,13 @@ version = "0.1.0"
 dependencies = [
  "base16ct",
  "edgezero-core",
+ "edgezero-store-aws",
+ "edgezero-store-celld",
  "serde",
  "serde_json",
  "sha2 0.11.1",
  "tempfile",
+ "thiserror 2.0.21",
  "toml",
  "walkdir",
 ]
@@ -1444,6 +1447,7 @@ dependencies = [
  "async-trait",
  "base64",
  "bytes",
+ "edgezero-adapter-axum",
  "edgezero-core",
  "futures-util",
  "getrandom 0.4.2",
