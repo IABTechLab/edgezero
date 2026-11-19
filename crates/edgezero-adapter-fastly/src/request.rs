@@ -42,6 +42,7 @@ use futures::executor;
 use futures_util::stream;
 use std::collections::BTreeMap;
 
+use crate::after_response;
 use crate::config_store::FastlyConfigStore;
 use crate::context::{FastlyOutboundObservation, FastlyRequestContext};
 use crate::delivery::{
@@ -263,8 +264,11 @@ impl<'app> FastlyService<'app> {
     {
         with_callback(|| {
             init_fastly_abi();
-            let outcome = self.dispatch_with(req, prepare);
-            finish_request(outcome, finalize, deliver)
+            let clock = self.app.monotonic_clock();
+            with_after_response(clock, || {
+                let outcome = self.dispatch_with(req, prepare);
+                finish_request(outcome, finalize, deliver)
+            })
         })
     }
 
@@ -484,6 +488,17 @@ where
     scratch
 }
 
+/// Runs one request lifecycle, then its after-response tasks inside the same callback scope.
+///
+/// Registration is open while `run` executes. The tasks start after `run` returns, which is
+/// after the response attempt ended, and each is bounded by its budget.
+fn with_after_response<T>(clock: MonotonicClock, run: impl FnOnce() -> T) -> T {
+    let armed = after_response::arm();
+    let result = run();
+    after_response::drain(armed.take(), clock);
+    result
+}
+
 fn dispatch_with_handles<Prepare>(
     app: &App,
     mut req: FastlyRequest,
@@ -508,6 +523,10 @@ where
             )
         })?;
     head_request.extensions_mut().extend(scratch);
+    // Inserted after the hook's extensions so preparation cannot replace the adapter's handle.
+    if let Some(handle) = after_response::handle_if_armed() {
+        head_request.extensions_mut().insert(handle);
+    }
     let outcome = dispatch_ingress_reader(
         app,
         head_request,
@@ -717,19 +736,21 @@ where
             build_kv_registry_with_records(stores.kv, app.record_store_requirements());
         let config_registry = build_config_registry(stores.config);
         let secret_registry = build_secret_registry(stores.secrets);
-        let outcome = dispatch_with_handles(
-            app,
-            req,
-            Stores {
-                config_registry,
-                kv_registry,
-                secret_registry,
-                ..Default::default()
-            },
-            request_start,
-            prepare,
-        );
-        finish_request(outcome, finalize, deliver)
+        with_after_response(app.monotonic_clock(), || {
+            let outcome = dispatch_with_handles(
+                app,
+                req,
+                Stores {
+                    config_registry,
+                    kv_registry,
+                    secret_registry,
+                    ..Default::default()
+                },
+                request_start,
+                prepare,
+            );
+            finish_request(outcome, finalize, deliver)
+        })
     })
 }
 

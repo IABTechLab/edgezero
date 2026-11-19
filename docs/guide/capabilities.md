@@ -345,6 +345,45 @@ terminal report. The boundaries remain `BestEffort` because none proves end-clie
 Provider-owned buffering, SDK allocations, and bytes beyond each stated acceptance boundary are
 not included. These limitations block whole-response-lifetime certification.
 
+## After-Response Task Matrix
+
+| Capability             | Axum               | Cloudflare         | Fastly             | Spin        |
+| ---------------------- | ------------------ | ------------------ | ------------------ | ----------- |
+| `after-response-tasks` | BoundedCooperative | BoundedCooperative | BoundedCooperative | Unsupported |
+
+`ctx.after_response(budget, task)` registers a task while a request is handled. The adapter starts
+the task once the response attempt ends at its terminal egress boundary, whatever the outcome. That
+boundary is the one the response-egress cells describe, so it does not prove the client received the
+response. The task is dropped, and so cancelled, when its budget elapses. Registration closes when
+the request's tasks are released, so a task cannot register more tasks. Start outbound requests
+inside the task.
+
+All three supporting adapters are `BoundedCooperative`: the budget cancels a task only when it yields,
+so CPU-bound or blocking work overruns it.
+
+- Axum spawns each task on the server's executor and releases it when Hyper drops the response body.
+  Shutdown through the production entrypoints, `run_app` and `AxumDevServer::run` (fixed 10 s grace)
+  waits for registered tasks after connections drain, within the same grace
+  (`EDGEZERO__ADAPTER__SHUTDOWN_GRACE_SECONDS` where configurable). Tasks still pending at the grace
+  are cancelled, and the process exits with the existing `grace exhausted` failure; a second signal
+  still stops immediately. The prebound `AxumDevServer::serve` embedding cancels them, consistent
+  with its cancel-not-drain contract. Blocking work in a task also delays the shared executor.
+- Fastly drives the tasks after the response is sent, before the request callback returns, inside
+  the same outbound scope. The budget is checked whenever a task yields to the adapter's progress
+  driver; a blocked hostcall cannot be preempted. The tasks delay the next request on a reused
+  `serve_app` instance, and a caller-sent native replacement after an uncommitted delivery.
+- Cloudflare registers gated tasks with Workers `waitUntil`. Tasks start after the adapter's
+  response writer terminates (or bodyless native handoff), including delivery failure and
+  disconnect. Each task gets an effective budget of `min(budget, 30 seconds)` starting at release,
+  with a fresh outbound callback scope. Workers independently shares an allowance of up to
+  30 seconds after response completion or disconnect across all `waitUntil` calls; platform
+  CPU/memory limits or earlier termination can shorten execution. Tasks have no persistence or
+  automatic retry. See [Workers context limits](https://developers.cloudflare.com/workers/runtime-apis/context/#waituntil).
+- Spin rejects every registration with a positive budget with `501 Not Implemented` and the
+  message `after-response tasks are not supported by the Spin adapter`
+  (`edgezero_adapter_spin::AFTER_RESPONSE_UNSUPPORTED`). The task is dropped without being polled.
+  A zero budget returns `500`, as on Axum and Fastly.
+
 ## Outbound Matrix
 
 | Capability                              | Axum                              | Cloudflare                        | Fastly                              | Spin                              |

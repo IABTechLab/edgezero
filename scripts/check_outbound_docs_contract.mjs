@@ -232,6 +232,15 @@ const expectedResponseEgressRows = [
     'BestEffort',
   ],
 ]
+const expectedAfterResponseRows = [
+  [
+    'after-response-tasks',
+    'BoundedCooperative',
+    'BoundedCooperative',
+    'BoundedCooperative',
+    'Unsupported',
+  ],
+]
 const expectedLimitHeader = ['Control', 'Scope', 'Default']
 const expectedLimitRows = [
   [
@@ -1902,6 +1911,14 @@ const matrices = [
     readMatrix(
       findMatrixHeader('Response Egress Matrix', 'response egress'),
       'response egress'
+    ),
+  ],
+  [
+    'after-response task',
+    expectedAfterResponseRows,
+    readMatrix(
+      findMatrixHeader('After-Response Task Matrix', 'after-response task'),
+      'after-response task'
     ),
   ],
   [

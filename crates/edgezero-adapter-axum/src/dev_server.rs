@@ -24,6 +24,7 @@ use std::process;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::after_response::AfterResponseTracker;
 use crate::diagnostics::{NativeDiagnosticsHandle, NativeSession};
 use crate::outbound_executor::{AxumOutboundExecutor, AxumOutboundExecutorHandle};
 pub use crate::run_options::AxumRunOptions;
@@ -779,6 +780,7 @@ where
     {
         log::warn!(target: BOOT_LOG_TARGET, "application head limits exceed Axum raw ingress limits; the parser rejects first");
     }
+    let after_response = AfterResponseTracker::default();
     let session = NativeSession::new(native.diagnostics, native.request_records)?;
     let mut service = AxumServiceState::with_native_transport(
         app,
@@ -789,7 +791,8 @@ where
         native.policy,
         native.geo,
     )
-    .with_phase(reader.clone());
+    .with_phase(reader.clone())
+    .with_after_response_tracker(after_response.clone());
     if let Some(selection) = native.ja4 {
         service = service.with_ja4_selection(selection);
     }
@@ -867,8 +870,10 @@ where
         tasks.clear();
         outcome
     } else {
-        drain_tasks(&mut tasks, grace, signals, outcome).await
+        drain_tasks(&mut tasks, &after_response, grace, signals, outcome).await
     };
+    // Pending tasks are cancelled when the executor drops, whichever way shutdown ended.
+    after_response.warn_abandoned();
     // Service/registry clones are dropped only after every owned connection settles.
     drop(service);
     result
@@ -880,6 +885,7 @@ where
 )]
 async fn drain_tasks(
     tasks: &mut Connections,
+    after_response: &AfterResponseTracker,
     grace: Duration,
     signals: &mut Option<Signals>,
     mut outcome: anyhow::Result<()>,
@@ -913,6 +919,22 @@ async fn drain_tasks(
         }
     }
     tasks.clear();
+    // Every connection has settled, so no handler can register more work. Tasks share the grace.
+    // An idle tracker wins over a deadline that passed while the select was being set up.
+    if outcome.is_ok() {
+        tokio::select! {
+            biased;
+            signal = next_signal(signals) => {
+                log_native_lifecycle(LifecyclePhase::Draining, "forced_stop", grace, true);
+                outcome = Err(signal.err().unwrap_or_else(|| failure("shutdown", "signal", "forced stop")));
+            }
+            () = after_response.wait_idle() => {}
+            () = sleep_until(deadline) => {
+                log_native_lifecycle(LifecyclePhase::Draining, "grace_exhausted", grace, true);
+                outcome = Err(failure("shutdown", "budget", "grace exhausted"));
+            }
+        }
+    }
     outcome
 }
 

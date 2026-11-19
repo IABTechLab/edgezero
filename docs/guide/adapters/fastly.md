@@ -498,6 +498,17 @@ response-egress capabilities at BestEffort.
 See the [Streaming guide](/guide/streaming) and
 [capability matrix](/guide/capabilities#outbound-matrix) for the exact boundary.
 
+## After-Response Tasks
+
+`ctx.after_response(budget, task)` queues the task for the current request. After the response is
+sent, and before the request callback returns, the adapter drives queued tasks in the same outbound
+scope, so outbound requests and timers work. Each budget is checked when the task yields to the
+adapter's progress driver; a blocked hostcall cannot be preempted. Tasks delay the next request on
+a reused `serve_app` instance. When delivery did not commit and the caller may send its own native
+response, the tasks have already run by the time the lifecycle returns. Requests converted with the
+public `into_core_request` outside a lifecycle get no scheduler, so registration returns `501`.
+A handle retained from an earlier request is rejected rather than queued into a later one.
+
 ## Testing
 
 Run contract tests for the Fastly adapter:

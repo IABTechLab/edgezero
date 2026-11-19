@@ -2038,6 +2038,7 @@ fn owns_managed_deploy(context: &AdapterDeployContext) -> bool {
 impl Adapter for FastlyCliAdapter {
     fn capability(&self, capability: Capability) -> CapabilitySupport {
         match capability {
+            Capability::AfterResponseTasks => CapabilitySupport::BoundedCooperative,
             Capability::IngressAdmission
             | Capability::OutboundAuthorityOverride
             | Capability::OutboundCacheBypass
@@ -6991,6 +6992,10 @@ mod tests {
     )]
     fn adapter_capability_matrix_matches_outbound_spec() {
         for (capability, support) in [
+            (
+                Capability::AfterResponseTasks,
+                CapabilitySupport::BoundedCooperative,
+            ),
             (
                 Capability::ConfigReadAllocationBounds,
                 CapabilitySupport::Unsupported,

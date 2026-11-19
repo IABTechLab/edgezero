@@ -84,6 +84,8 @@ impl BakedManifest {
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Capability {
+    /// Bounded tasks that start after the response leaves the adapter.
+    AfterResponseTasks,
     BufferedResponseContentLength,
     ConfigReadAllocationBounds,
     ConfigReadDeadlines,
@@ -130,6 +132,7 @@ impl Capability {
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::AfterResponseTasks => "after-response-tasks",
             Self::BufferedResponseContentLength => "buffered-response-content-length",
             Self::ConfigReadAllocationBounds => "config-read-allocation-bounds",
             Self::ConfigReadDeadlines => "config-read-deadlines",
@@ -2035,6 +2038,7 @@ env = "APP_TOKEN"
         let source = r#"
 [capabilities]
 required = [
+    "after-response-tasks",
     "buffered-response-content-length",
     "config-read-allocation-bounds",
     "config-read-deadlines",
@@ -2071,6 +2075,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
 "#;
         let loader = ManifestLoader::try_load_from_str(source).expect("capability manifest");
         let expected = [
+            Capability::AfterResponseTasks,
             Capability::BufferedResponseContentLength,
             Capability::ConfigReadAllocationBounds,
             Capability::ConfigReadDeadlines,
@@ -2111,6 +2116,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             )
         );
         for (capability, expected_name) in expected.iter().zip([
+            "after-response-tasks",
             "buffered-response-content-length",
             "config-read-allocation-bounds",
             "config-read-deadlines",

@@ -332,6 +332,7 @@ impl Hooks for FixtureApp {
             .get("/stream", endless_stream)
             .get("/flood", flood)
             .get("/after", after)
+            .get("/after-task", after_task)
             .get("/write", write)
             .get("/read", read)
             .get("/alias", alias)
@@ -818,6 +819,20 @@ async fn after() -> Result<&'static str, EdgeError> {
 }
 
 #[action]
+async fn after_task(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+    let millis = env::var("FIXTURE_TASK_MILLIS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(500);
+    ctx.after_response(Duration::from_secs(30), async move {
+        let _guard = WorkGuard("AFTER_TASK_DROPPED");
+        sleep(Duration::from_millis(millis)).await;
+        println!("AFTER_TASK_DONE");
+    })?;
+    Ok("after-task-queued")
+}
+
+#[action]
 async fn finite(ctx: RequestContext) -> Result<&'static str, EdgeError> {
     let observed = reader(&ctx)?;
     let _guard = WorkGuard("FINITE_DROPPED");
@@ -826,7 +841,11 @@ async fn finite(ctx: RequestContext) -> Result<&'static str, EdgeError> {
         sleep(Duration::from_millis(5)).await;
     }
     println!("DRAINING");
-    sleep(Duration::from_millis(80)).await;
+    let millis = env::var("FIXTURE_FINITE_MILLIS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(80);
+    sleep(Duration::from_millis(millis)).await;
     Ok("finite-complete")
 }
 

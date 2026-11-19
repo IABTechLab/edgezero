@@ -38,6 +38,7 @@ use tokio::sync::watch;
 #[cfg(test)]
 use tower::Service as TowerService;
 
+use crate::after_response::{AfterResponseTracker, request_tasks};
 #[cfg(test)]
 use crate::connection::{ConnectionExit, serve_http1};
 use crate::context::AxumRequestContext;
@@ -67,6 +68,7 @@ pub(crate) struct AxumIngressAbort;
 #[derive(Clone)]
 pub(crate) struct AxumServiceState {
     activity: Option<ConnectionActivity>,
+    after_response: AfterResponseTracker,
     app: Arc<App>,
     config_registry: Option<ConfigRegistry>,
     config_store_handle: Option<ConfigStoreHandle>,
@@ -129,6 +131,7 @@ impl AxumServiceState {
             .or_else(|| initialize(app.monotonic_clock()));
         Self {
             activity: None,
+            after_response: AfterResponseTracker::default(),
             app: Arc::new(app),
             executor,
             config_registry: None,
@@ -275,6 +278,12 @@ impl AxumServiceState {
         self
     }
 
+    /// Shares the lifecycle owner's tracker so shutdown can drain after-response tasks.
+    pub(crate) fn with_after_response_tracker(mut self, tracker: AfterResponseTracker) -> Self {
+        self.after_response = tracker;
+        self
+    }
+
     pub(crate) fn with_phase(mut self, phase: watch::Receiver<LifecyclePhase>) -> Self {
         self.phase = Some(phase);
         self
@@ -392,6 +401,12 @@ impl AxumServiceState {
         if let Some(registry) = secret_registry {
             core_request.extensions_mut().insert(registry);
         }
+
+        // Dropping `release` starts this request's after-response tasks: normally when Hyper
+        // drops the response body, or here if this future is cancelled before a body exists.
+        let (after_response, release) =
+            request_tasks(self.executor.clone(), self.after_response.clone());
+        core_request.extensions_mut().insert(after_response);
         let egress = app
             .dispatch_admitted_with_client_info(
                 prepared,
@@ -401,7 +416,9 @@ impl AxumServiceState {
                 client_info,
             )
             .await;
-        prepare_native_egress(egress, connection, guard).await
+        let mut response = prepare_native_egress(egress, connection, guard).await;
+        response.body_mut().release_after_response_on_drop(release);
+        response
     }
 
     async fn dispatch_request(
