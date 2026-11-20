@@ -1,0 +1,2 @@
+# Unified patches contain single-space context lines; check whitespace in the applied source.
+patches/viceroy/*.patch -whitespace

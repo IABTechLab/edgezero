@@ -9,6 +9,8 @@
 //! Every segment is lower-cased on parse, and lookup arguments are lower-cased
 //! before matching — callers pass lower-case logical ids and get a
 //! case-insensitive match against the upper-case env-var convention.
+//! On Windows the prefix also follows the process environment's case-insensitive
+//! key identity; Unix prefixes remain case-sensitive.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -66,7 +68,7 @@ impl EnvConfig {
     {
         let mut entries = BTreeMap::new();
         for (key, value) in vars {
-            let Some(rest) = key.as_ref().strip_prefix(PREFIX) else {
+            let Some(rest) = strip_config_prefix(key.as_ref(), cfg!(windows)) else {
                 continue;
             };
             let segments: Vec<String> =
@@ -90,6 +92,19 @@ impl EnvConfig {
             .map(|seg| seg.to_ascii_lowercase())
             .collect();
         self.entries.get(&path).map(String::as_str)
+    }
+
+    /// Enumerate relative key paths in a configuration namespace, without values.
+    #[inline]
+    pub fn keys_below(&self, prefix: &[&str]) -> impl Iterator<Item = Vec<&str>> {
+        let folded_prefix: Vec<_> = prefix
+            .iter()
+            .map(|part| part.to_ascii_lowercase())
+            .collect();
+        self.entries.keys().filter_map(move |key| {
+            key.strip_prefix(folded_prefix.as_slice())
+                .map(|suffix| suffix.iter().map(String::as_str).collect())
+        })
     }
 
     /// `EDGEZERO__LOGGING__ENDPOINT`. Adapters that wire a platform-specific
@@ -254,7 +269,7 @@ where
 }
 
 fn normalized_merge_key(key: &str) -> String {
-    if key.starts_with(PREFIX) {
+    if strip_config_prefix(key, cfg!(windows)).is_some() {
         key.to_ascii_uppercase()
     } else {
         key.to_owned()
@@ -269,6 +284,18 @@ fn is_blank_or_control(value: &str) -> bool {
     value.is_empty()
         || value.chars().all(char::is_whitespace)
         || value.chars().any(char::is_control)
+}
+
+fn strip_config_prefix(key: &str, case_insensitive: bool) -> Option<&str> {
+    if case_insensitive {
+        let prefix = key.get(..PREFIX.len())?;
+        if !prefix.eq_ignore_ascii_case(PREFIX) {
+            return None;
+        }
+        key.get(PREFIX.len()..)
+    } else {
+        key.strip_prefix(PREFIX)
+    }
 }
 
 #[cfg(test)]
@@ -327,6 +354,31 @@ mod tests {
             ("EDGEZERO__LOGGING__LEVEL", "debug"),
             ("PATH", "/usr/bin"),
         ])
+    }
+
+    #[test]
+    fn prefix_matching_preserves_platform_key_identity() {
+        for (key, exact, folded) in [
+            (
+                "EDGEZERO__ADAPTER__INGRESS__MAX_CONNECTIONS",
+                Some("ADAPTER__INGRESS__MAX_CONNECTIONS"),
+                Some("ADAPTER__INGRESS__MAX_CONNECTIONS"),
+            ),
+            (
+                "edgezero__ADAPTER__INGRESS__MAX_CONNECTIONS",
+                None,
+                Some("ADAPTER__INGRESS__MAX_CONNECTIONS"),
+            ),
+            ("EdGeZeRo__adapter__port", None, Some("adapter__port")),
+            ("EDGEZERO_ADAPTER", None, None),
+            ("short", None, None),
+            ("EDGEZERO\u{e9}__adapter", None, None),
+        ] {
+            assert_eq!(strip_config_prefix(key, false), exact);
+            assert_eq!(strip_config_prefix(key, true), folded);
+        }
+        let config = EnvConfig::from_vars([("edgezero__ADAPTER__PORT", "9090")]);
+        assert_eq!(config.adapter_port(), cfg!(windows).then_some("9090"));
     }
 
     #[test]
@@ -549,5 +601,20 @@ mod tests {
         assert_eq!(cfg.adapter_host(), Some("good"));
         assert_eq!(cfg.adapter_port(), None);
         assert_eq!(cfg.get(&["adapter"]), None);
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::EnvConfig;
+    #[test]
+    fn prefix_keys_are_case_folded_and_do_not_include_values() {
+        let env = EnvConfig::from_vars([
+            ("EDGEZERO__ADAPTER__GEO__PROVIDER", "kv"),
+            ("EDGEZERO__ADAPTER__GEO__TYPO", "private"),
+            ("EDGEZERO__STORES__KV__GEO__NAME", "binding"),
+        ]);
+        let keys: Vec<_> = env.keys_below(&["ADAPTER", "geo"]).collect();
+        assert_eq!(keys, vec![vec!["provider"], vec!["typo"]]);
     }
 }

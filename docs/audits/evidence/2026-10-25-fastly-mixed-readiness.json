@@ -1,0 +1,170 @@
+{
+  "schema": 1,
+  "execution_date": "2026-10-25",
+  "qualification": false,
+  "edgezero_base_revision": "92daf00ab8bb76b2d4791e727e698e3304cc15ca",
+  "source_state": "working-tree characterization; not a frozen-candidate build",
+  "execution_environment": "Local macOS, not an isolated-load benchmark; source verification could run concurrently. No scheduling cause or tail bound is inferred.",
+  "command": "CARGO_NET_OFFLINE=true SSL_CERT_FILE=/etc/ssl/cert.pem VICEROY_BIN=<explicit stock or repaired binary> scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness --output <new empty directory>",
+  "deployed": false,
+  "external_requests": false,
+  "runtime_version": "0.21.0",
+  "runtime_upstream_revision": "a69d982d1d95e13c0fc9f92683b9118639bb4b04",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "fastly_sdk": "0.13.1",
+  "deadline_us": 500000,
+  "tolerance_us": 5000,
+  "production_transport_changed": false,
+  "runtime_pins_changed": false,
+  "historical_evidence_rewritten": false,
+  "runs": [
+    {
+      "id": "repaired-before-formatting",
+      "directory": "/private/tmp/edgezero-fastly-mixed-repaired-20261025",
+      "exit_code": 1,
+      "runtime_binary_sha256": "98ea0536478ce2e641f093b2619b7ac7c6c237402f140e5792d854575abc7100",
+      "guest_sha256": "2cfcc3fa6c7813132516cbda49254749f2865164fa2dcaff25b09f8138acea7b",
+      "guest_bytes": 787972,
+      "events_sha256": "d9fbdce2850b1f34e645ee26044b6cfbb7dd1a2eb5adb2ac6eeac98ae43c0e78",
+      "log_sha256": "a64d3bddf3dab849d8ff28d1c29c1d3ce5eb48aca29326c24a8f2645792ec2c5",
+      "body_probes": 153,
+      "origin_requests": 177,
+      "progress_probes": 18,
+      "progress_origin_requests": 30,
+      "full_capacity_progress_probes": 18,
+      "mixed_selection_probes": 12,
+      "maximum_completion_us": 518771,
+      "source_error_losses": 0,
+      "new_truncation_errors_preserved": 6,
+      "timer_controls": 72,
+      "late_timer_controls": 1,
+      "late_probes": [
+        {
+          "case": "mixed-head-body",
+          "mode": "selected",
+          "consumption": "buffered",
+          "read_limit": 16384,
+          "repetition": 0,
+          "completed_us": 508002
+        },
+        {
+          "case": "mixed-head-body",
+          "mode": "selected",
+          "consumption": "streamed",
+          "read_limit": 16384,
+          "repetition": 1,
+          "completed_us": 518771
+        }
+      ],
+      "validation_failures": [
+        "mixed/full-buffer progress: 2 readiness leg(s) failed:\nmixed-head-body/selected/buffered/16384/0: reordered or late operation\nmixed-head-body/selected/streamed/16384/1: missing/late probe completion"
+      ],
+      "qualification": false
+    },
+    {
+      "id": "stock-formatted",
+      "directory": "/private/tmp/edgezero-fastly-mixed-stock-20261025",
+      "exit_code": 1,
+      "runtime_binary_sha256": "751ff2c1a83063b109bc212b95be5f52e5ab6284b9027fa03aa229087eba3f30",
+      "guest_sha256": "45f4f541a2338bd923ad33afcf4677a0619b5889778f602f8817cc7d2f97f392",
+      "guest_bytes": 787988,
+      "events_sha256": "ab2a563c36d2bb6347abcd8ce5a59a63f6fa50524d2548822cb4fe4fcc97666d",
+      "log_sha256": "98d15fd83e123825f01183f992920d91cb3b602a76a4196cbcfbee0be4ebafe4",
+      "body_probes": 153,
+      "origin_requests": 177,
+      "progress_probes": 18,
+      "progress_origin_requests": 30,
+      "full_capacity_progress_probes": 18,
+      "mixed_selection_probes": 12,
+      "maximum_completion_us": 593907,
+      "source_error_losses": 30,
+      "new_truncation_errors_preserved": 0,
+      "timer_controls": 72,
+      "late_timer_controls": 2,
+      "late_probes": [
+        {
+          "case": "exhausted",
+          "mode": "selected",
+          "consumption": "buffered",
+          "read_limit": 1,
+          "repetition": 0,
+          "completed_us": 517183
+        },
+        {
+          "case": "mixed-head-body",
+          "mode": "selected",
+          "consumption": "streamed",
+          "read_limit": 16384,
+          "repetition": 2,
+          "completed_us": 593907
+        }
+      ],
+      "validation_failures": [
+        "readiness: 25 readiness leg(s) failed:\ntruncated/selected/buffered/1/0: wrong case terminal\ntruncated/selected/buffered/16384/0: wrong case terminal\ntruncated/selected/streamed/1/0: wrong case terminal\ntruncated/selected/streamed/16384/0: wrong case terminal\nexhausted/selected/buffered/1/0: reordered or late operation\nmalformed-body/selected/buffered/1/0: wrong case terminal\nmalformed-body/selected/buffered/16384/0: wrong case terminal\nmalformed-body/selected/streamed/1/0: wrong case terminal\nmalformed-body/selected/streamed/16384/0: wrong case terminal\ntruncated/selected/buffered/1/1: wrong case terminal\ntruncated/selected/buffered/16384/1: wrong case terminal\ntruncated/selected/streamed/1/1: wrong case terminal\ntruncated/selected/streamed/16384/1: wrong case terminal\nmalformed-body/selected/buffered/1/1: wrong case terminal\nmalformed-body/selected/buffered/16384/1: wrong case terminal\nmalformed-body/selected/streamed/1/1: wrong case terminal\nmalformed-body/selected/streamed/16384/1: wrong case terminal\ntruncated/selected/buffered/1/2: wrong case terminal\ntruncated/selected/buffered/16384/2: wrong case terminal\ntruncated/selected/streamed/1/2: wrong case terminal\ntruncated/selected/streamed/16384/2: wrong case terminal\nmalformed-body/selected/buffered/1/2: wrong case terminal\nmalformed-body/selected/buffered/16384/2: wrong case terminal\nmalformed-body/selected/streamed/1/2: wrong case terminal\nmalformed-body/selected/streamed/16384/2: wrong case terminal\nmixed/full-buffer progress: 7 readiness leg(s) failed:\nfull-body-error/selected/buffered/16384/0: wrong case terminal\nfull-body-error/selected/streamed/16384/0: wrong case terminal\nfull-body-error/selected/buffered/16384/1: wrong case terminal\nfull-body-error/selected/streamed/16384/1: wrong case terminal\nmixed-head-body/selected/streamed/16384/2: reordered or late operation\nfull-body-error/selected/buffered/16384/2: wrong case terminal\nfull-body-error/selected/streamed/16384/2: wrong case terminal"
+      ],
+      "qualification": false
+    },
+    {
+      "id": "repaired-formatted",
+      "directory": "/private/tmp/edgezero-fastly-mixed-repaired-formatted-20261025",
+      "exit_code": 2,
+      "runtime_binary_sha256": "98ea0536478ce2e641f093b2619b7ac7c6c237402f140e5792d854575abc7100",
+      "guest_sha256": "45f4f541a2338bd923ad33afcf4677a0619b5889778f602f8817cc7d2f97f392",
+      "guest_bytes": 787988,
+      "events_sha256": "d6c89d5d29f12808c74ce8cb86ef0a147394a65670efba7adb6f6d40246b0cc4",
+      "log_sha256": "ceb45162882e4bcffc033e5e010df7a23ad42ba1b506fff8978b6bd5a7c60369",
+      "body_probes": 153,
+      "origin_requests": 177,
+      "progress_probes": 18,
+      "progress_origin_requests": 30,
+      "full_capacity_progress_probes": 18,
+      "mixed_selection_probes": 12,
+      "maximum_completion_us": 504369,
+      "source_error_losses": 0,
+      "new_truncation_errors_preserved": 6,
+      "timer_controls": 72,
+      "late_timer_controls": 0,
+      "late_probes": [],
+      "validation_failures": [],
+      "qualification": false
+    }
+  ],
+  "formatted_pair_identical_guest": true,
+  "selected_formatted_source_files": [
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_readiness.rs",
+      "sha256": "1471fef455cf0d89899eb6e604eba3b3c24febf1fdc5066bf89065bc86836e3a"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/net/readiness.rs",
+      "sha256": "3d819038b2bd9e711addd4105bd8831f45e76ec23cf8d48a4cf6acadd5c3ea15"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/readiness.rs",
+      "sha256": "fc83764dc9e55ff32e6c7b38f3cd2f55a4f856bb95eca5281d84ee05c7319bd6"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/Cargo.lock",
+      "sha256": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee"
+    },
+    {
+      "path": "patches/viceroy/0.21.0-body-readiness.patch",
+      "sha256": "8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759"
+    }
+  ],
+  "retained_probes": {
+    "path": "docs/audits/evidence/2026-10-25-fastly-mixed-readiness-probes.jsonl",
+    "sha256": "43fad96badc17b8c7824c2a01d68273e68d7f250dd9a153be5ceac94f20feb33",
+    "records": 675,
+    "body_probes": 459,
+    "timer_controls": 216
+  },
+  "interpretation": [
+    "The formatted pair uses identical guest bytes. The earlier repaired run precedes formatting and has a distinct guest identity; it is retained, not represented as an identical-guest comparison.",
+    "The repaired runtime preserves all selected source errors and completes the mixed ready sibling before the pending sibling expires. Every supplementary probe records at least one full 16 KiB read.",
+    "The first repaired run fails two unchanged timing checks. The formatted repaired run passes both local matrices but exits 2, unverified; no tail bound or timing guarantee follows.",
+    "Stock loses 24 baseline and six new full-body truncation errors and retains its timing failures. No observation is backdated, widened or overwritten.",
+    "Three cases and two-slot readiness do not prove fairness for arbitrary continuously-ready populations, production read-size approval, resource bounds or hosted transport teardown.",
+    "Backend registration remains outside this diagnostic window and fixed two-second timers are not a proof of the B31 production policy. No production engine, runtime pin, capability or G2 qualification is promoted."
+  ]
+}

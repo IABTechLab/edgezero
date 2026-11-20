@@ -34,11 +34,11 @@ crates/my-app-adapter-spin/
 The Spin entrypoint wires the adapter via `#[http_service]`:
 
 ```rust
-use spin_sdk::{http::IntoResponse, http::Request, http_service};
+use spin_sdk::{http::Request, http_service};
 use my_app_core::App;
 
 #[http_service]
-async fn handle(req: Request) -> anyhow::Result<impl IntoResponse> {
+async fn handle(req: Request) -> anyhow::Result<edgezero_adapter_spin::SpinResponse> {
     edgezero_adapter_spin::run_app::<App>(req).await
 }
 ```
@@ -46,6 +46,11 @@ async fn handle(req: Request) -> anyhow::Result<impl IntoResponse> {
 `run_app` reads the portable store metadata baked into `App` by the `app!`
 macro plus `EDGEZERO__*` environment variables; it does not require an
 `edgezero.toml` to be present at runtime.
+If route/state assembly or `Hooks::configure` fails, `run_app` and `run_app_with_platform`
+deliver the typed error's status and standard JSON body through canonical detached egress.
+They release the unread request, use no failed app's policies or headers, and log the full failure
+once on `edgezero::boot`. Internal details stay off the wire. The finite default write deadline
+starts before assembly; see [application assembly](/guide/handlers#configuring-the-application-lifecycle).
 
 ## Building
 
@@ -79,6 +84,31 @@ edgezero deploy --adapter spin
 spin deploy --from crates/my-app-adapter-spin
 ```
 
+## Outbound HTTP
+
+`SpinOutboundClient` uses the WASI HTTP 0.3 interfaces directly so request-body production,
+response completion, limits, and the guest-visible deadline race share one owner. Generated
+`spin.toml` files default `allowed_outbound_hosts` to `https://*:*`; cleartext requires an explicit
+manifest declaration.
+
+Spin exposes raw header bytes and drives isolated batch slots in completion order. Cache bypass
+adds no synthetic origin header because the adapter owns no intermediary cache. A wire-authority
+override is rejected during preflight: WASI HTTP uses the same authority for connection routing,
+so Spin cannot preserve URI-owned routing and TLS identity while changing only the HTTP authority.
+Unsupported Image Optimizer settings are rejected first, then an unsupported authority override,
+before portable method/body validation and budget selection. A pending GET/HEAD source or invalid
+response policy cannot mask the authority diagnostic or trigger a body read. The shared facade
+prepares contexts and settles unknown GET/HEAD sources before dispatch. Begin and batches schedule
+complete exchanges with the WASIp3 executor before returning their completion receivers; later
+collection does not start transport work or resample the batch start.
+Deadline, batch cancellation, and streamed-upload cancellation remain BestEffort until host
+teardown has a documented observed bound, and provider phase-timer defaults may prevent a fully
+elastic budget. Downstream response
+delivery owns the raw WASI response, body, and result writers in one coordinator and preserves
+lazy body production under host backpressure. Successful close is a host handoff, not proof of
+client receipt, so response-egress capabilities also remain BestEffort. See
+[Capabilities](/guide/capabilities).
+
 ## KV Storage
 
 Spin KV is **label-backed and multi-store** — each logical id in
@@ -105,7 +135,8 @@ full rationale):
 - **TTL is unsupported.** Spin's `key_value::Store::set` accepts no
   expiry. `put_bytes_with_ttl` returns
   `KvError::Unsupported { operation: "put_bytes_with_ttl" }` (mapped to
-  HTTP 501); never silently strips the TTL.
+  HTTP 501) after a successful open; a failed declared binding returns its typed
+  `OpenFailed` reason first. It never silently strips the TTL.
 - **Listing is capped.** `Store::get_keys()` is unbounded, so the
   adapter materialises the key list, filters by prefix, sorts, and pages
   client-side. A `max_list_keys` cap (default `1000`, override via
@@ -204,9 +235,13 @@ Schema-coupling note: the SQLite writer uses the exact `spin_key_value`
 schema and `INSERT … ON CONFLICT DO UPDATE` statement vendored from
 spinframework/spin's `crates/key-value-spin/src/store.rs`. A contract
 test in `edgezero-adapter-spin/src/cli/push_sqlite.rs` asserts
-byte-equality against the upstream string, and the workspace's
-`spin-sdk = "~7.0"` pin blocks any Spin minor bump that would change
-the schema until the operator opts in.
+byte-equality against the upstream Spin 4.1.0 strings. The workspace's
+exact registry SDK 8.0.0 pin, shared with the demo, reusable fixture and generator,
+makes every SDK upgrade explicit. The
+[dependency audit](../../audits/2026-10-27-spin-sdk-eager-progress.md) records the executor
+repair and upstream PR; callers use the SDK's `wasip3::spawn_local` re-export.
+The CLI warns when the installed Spin runtime major is outside the
+schema-verified 2.x through 4.x range.
 
 ```bash
 # Local dev: writes through to .spin/sqlite_key_value.db.
@@ -261,30 +296,139 @@ surfaces before `provision` / `config push` run.
 
 ## Logging
 
-`edgezero_adapter_spin::init_logger()` is a no-op today because Spin manages its own
-logging internally; `run_app` calls it unless your app sets `owns_logging = true`. An
-`[adapters.spin.logging]` table in `edgezero.toml` is not consumed by the Spin runtime.
-View output through `spin up` or your Spin host's log files.
+`run_app` installs a Rust `log` stderr backend before assembly unless `owns_logging = true`.
+It resolves `EDGEZERO__LOGGING__LEVEL` from the runtime environment: absent or invalid means
+`Info`, and valid values are case-insensitive. The manifest's `[adapters.spin.logging]` table
+is not consumed by the runtime. View stderr through `spin up` or your host's log files.
+`edgezero::boot` preserves Error/Warn independently of ordinary Error/Off.
 
-::: tip Logging status
-Spin logging is handled by the runtime; install your own `log` implementation in the
-entrypoint if you need structured output.
-:::
+Manual lifecycle owners call `init_logger(level)?`; the parameterless no-op API is removed.
+Repeated same-level setup is idempotent. Changed instance configuration or a foreign installed
+logger returns a typed error instead of replacing filters during concurrent work.
 
-## Proxy Client
+To own logging, install your backend before entering the runner and set `owns_logging = true`.
+Apply both backend and facade filters, using `resolve_logging_level(&EnvConfig)` and the boot
+constants as appropriate. EdgeZero makes no logging-state changes in that mode.
 
-The Spin adapter forwards outbound requests through `spin_sdk::http::send`:
+Inside a hand-written `Hooks` implementation, obtain the same compile-time logging
+metadata as `app!` without generating routes:
 
 ```rust
-use edgezero_adapter_spin::proxy::SpinProxyClient;
-use edgezero_core::proxy::ProxyService;
-
-let response = ProxyService::new(SpinProxyClient).forward(request).await?;
+fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+    edgezero_core::logging_config!("edgezero.toml", adapter)
+}
 ```
 
-Proxied responses carry `x-edgezero-proxy: spin`. Every upstream host must be listed
-in the component's `allowed_outbound_hosts` in `spin.toml` or the send fails at
-runtime.
+The path is relative to the consuming crate's `CARGO_MANIFEST_DIR` (for example,
+`"../../edgezero.toml"` in scaffolded core crates). This lookup performs no runtime
+manifest I/O or parsing. It does not initialize a logger, configure filters, read
+runtime overrides or change `owns_logging`. Existing runner and application-owned
+logging responsibilities remain unchanged.
+
+## Geographic context from a pinned KV dataset
+
+Spin has no native country/region metadata. Managed `run_app`, `run_app_with_platform`
+and `dispatch_app` can resolve `ctx.geo()` from an immutable KV dataset. Select it in
+the application's baked `edgezero.toml`; no adapter-specific `Hooks::configure` is needed:
+
+```toml
+[stores.kv]
+ids = ["geo"]
+default = "geo"
+
+[adapters.spin.geo]
+provider = "kv"
+store_id = "geo"
+pin = "<generation>@<manifest-sha256>" # Replace with the verified dataset receipt.
+reader_ip = "authenticated-header"
+credential_variable = "geo_token"
+lookup_timeout_ms = 250
+```
+
+The provider defaults to off. `EDGEZERO__ADAPTER__GEO__PROVIDER`, `__STORE_ID`,
+`__PIN`, `__READER_IP`, `__CREDENTIAL_VARIABLE` and `__LOOKUP_TIMEOUT_MS` override
+matching manifest defaults. A timeout must be 1–30000 milliseconds. Invalid pins,
+undeclared logical bindings, unknown geo override keys and mixed provider settings
+are configuration errors; `provider = "off"` must not retain source settings.
+Spin rejects Axum's peer/CloudFront policy and `max_in_flight` fields.
+
+Declare the physical store and credential variable in the consuming component's
+`spin.toml` (replace `my-app` with its component id):
+
+```toml
+[variables]
+geo_token = { required = true, secret = true }
+
+[component.my-app]
+key_value_stores = ["geo_runtime"]
+
+[component.my-app.variables]
+geo_token = "{{ geo_token }}"
+
+[component.my-app.environment]
+EDGEZERO__STORES__KV__GEO__NAME = "geo_runtime"
+```
+
+Supply the variable through the deployment's secret provider. Use a high-entropy
+credential of 32–128 ASCII bytes in `0x21`–`0x7e`, never source, logs or command-line
+arguments. The adapter loads it once per admitted request with a syntactically valid
+token, including wrong tokens. Remote variable providers can incur network cost on
+each read; qualify latency and restrict direct origin access. Rotation requires
+coordinating the proxy and variable update.
+
+A trusted proxy must remove every viewer-supplied instance of these headers and
+replace them with its own values:
+
+| Header                 | Value                                                         |
+| ---------------------- | ------------------------------------------------------------- |
+| `x-edgezero-geo-ip`    | One original visitor IP, such as `192.0.2.1` or `2001:db8::1` |
+| `x-edgezero-geo-token` | The credential shared with Spin                               |
+
+The IP must have no port, list, whitespace or zone identifier. IPv4-mapped IPv6 is
+canonicalized. The proxy needs no geographic database. Protect its transport to a
+fixed Spin origin with TLS or an isolated network, redact both fields in logs, and
+disable credential-bearing redirects. A credential authenticates its holder; the
+operator remains responsible for the claimed visitor IP and network topology.
+`Forwarded`, `X-Forwarded-For`, country headers and `spin-client-addr` are not geo
+trust sources.
+
+Publish the dataset through the separate [Spin operator loader](https://github.com/IABTechLab/edgezero/blob/main/examples/geo-spin-loader/README.md)
+after building and verifying it with the [KV geo tools](https://github.com/IABTechLab/edgezero/blob/main/examples/geo-kv-prototype/README.md).
+The loader uses ordinary binary KV writes, checks immutable conflicts, reads writes
+back, publishes the manifest last and verifies the full tree. It is a temporary
+loopback application, never a route in the serving app. Use the exact same named
+store and backend configuration for loading and serving; local Spin storage requires
+an absolute database path. Select the pin only after verification through the serving
+identity/path. Rollback requires re-verifying the previous permitted generation.
+
+Serving performs exact-key reads only. Each admitted/authenticated request opens the
+pinned manifest, verifies both roots, and looks up the visitor IP through the shared
+portable resolver. All SDK handles and validated cache bytes are request-local,
+including retained `dispatch_app` applications. This repeats manifest/root reads on
+every request; measure cold-request latency and capacity with the selected backend.
+The local cache is limited to 1 MiB/16 entries, objects to 384 KiB and paths to three
+objects. The SDK materializes values before core validates their size, so these are
+not hard host allocation limits. Platform controls govern aggregate concurrency.
+
+One KV deadline covers preparation and lookup. Secret and KV work also share the
+remaining admitted request deadline. Expiry drops guest futures; it does not certify
+cancellation of host/backend work. There is no automatic fallback or previous-request
+result. Outcomes retain provider `kv`; a location has `GeoSource::Kv` and
+`GeoTrustBasis::AuthenticatedIngressHeader`:
+
+- Missing, duplicate, invalid or wrong credentials: `UntrustedIngress`.
+- Authenticated missing IP: `MissingReaderIp`; invalid or duplicate IP: `UntrustedIngress`.
+- Secret/backend errors, expired work, or missing/corrupt pinned objects: `ProviderFailure`.
+- A valid dataset gap: `NoMatch`; a source country unsupported by core: `UnsupportedGeography`.
+- A country without subdivision remains country-only.
+
+The adapter strips both private headers before admission, middleware and handlers,
+even when geo is off; original bytes still count toward header limits. Public header
+or extension mutations cannot change the private outcome. Configuration errors fail
+assembly; ordinary geo errors do not themselves choose an HTTP status or grant
+permission. Applications must define unavailable/error policy and geography-sensitive
+cache behavior, including error responses. Local runtime verification does not certify
+hosted proxy protection, data accuracy, licensed-data permissions or production load.
 
 ## Context Access
 
@@ -295,7 +439,7 @@ use edgezero_core::context::RequestContext;
 use edgezero_adapter_spin::context::SpinRequestContext;
 
 async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
-    if let Some(spin_ctx) = SpinRequestContext::get(ctx.request()) {
+    if let Some(spin_ctx) = ctx.extensions().get::<SpinRequestContext>() {
         let client_addr = spin_ctx.client_addr;
         let full_url = spin_ctx.full_url.as_deref();
         // ...
@@ -306,7 +450,63 @@ async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
 ```
 
 Spin exposes this data through the `spin-client-addr` and `spin-full-url` headers
-rather than a separate runtime object.
+rather than a separate runtime object. Spin appends its own copies after the
+client's headers, so a client can send the same names first. The context reads
+the last field of each, which is the runtime's.
+
+## Client info
+
+[`ctx.client_info()`](../handlers.md#client-metadata) has two operator-declared
+sources for the client address. Both are off by default, and every field is then
+`NotExposed`.
+
+| Mode                 | Use when                                   | Effective client                                          | Direct peer             |
+| -------------------- | ------------------------------------------ | --------------------------------------------------------- | ----------------------- |
+| Direct ingress       | Visitors connect to the Spin host directly | Last `spin-client-addr`, source `DirectPeer`              | The same socket address |
+| Authenticated header | A proxy you run speaks for the visitor     | The KV Geo authenticated IP, source `AuthenticatedHeader` | `NotExposed`            |
+
+Viewer TLS is `NotExposed` in every mode: Spin passes the scheme in
+`spin-full-url` but no protocol version or cipher. `ctx.ja4()` stays
+`NotExposed`.
+
+### Direct ingress
+
+```toml
+[adapters.spin.client_info]
+direct_ingress = true
+```
+
+The setting declares that the Spin host sets `spin-client-addr` and that the peer
+it reports is the visitor. The component cannot verify either:
+
+- Spin's documentation says some runtimes do not set the header. On such a host
+  every copy is client-supplied. `wasmtime serve` sets none.
+- Behind a proxy, such as an ingress controller under SpinKube, the peer is the
+  proxy, not the visitor. Use the authenticated header mode there.
+
+Only the last `spin-client-addr` field is read, as the `ip:port` or `[ipv6]:port`
+form Spin writes. No field is `Missing`. A last field that is not UTF-8 or not a
+socket address is `Rejected`; earlier fields and `X-Forwarded-For` are never used.
+
+### Authenticated header
+
+The [KV Geo selection](#geographic-context-from-a-pinned-kv-dataset) already
+admits one visitor IP from `x-edgezero-geo-ip`, authenticated by
+`x-edgezero-geo-token`. When it is selected, `client_info()` reports that same IP,
+so `ctx.geo()` and `client_info()` always describe one address.
+
+| Request                                               | `effective_client()`  |
+| ----------------------------------------------------- | --------------------- |
+| Valid token and one valid IP                          | `AuthenticatedHeader` |
+| No token                                              | `Missing`             |
+| Malformed, repeated or wrong token; unreadable secret | `Rejected`            |
+| Valid token, no IP                                    | `Missing`             |
+| Valid token, repeated or malformed IP                 | `Rejected`            |
+
+A KV lookup failure or timeout after authentication does not change the client.
+Declaring `direct_ingress = true` together with this Geo selection is a
+configuration error in `run_app` and `dispatch_app`: one says visitors connect
+directly, the other that a proxy speaks for them.
 
 ## Testing
 
@@ -314,7 +514,7 @@ Run contract tests for the Spin adapter:
 
 ```bash
 rustup target add wasm32-wasip2
-export CARGO_TARGET_WASM32_WASIP2_RUNNER="wasmtime run"
+export CARGO_TARGET_WASM32_WASIP2_RUNNER="wasmtime run -W component-model-async=y -S p3=y -S http=y"
 cargo test -p edgezero-adapter-spin --features spin --target wasm32-wasip2 --test contract
 ```
 
@@ -336,30 +536,76 @@ application logging before the cache's synchronous app constructor. Do not use a
 generic unkeyed static or hold a lock across an await.
 
 ```rust
-use edgezero_core::app::{App, Hooks};
-use spin_sdk::{http::{IntoResponse, Request}, http_service};
+use edgezero_adapter_spin::{SPIN_PLATFORM, SpinResponse};
+use edgezero_core::{app::App, EdgeError, MonotonicClock};
+use my_app_core::App as MyApp;
+use spin_sdk::{http::Request, http_service};
 use std::sync::OnceLock;
 
 static APP: OnceLock<App> = OnceLock::new();
 
+fn retained_app() -> Result<&'static App, EdgeError> {
+    if let Some(app) = APP.get() {
+        return Ok(app);
+    }
+    let app = App::build::<MyApp>(SPIN_PLATFORM)?;
+    Ok(APP.get_or_init(|| app))
+}
+
 #[http_service]
-async fn handle(req: Request) -> anyhow::Result<impl IntoResponse> {
-    let app = APP.get_or_init(MyApp::build_app);
+async fn handle(req: Request) -> anyhow::Result<SpinResponse> {
+    // Install application-owned logging before attempting assembly.
+    let clock = MonotonicClock::default();
+    let start = clock.now();
+    let app = match retained_app() {
+        Ok(app) => app,
+        Err(error) => return Ok(edgezero_adapter_spin::request::send_assembly_error(
+            req, error, start, clock,
+        )?),
+    };
     edgezero_adapter_spin::dispatch_app::<MyApp>(app, req).await
 }
 ```
 
-The pinned SDK 7 macro exports a P3 HTTP interface. The `wasm32-wasip2` Rust target
+`App::build::<MyApp>(SPIN_PLATFORM)` returns `Result<App, EdgeError>` and invokes
+fallible `Hooks::configure` after installing platform metadata. For Akamai Functions,
+select `AKAMAI_FUNCTIONS_PLATFORM`; other hosts can supply metadata matching their
+configured limits. Only a successful app is cached, so a failed build can be retried.
+Concurrent construction attempts may build multiple candidates; only one is retained.
+The app must be built from the same `Hooks` type used by dispatch.
+
+`dispatch_app<A: Hooks>(&App, SpinRequest) -> anyhow::Result<SpinResponse>` returns
+the raw WASI response, not a collected SDK response. Each invocation resolves fresh
+registries and runs admission and response egress; the adapter's coordinator owns
+the body writer and transmission-result observation through terminal delivery.
+
+The pinned SDK 8 macro exports a P3 HTTP interface. The `wasm32-wasip2` Rust target
 name does not establish the component's HTTP lifecycle. Verify the emitted
-interface and host together. spin-sdk 7 requires Spin 4.1 or later. See Spin's
+interface and host together. SDK 8 requires Spin 4.1 or later. See Spin's
 [instance-reuse documentation](https://spinframework.dev/v4/http-trigger#controlling-instance-reuse)
 for the reuse and concurrency controls your host version supports.
 
 Test both sequential reuse and overlapping invocations in the same instance.
 Different guest instances are not evidence of concurrent isolation. Keep
-request/response bodies and pending operations invocation-local. Existing
-response buffering and stream collection limits still apply. Restore `run_app`
+request/response bodies, admission resources, delivery coordinators, and pending
+operations invocation-local. Standard response delivery remains lazy under host
+backpressure; retention adds no whole-response buffer or collection cap. Restore `run_app`
 and remove the cache to roll back; default generated entry points are unchanged.
+
+## After-response tasks
+
+Spin does not run after-response tasks. `ctx.after_response(budget, task)` with a positive budget
+returns `EdgeError::NotImplemented` (`501`) with the message
+`after-response tasks are not supported by the Spin adapter`, exported as
+`edgezero_adapter_spin::AFTER_RESPONSE_UNSUPPORTED`. The task is dropped without being polled.
+A zero budget is a programming error and returns `500`, as on every adapter that installs a
+scheduler. Every Spin entry point that converts a native request installs this error, including
+`run_app`, `dispatch_app` and `request::into_core_request`. Branch on the status or the
+`not_implemented` kind rather than the message (core's constant of the same name does not match
+on Spin), and do the work inline or elsewhere. An application
+that cannot run without the tasks can declare `after-response-tasks` under
+`[capabilities] required`, so `edgezero build`, `serve` and `deploy` refuse Spin. See the
+[after-response task matrix](/guide/capabilities#after-response-task-matrix).
 
 ## Runtime ingress metadata
 
@@ -369,8 +615,11 @@ comes from HTTP(S) URI scheme/authority, with runtime provenance.
 adapter-supplied ingress-origin facts. Runtime URI authority still identifies the client-requested host; it does not establish operator approval or ownership. Existing context fields and store/body behavior
 remain unchanged.
 
-The Spin 4.1 HTTP component fixture verifies methods, tested target spelling,
-duplicates and hook ordering through the actual converter. Spin 4.1's request
+The historical Spin 4.1 HTTP fixture observations imported from main
+`87456c70` cover methods, tested target spelling, duplicates and hook ordering
+through the converter. They are not evidence of a run with the merged
+candidate's pinned SDK source; rerun the fixture to establish that result.
+In that recorded runtime, request
 preparation requires UTF-8 header values; a Cookie containing FF returns 500
 before the component starts. This needs an upstream runtime fix and cannot be
 restored inside EdgeZero. Same-name runtime values are copied byte-for-byte,
@@ -380,10 +629,15 @@ component invocation: the `chunked` and `te-cl` probes expose no such field to
 the hook. The component cannot reconstruct that transport framing.
 
 Pure metadata tests execute on the host. The WASM contract suite runs with
-`wasmtime run`. The full WASM library test artifact
+`wasmtime run -W component-model-async=y -S p3=y -S http=y`.
+The full WASM library test artifact
 also imports Spin-specific host interfaces, so plain Wasmtime cannot execute
 that artifact. The real Spin HTTP fixture supplies runtime conversion evidence.
 See [the capability matrix](./overview#inbound-request-fidelity).
+
+Spin components never see the TLS handshake, so `ctx.ja4()` reports
+`Unavailable(NotExposed)`. See
+[Client TLS fingerprint](./overview#client-tls-fingerprint-ja4).
 
 ## Next Steps
 

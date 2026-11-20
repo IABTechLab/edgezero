@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "execution_date": "2026-11-02",
+  "status": "Local dynamic-backend timeout readback verified; hosted enforcement remains open",
+  "qualification": false,
+  "edgezero_base_revision": "775366fdac923135e8430b1e3dffebedc648ef7c",
+  "source_state": "working-tree acceptance coverage, not a frozen qualification record",
+  "upstream": {
+    "repository": "https://github.com/fastly/Viceroy",
+    "revision": "a69d982d1d95e13c0fc9f92683b9118639bb4b04",
+    "tag": "v0.21.0",
+    "lockfile_sha256": "d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a"
+  },
+  "patch": {
+    "path": "patches/viceroy/0.21.0-body-readiness.patch",
+    "sha256": "42ff805147e003e0bec6ec190a5e72cab2ef445582940818c056f2718162663d",
+    "scope": "Existing body-readiness repair plus dynamic connect-timeout retention and timeout getters in both guest ABIs. No network connect-timeout enforcement."
+  },
+  "build": {
+    "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "host": "aarch64-apple-darwin; Darwin 27.0.0",
+    "profile": "dev; debug=0; incremental=0; upstream opt-level=1",
+    "sdk": "fastly 0.13.1",
+    "runtime": "viceroy 0.21.0 with the explicitly selected tracked repair",
+    "host_binary_sha256": "7aaccb8145745ecd5b6c25bb32bb9f564ecf1e246f8550ae5ae3731819b42a7f",
+    "guest_binary_sha256": "5e78d00c061573703f525002e30250c0d76e3edfd5782a5880ba5530b4ec7d1f",
+    "outbound_source_sha256": "a48ecf537715ed7ae4bec0e76b1f3086237813feaab4fc614fba5900089283fb",
+    "guest_source_identity": "The new exact getter control uses immutable staged guest/runtime copies. Guest, runtime and the owned outbound.rs source hashes match before and after execution. The source hash covers that file, not a frozen whole-tree candidate; this remains unqualified characterization."
+  },
+  "controls": {
+    "prior_runtime_sdk_failure": {
+      "status": "failed as expected: get_connect_timeout_ms returned Unsupported",
+      "exit_code": 134,
+      "log": "/private/tmp/pr275-fastly-connect-readback-sdk-distinct-red.log",
+      "log_sha256": "2ae37d04c3d52fcf74266a8d2eb89292ff7f512a6dc248f40637747ef9f3e247",
+      "binary_identity": "Not independently captured before the explicit local rebuild; this failed control is not frozen evidence."
+    },
+    "repaired_full_library": {
+      "passed": 136,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/private/tmp/pr275-closeout-viceroy-lib-final.log",
+      "log_sha256": "18c7537c0ab4eebf37ea3af82776b1038c16e79e483d7ff9f72a031cab8dcbc0"
+    },
+    "repaired_actual_sdk": {
+      "sentinel": "outbound::fastly_impl::tests::configured_connect_timeout_reads_registered_sdk_timeout_settings",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "log": "/private/tmp/pr275-getter-pair-mGlQvy/getter.log",
+      "log_sha256": "78cc7e75017b96730fe06389efd90547184172af2520393235582d46415db4b6",
+      "command": "env SSL_CERT_FILE=/etc/ssl/cert.pem /private/tmp/pr275-getter-pair-mGlQvy/viceroy run /private/tmp/pr275-getter-pair-mGlQvy/tests.wasm outbound::fastly_impl::tests::configured_connect_timeout_reads_registered_sdk_timeout_settings --exact --nocapture",
+      "before_hashes": "/private/tmp/pr275-getter-pair-mGlQvy/before.json",
+      "after_hashes": "/private/tmp/pr275-getter-pair-mGlQvy/after.json",
+      "assertions": [
+        "Distinct native 711/812/913 ms connect/first-byte/between-bytes settings retain their own field identities.",
+        "The production registration path stores independently requested 1 s and 2 s connect settings.",
+        "Both production registrations retain 16,384 ms B31 phase ceilings and the original 15 s logical timeout."
+      ]
+    },
+    "earlier_unpaired_sdk_observation": {
+      "log": "/private/tmp/pr275-fastly-connect-readback-current-source-final.log",
+      "log_sha256": "3af8e876f34234db304e941a66191c8baed86546f9ffeae86cdd4e69e46f076d",
+      "binary_identity": "The guest was rebuilt by adjacent checks before independent hash capture. Later hashes are not attributed to this earlier run."
+    }
+  },
+  "limitations": [
+    "No SDK/runtime version pin or installed PATH executable changes.",
+    "Stored-value readback is not a network connect-timeout or pooling test.",
+    "Hosted Fastly readiness, interruption, cancellation and resource qualification remain separate.",
+    "Historical repair records and failed timing observations are retained unchanged."
+  ]
+}
