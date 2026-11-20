@@ -343,6 +343,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
+name = "edgezero-adapter"
+version = "0.1.0"
+dependencies = [
+ "edgezero-core",
+ "edgezero-store-aws",
+ "edgezero-store-celld",
+ "serde",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
 name = "edgezero-adapter-cloudflare"
 version = "0.1.0"
 dependencies = [
@@ -374,6 +386,7 @@ dependencies = [
  "brotli",
  "bytes",
  "chrono",
+ "edgezero-adapter",
  "edgezero-core",
  "fastly",
  "fastly-shared",
@@ -465,6 +478,26 @@ dependencies = [
  "syn 3.0.6",
  "toml",
  "validator",
+]
+
+[[package]]
+name = "edgezero-store-aws"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+ "serde",
+ "thiserror 2.0.21",
+ "url",
+ "web-time",
+]
+
+[[package]]
+name = "edgezero-store-celld"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.21",
+ "url",
 ]
 
 [[package]]

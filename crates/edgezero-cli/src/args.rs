@@ -64,11 +64,13 @@ pub enum Command {
 /// Subcommands under `edgezero config …`.
 ///
 /// In the bundled `edgezero` binary, `push` and `diff` are stubs that
-/// print a pointer to the downstream typed CLI and exit 2.  `validate`
-/// is the only subcommand that runs in-band here because it does not
-/// require a typed app-config struct.
+/// print a pointer to the downstream typed CLI and exit 2. `validate`,
+/// `gc` and `bindings` run here without a typed app-config struct.
 #[derive(Subcommand, Debug)]
 pub enum ConfigCmd {
+    /// Prepare and pin the identities in a portable store bindings file.
+    #[command(subcommand)]
+    Bindings(BindingsCmd),
     /// Diff the typed `<name>.toml` against the live config store.
     /// (Bundled `edgezero` stub — see after-help for the typed CLI.)
     #[command(after_help = STUB_POINTER_AFTER_HELP)]
@@ -101,6 +103,25 @@ pub enum ConfigCmd {
     /// Validate `edgezero.toml` and the typed `<name>.toml` against the
     /// manifest / app-config / Spin-key contract.
     Validate(ConfigValidateArgs),
+}
+
+/// Untyped store bindings commands, shared by bundled and generated CLIs.
+#[derive(Subcommand, Debug)]
+pub enum BindingsCmd {
+    /// Preflight all selected providers and update only their pinned identities.
+    Pin(BindingsPinArgs),
+}
+
+/// Arguments for `config bindings pin`. No app-config type or upload is involved.
+#[derive(clap::Args, Debug)]
+#[non_exhaustive]
+pub struct BindingsPinArgs {
+    /// Target adapter. Only `fastly` is currently supported.
+    #[arg(long, value_parser = ["fastly"])]
+    pub adapter: String,
+    /// Store bindings TOML file to update after every preflight succeeds.
+    #[arg(long)]
+    pub store_bindings: PathBuf,
 }
 
 /// Hidden catch-all argument sink for the bundled stub variants of
@@ -615,7 +636,7 @@ impl Default for ConfigPushArgs {
     reason = "each bool is an independent Clap control; target toggles mirror Cargo feature flags"
 )]
 pub struct ConfigValidateArgs {
-    /// Select bindings-only native validation; must be `axum`.
+    /// Select bindings-only validation for `axum` or `fastly`.
     #[arg(long)]
     pub adapter: Option<String>,
     /// Path to the typed app-config file (default: `<app_name>.toml`
@@ -630,7 +651,7 @@ pub struct ConfigValidateArgs {
     /// sees the values the runtime would.
     #[arg(long)]
     pub no_env: bool,
-    /// Explicit absolute native bindings file for bindings-only validation.
+    /// Bindings file for bindings-only validation. Axum requires an absolute path.
     #[arg(long)]
     pub store_bindings: Option<PathBuf>,
     /// Strict mode: additionally check capability-aware completeness
@@ -720,6 +741,7 @@ pub fn parse_duration_secs(raw: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::error::ErrorKind;
 
     /// Thin wrapper so `ConfigDiffArgs` (a `clap::Args`) can be
     /// tested via real clap parsing. `ConfigDiffArgs` is `#[non_exhaustive]`
@@ -729,6 +751,42 @@ mod tests {
     struct DiffTestWrapper {
         #[command(flatten)]
         args: ConfigDiffArgs,
+    }
+
+    #[test]
+    fn bindings_pin_clap_surface_and_help_are_untyped_and_explicit() {
+        let parsed = Args::try_parse_from([
+            "edgezero",
+            "config",
+            "bindings",
+            "pin",
+            "--adapter",
+            "fastly",
+            "--store-bindings",
+            "bindings.toml",
+        ])
+        .unwrap();
+        let Command::Config(ConfigCmd::Bindings(BindingsCmd::Pin(args))) = parsed.cmd else {
+            panic!("expected bindings pin");
+        };
+        assert_eq!(args.adapter, "fastly");
+        assert_eq!(args.store_bindings, PathBuf::from("bindings.toml"));
+        for flags in [
+            vec!["--adapter", "axum", "--store-bindings", "bindings.toml"],
+            vec!["--adapter", "fastly"],
+            vec!["--store-bindings", "bindings.toml"],
+        ] {
+            let mut invocation = vec!["edgezero", "config", "bindings", "pin"];
+            invocation.extend(flags);
+            let _error = Args::try_parse_from(invocation).expect_err("invalid pin flags");
+        }
+        let help =
+            Args::try_parse_from(["edgezero", "config", "bindings", "pin", "--help"]).unwrap_err();
+        assert_eq!(help.kind(), ErrorKind::DisplayHelp);
+        let help_text = help.to_string();
+        assert!(help_text.contains("Usage: edgezero config bindings pin --adapter <ADAPTER> --store-bindings <STORE_BINDINGS>"));
+        assert!(help_text.contains("fastly"));
+        assert!(!help_text.contains(STUB_POINTER_AFTER_HELP));
     }
 
     /// Parse `ConfigDiffArgs` from a CLI token slice via clap.

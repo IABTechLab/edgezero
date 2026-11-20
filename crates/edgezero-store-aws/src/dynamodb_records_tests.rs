@@ -8,8 +8,11 @@
 
 use super::*;
 use crate::dynamodb_kv::sdk_tests::{active_table, loopback_client, read_request};
-use crate::settings::{AwsPreparationLimits, DynamoDbKvLimits};
+use crate::settings::{AwsPreparationLimits, DynamoDbKvLimits, DynamoDbPinnedIdentity};
+use bytes::Bytes;
+use edgezero_core::key_value_store::KvStore as _;
 use edgezero_core::record_store::{RecordKeyLayout, contract};
+use edgezero_core::record_store::{RecordWrite, RecordWriteMode, RecordWriteOutcome};
 use edgezero_core::time::MonotonicClock;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -20,6 +23,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
 #[derive(Clone, Copy)]
@@ -1154,6 +1158,406 @@ fn partition_encoding_is_collision_free_and_preserves_full_unicode_keys() {
     let key_partition = provider_a.binding.layout.resolve(key).unwrap();
     assert_eq!(
         provider_a.key(key, &key_partition, "r").unwrap()["sk"],
-        AttributeValue::S(format!("r#{key}"))
+        Attr::Text(format!("r#{key}"))
     );
+}
+
+#[test]
+fn pinned_preparation_and_preflight_use_the_same_table_identity() {
+    let runtime = runtime();
+    let fixture = Fixture::start();
+    let settings = settings();
+    let endpoint = format!("http://{}", fixture.address);
+    let prepare = || {
+        let client = loopback_client(&runtime, &endpoint, settings.limits);
+        runtime.block_on(async {
+            let mut preparation =
+                AwsPreparation::new(MonotonicClock::default(), AwsPreparationLimits::default())
+                    .unwrap();
+            preparation.validate_dynamodb_mapping(&settings).unwrap();
+            preparation
+                .finish_dynamodb_preparation(&settings, client)
+                .await
+                .unwrap()
+        })
+    };
+    // Preflight reports exactly the identity native preparation binds into cursors.
+    let identity = preflight_identity(&prepare(), &format!("{endpoint}/")).unwrap();
+    assert_eq!(
+        identity.pinned,
+        DynamoDbPinnedIdentity {
+            table_arn: "arn:aws:dynamodb:us-east-1:111111111111:table/fixture-kv".to_owned(),
+            table_id: Some("fixture-table-id".to_owned()),
+        }
+    );
+    assert_eq!(
+        preflight_identity(&prepare(), "https://dynamodb.us-east-1.amazonaws.com/").unwrap_err(),
+        PreparationError::InvalidEndpoint
+    );
+    // Preflight only describes the table.
+    assert!(
+        fixture
+            .requests()
+            .iter()
+            .all(|(target, _)| target == "DescribeTable")
+    );
+    let layout = RecordLayout::new(Groups).unwrap();
+    let base = record_partition_base(&settings, &layout).unwrap();
+    pinned_store(
+        prepare(),
+        layout.clone(),
+        base.clone(),
+        Some(&identity.pinned),
+    )
+    .unwrap();
+    let mut recreated = identity.pinned;
+    recreated.table_id = Some("recreated-table".to_owned());
+    assert_eq!(
+        pinned_store(prepare(), layout, base, Some(&recreated))
+            .map(|_store| ())
+            .unwrap_err(),
+        PreparationError::PinnedIdentityMismatch
+    );
+}
+
+/// The portable JSON 1.0 transport against the same loopback service, through a real
+/// `HttpClient`. Rows written by one transport are read by the other.
+#[cfg(feature = "dynamodb-records-portable")]
+mod portable {
+    use super::*;
+    use crate::portable_dynamodb::PreparedDynamoDbRecords;
+    use crate::settings::{
+        DynamoDbKvLimitsInput, DynamoDbPinnedIdentity, DynamoDbRecordsSettings, SecretsReference,
+    };
+    use edgezero_adapter_axum::outbound::AxumOutboundClient;
+    use edgezero_adapter_axum::outbound_executor::AxumOutboundExecutor;
+    use edgezero_core::config_store::BoundedStoreRead;
+    use edgezero_core::outbound::HttpClient;
+    use edgezero_core::secret_store::{
+        InMemorySecretStore, SecretError, SecretHandle, SecretStore,
+    };
+    use edgezero_core::store_registry::BoundSecretStore;
+    use edgezero_core::time::Deadline;
+    use std::sync::atomic::AtomicUsize;
+
+    struct Counting {
+        inner: InMemorySecretStore,
+        reads: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl SecretStore for Counting {
+        async fn get_bytes(
+            &self,
+            store_name: &str,
+            key: &str,
+        ) -> Result<Option<Bytes>, SecretError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.get_bytes(store_name, key).await
+        }
+
+        async fn get_bytes_bounded(
+            &self,
+            store_name: &str,
+            key: &str,
+            clock: &MonotonicClock,
+            deadline: Deadline,
+            max_backend_bytes: u64,
+            max_value_bytes: u64,
+        ) -> Result<BoundedStoreRead<Bytes>, SecretError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .get_bytes_bounded(
+                    store_name,
+                    key,
+                    clock,
+                    deadline,
+                    max_backend_bytes,
+                    max_value_bytes,
+                )
+                .await
+        }
+    }
+
+    fn binding(fixture: &Fixture) -> DynamoDbRecordsSettings {
+        DynamoDbRecordsSettings {
+            credentials: Some(SecretsReference {
+                secrets: "stores".to_owned(),
+            }),
+            endpoint: Some(format!("http://{}", fixture.address)),
+            limits: DynamoDbKvLimitsInput::default(),
+            namespace: "records-wire".to_owned(),
+            pinned: Some(DynamoDbPinnedIdentity {
+                table_arn: "arn:aws:dynamodb:us-east-1:111111111111:table/fixture-kv".to_owned(),
+                table_id: Some("fixture-table-id".to_owned()),
+            }),
+            region: "us-east-1".to_owned(),
+            table: "fixture-kv".to_owned(),
+        }
+    }
+
+    fn secrets(session: bool) -> (BoundSecretStore, Arc<AtomicUsize>) {
+        let mut entries = vec![
+            ("stores/KV__IDENTITY__AWS_ACCESS_KEY_ID", "AKIDFIXTURE"),
+            (
+                "stores/KV__IDENTITY__AWS_SECRET_ACCESS_KEY",
+                "fixture-secret",
+            ),
+        ];
+        if session {
+            entries.push(("stores/KV__IDENTITY__AWS_SESSION_TOKEN", "fixture-session"));
+        }
+        let reads = Arc::new(AtomicUsize::new(0));
+        let store = Counting {
+            inner: InMemorySecretStore::new(entries),
+            reads: Arc::clone(&reads),
+        };
+        (
+            BoundSecretStore::new(SecretHandle::new(Arc::new(store)), "stores".to_owned()),
+            reads,
+        )
+    }
+
+    fn prepared(fixture: &Fixture, session: bool) -> (PreparedDynamoDbRecords, Arc<AtomicUsize>) {
+        let (store, reads) = secrets(session);
+        let layout = RecordLayout::new(Groups).unwrap();
+        (
+            PreparedDynamoDbRecords::new("identity", &binding(fixture), &layout, store).unwrap(),
+            reads,
+        )
+    }
+
+    fn client(executor: &AxumOutboundExecutor) -> HttpClient {
+        HttpClient::with_client(AxumOutboundClient::try_new(executor.handle()).unwrap())
+    }
+
+    #[test]
+    fn portable_and_native_bindings_share_scope_rows_and_cursors() {
+        let runtime = runtime();
+        let fixture = Fixture::start();
+        let native = store(&runtime, &fixture, &settings());
+        let (portable, _reads) = prepared(&fixture, false);
+        let (portable_binding, native_binding) = (portable.record_binding(), &native.binding);
+        assert_eq!(portable_binding.scope, native_binding.scope);
+        assert_eq!(portable_binding.format, native_binding.format);
+        assert_eq!(
+            portable_binding.max_metadata_bytes,
+            DynamoDbKvLimits::PORTABLE.max_value_bytes
+        );
+        let mut executor = AxumOutboundExecutor::new();
+        let http = client(&executor);
+        runtime.block_on(executor.run_until(async {
+            let portable_kv = KvHandle::new(Arc::new(portable.bind(http.clone())));
+            let native_kv = KvHandle::new(Arc::new(native));
+            let portable_records = portable_kv.require_records().unwrap();
+            let native_records = native_kv.require_records().unwrap();
+            // Native writes, portable reads, and portable CAS against the native generation.
+            assert_eq!(
+                native_records
+                    .insert("a/one", write(b"native", RecordWriteMode::Add))
+                    .await
+                    .unwrap(),
+                RecordWriteOutcome::Written
+            );
+            let read = portable_records.lookup("a/one").await.unwrap().unwrap();
+            assert_eq!(read.body.as_ref(), b"native");
+            assert_eq!(read.metadata.as_deref(), Some("m\u{e9}tadata"));
+            assert_eq!(
+                portable_records
+                    .insert(
+                        "a/one",
+                        write(
+                            b"portable",
+                            RecordWriteMode::IfGenerationMatch(read.generation)
+                        )
+                    )
+                    .await
+                    .unwrap(),
+                RecordWriteOutcome::Written
+            );
+            assert_eq!(
+                portable_records
+                    .insert(
+                        "a/one",
+                        write(
+                            b"stale",
+                            RecordWriteMode::IfGenerationMatch(read.generation)
+                        )
+                    )
+                    .await
+                    .unwrap(),
+                RecordWriteOutcome::PreconditionFailed
+            );
+            // Portable writes, native reads.
+            assert_eq!(
+                native_records
+                    .lookup("a/one")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .body
+                    .as_ref(),
+                b"portable"
+            );
+            portable_records
+                .insert("a/two", write(b"two", RecordWriteMode::Add))
+                .await
+                .unwrap();
+            // A cursor from one transport continues on the other, both ways.
+            let partition = native_records.partition("a/").unwrap();
+            let first = native_records
+                .list_partition(&partition, None, 1)
+                .await
+                .unwrap();
+            let rest = portable_records
+                .list_partition(&partition, first.cursor.as_deref(), 1000)
+                .await
+                .unwrap();
+            let mut keys: Vec<_> = first.keys.into_iter().chain(rest.keys).collect();
+            keys.sort();
+            assert_eq!(keys, ["a/one", "a/two"]);
+            let scan = portable_kv.list_keys_page("a/", None, 1).await.unwrap();
+            native_kv
+                .list_keys_page("a/", scan.cursor.as_deref(), 1000)
+                .await
+                .unwrap();
+            portable_records.delete("a/one").await.unwrap();
+            assert!(!native_records.exists_strong("a/one").await.unwrap());
+        }));
+    }
+
+    #[test]
+    fn shared_public_record_contract_uses_the_portable_wire() {
+        let runtime = runtime();
+        let fixture = Fixture::start();
+        let (portable, _reads) = prepared(&fixture, false);
+        let mut executor = AxumOutboundExecutor::new();
+        let http = client(&executor);
+        runtime.block_on(executor.run_until(async {
+            let kv = KvHandle::new(Arc::new(portable.bind(http)));
+            contract::assert_record_contract(&kv, "group/").await;
+        }));
+        let targets: BTreeSet<_> = fixture
+            .requests()
+            .into_iter()
+            .map(|(target, _)| target)
+            .collect();
+        assert!(!targets.contains("DescribeTable"));
+    }
+
+    #[test]
+    fn credentials_are_read_on_first_use_once_per_bound_store() {
+        let runtime = runtime();
+        let fixture = Fixture::start();
+        let (portable, reads) = prepared(&fixture, true);
+        let mut executor = AxumOutboundExecutor::new();
+        let http = client(&executor);
+        runtime.block_on(executor.run_until(async {
+            let first = KvHandle::new(Arc::new(portable.bind(http.clone())));
+            // Binding and capability acquisition perform no secret reads or I/O.
+            first.require_records().unwrap();
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+            assert!(fixture.requests().is_empty());
+            first.get_bytes("a/missing").await.unwrap();
+            first.get_bytes("a/missing").await.unwrap();
+            // Access key, secret key and optional session token, once.
+            assert_eq!(reads.load(Ordering::SeqCst), 3);
+            let second = KvHandle::new(Arc::new(portable.bind(http)));
+            second.get_bytes("a/missing").await.unwrap();
+            assert_eq!(reads.load(Ordering::SeqCst), 6);
+        }));
+    }
+
+    #[test]
+    fn missing_credentials_never_dispatch() {
+        let runtime = runtime();
+        let fixture = Fixture::start();
+        let layout = RecordLayout::new(Groups).unwrap();
+        let empty = BoundSecretStore::new(
+            SecretHandle::new(Arc::new(InMemorySecretStore::new(
+                Vec::<(String, Bytes)>::new(),
+            ))),
+            "stores".to_owned(),
+        );
+        let portable =
+            PreparedDynamoDbRecords::new("identity", &binding(&fixture), &layout, empty).unwrap();
+        let mut executor = AxumOutboundExecutor::new();
+        let http = client(&executor);
+        runtime.block_on(executor.run_until(async {
+            let kv = KvHandle::new(Arc::new(portable.bind(http)));
+            assert!(matches!(
+                kv.put_bytes("a/key", Bytes::from_static(b"v")).await,
+                Err(KvError::Unavailable)
+            ));
+        }));
+        assert!(fixture.requests().is_empty());
+    }
+
+    #[test]
+    fn mutation_failures_use_the_native_classifier_without_retry() {
+        for (status, code, mode, expected) in [
+            (
+                500,
+                "InternalServerError",
+                RecordWriteMode::Overwrite,
+                Err(KvError::MutationUncertain),
+            ),
+            (
+                400,
+                "ValidationException",
+                RecordWriteMode::Overwrite,
+                Err(KvError::Unavailable),
+            ),
+            (
+                400,
+                "ConditionalCheckFailedException",
+                RecordWriteMode::Add,
+                Ok(RecordWriteOutcome::PreconditionFailed),
+            ),
+        ] {
+            let runtime = runtime();
+            let fixture = Fixture::start();
+            let (portable, _reads) = prepared(&fixture, false);
+            fixture.fail("PutItem", false, status, code);
+            let mut executor = AxumOutboundExecutor::new();
+            let http = client(&executor);
+            let outcome = runtime.block_on(executor.run_until(async {
+                let kv = KvHandle::new(Arc::new(portable.bind(http)));
+                kv.require_records()
+                    .unwrap()
+                    .insert("a/key", write(b"v", mode))
+                    .await
+            }));
+            assert_eq!(
+                outcome.map_err(|error| error.to_string()),
+                expected.map_err(|error: KvError| error.to_string())
+            );
+            let puts = fixture
+                .requests()
+                .into_iter()
+                .filter(|(target, _)| target == "PutItem")
+                .count();
+            assert_eq!(puts, 1, "no retry for {code}");
+        }
+    }
+
+    #[test]
+    fn one_portable_deadline_bounds_allocation_before_value_dispatch() {
+        let runtime = runtime();
+        let fixture = Fixture::start();
+        let (portable, _reads) = prepared(&fixture, false);
+        // The portable default deadline is 1,000 ms for both insert calls together.
+        fixture.state.lock().unwrap().allocation_delay = Some(Duration::from_millis(1_200));
+        let mut executor = AxumOutboundExecutor::new();
+        let http = client(&executor);
+        let outcome = runtime.block_on(executor.run_until(async {
+            let kv = KvHandle::new(Arc::new(portable.bind(http)));
+            kv.require_records()
+                .unwrap()
+                .insert("a/budget", write(b"body", RecordWriteMode::Add))
+                .await
+        }));
+        assert!(matches!(outcome, Err(KvError::Unavailable)));
+        assert_eq!(fixture.requests().len(), 1);
+    }
 }

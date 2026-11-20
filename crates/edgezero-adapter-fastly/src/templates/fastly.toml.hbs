@@ -8,5 +8,5 @@ service_id = ""
 [local_server]
 
 [scripts]
-  build = "cargo build --profile release --target wasm32-wasip1"
+  build = "cargo build --profile release --target wasm32-wasip1 ${EDGEZERO_BUILD_FEATURES:+--features \"$EDGEZERO_BUILD_FEATURES\"}"
 

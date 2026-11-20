@@ -3,7 +3,7 @@
 #[cfg(feature = "cli")]
 fn main() {
     use clap::Parser as _;
-    use edgezero_cli::args::{self, Args, Command, ConfigCmd};
+    use edgezero_cli::args::{self, Args, BindingsCmd, Command, ConfigCmd};
     use std::process;
 
     let cmd = Args::parse().cmd;
@@ -34,6 +34,9 @@ fn main() {
         // `config gc` needs no typed app-config -- it reclaims unreferenced
         // chunk entries by inspecting the store -- so it runs in-band here.
         Command::Config(ConfigCmd::Gc(cmd_args)) => edgezero_cli::run_config_gc(&cmd_args),
+        Command::Config(ConfigCmd::Bindings(BindingsCmd::Pin(cmd_args))) => {
+            edgezero_cli::run_config_bindings_pin(&cmd_args)
+        }
         Command::Config(ConfigCmd::Validate(cmd_args)) => {
             edgezero_cli::run_config_validate(&cmd_args)
         }

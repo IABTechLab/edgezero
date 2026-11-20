@@ -22,6 +22,7 @@ use crate::args::{
     ConfigDiffArgs, ConfigGcArgs, ConfigPushArgs, ConfigValidateArgs, DiffFormat,
     parse_duration_secs,
 };
+use crate::bindings_pin::{parse_portable_bindings, read_portable_bindings};
 use crate::diff::{collect_changes, render_json, render_structured};
 use crate::{ensure_adapter_defined, manifest_variable_defaults};
 use edgezero_adapter::registry::{
@@ -235,7 +236,7 @@ struct ResolvedTomlLeaf<'raw> {
 #[inline]
 pub fn run_config_validate(args: &ConfigValidateArgs) -> Result<(), String> {
     if args.store_bindings.is_some() || args.adapter.is_some() {
-        return run_native_bindings_validate(args);
+        return run_bindings_validate(args);
     }
     reject_target_controls_without_bindings(args)?;
     let ctx = load_validation_context(args)?;
@@ -258,7 +259,7 @@ where
     C: DeserializeOwned + Validate + AppConfigMeta,
 {
     if args.store_bindings.is_some() || args.adapter.is_some() {
-        return run_native_bindings_validate(args);
+        return run_bindings_validate(args);
     }
     reject_target_controls_without_bindings(args)?;
     let ctx = load_validation_context(args)?;
@@ -1584,6 +1585,84 @@ fn load_validated_native_bindings(
     )
     .map_err(|_error| "native store bindings do not match manifest declarations".to_owned())?;
     Ok(bindings)
+}
+
+fn run_bindings_validate(args: &ConfigValidateArgs) -> Result<(), String> {
+    if args
+        .adapter
+        .as_deref()
+        .is_some_and(|adapter| adapter.eq_ignore_ascii_case("fastly"))
+    {
+        return run_portable_bindings_validate(args);
+    }
+    run_native_bindings_validate(args)
+}
+
+fn run_portable_bindings_validate(args: &ConfigValidateArgs) -> Result<(), String> {
+    use edgezero_adapter::store_bindings::{PortableDeclarations, PortableRecordProviders};
+
+    let path = args
+        .store_bindings
+        .as_deref()
+        .ok_or_else(|| "bindings-only validation requires `--store-bindings <file>`".to_owned())?;
+    if args.app_config.is_some() {
+        return Err("`--app-config` cannot be used with bindings-only validation".to_owned());
+    }
+    reject_target_controls_without_bindings(args)?;
+    let loader = ManifestLoader::from_path(&args.manifest)
+        .map_err(|_error| "failed to load application manifest".to_owned())?;
+    let manifest = loader.manifest();
+    let (_name, adapter) = manifest
+        .adapter_entry("fastly")
+        .ok_or_else(|| "manifest does not declare the Fastly adapter".to_owned())?;
+    let kv = manifest
+        .stores
+        .kv
+        .as_ref()
+        .map_or_else(Vec::new, |declaration| {
+            declaration
+                .ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        });
+    let secrets = manifest
+        .stores
+        .secrets
+        .as_ref()
+        .map_or_else(Vec::new, |declaration| {
+            declaration
+                .ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        });
+    let compiled = PortableRecordProviders {
+        celld: adapter
+            .build
+            .features
+            .iter()
+            .any(|feature| feature == "celld-records"),
+        dynamodb: adapter
+            .build
+            .features
+            .iter()
+            .any(|feature| feature == "aws-dynamodb-records"),
+    };
+    let input = read_portable_bindings(path)?;
+    parse_portable_bindings(&input)?
+        .validate_portable(
+            &PortableDeclarations {
+                kv: &kv,
+                secrets: &secrets,
+            },
+            compiled,
+        )
+        .map_err(|error| format!("invalid Fastly store bindings: {error}"))?;
+    log::info!(
+        "[edgezero] Fastly store bindings valid for declared IDs and build features (offline)"
+    );
+    Ok(())
 }
 
 /// Validate only a caller-selected native bindings file. This path intentionally
@@ -2932,6 +3011,147 @@ default = "state"
             run_config_validate(&args)
                 .expect("record settings validate without tokens, SDKs or service I/O");
         }
+    }
+
+    const FASTLY_BINDINGS_MANIFEST: &str = r#"
+[app]
+name = "demo-app"
+[adapters.fastly.adapter]
+crate = "crates/demo-fastly"
+[adapters.fastly.build]
+features = ["aws-dynamodb-records", "celld-records"]
+[stores.kv]
+ids = ["identity", "sessions"]
+default = "identity"
+[stores.secrets]
+ids = ["stores"]
+"#;
+
+    const FASTLY_BINDINGS: &str = r#"version = 1
+[kv.identity]
+provider = "aws-dynamodb-records"
+region = "us-east-1"
+table = "identity-table"
+namespace = "example/identity"
+credentials = { secrets = "stores" }
+pinned = { table_arn = "arn:aws:dynamodb:us-east-1:111122223333:table/identity-table" }
+[kv.sessions]
+provider = "celld-records"
+endpoint = "https://unreachable.invalid"
+store = "sessions"
+access = { mode = "authenticated", token_secret = { secrets = "stores" } }
+pinned = { instance = "AAAAAAAAAAAAAAAAAAAAAA" }
+"#;
+
+    #[test]
+    fn fastly_bindings_validation_is_offline_and_skips_typed_app_config() {
+        let (dir, manifest, app_config) = setup_project(FASTLY_BINDINGS_MANIFEST, "not TOML");
+        fs::remove_file(app_config).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let bindings = dir.path().join("bindings.toml");
+        let input = FASTLY_BINDINGS
+            .replace("https://unreachable.invalid", &format!("https://{address}"))
+            .replace(
+                "region =",
+                &format!("endpoint = 'http://{address}'\nregion ="),
+            );
+        fs::write(&bindings, input).unwrap();
+        let mut args = args_for(&manifest);
+        args.adapter = Some("fastly".to_owned());
+        args.store_bindings = Some(bindings);
+        run_config_validate(&args).unwrap();
+        run_config_validate_typed::<FixtureConfig>(&args).unwrap();
+        assert!(matches!(listener.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock));
+        assert!(!dir.path().join(".edgezero").exists());
+    }
+
+    #[test]
+    fn fastly_bindings_validation_rejects_pins_declarations_and_native_only_providers() {
+        let (dir, manifest, _app_config) = setup_project(FASTLY_BINDINGS_MANIFEST, "not TOML");
+        let bindings = dir.path().join("bindings.toml");
+        let mut args = args_for(&manifest);
+        args.adapter = Some("fastly".to_owned());
+        args.store_bindings = Some(bindings.clone());
+        for (input, expected) in [
+            (FASTLY_BINDINGS.replace("pinned = { instance = \"AAAAAAAAAAAAAAAAAAAAAA\" }", ""), "no pinned identity"),
+            (FASTLY_BINDINGS.replace("secrets = \"stores\"", "secrets = \"other\""), "undeclared binding"),
+            (FASTLY_BINDINGS.replace("[kv.sessions]", "[kv.Sessions]"), "undeclared binding"),
+            (FASTLY_BINDINGS.replace("mode = \"authenticated\", token_secret = { secrets = \"stores\" }", "mode = \"trusted-network\""), "invalid store bindings"),
+            (FASTLY_BINDINGS.replace("aws-dynamodb-records", "aws-dynamodb").replace("credentials = { secrets = \"stores\" }", "").replace("pinned = { table_arn = \"arn:aws:dynamodb:us-east-1:111122223333:table/identity-table\" }", ""), "unsupported"),
+        ] {
+            fs::write(&bindings, input).unwrap();
+            let error = run_config_validate(&args).unwrap_err();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("unreachable.invalid"));
+        }
+        fs::write(&bindings, FASTLY_BINDINGS).unwrap();
+        fs::write(
+            &manifest,
+            FASTLY_BINDINGS_MANIFEST.replace("ids = [\"stores\"]", "ids = [\"other\"]"),
+        )
+        .unwrap();
+        assert!(
+            run_config_validate(&args)
+                .unwrap_err()
+                .contains("undeclared binding")
+        );
+        for feature in ["aws-dynamodb-records", "celld-records"] {
+            fs::write(
+                &manifest,
+                FASTLY_BINDINGS_MANIFEST.replace(feature, "unused"),
+            )
+            .unwrap();
+            assert!(
+                run_config_validate(&args)
+                    .unwrap_err()
+                    .contains("not compiled")
+            );
+        }
+        fs::write(
+            &manifest,
+            FASTLY_BINDINGS_MANIFEST.replace("\"sessions\"", "\"Sessions\""),
+        )
+        .unwrap();
+        fs::write(
+            &bindings,
+            FASTLY_BINDINGS.replace("[kv.sessions]", "[kv.Sessions]"),
+        )
+        .unwrap();
+        assert!(
+            run_config_validate(&args)
+                .unwrap_err()
+                .contains("invalid store bindings")
+        );
+    }
+
+    #[test]
+    fn fastly_bindings_validation_rejects_app_config_and_native_target_overrides() {
+        let (dir, manifest, _app_config) = setup_project(FASTLY_BINDINGS_MANIFEST, "not TOML");
+        let bindings = dir.path().join("bindings.toml");
+        fs::write(&bindings, FASTLY_BINDINGS).unwrap();
+        let mut args = args_for(&manifest);
+        args.adapter = Some("fastly".to_owned());
+        assert!(
+            run_config_validate(&args)
+                .unwrap_err()
+                .contains("--store-bindings")
+        );
+        args.store_bindings = Some(bindings);
+        args.app_config = Some("not-read.toml".into());
+        assert!(
+            run_config_validate(&args)
+                .unwrap_err()
+                .contains("--app-config")
+        );
+        args.app_config = None;
+        args.target_features = vec!["celld-records".to_owned()];
+        assert!(
+            run_config_validate(&args)
+                .unwrap_err()
+                .contains("native target controls")
+        );
     }
 
     #[cfg(feature = "edgezero-adapter-axum")]
