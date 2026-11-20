@@ -567,6 +567,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "binds extra loopback source addresses (127.0.0.2, 127.0.0.3), which only Linux routes by default (macOS lo0 has only 127.0.0.1); on macOS run with --ignored after `sudo ifconfig lo0 alias 127.0.0.2 up` and `sudo ifconfig lo0 alias 127.0.0.3 up`"
+    )]
     fn native_source_bound_single_proxy_and_mapped_cidr_match_only_owned_peers() {
         for networks in [
             "127.0.0.2/32",
@@ -627,6 +631,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "binds extra loopback source addresses (127.0.0.2, 127.0.0.3), which only Linux routes by default (macOS lo0 has only 127.0.0.1); on macOS run with --ignored after `sudo ifconfig lo0 alias 127.0.0.2 up` and `sudo ifconfig lo0 alias 127.0.0.3 up`"
+    )]
     fn native_two_proxy_chain_stops_at_untrusted_hop_and_gateway_replaces_prefix() {
         for (networks, boundary) in [
             ("127.0.0.2/32,127.0.0.3/32", "127.0.0.1"),
@@ -773,6 +781,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "binds extra loopback source addresses (127.0.0.2, 127.0.0.3), which only Linux routes by default (macOS lo0 has only 127.0.0.1); on macOS run with --ignored after `sudo ifconfig lo0 alias 127.0.0.2 up` and `sudo ifconfig lo0 alias 127.0.0.3 up`"
+    )]
     fn native_selected_families_conflicts_malformed_sets_gaps_and_exhaustion() {
         for family in ["forwarded", "x-forwarded"] {
             let roots = Roots::new();
@@ -847,6 +859,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "binds extra loopback source addresses (127.0.0.2, 127.0.0.3), which only Linux routes by default (macOS lo0 has only 127.0.0.1); on macOS run with --ignored after `sudo ifconfig lo0 alias 127.0.0.2 up` and `sudo ifconfig lo0 alias 127.0.0.3 up`"
+    )]
     fn native_verified_tls_ingress_overwrites_public_assertions_and_rejects_wrong_name() {
         let roots = Roots::new();
         let addr = address();
