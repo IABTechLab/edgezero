@@ -22,8 +22,14 @@
 
 #[cfg(test)]
 #[cfg(unix)]
+#[path = "support/blocking_accept.rs"]
+mod blocking_accept;
+
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
 
+    use crate::blocking_accept::accept_blocking;
     use std::env::var_os;
     use std::fs;
     use std::io::{ErrorKind, Read as _, Write as _};
@@ -114,7 +120,7 @@ mod tests {
                 let mut extra = Vec::new();
                 let deadline = deadline_after(SERVICE_GRACE);
                 while Instant::now() < deadline {
-                    match listener.accept() {
+                    match accept_blocking(&listener) {
                         Ok((mut extra_stream, peer)) => {
                             assert!(peer.ip().is_loopback(), "only literal loopback peers");
                             extra_stream
@@ -304,7 +310,7 @@ mod tests {
 
     fn accept_before(listener: &TcpListener, deadline: Instant) -> (TcpStream, SocketAddr) {
         loop {
-            match listener.accept() {
+            match accept_blocking(listener) {
                 Ok((stream, peer)) => {
                     assert!(peer.ip().is_loopback(), "fixture peer must be loopback");
                     return (stream, peer);

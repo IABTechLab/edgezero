@@ -6,12 +6,18 @@
 
 #[cfg(test)]
 #[cfg(unix)]
+#[path = "support/blocking_accept.rs"]
+mod blocking_accept;
+
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     #![expect(
         clippy::arbitrary_source_item_ordering,
         reason = "keep fixture ownership, generated source and proof steps together"
     )]
 
+    use crate::blocking_accept::accept_blocking;
     use std::collections::BTreeMap;
     use std::env;
     use std::fmt::Write as _;
@@ -76,7 +82,7 @@ mod tests {
             let worker = thread::spawn(move || {
                 let end = deadline(Duration::from_mins(10));
                 while !worker_stop.load(Ordering::Relaxed) && Instant::now() < end {
-                    match listener.accept() {
+                    match accept_blocking(&listener) {
                         Ok((mut stream, peer)) => {
                             assert!(peer.ip().is_loopback());
                             stream
