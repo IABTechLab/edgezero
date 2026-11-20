@@ -2,14 +2,18 @@
 
 ## Unreleased
 
-### After-Response Tasks (#476)
+### After-Response Tasks (#476, #478)
+
+- Cloudflare runs gated `waitUntil` tasks after terminal response egress, with fresh
+  outbound scopes and effective budgets capped at 30 seconds. Workers lifetime limits
+  still apply; tasks have no persistence or automatic retries.
 
 - Add `RequestContext::after_response(budget, task)` and the adapter-facing
   `edgezero_core::after_response::{AfterResponseScheduler, AfterResponseHandle}`. A task starts
   after the response attempt ends and is cancelled at its budget. Adapters without support return
   `501 Not Implemented` at registration.
 - Add the `after-response-tasks` capability: Axum and Fastly `BoundedCooperative`,
-  Cloudflare and Spin `Unsupported` (tracked in #478 and #483).
+  Cloudflare `BoundedCooperative` (#478), and Spin `Unsupported` (tracked in #483).
 - Axum production, `run_app` and `AxumDevServer::run` shutdown now waits for registered after-response tasks within the
   existing shutdown grace, after connections drain. Tasks still pending at the grace make the
   process exit non-zero with `grace exhausted`.

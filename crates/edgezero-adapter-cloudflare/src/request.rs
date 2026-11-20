@@ -54,6 +54,7 @@ use worker::{
     Response as CfResponse,
 };
 
+use crate::after_response;
 use crate::config_store::CloudflareConfigStore;
 use crate::context::CloudflareRequestContext;
 use crate::key_value_store::CloudflareKvStore;
@@ -618,10 +619,13 @@ pub(crate) async fn dispatch_with_handles(
     let request_method =
         CoreMethod::from_bytes(req.inner().method().as_bytes()).unwrap_or(CoreMethod::GET);
     let context = Arc::new(ctx);
-    let runtime = CloudflareEgressRuntime::new(signal, Arc::clone(&context));
+    let (after_response, release) =
+        after_response::arm(Arc::clone(&context), app.monotonic_clock());
+    let runtime =
+        CloudflareEgressRuntime::new(signal, Arc::clone(&context)).with_after_response(release);
     let geo = request_geo(&req);
     let client_info = request_client_info(&req, stores.direct_ingress);
-    let head_request = match into_core_request_head(&req, env, context, app.monotonic_clock()) {
+    let mut head_request = match into_core_request_head(&req, env, context, app.monotonic_clock()) {
         Ok(request) => request,
         Err(error) => {
             drop(req);
@@ -630,6 +634,7 @@ pub(crate) async fn dispatch_with_handles(
                 .map_err(|delivery_error| edge_error_to_worker(&delivery_error));
         }
     };
+    head_request.extensions_mut().insert(after_response);
     dispatch_ingress_stream_and(
         app,
         head_request,

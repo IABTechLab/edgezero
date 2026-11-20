@@ -3,6 +3,9 @@
 #[cfg(all(feature = "cli", not(target_arch = "wasm32")))]
 pub mod cli;
 
+#[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
+mod after_response;
+
 // `config_store` compiles on host for its `InMemory` test backend; the
 // production `Kv` backend is feature-gated internally.
 #[cfg(any(test, all(feature = "cloudflare", target_arch = "wasm32")))]
