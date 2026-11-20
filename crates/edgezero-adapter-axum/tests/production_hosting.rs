@@ -67,14 +67,21 @@ mod tests {
 
     /// macOS marks a new socket close-on-exec only after `socket()` returns, so a fixture
     /// process spawned by a parallel test in that gap inherits it. An inherited reservation
-    /// stays bound in that process, and the fixture server that later binds the port fails
-    /// with `AddrInUse`. Reservations and spawns hold this lock so they never overlap.
+    /// stays bound in that process, so the fixture server that later binds the port fails with
+    /// `AddrInUse`, and an inherited client stream stays open after the test drops it. Port
+    /// reservations, client streams and spawns hold this lock so they never overlap.
     static RESERVE_OR_SPAWN: Mutex<()> = Mutex::new(());
 
     fn reserve_or_spawn() -> MutexGuard<'static, ()> {
         RESERVE_OR_SPAWN
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Opens a client stream without letting a concurrently spawned fixture inherit it.
+    fn connect(addr: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+        let _connecting = reserve_or_spawn();
+        TcpStream::connect_timeout(&addr, timeout)
     }
 
     /// Reserves a loopback port for a fixture server that binds it itself.
@@ -85,6 +92,8 @@ mod tests {
     /// Reserves a loopback port and keeps it bound, but not listening, until the holder drops.
     /// No parallel test can bind the port meanwhile and nothing accepts a connection to it, so
     /// a "nothing answers" check cannot reach a server that reused a released reservation.
+    /// While held, the check cannot fail by itself: callers also assert that the server never
+    /// reached its listener bind.
     fn reserved_address() -> (SocketAddr, TcpSocket) {
         let _reserving = reserve_or_spawn();
         let socket = TcpSocket::new_v4().expect("port reservation socket");
@@ -210,7 +219,7 @@ mod tests {
         }
 
         fn socket(&self) -> io::Result<TcpStream> {
-            let socket = TcpStream::connect_timeout(&self.addr, Duration::from_millis(50))?;
+            let socket = connect(self.addr, Duration::from_millis(50))?;
             socket.set_read_timeout(Some(WAIT))?;
             socket.set_write_timeout(Some(WAIT))?;
             Ok(socket)
@@ -272,6 +281,10 @@ mod tests {
             "startup diagnostic leaked fixture contents: {log}"
         );
         assert!(!log.contains("INITIALIZED"));
+        assert!(
+            !log.contains("startup bind"),
+            "failed startup reached bind: {log}"
+        );
         TcpStream::connect_timeout(&addr, Duration::from_millis(50))
             .expect_err("failed startup never accepts connections");
         log
@@ -403,7 +416,7 @@ mod tests {
     }
 
     fn raw_request(addr: SocketAddr, request: &str) -> String {
-        let mut socket = TcpStream::connect_timeout(&addr, WAIT).expect("wire connection");
+        let mut socket = connect(addr, WAIT).expect("wire connection");
         socket.set_read_timeout(Some(WAIT)).expect("read timeout");
         socket.set_write_timeout(Some(WAIT)).expect("write timeout");
         socket.write_all(request.as_bytes()).expect("wire request");
@@ -2323,6 +2336,10 @@ mod tests {
         assert!(!log.contains("INITIALIZED"));
         assert!(!log.contains("HOOK_ENTERED"));
         assert!(!log.contains("ready"));
+        assert!(
+            !log.contains("startup bind"),
+            "unavailable implementation reached bind"
+        );
         TcpStream::connect_timeout(&addr, Duration::from_millis(50))
             .expect_err("unavailable implementation never binds");
         assert_eq!(fs::read_dir(cwd.path()).expect("unrelated cwd").count(), 0);
@@ -2397,6 +2414,10 @@ mod tests {
         assert!(!server.log().contains("INITIALIZED"));
         assert!(!server.log().contains("HOOK_ENTERED"));
         assert!(!server.log().contains("x-origin-verify-fixture"));
+        assert!(
+            !server.log().contains("startup bind"),
+            "invalid policy reached bind"
+        );
         TcpStream::connect_timeout(&addr, Duration::from_millis(50))
             .expect_err("invalid policy never binds");
         assert_eq!(fs::read_dir(cwd.path()).expect("unrelated cwd").count(), 0);

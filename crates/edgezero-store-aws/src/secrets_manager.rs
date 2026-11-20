@@ -475,13 +475,19 @@ mod tests {
                 .checked_add(Duration::from_secs(30))
                 .expect("fixture deadline fits the monotonic clock");
             let mut held = Vec::new();
-            while !worker_stop.load(Ordering::Acquire) {
+            loop {
+                // Read the flag before accepting: once the child has exited, every connection it
+                // opened is already queued, so draining until `WouldBlock` counts all of them.
+                let stopping = worker_stop.load(Ordering::Acquire);
                 match accept_blocking(&listener) {
                     Ok((stream, peer)) => {
                         assert!(peer.ip().is_loopback(), "fixture peer must be loopback");
                         held.push(hold(stream));
                     }
                     Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        if stopping {
+                            break;
+                        }
                         assert!(Instant::now() < deadline, "SDK child did not finish");
                         thread::sleep(Duration::from_millis(5));
                     }
