@@ -20,13 +20,14 @@ mod tests {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::{Child, Command, ExitStatus, Stdio};
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
     use edgezero_core::blob_envelope::BlobEnvelope;
     use serde_json::{Value, json};
     use tempfile::TempDir;
+    use tokio::net::TcpSocket;
 
     const WAIT: Duration = Duration::from_secs(5);
 
@@ -64,11 +65,34 @@ mod tests {
         .expect("envelope")
     }
 
+    /// macOS marks a new socket close-on-exec only after `socket()` returns, so a fixture
+    /// process spawned by a parallel test in that gap inherits it. An inherited reservation
+    /// stays bound in that process, and the fixture server that later binds the port fails
+    /// with `AddrInUse`. Reservations and spawns hold this lock so they never overlap.
+    static RESERVE_OR_SPAWN: Mutex<()> = Mutex::new(());
+
+    fn reserve_or_spawn() -> MutexGuard<'static, ()> {
+        RESERVE_OR_SPAWN
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Reserves a loopback port for a fixture server that binds it itself.
     fn address() -> SocketAddr {
-        TcpListener::bind("127.0.0.1:0")
-            .expect("port reservation")
-            .local_addr()
-            .expect("address")
+        reserved_address().0
+    }
+
+    /// Reserves a loopback port and keeps it bound, but not listening, until the holder drops.
+    /// No parallel test can bind the port meanwhile and nothing accepts a connection to it, so
+    /// a "nothing answers" check cannot reach a server that reused a released reservation.
+    fn reserved_address() -> (SocketAddr, TcpSocket) {
+        let _reserving = reserve_or_spawn();
+        let socket = TcpSocket::new_v4().expect("port reservation socket");
+        socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .expect("port reservation");
+        let addr = socket.local_addr().expect("reserved address");
+        (addr, socket)
     }
 
     fn command(mode: &str, roots: &Roots, addr: SocketAddr) -> Command {
@@ -101,11 +125,13 @@ mod tests {
 
     impl Server {
         fn spawn(mut command: Command, addr: SocketAddr) -> Self {
+            let spawning = reserve_or_spawn();
             let mut child = command
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("fixture process");
+            drop(spawning);
             let output = Arc::new(Mutex::new(String::new()));
             let (sender, events) = mpsc::channel();
             let stdout = child.stdout.take().expect("stdout");
@@ -173,14 +199,14 @@ mod tests {
         }
 
         fn signal(&self, name: &str) {
-            assert!(
-                Command::new("kill")
-                    .arg(format!("-{name}"))
-                    .arg(self.child.id().to_string())
-                    .status()
-                    .expect("send signal")
-                    .success()
-            );
+            let spawning = reserve_or_spawn();
+            let status = Command::new("kill")
+                .arg(format!("-{name}"))
+                .arg(self.child.id().to_string())
+                .status()
+                .expect("send signal");
+            drop(spawning);
+            assert!(status.success());
         }
 
         fn socket(&self) -> io::Result<TcpStream> {
@@ -1660,7 +1686,7 @@ mod tests {
             (None, None, Some("RECORDS_SENTINEL"), "REQUEST_RECORDS"),
             (None, None, Some("FALSE"), "REQUEST_RECORDS"),
         ] {
-            let addr = address();
+            let (addr, _addr_held) = reserved_address();
             let mut launch = command("diagnostics", &roots, addr);
             if let Some(value) = networks {
                 launch.env("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", value);
@@ -1701,7 +1727,7 @@ mod tests {
             ),
             ("EDGEZERO__LOGGING__REQUEST_RECORDS", "REQUEST_RECORDS"),
         ] {
-            let addr = address();
+            let (addr, _addr_held) = reserved_address();
             let mut launch = command("diagnostics", &roots, addr);
             let mut raw = b"NON_UNICODE_SENTINEL".to_vec();
             raw.push(0xff);
@@ -1844,7 +1870,7 @@ mod tests {
                 OsString::from_vec(vec![0xff]),
             ] {
                 let roots = Roots::new();
-                let addr = address();
+                let (addr, _addr_held) = reserved_address();
                 let mut launch = command(mode, &roots, addr);
                 launch.env("EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES", value);
                 let log = failed(launch, addr, "JSON_BODY_LIMIT_BYTES");
@@ -1948,7 +1974,7 @@ mod tests {
     #[test]
     fn stop_during_startup_never_binds_or_becomes_ready() {
         let roots = Roots::new();
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         let mut server = Server::spawn(command("starting", &roots, addr), addr);
         server.wait_line("INITIALIZING");
         TcpStream::connect_timeout(&addr, Duration::from_millis(50))
@@ -1982,7 +2008,7 @@ mod tests {
                 "settings",
             ),
         ] {
-            let addr = address();
+            let (addr, _addr_held) = reserved_address();
             let mut cmd = command("initialized", &roots, addr);
             cmd.env(key, value);
             failed(cmd, addr, category);
@@ -1991,15 +2017,15 @@ mod tests {
             ("hook-error", "application configuration"),
             ("initializer-error", "initializer"),
         ] {
-            let addr = address();
+            let (addr, _addr_held) = reserved_address();
             failed(command(mode, &roots, addr), addr, category);
         }
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         let mut cmd = command("initialized", &roots, addr);
         cmd.env_remove("EDGEZERO__ADAPTER__CONFIG_DIR");
         failed(cmd, addr, "CONFIG_DIR");
         let missing = roots.cwd.path().join("missing-data-SENTINEL");
-        let missing_addr = address();
+        let (missing_addr, _missing_addr_held) = reserved_address();
         let mut missing_cmd = command("initialized", &roots, missing_addr);
         missing_cmd.env("EDGEZERO__ADAPTER__DATA_DIR", &missing);
         failed(missing_cmd, missing_addr, "DATA_DIR");
@@ -2022,10 +2048,10 @@ mod tests {
         let roots = Roots::new();
         let file = roots.config.path().join("local-config-settings.json");
         fs::remove_file(&file).expect("missing file fixture");
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         failed(command("initialized", &roots, addr), addr, "missing");
         fs::create_dir_all(&file).expect("non-regular fixture");
-        let directory_addr = address();
+        let (directory_addr, _directory_addr_held) = reserved_address();
         failed(
             command("initialized", &roots, directory_addr),
             directory_addr,
@@ -2033,7 +2059,7 @@ mod tests {
         );
         fs::remove_dir(&file).expect("remove fixture directory");
         roots.map(&json!({"settings": {"CONFIG_SENTINEL": true}}));
-        let malformed_addr = address();
+        let (malformed_addr, _malformed_addr_held) = reserved_address();
         failed(
             command("initialized", &roots, malformed_addr),
             malformed_addr,
@@ -2052,7 +2078,7 @@ mod tests {
             ),
         ] {
             roots.map(&map);
-            let typed_addr = address();
+            let (typed_addr, _typed_addr_held) = reserved_address();
             failed(
                 command("initialized", &roots, typed_addr),
                 typed_addr,
@@ -2063,7 +2089,7 @@ mod tests {
             serde_json::from_str(&blob("valid-greeting", "fixture_token")).expect("envelope");
         envelope["data"]["greeting"] = json!("CHANGED_CONFIG_SENTINEL");
         roots.map(&json!({"settings": serde_json::to_string(&envelope).expect("envelope")}));
-        let integrity_addr = address();
+        let (integrity_addr, _integrity_addr_held) = reserved_address();
         failed(
             command("initialized", &roots, integrity_addr),
             integrity_addr,
@@ -2137,7 +2163,7 @@ mod tests {
                 .expect("snapshot")
                 .ends_with("selected-greeting")
         );
-        let second_addr = address();
+        let (second_addr, _second_addr_held) = reserved_address();
         failed(
             command("initialized", &roots, second_addr),
             second_addr,
@@ -2289,7 +2315,7 @@ mod tests {
     #[cfg(not(feature = "geo-cloudfront"))]
     fn geo_hosting_rejects_unavailable_cloudfront() {
         let cwd = tempfile::tempdir().expect("unrelated cwd");
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         let mut server = Server::spawn(geo_command("geo-cloudfront", &cwd, addr), addr);
         assert!(!server.wait().success());
         let log = server.log();
@@ -2365,7 +2391,7 @@ mod tests {
     #[test]
     fn geo_hosting_invalid_policy_never_initializes_or_listens() {
         let cwd = tempfile::tempdir().expect("unrelated cwd");
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         let mut server = Server::spawn(geo_command("geo-invalid-policy", &cwd, addr), addr);
         assert!(!server.wait().success());
         assert!(!server.log().contains("INITIALIZED"));
