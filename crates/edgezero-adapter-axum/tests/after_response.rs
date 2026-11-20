@@ -7,19 +7,24 @@
 )]
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use edgezero_adapter_axum::dev_server::{AxumDevServer, AxumDevServerConfig};
 use edgezero_adapter_axum::ingress_config::AxumIngressConfig;
+use edgezero_adapter_axum::key_value_store::PersistentKvStore;
 use edgezero_core::app::App;
 use edgezero_core::body::Body;
 use edgezero_core::context::RequestContext;
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::response_builder;
+use edgezero_core::key_value_store::{KvError, KvHandle};
 use edgezero_core::outbound::OutboundRequest;
+use edgezero_core::record_store::{
+    RecordKeyLayout, RecordLayout, RecordWrite, RecordWriteMode, RecordWriteOutcome,
+};
 use edgezero_core::router::RouterService;
 use futures::future::pending;
 use futures::stream::{self, StreamExt as _};
@@ -30,6 +35,35 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 const WAIT: Duration = Duration::from_secs(5);
+
+struct GroupLayout;
+
+impl RecordKeyLayout for GroupLayout {
+    fn id(&self) -> &'static str {
+        "after-response-test"
+    }
+
+    fn partition_prefix<'key>(&self, key: &'key str) -> Result<&'key str, KvError> {
+        key.find('/')
+            .and_then(|split| key.get(..=split))
+            .ok_or_else(|| KvError::Validation("missing group".to_owned()))
+    }
+
+    fn validate(&self) -> Result<(), KvError> {
+        Ok(())
+    }
+
+    fn validate_partition(&self, prefix: &str) -> Result<(), KvError> {
+        match prefix.strip_suffix('/') {
+            Some(group) if !group.is_empty() && !group.contains('/') => Ok(()),
+            _ => Err(KvError::Validation("invalid group".to_owned())),
+        }
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+}
 
 async fn serve(router: RouterService) -> (SocketAddr, JoinHandle<anyhow::Result<()>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
@@ -259,5 +293,119 @@ async fn outbound_request_started_inside_a_task_reaches_the_upstream() {
         "the task's outbound request completed"
     );
     accept.await.expect("upstream task");
+    server.abort();
+}
+
+/// Sends one request on a fresh connection and returns the raw HTTP response.
+async fn raw_get(address: SocketAddr, path: &str) -> String {
+    let mut client = TcpStream::connect(address).await.expect("connect");
+    client
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .expect("request");
+    let mut response = Vec::new();
+    timeout(WAIT, client.read_to_end(&mut response))
+        .await
+        .expect("response in time")
+        .expect("read response");
+    String::from_utf8(response).expect("utf-8 response")
+}
+
+/// The response does not wait for the task's guarded write, which a later request then reads.
+/// Start-after-egress ordering is covered by the kept-alive streaming test above.
+#[tokio::test]
+async fn guarded_record_write_in_a_task_is_visible_to_a_later_request() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let layout = RecordLayout::new(GroupLayout).expect("layout");
+    let kv = KvHandle::new(Arc::new(
+        PersistentKvStore::new_records(dir.path().join("records.redb"), layout)
+            .expect("record store"),
+    ));
+    let gate = Arc::new(Notify::new());
+    let outcome = Arc::new(Mutex::new(None));
+    let route_gate = Arc::clone(&gate);
+    let route_outcome = Arc::clone(&outcome);
+    let router = RouterService::builder()
+        .get("/write", move |ctx: RequestContext| {
+            let task_gate = Arc::clone(&route_gate);
+            let task_outcome = Arc::clone(&route_outcome);
+            async move {
+                let records = ctx
+                    .kv_store_default()
+                    .expect("default kv")
+                    .require_records()
+                    .map_err(EdgeError::internal)?;
+                ctx.after_response(Duration::from_secs(5), async move {
+                    task_gate.notified().await;
+                    let write = RecordWrite {
+                        body: b"synced",
+                        metadata: None,
+                        ttl: None,
+                        mode: RecordWriteMode::Add,
+                    };
+                    let result = records.insert("user/follow-up", write).await;
+                    *task_outcome.lock().expect("outcome") =
+                        Some(result.map_err(|error| error.to_string()));
+                })?;
+                Ok::<_, EdgeError>("queued")
+            }
+        })
+        .get("/read", |ctx: RequestContext| async move {
+            let records = ctx
+                .kv_store_default()
+                .expect("default kv")
+                .require_records()
+                .map_err(EdgeError::internal)?;
+            let found = records
+                .lookup("user/follow-up")
+                .await
+                .map_err(EdgeError::internal)?;
+            Ok::<_, EdgeError>(found.map_or_else(
+                || "absent".to_owned(),
+                |record| String::from_utf8(record.body.to_vec()).expect("utf-8 record"),
+            ))
+        })
+        .build();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+    let address = listener.local_addr().expect("address");
+    let dev_server = AxumDevServer::with_config(
+        App::new(router),
+        AxumDevServerConfig {
+            addr: address,
+            enable_ctrl_c: false,
+            ingress: AxumIngressConfig::new(8, 8192, 100, Duration::from_secs(10))
+                .expect("ingress"),
+        },
+    )
+    .with_kv_handle(kv);
+    let server = tokio::spawn(dev_server.serve(listener, pending()));
+
+    let queued = raw_get(address, "/write").await;
+    assert!(queued.ends_with("queued"), "unexpected reply: {queued}");
+    let before = raw_get(address, "/read").await;
+    assert!(
+        before.ends_with("absent"),
+        "the task is still gated: {before}"
+    );
+    gate.notify_one();
+    let acknowledged = timeout(WAIT, async {
+        loop {
+            if let Some(result) = outcome.lock().expect("outcome").clone() {
+                return result;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the task's write completes");
+    assert_eq!(acknowledged, Ok(RecordWriteOutcome::Written));
+    let after = raw_get(address, "/read").await;
+    assert!(
+        after.contains("200 OK") && after.ends_with("synced"),
+        "a later request reads the follow-up write: {after}"
+    );
     server.abort();
 }
