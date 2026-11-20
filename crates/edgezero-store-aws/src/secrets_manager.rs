@@ -323,6 +323,7 @@ fn classify_sdk_error(
 mod tests {
     use super::{classify_operation_error, materialize_payload};
     use crate::PreparationError;
+    use crate::test_net::accept_blocking;
     use aws_sdk_secretsmanager::error::{ConnectorError, SdkError};
     use aws_sdk_secretsmanager::operation::get_secret_value::GetSecretValueOutput;
     use aws_sdk_secretsmanager::primitives::Blob;
@@ -465,7 +466,7 @@ mod tests {
             let mut bodies = Vec::new();
             for response in responses {
                 let stream = loop {
-                    match worker_listener.accept() {
+                    match accept_blocking(&worker_listener) {
                         Ok((stream, peer)) => {
                             assert!(peer.ip().is_loopback(), "fixture peer must be loopback");
                             break stream;

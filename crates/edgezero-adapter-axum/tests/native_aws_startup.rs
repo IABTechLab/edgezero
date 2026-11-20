@@ -5,11 +5,16 @@
 //! DNS hostname, external socket, image, or real cloud credential is used.
 
 #[cfg(test)]
+#[path = "fixtures/blocking_accept.rs"]
+mod blocking_accept;
+
+#[cfg(test)]
 #[expect(
     clippy::arbitrary_source_item_ordering,
     reason = "loopback fixture helpers remain grouped before startup scenarios"
 )]
 mod tests {
+    use crate::blocking_accept::accept_blocking;
     use std::fmt::Write as _;
     use std::fs;
     use std::io::{ErrorKind, Read, Write as _};
@@ -83,7 +88,7 @@ mod tests {
                     .checked_add(watch)
                     .expect("fixture deadline fits the monotonic clock");
                 loop {
-                    match listener.accept() {
+                    match accept_blocking(&listener) {
                         Ok((mut stream, peer)) => {
                             assert!(peer.ip().is_loopback(), "fixture peer was not loopback");
                             stream
