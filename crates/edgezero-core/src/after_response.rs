@@ -2,8 +2,9 @@
 //!
 //! A handler registers a task through [`RequestContext::after_response`](crate::context::RequestContext::after_response).
 //! The adapter starts it once the request's response attempt has ended at the adapter's terminal
-//! egress boundary, and cancels it when its budget runs out. Adapters without support install no
-//! handle, so registration fails with [`EdgeError::NotImplemented`].
+//! egress boundary, and cancels it when its budget runs out. Adapters without support install
+//! either no handle or one that rejects every task, so registration fails with
+//! [`EdgeError::NotImplemented`].
 
 use std::fmt;
 use std::sync::Arc;
@@ -13,7 +14,8 @@ use futures_util::future::LocalBoxFuture;
 
 use crate::error::EdgeError;
 
-/// Message returned when the adapter installed no after-response scheduler for the request.
+/// Message returned when no after-response scheduler is installed for the request. Adapters that
+/// install a rejecting scheduler may use their own message.
 pub const AFTER_RESPONSE_UNSUPPORTED: &str =
     "after-response tasks are not supported by this adapter";
 

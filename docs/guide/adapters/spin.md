@@ -592,6 +592,21 @@ operations invocation-local. Standard response delivery remains lazy under host
 backpressure; retention adds no whole-response buffer or collection cap. Restore `run_app`
 and remove the cache to roll back; default generated entry points are unchanged.
 
+## After-response tasks
+
+Spin does not run after-response tasks. `ctx.after_response(budget, task)` with a positive budget
+returns `EdgeError::NotImplemented` (`501`) with the message
+`after-response tasks are not supported by the Spin adapter`, exported as
+`edgezero_adapter_spin::AFTER_RESPONSE_UNSUPPORTED`. The task is dropped without being polled.
+A zero budget is a programming error and returns `500`, as on every adapter that installs a
+scheduler. Every Spin entry point that converts a native request installs this error, including
+`run_app`, `dispatch_app` and `request::into_core_request`. Branch on the status or the
+`not_implemented` kind rather than the message (core's constant of the same name does not match
+on Spin), and do the work inline or elsewhere. An application
+that cannot run without the tasks can declare `after-response-tasks` under
+`[capabilities] required`, so `edgezero build`, `serve` and `deploy` refuse Spin. See the
+[after-response task matrix](/guide/capabilities#after-response-task-matrix).
+
 ## Runtime ingress metadata
 
 Conversion captures SDK URI parts before rebuilding the core request. Origin

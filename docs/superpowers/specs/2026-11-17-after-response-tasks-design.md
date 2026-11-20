@@ -68,7 +68,7 @@ New `Capability::AfterResponseTasks` (`after-response-tasks`). Applications can 
 
 ## Cloudflare and Spin
 
-No scheduler is installed, so registration returns the 501 capability error. Their private egress `spawn` hooks stay unchanged. #478 and #483 own the change.
+No scheduler is installed, so registration returns the 501 capability error. Their private egress `spawn` hooks stay unchanged. #478 and #483 own the change. (#483 later installs a rejecting Spin scheduler; see `2026-11-18-spin-after-response-error-design.md`.)
 
 ## Preservation and acceptance
 
