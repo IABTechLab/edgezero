@@ -33,6 +33,7 @@ mod tests {
     use edgezero_adapter_fastly::delivery::{
         FastlyRequestDelivery, FastlyResponseCommitState, testing::response_delivery,
     };
+    use edgezero_adapter_fastly::key_value_store::FastlyKvStore;
     use edgezero_adapter_fastly::request::{
         FastlyService, into_core_request, run_request_with_registries_and_hooks_for_test,
     };
@@ -51,8 +52,13 @@ mod tests {
     use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoSource, GeoStatus};
     use edgezero_core::http::{HeaderMap, Method, Response, StatusCode, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
+    use edgezero_core::key_value_store::{KvError, KvHandle};
     use edgezero_core::outbound::{
         OutboundRequest, OutboundSendMode, OutboundTime, validate_for_dispatch,
+    };
+    use edgezero_core::record_store::{
+        RecordHandle, RecordKeyLayout, RecordLayout, RecordWrite, RecordWriteMode,
+        RecordWriteOutcome,
     };
     use edgezero_core::response_egress::ResponseEgressCompletion;
     use edgezero_core::response_egress::{ResponseEgressEnvelope, ResponseEgressReport};
@@ -1086,6 +1092,91 @@ mod tests {
             reached_transport,
             "the task's request reached Fastly's transport after delivery"
         );
+    }
+
+    struct FollowUpLayout;
+
+    impl RecordKeyLayout for FollowUpLayout {
+        fn id(&self) -> &'static str {
+            "after-response-contract"
+        }
+
+        fn partition_prefix<'key>(&self, key: &'key str) -> Result<&'key str, KvError> {
+            key.find('/')
+                .and_then(|split| key.get(..=split))
+                .ok_or_else(|| KvError::Validation("missing group".to_owned()))
+        }
+
+        fn validate(&self) -> Result<(), KvError> {
+            Ok(())
+        }
+
+        fn validate_partition(&self, prefix: &str) -> Result<(), KvError> {
+            match prefix.strip_suffix('/') {
+                Some(group) if !group.is_empty() && !group.contains('/') => Ok(()),
+                _ => Err(KvError::Validation("invalid group".to_owned())),
+            }
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+    }
+
+    fn follow_up_records() -> RecordHandle {
+        let layout = RecordLayout::new(FollowUpLayout).expect("layout");
+        KvHandle::new(Arc::new(
+            FastlyKvStore::open_records("cache", layout).expect("Viceroy cache store"),
+        ))
+        .require_records()
+        .expect("record handle")
+    }
+
+    // CI runs this binary under a bare `viceroy run`, which has no KV stores. Run it from
+    // `crates/edgezero-adapter-fastly`, whose runner loads the demo `fastly.toml` and its
+    // `cache` store: `cargo test --features fastly,test-utils --test contract -- --ignored`.
+    #[test]
+    #[ignore = "needs a Viceroy config that declares the `cache` KV store"]
+    fn after_response_task_guarded_record_write_lands_after_delivery() {
+        const KEY: &str = "after-response/follow-up";
+        block_on(follow_up_records().delete(KEY)).expect("reset follow-up");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let outcome = Arc::new(Mutex::new(None));
+        let handler_events = Arc::clone(&events);
+        let handler_outcome = Arc::clone(&outcome);
+        let router = RouterService::builder()
+            .get("/after", move |ctx: RequestContext| {
+                let task_events = Arc::clone(&handler_events);
+                let task_outcome = Arc::clone(&handler_outcome);
+                async move {
+                    let records = follow_up_records();
+                    ctx.after_response(Duration::from_secs(2), async move {
+                        let write = RecordWrite {
+                            body: b"synced",
+                            metadata: None,
+                            ttl: None,
+                            mode: RecordWriteMode::Add,
+                        };
+                        let result = records.insert(KEY, write).await;
+                        task_events.lock().expect("events").push("write");
+                        *task_outcome.lock().expect("outcome") =
+                            Some(result.map_err(|error| error.to_string()));
+                    })?;
+                    Ok::<_, EdgeError>("queued")
+                }
+            })
+            .build();
+        let _delivered = run_after_response(router, &events, FastlyResponseCommitState::Committed);
+        assert_eq!(*events.lock().expect("events"), ["deliver", "write"]);
+        assert_eq!(
+            *outcome.lock().expect("outcome"),
+            Some(Ok(RecordWriteOutcome::Written)),
+            "the guarded Add inside the task was acknowledged"
+        );
+        let stored = block_on(follow_up_records().lookup(KEY))
+            .expect("lookup")
+            .expect("the follow-up record is visible after the lifecycle");
+        assert_eq!(stored.body.as_ref(), b"synced");
     }
 
     #[test]
