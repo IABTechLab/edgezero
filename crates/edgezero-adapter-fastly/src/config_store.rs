@@ -43,7 +43,11 @@ impl FastlyConfigStore {
         unsafe_code,
         reason = "the pinned ABI receives a live initialized slice and cannot resize it"
     )]
-    fn read_entry(&self, key: &str, limit: u64) -> Result<Option<String>, ConfigStoreError> {
+    pub(crate) fn read_entry(
+        &self,
+        key: &str,
+        limit: u64,
+    ) -> Result<Option<String>, ConfigStoreError> {
         let read_limit = limit.min(MAX_ENTRY_BYTES);
         match &self.inner {
             FastlyConfigStoreBackend::Fastly(handle) => {
@@ -90,7 +94,7 @@ impl FastlyConfigStore {
         unsafe_code,
         reason = "the pinned host ABI writes only the supplied handle out-parameter"
     )]
-    fn try_open_optional(name: &str) -> Result<Option<Self>, ConfigStoreError> {
+    pub(crate) fn try_open_optional(name: &str) -> Result<Option<Self>, ConfigStoreError> {
         let mut handle = fastly_shared::INVALID_CONFIG_STORE_HANDLE;
         // SAFETY: the UTF-8 name slice and initialized out-parameter remain live
         // for this synchronous call. Config Store exposes no close operation.

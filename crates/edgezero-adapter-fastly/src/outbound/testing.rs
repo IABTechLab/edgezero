@@ -5,11 +5,15 @@ use futures_util::future::pending;
 use std::cell::RefCell;
 use std::iter::repeat_with;
 use std::rc::Rc;
+#[cfg(feature = "fastly")]
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(feature = "fastly", feature = "test-utils"))]
 use std::task::{Context, Waker};
 use std::time::Duration;
 
+#[cfg(feature = "fastly")]
+use edgezero_core::ClientIdentityPolicy;
 use edgezero_core::http::HeaderValue;
 use edgezero_core::{
     Deadline, EdgeError, HttpClient, IndependentOutboundProgress, MonotonicClock, MonotonicInstant,
@@ -121,6 +125,30 @@ pub(super) fn scripted(
         validate: super::validate_supported_options,
     });
     HttpClient::with_client(capture)
+}
+
+/// Like [`dispatch`], through a client that carries a client identity policy.
+#[cfg(feature = "fastly")]
+pub(super) fn dispatch_with_policy(
+    request: OutboundRequest,
+    time: OutboundTime,
+    policy: Arc<ClientIdentityPolicy>,
+) -> OutboundDispatchRequest {
+    let mut future = HttpClient::with_client(Capture::new(time, CaptureMode::Dispatch))
+        .with_client_identity_policy(policy)
+        .send(request);
+    assert!(
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    DISPATCH.with(|saved| {
+        saved
+            .borrow_mut()
+            .take()
+            .expect("facade dispatched test request")
+    })
 }
 
 #[cfg(any(feature = "fastly", feature = "test-utils"))]
