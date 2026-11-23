@@ -4,6 +4,7 @@
 )]
 
 mod batch;
+mod client_identity;
 mod dispatch;
 mod exchange;
 mod head;
@@ -63,7 +64,12 @@ pub use batch::{
     OutboundBatchMergeFailure, OutboundBatchNext, OutboundBatchResults, OutboundBatchTermination,
     OutboundCollectedSlot, OutboundPreparedBatch,
 };
-pub(crate) use dispatch::ForwardedReadDeadline;
+pub(crate) use client_identity::is_https;
+pub use client_identity::{
+    ClientCertificateChain, ClientIdentityError, ClientIdentityHosts, ClientIdentityMaterial,
+    ClientIdentityMetadata, ClientIdentityName, ClientIdentityPolicy,
+};
+pub(crate) use dispatch::{ForwardedReadDeadline, ResolvedClientIdentity};
 pub use exchange::OutboundExchangeFailure;
 pub use redirect::{
     OutboundFollowFailure, OutboundFollowResult, OutboundRedirectAction, OutboundRedirectContext,
@@ -135,6 +141,7 @@ pub enum OutboundSendMode {
 /// Providers inspect or consume this value, never construct or reset it.
 #[derive(Debug)]
 pub struct OutboundDispatchRequest {
+    client_identity: Option<ResolvedClientIdentity>,
     context: OutboundResponseContext,
     request: OutboundRequest,
 }
@@ -309,6 +316,7 @@ pub(crate) struct BudgetInputs {
 pub struct OutboundRequest {
     body: Body,
     cache_policy: OutboundCachePolicy,
+    client_identity: Option<ClientIdentityName>,
     connect_timeout: Option<Duration>,
     deadline: Option<Deadline>,
     headers: HeaderMap,
@@ -342,6 +350,7 @@ pub struct OutboundRequest {
 pub struct OutboundRequestParts {
     pub body: Body,
     pub cache_policy: OutboundCachePolicy,
+    pub client_identity: Option<ClientIdentityName>,
     pub connect_timeout: Option<Duration>,
     pub deadline: Option<Deadline>,
     pub headers: HeaderMap,
@@ -434,6 +443,7 @@ pub enum OutboundCachePolicy {
 
 #[derive(Clone)]
 pub struct HttpClient {
+    client_identity_policy: Option<Arc<ClientIdentityPolicy>>,
     inner: Arc<dyn OutboundHttpClient>,
     proxy_marker_enabled: bool,
 }
@@ -611,6 +621,13 @@ impl ResponseHeaderLimiter {
 }
 
 impl HttpClient {
+    /// Gives this client the app's identity policy unless it already has one.
+    pub(crate) fn attach_client_identity_policy(&mut self, policy: &Arc<ClientIdentityPolicy>) {
+        if self.client_identity_policy.is_none() {
+            self.client_identity_policy = Some(Arc::clone(policy));
+        }
+    }
+
     /// Settles permitted GET/HEAD streams, then schedules the complete exchange.
     ///
     /// # Errors
@@ -636,6 +653,14 @@ impl HttpClient {
                     .bind(&pending_scope, pending_time, entered_at)
             }),
         )
+    }
+
+    /// The identity policy requests from this client are checked against.
+    /// `None` means every client identity is undeclared.
+    #[must_use]
+    #[inline]
+    pub fn client_identity_policy(&self) -> Option<&Arc<ClientIdentityPolicy>> {
+        self.client_identity_policy.as_ref()
     }
 
     /// Inspects effective marker policy without validation or I/O.
@@ -680,6 +705,7 @@ impl HttpClient {
     #[inline]
     pub fn new(client: Arc<dyn OutboundHttpClient>) -> Self {
         Self {
+            client_identity_policy: None,
             inner: client,
             proxy_marker_enabled: true,
         }
@@ -848,6 +874,15 @@ impl HttpClient {
         Client: OutboundHttpClient + 'static,
     {
         Self::new(Arc::new(client))
+    }
+
+    /// Sets this client's identity policy. Dispatch keeps an explicit policy
+    /// instead of the app's.
+    #[must_use]
+    #[inline]
+    pub fn with_client_identity_policy(mut self, policy: Arc<ClientIdentityPolicy>) -> Self {
+        self.client_identity_policy = Some(policy);
+        self
     }
 
     /// Sets the marker default for this handle; explicit per-request settings win.
@@ -1139,6 +1174,25 @@ impl OutboundRequest {
         (self.uri.scheme_str() == Some("https")).then(|| self.host_name())
     }
 
+    /// Presents this declared client identity's certificate on the TLS connection.
+    ///
+    /// The request fails before any network I/O when the identity is undeclared,
+    /// the URI is not HTTPS, the adapter cannot present it, or the origin is not
+    /// in the identity's runtime hosts. Redirect hops keep the identity and are
+    /// checked again.
+    #[must_use]
+    #[inline]
+    pub fn client_identity(mut self, name: ClientIdentityName) -> Self {
+        self.client_identity = Some(name);
+        self
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn client_identity_name(&self) -> Option<&ClientIdentityName> {
+        self.client_identity.as_ref()
+    }
+
     /// Sets an independent connect-phase ceiling; zero is rejected at preflight.
     #[must_use]
     #[inline]
@@ -1171,6 +1225,7 @@ impl OutboundRequest {
         Ok(Self {
             body: parts.body,
             cache_policy: parts.cache_policy,
+            client_identity: parts.client_identity,
             connect_timeout: parts
                 .connect_timeout
                 .map(|timeout| timeout.min(DEADLINE_FAR_FUTURE)),
@@ -1346,6 +1401,7 @@ impl OutboundRequest {
         OutboundRequestParts {
             body: self.body,
             cache_policy: self.cache_policy,
+            client_identity: self.client_identity,
             connect_timeout: self.connect_timeout,
             deadline: self.deadline,
             headers: self.headers,
@@ -1571,6 +1627,7 @@ impl OutboundRequest {
         Self {
             body: Body::empty(),
             cache_policy: OutboundCachePolicy::PlatformDefault,
+            client_identity: None,
             connect_timeout: None,
             deadline: None,
             headers: HeaderMap::new(),

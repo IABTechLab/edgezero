@@ -19,6 +19,7 @@ use crate::ingress::{
 use crate::key_value_store::KvError;
 use crate::logging::BOOT_LOG_TARGET;
 use crate::manifest::{BakedManifest, ResolvedLoggingConfig};
+use crate::outbound::{ClientIdentityPolicy, HttpClient};
 use crate::platform::PlatformMetadata;
 use crate::record_store::{RecordKeyLayout, RecordLayout, RecordStoreRequirements};
 use crate::response_egress::{
@@ -62,6 +63,7 @@ pub enum FrameworkErrorDetail {
 /// Lightweight container around a `RouterService` that can be extended via hook implementations.
 pub struct App {
     admitted_error_response_finalizer: Option<AdmittedErrorResponseFinalizer>,
+    client_identity_policy: Arc<ClientIdentityPolicy>,
     config_extraction_limits: ConfigExtractionLimits,
     detached_response_egress_decision_factory: DetachedResponseEgressDecisionFactory,
     error_response_renderer: ErrorResponseRenderer,
@@ -223,6 +225,14 @@ impl App {
         Self::from_router::<A>(A::routes()?, platform)
     }
 
+    /// Declared client identities and the outbound allowlist, built once from the
+    /// baked manifest. Dispatch attaches it to each request's `HttpClient`.
+    #[must_use]
+    #[inline]
+    pub fn client_identity_policy(&self) -> &Arc<ClientIdentityPolicy> {
+        &self.client_identity_policy
+    }
+
     #[must_use]
     #[inline]
     pub fn config_extraction_limits(&self) -> ConfigExtractionLimits {
@@ -361,11 +371,14 @@ impl App {
     async fn dispatch_admitted_with_request_facts(
         &self,
         prepared: PreparedIngress,
-        request: Request,
+        mut request: Request,
         detail: FrameworkErrorDetail,
         geo: GeoOutcome,
         client_info: Option<ClientInfo>,
     ) -> ResponseEgressEnvelope {
+        if let Some(client) = request.extensions_mut().get_mut::<HttpClient>() {
+            client.attach_client_identity_policy(&self.client_identity_policy);
+        }
         let request_method = request.method().clone();
         let request_start = prepared.request_start();
         let route = prepared.route_metadata().cloned();
@@ -498,6 +511,7 @@ impl App {
         A: Hooks,
     {
         let mut app = Self::with_name_and_platform(router, A::name(), platform);
+        app.client_identity_policy = Arc::new(ClientIdentityPolicy::from_baked(A::manifest()));
         A::configure(&mut app)?;
         if app.platform() != platform {
             return Err(EdgeError::internal(anyhow::anyhow!(
@@ -866,6 +880,7 @@ impl App {
     {
         Self {
             admitted_error_response_finalizer: None,
+            client_identity_policy: Arc::new(ClientIdentityPolicy::default()),
             config_extraction_limits: ConfigExtractionLimits::default(),
             detached_response_egress_decision_factory: Arc::new(|head| {
                 DetachedResponseEgressDecision::Send {

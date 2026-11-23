@@ -502,7 +502,7 @@ pub(crate) fn ensure_capabilities(
             ),
         }
     }
-    Ok(())
+    adapter.validate_client_identities(verified_manifest)
 }
 
 fn produces_current_runtime(action: Action) -> bool {
@@ -864,7 +864,8 @@ mod tests {
         Adapter, AdapterAction, AdapterExecutionTarget, register_adapter,
     };
     use edgezero_core::manifest::{
-        Capability, CapabilitySupport, ManifestContract, ManifestLoader, ResolvedEnvironmentBinding,
+        Capability, CapabilitySupport, Manifest, ManifestContract, ManifestLoader,
+        ResolvedEnvironmentBinding,
     };
     use edgezero_core::test_env::EnvOverride;
     use std::env;
@@ -889,6 +890,7 @@ mod tests {
         name: "gate-native",
         support: CapabilitySupport::Native,
     };
+    static IDENTITY_GATE_ADAPTER: IdentityGateAdapter = IdentityGateAdapter;
     static UNSUPPORTED_ADAPTER: GateAdapter = GateAdapter {
         name: "gate-unsupported",
         support: CapabilitySupport::Unsupported,
@@ -897,6 +899,35 @@ mod tests {
     struct GateAdapter {
         name: &'static str,
         support: CapabilitySupport,
+    }
+
+    /// Rejects any manifest that declares a client identity.
+    struct IdentityGateAdapter;
+
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "identity-gate fixture overrides only the relevant trait methods"
+    )]
+    impl Adapter for IdentityGateAdapter {
+        fn capability(&self, _capability: Capability) -> CapabilitySupport {
+            CapabilitySupport::Native
+        }
+
+        fn execute(&self, _action: AdapterAction, _args: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn name(&self) -> &'static str {
+            "gate-identity"
+        }
+
+        fn validate_client_identities(&self, manifest: &Manifest) -> Result<(), String> {
+            if manifest.capabilities.outbound.client_identities.is_empty() {
+                Ok(())
+            } else {
+                Err("fixture rejects client identities".to_owned())
+            }
+        }
     }
 
     struct EnvironmentAdapter;
@@ -1221,6 +1252,31 @@ mod tests {
                 Ok(())
             );
         }
+    }
+
+    #[test]
+    fn capability_gate_runs_adapter_client_identity_validation() {
+        register_adapter(&IDENTITY_GATE_ADAPTER);
+        let without = capability_manifest("required = [\"outbound-http\"]");
+        assert_eq!(
+            ensure_capabilities(
+                "gate-identity",
+                ManifestContract::from_opt(Some(without.manifest()))
+            ),
+            Ok(())
+        );
+
+        let with = ManifestLoader::load_from_str(
+            "[capabilities]\noptional = [\"outbound-client-identity\"]\n\
+             [capabilities.outbound.client-identities.mtls]\n[adapters.gate]\n",
+        );
+        assert_eq!(
+            ensure_capabilities(
+                "gate-identity",
+                ManifestContract::from_opt(Some(with.manifest()))
+            ),
+            Err("fixture rejects client identities".to_owned())
+        );
     }
 
     #[test]

@@ -877,6 +877,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base16ct",
+ "base64 0.22.1",
  "brotli",
  "brotli-decompressor",
  "bytes",

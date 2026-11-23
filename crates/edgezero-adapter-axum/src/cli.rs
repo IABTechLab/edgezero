@@ -919,6 +919,14 @@ mod tests {
     }
 
     #[test]
+    fn client_identities_are_unsupported() {
+        assert_eq!(
+            AXUM_ADAPTER.capability(Capability::OutboundClientIdentity),
+            CapabilitySupport::Unsupported
+        );
+    }
+
+    #[test]
     fn adapter_capability_matrix_matches_contracts() {
         let connect = AXUM_ADAPTER.capability(Capability::OutboundConnectTimeout);
         assert_eq!(connect, CapabilitySupport::BestEffort);
