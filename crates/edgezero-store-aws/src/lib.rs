@@ -53,6 +53,12 @@ mod secrets_manager;
 #[cfg(test)]
 #[cfg(all(not(target_arch = "wasm32"), feature = "secrets-manager"))]
 mod snapshot_tests;
+#[cfg(test)]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "secrets-manager", feature = "dynamodb-kv")
+))]
+mod test_net;
 #[cfg(all(
     not(target_arch = "wasm32"),
     any(
