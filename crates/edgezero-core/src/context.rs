@@ -21,7 +21,7 @@ use crate::http::{
 };
 use crate::ingress::{AdmittedIngress, IngressGrant, RequestIngress};
 use crate::ja4::CapturedJa4;
-use crate::outbound::{ForwardedReadDeadline, HttpClient};
+use crate::outbound::{ClientIdentityError, ForwardedReadDeadline, HttpClient};
 use crate::params::PathParams;
 use crate::router::RouteMetadata;
 use crate::store_registry::{
@@ -178,6 +178,7 @@ impl InputGuard {
 enum StoredError {
     BadGateway(String, BadGatewayReason, Option<ProviderFailureDetail>),
     BadRequest(String, Option<ProviderFailureDetail>),
+    ClientIdentity(String, ClientIdentityError),
     ConfigOutOfDate(String, String),
     GatewayTimeout(String, BudgetSource, Option<ProviderFailureDetail>),
     Internal(String, Option<ProviderFailureDetail>),
@@ -242,6 +243,9 @@ impl StoredError {
                 message,
                 field_path,
             } => Self::StoreExtraction(*reason, message.clone(), field_path.clone()),
+            EdgeError::ClientIdentity { name, reason } => {
+                Self::ClientIdentity(name.clone(), reason.clone())
+            }
             EdgeError::UriTooLong { message } => Self::UriTooLong(message.clone()),
             EdgeError::Validation { message } => Self::Validation(message.clone()),
         }
@@ -292,6 +296,10 @@ impl StoredError {
             Self::StoreExtraction(reason, message, field_path) => {
                 EdgeError::store_extraction(*reason, message.clone(), field_path.clone())
             }
+            Self::ClientIdentity(name, reason) => EdgeError::ClientIdentity {
+                name: name.clone(),
+                reason: reason.clone(),
+            },
             Self::UriTooLong(message) => EdgeError::uri_too_long(message.clone()),
             Self::Validation(message) => EdgeError::validation(message.clone()),
         }

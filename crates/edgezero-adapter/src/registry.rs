@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, PoisonError, RwLock};
 
+use edgezero_core::manifest::Manifest;
 use edgezero_core::{Capability, CapabilitySupport, PlatformMetadata};
 
 static REGISTRY: LazyLock<RwLock<HashMap<String, &'static dyn Adapter>>> =
@@ -790,6 +791,19 @@ pub trait Adapter: Sync + Send {
     /// the adapter's contract.
     #[inline]
     fn validate_app_config_keys(&self, _keys: &[&str]) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Reject manifest client identities this adapter cannot bind.
+    ///
+    /// Runs in the same CLI step that enforces required capabilities, with the
+    /// verified manifest. Adapters that read an identity's binding from stores
+    /// check here that those stores resolve. Default: no checks.
+    ///
+    /// # Errors
+    /// Returns a human-readable error naming each identity the adapter cannot bind.
+    #[inline]
+    fn validate_client_identities(&self, _manifest: &Manifest) -> Result<(), String> {
         Ok(())
     }
 

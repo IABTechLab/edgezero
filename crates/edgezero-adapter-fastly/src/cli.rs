@@ -39,6 +39,7 @@ use edgezero_adapter::scaffold::{
     ManifestSpec, ReadmeInfo, TemplateRegistration, register_adapter_blueprint,
 };
 use edgezero_core::env_config::{EnvConfig, merge_env_defaults};
+use edgezero_core::manifest::Manifest;
 use edgezero_core::{Capability, CapabilitySupport, PlatformMetadata};
 use walkdir::WalkDir;
 
@@ -2041,6 +2042,7 @@ impl Adapter for FastlyCliAdapter {
             Capability::IngressAdmission
             | Capability::OutboundAuthorityOverride
             | Capability::OutboundCacheBypass
+            | Capability::OutboundClientIdentity
             | Capability::OutboundConnectTimeout
             | Capability::OutboundFailureDiagnostics
             | Capability::OutboundFlexiblePhaseBudget
@@ -2225,6 +2227,10 @@ impl Adapter for FastlyCliAdapter {
         local: bool,
     ) -> Result<(), String> {
         validate_fastly_config_key(logical_store_id, key, staging, local)
+    }
+
+    fn validate_client_identities(&self, manifest: &Manifest) -> Result<(), String> {
+        validate_fastly_client_identities(manifest)
     }
 
     fn preflight_deploy(
@@ -5913,6 +5919,36 @@ fn effective_deploy_environment(context: &AdapterDeployContext) -> Result<EnvCon
     Ok(environment)
 }
 
+/// Fastly reads each client identity's certificate and hosts from a config store
+/// and its key from a secret store, so both must resolve from the manifest.
+fn validate_fastly_client_identities(manifest: &Manifest) -> Result<(), String> {
+    let unresolved: Vec<String> = manifest
+        .capabilities
+        .outbound
+        .client_identities
+        .iter()
+        .filter_map(|(name, identity)| {
+            let mut missing = Vec::new();
+            if identity.resolved_config_store(&manifest.stores).is_none() {
+                missing.push("config store");
+            }
+            if identity.resolved_secret_store(&manifest.stores).is_none() {
+                missing.push("secret store");
+            }
+            (!missing.is_empty()).then(|| format!("`{name}` (no {})", missing.join(" or ")))
+        })
+        .collect();
+    if unresolved.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "adapter 'fastly' reads client identity bindings from a config store and a secret store, \
+         and these identities cannot resolve one: {}. Declare [stores.config] and [stores.secrets], \
+         or name the stores with `config-store` and `secret-store`.",
+        unresolved.join(", ")
+    ))
+}
+
 fn validate_fastly_config_key(
     logical_store_id: &str,
     key: &str,
@@ -6980,6 +7016,51 @@ mod tests {
     }
 
     #[test]
+    fn client_identities_need_resolvable_config_and_secret_stores() {
+        use edgezero_core::manifest::ManifestLoader;
+
+        let resolvable = ManifestLoader::load_from_str(
+            "[capabilities.outbound.client-identities.defaulted]\n\
+             [capabilities.outbound.client-identities.explicit]\n\
+             config-store = \"app_config\"\nsecret-store = \"keys\"\n\
+             [stores.config]\nids = [\"app_config\"]\n\
+             [stores.secrets]\nids = [\"keys\"]\n",
+        );
+        assert_eq!(
+            FastlyCliAdapter.validate_client_identities(resolvable.manifest()),
+            Ok(())
+        );
+
+        let no_secrets = ManifestLoader::load_from_str(
+            "[capabilities.outbound.client-identities.mtls]\n\
+             [stores.config]\nids = [\"app_config\"]\n",
+        );
+        let no_secret_error = FastlyCliAdapter
+            .validate_client_identities(no_secrets.manifest())
+            .expect_err("missing secret store");
+        assert!(
+            no_secret_error.contains("`mtls` (no secret store)"),
+            "{no_secret_error}"
+        );
+
+        let no_stores =
+            ManifestLoader::load_from_str("[capabilities.outbound.client-identities.mtls]\n");
+        let no_store_error = FastlyCliAdapter
+            .validate_client_identities(no_stores.manifest())
+            .expect_err("missing both stores");
+        assert!(
+            no_store_error.contains("`mtls` (no config store or secret store)"),
+            "{no_store_error}"
+        );
+
+        let none = ManifestLoader::load_from_str("[app]\nname = \"plain\"\n");
+        assert_eq!(
+            FastlyCliAdapter.validate_client_identities(none.manifest()),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn adapter_capability_matrix_matches_contracts() {
         adapter_capability_matrix_matches_outbound_spec();
     }
@@ -7079,6 +7160,10 @@ mod tests {
                 CapabilitySupport::BestEffort,
             ),
             (Capability::OutboundCacheBypass, CapabilitySupport::Native),
+            (
+                Capability::OutboundClientIdentity,
+                CapabilitySupport::Native,
+            ),
             (
                 Capability::OutboundImageOptimizer,
                 CapabilitySupport::BestEffort,

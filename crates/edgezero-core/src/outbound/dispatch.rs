@@ -5,10 +5,13 @@ use std::task::Poll;
 use futures_util::StreamExt as _;
 use futures_util::future::poll_fn;
 
+use std::sync::Arc;
+
 use super::{
-    HttpClient, Method, OutboundDispatchRequest, OutboundRequest, OutboundRequestParts,
-    OutboundResponseContext, OutboundScope, OutboundSendMode, OutboundTime, ResponseBodyPolicy,
-    ResponseHeaderLimiter, normalize_for_dispatch, validate_for_dispatch,
+    ClientIdentityError, ClientIdentityMetadata, ClientIdentityPolicy, HttpClient, Method,
+    OutboundDispatchRequest, OutboundRequest, OutboundRequestParts, OutboundResponseContext,
+    OutboundScope, OutboundSendMode, OutboundTime, ResponseBodyPolicy, ResponseHeaderLimiter,
+    is_https, normalize_for_dispatch, validate_for_dispatch,
 };
 use crate::error::EdgeError;
 use crate::http::StatusCode;
@@ -20,6 +23,13 @@ use crate::time::{
 pub(super) struct DispatchBounds {
     pub observation_cutoff: Option<Deadline>,
     pub original_chain_deadline: Option<Deadline>,
+}
+
+/// A declared identity selected by a request, with the policy that declared it.
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedClientIdentity {
+    metadata: ClientIdentityMetadata,
+    policy: Arc<ClientIdentityPolicy>,
 }
 
 /// Private forwarding metadata, not a second body or a public policy override.
@@ -40,6 +50,25 @@ impl OutboundDispatchRequest {
     #[inline]
     pub fn budget(&self) -> DispatchBudget {
         self.context.budget
+    }
+
+    /// The declared identity this request selects, already checked to be
+    /// declared and HTTPS. Adapters resolve its runtime binding.
+    #[must_use]
+    #[inline]
+    pub fn client_identity(&self) -> Option<&ClientIdentityMetadata> {
+        self.client_identity
+            .as_ref()
+            .map(|resolved| &resolved.metadata)
+    }
+
+    /// The policy that declared [`Self::client_identity`], for parsing its hosts entry.
+    #[must_use]
+    #[inline]
+    pub fn client_identity_policy(&self) -> Option<&Arc<ClientIdentityPolicy>> {
+        self.client_identity
+            .as_ref()
+            .map(|resolved| &resolved.policy)
     }
 
     #[must_use]
@@ -79,6 +108,35 @@ impl OutboundDispatchRequest {
     }
 }
 
+/// Undeclared and non-HTTPS identity requests fail here, in core, before any adapter I/O.
+fn resolve_client_identity(
+    client: &HttpClient,
+    request: &OutboundRequest,
+) -> Result<Option<ResolvedClientIdentity>, EdgeError> {
+    let Some(name) = request.client_identity_name() else {
+        return Ok(None);
+    };
+    let Some((policy, metadata)) = client
+        .client_identity_policy()
+        .and_then(|policy| policy.identity(name).map(|metadata| (policy, metadata)))
+    else {
+        return Err(EdgeError::client_identity(
+            name,
+            ClientIdentityError::Undeclared,
+        ));
+    };
+    if !is_https(request.uri()) {
+        return Err(EdgeError::client_identity(
+            name,
+            ClientIdentityError::RequiresHttps,
+        ));
+    }
+    Ok(Some(ResolvedClientIdentity {
+        metadata: metadata.clone(),
+        policy: Arc::clone(policy),
+    }))
+}
+
 pub(super) fn prepare(
     client: &HttpClient,
     mut request: OutboundRequest,
@@ -90,6 +148,7 @@ pub(super) fn prepare(
 ) -> Result<OutboundDispatchRequest, EdgeError> {
     scope.check()?;
     client.inner.validate_supported_options(&request, mode)?;
+    let client_identity = resolve_client_identity(client, &request)?;
     scope.check()?;
     validate_for_dispatch(&request, mode)?;
     let budget = dispatch_budget_inputs(
@@ -132,7 +191,11 @@ pub(super) fn prepare(
         scope,
         time,
     };
-    Ok(OutboundDispatchRequest { context, request })
+    Ok(OutboundDispatchRequest {
+        client_identity,
+        context,
+        request,
+    })
 }
 
 pub(super) async fn settle(

@@ -1614,6 +1614,10 @@ mod tests {
             ),
             (Capability::OutboundCacheBypass, CapabilitySupport::Native),
             (
+                Capability::OutboundClientIdentity,
+                CapabilitySupport::Unsupported,
+            ),
+            (
                 Capability::OutboundImageOptimizer,
                 CapabilitySupport::Unsupported,
             ),
