@@ -31,6 +31,10 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(5);
 
+    /// The visitor address an appending test proxy reports as its predecessor. It lies outside
+    /// every trusted range, so a chain walk that accepts it stopped at the proxy's assertion.
+    const VISITOR: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+
     struct Roots {
         config: TempDir,
         cwd: TempDir,
@@ -606,16 +610,14 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(target_os = "linux"),
-        ignore = "binds extra loopback source addresses (127.0.0.2, 127.0.0.3), which only Linux routes by default (macOS lo0 has only 127.0.0.1); on macOS run with --ignored after `sudo ifconfig lo0 alias 127.0.0.2 up` and `sudo ifconfig lo0 alias 127.0.0.3 up`"
-    )]
     fn native_source_bound_single_proxy_and_mapped_cidr_match_only_owned_peers() {
+        // The mapped /127 truncates to 127.0.0.0/31, so 127.0.0.0/32 is the sibling of the
+        // peer inside that range and the one listed network that does not own it.
         for networks in [
-            "127.0.0.2/32",
-            "::ffff:127.0.0.2/128",
-            "::ffff:127.0.0.2/127",
-            "127.0.0.3/32",
+            "127.0.0.1/32",
+            "::ffff:127.0.0.1/128",
+            "::ffff:127.0.0.1/127",
+            "127.0.0.0/32",
         ] {
             let roots = Roots::new();
             let addr = address();
@@ -626,8 +628,8 @@ mod tests {
             server.ready();
             let proxy = LocalProxy::start(
                 addr,
-                Ipv4Addr::new(127, 0, 0, 2),
                 Assertions::AppendForwarded {
+                    predecessor: VISITOR,
                     host: "public.example",
                     scheme: "https",
                 },
@@ -640,10 +642,10 @@ mod tests {
                 ),
             );
             let value = response_json(&response);
-            let trusted = networks != "127.0.0.3/32";
+            let trusted = networks != "127.0.0.0/32";
             assert_metadata(
                 &value,
-                if trusted { "127.0.0.1" } else { "127.0.0.2" },
+                if trusted { "192.0.2.1" } else { "127.0.0.1" },
                 if trusted {
                     "public.example"
                 } else {
@@ -661,7 +663,7 @@ mod tests {
                 .expect("proxy peer")
                 .parse()
                 .expect("peer address");
-            assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)));
+            assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
             assert_no_diagnostic_headers(&response);
             server.signal("TERM");
             assert!(server.wait().success());
@@ -670,14 +672,14 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(target_os = "linux"),
-        ignore = "binds extra loopback source addresses (127.0.0.2, 127.0.0.3), which only Linux routes by default (macOS lo0 has only 127.0.0.1); on macOS run with --ignored after `sudo ifconfig lo0 alias 127.0.0.2 up` and `sudo ifconfig lo0 alias 127.0.0.3 up`"
-    )]
     fn native_two_proxy_chain_stops_at_untrusted_hop_and_gateway_replaces_prefix() {
+        // The ingress is the server's real 127.0.0.1 peer. It reports the first proxy as
+        // 192.0.2.2, and the first proxy reports the visitor, so the chain has three
+        // distinct hops: 198.51.100.99 (visitor-supplied), 192.0.2.1, then 192.0.2.2.
+        let first_proxy = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
         for (networks, boundary) in [
-            ("127.0.0.2/32,127.0.0.3/32", "127.0.0.1"),
-            ("127.0.0.3/32", "127.0.0.2"),
+            ("127.0.0.1/32,192.0.2.2/32", "192.0.2.1"),
+            ("127.0.0.1/32", "192.0.2.2"),
         ] {
             let roots = Roots::new();
             let addr = address();
@@ -688,8 +690,8 @@ mod tests {
             server.ready();
             let ingress = LocalProxy::start(
                 addr,
-                Ipv4Addr::new(127, 0, 0, 3),
                 Assertions::AppendForwarded {
+                    predecessor: first_proxy,
                     host: "final.example",
                     scheme: "https",
                 },
@@ -697,8 +699,8 @@ mod tests {
             );
             let first = LocalProxy::start(
                 ingress.addr(),
-                Ipv4Addr::new(127, 0, 0, 2),
                 Assertions::AppendForwarded {
+                    predecessor: VISITOR,
                     host: "earlier.example",
                     scheme: "http",
                 },
@@ -716,7 +718,7 @@ mod tests {
                 value["handler"]["peer"]
                     .as_str()
                     .expect("last proxy peer")
-                    .starts_with("127.0.0.3:")
+                    .starts_with("127.0.0.1:")
             );
             server.signal("TERM");
             assert!(server.wait().success());
@@ -725,13 +727,12 @@ mod tests {
         let roots = Roots::new();
         let addr = address();
         let mut server = Server::spawn(
-            native_command("diagnostics", &roots, addr, "127.0.0.3/32", "forwarded"),
+            native_command("diagnostics", &roots, addr, "127.0.0.1/32", "forwarded"),
             addr,
         );
         server.ready();
         let gateway = LocalProxy::start(
             addr,
-            Ipv4Addr::new(127, 0, 0, 3),
             Assertions::ReplaceForwarded {
                 client: "203.0.113.7".parse().expect("verified gateway client"),
                 host: "gateway.example",
@@ -758,13 +759,8 @@ mod tests {
     }
 
     fn assert_missing_unresolved_and_duplicate_family(addr: SocketAddr, family: &str) {
-        // This source-bound relay preserves deliberate bad inputs rather than sanitizing them.
-        let gateway = LocalProxy::start(
-            addr,
-            Ipv4Addr::new(127, 0, 0, 2),
-            Assertions::Preserve,
-            false,
-        );
+        // This trusted relay preserves deliberate bad inputs rather than sanitizing them.
+        let gateway = LocalProxy::start(addr, Assertions::Preserve, false);
         let absent = if family == "forwarded" {
             "Forwarded: host=partial.example;proto=https\r\nX-Forwarded-For: 198.51.100.9\r\n"
         } else {
@@ -773,7 +769,7 @@ mod tests {
         let missing_client = response_json(&raw_request(gateway.addr(), &metadata_request(absent)));
         assert_metadata(
             &missing_client,
-            "127.0.0.2",
+            "127.0.0.1",
             "partial.example",
             "https",
             if family == "forwarded" {
@@ -788,16 +784,17 @@ mod tests {
             } else {
                 "X-Forwarded-For: unknown\r\nX-Forwarded-Host: gap.example\r\nX-Forwarded-Proto: https\r\n"
             },
+            // The only hop is the trusted peer itself, so the walk exhausts the chain.
             if family == "forwarded" {
-                "Forwarded: for=127.0.0.2;host=gap.example;proto=https\r\n"
+                "Forwarded: for=127.0.0.1;host=gap.example;proto=https\r\n"
             } else {
-                "X-Forwarded-For: 127.0.0.2\r\nX-Forwarded-Host: gap.example\r\nX-Forwarded-Proto: https\r\n"
+                "X-Forwarded-For: 127.0.0.1\r\nX-Forwarded-Host: gap.example\r\nX-Forwarded-Proto: https\r\n"
             },
         ] {
             let value = response_json(&raw_request(gateway.addr(), &metadata_request(headers)));
             assert_metadata(
                 &value,
-                "127.0.0.2",
+                "127.0.0.1",
                 "gap.example",
                 "https",
                 "unresolved_chain",
@@ -812,7 +809,7 @@ mod tests {
             response_json(&raw_request(gateway.addr(), &metadata_request(duplicate)));
         assert_metadata(
             &malformed_duplicate,
-            "127.0.0.2",
+            "127.0.0.1",
             "direct.example:8080",
             "http",
             "malformed",
@@ -820,36 +817,34 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(target_os = "linux"),
-        ignore = "binds extra loopback source addresses (127.0.0.2, 127.0.0.3), which only Linux routes by default (macOS lo0 has only 127.0.0.1); on macOS run with --ignored after `sudo ifconfig lo0 alias 127.0.0.2 up` and `sudo ifconfig lo0 alias 127.0.0.3 up`"
-    )]
     fn native_selected_families_conflicts_malformed_sets_gaps_and_exhaustion() {
         for family in ["forwarded", "x-forwarded"] {
             let roots = Roots::new();
             let addr = address();
             let mut server = Server::spawn(
-                native_command("diagnostics", &roots, addr, "127.0.0.2/32", family),
+                native_command("diagnostics", &roots, addr, "127.0.0.1/32", family),
                 addr,
             );
             server.ready();
             let assertions = if family == "forwarded" {
                 Assertions::AppendForwarded {
+                    predecessor: VISITOR,
                     host: "selected.example",
                     scheme: "https",
                 }
             } else {
                 Assertions::AppendXForwarded {
+                    predecessor: VISITOR,
                     host: "selected.example",
                     scheme: "https",
                 }
             };
-            let proxy = LocalProxy::start(addr, Ipv4Addr::new(127, 0, 0, 2), assertions, false);
+            let proxy = LocalProxy::start(addr, assertions, false);
             for (prefix, expected_result, client, host, scheme) in [
                 (
                     "Forwarded: for=198.51.100.1;host=wrong.example;proto=http\r\nX-Forwarded-For: 203.0.113.1\r\nX-Forwarded-Host: wrong.example\r\nX-Forwarded-Proto: http\r\n",
                     "accepted",
-                    "127.0.0.1",
+                    "192.0.2.1",
                     "selected.example",
                     "https",
                 ),
@@ -860,7 +855,7 @@ mod tests {
                         "X-Forwarded-For: bad-address\r\n"
                     },
                     "malformed",
-                    "127.0.0.2",
+                    "127.0.0.1",
                     "direct.example:8080",
                     "http",
                 ),
@@ -871,7 +866,7 @@ mod tests {
                         "X-Forwarded-For: unknown\r\n"
                     },
                     "accepted",
-                    "127.0.0.1",
+                    "192.0.2.1",
                     "selected.example",
                     "https",
                 ),
@@ -898,22 +893,18 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(target_os = "linux"),
-        ignore = "binds extra loopback source addresses (127.0.0.2, 127.0.0.3), which only Linux routes by default (macOS lo0 has only 127.0.0.1); on macOS run with --ignored after `sudo ifconfig lo0 alias 127.0.0.2 up` and `sudo ifconfig lo0 alias 127.0.0.3 up`"
-    )]
     fn native_verified_tls_ingress_overwrites_public_assertions_and_rejects_wrong_name() {
         let roots = Roots::new();
         let addr = address();
         let mut server = Server::spawn(
-            native_command("diagnostics", &roots, addr, "127.0.0.2/32", "forwarded"),
+            native_command("diagnostics", &roots, addr, "127.0.0.1/32", "forwarded"),
             addr,
         );
         server.ready();
         let proxy = LocalProxy::start(
             addr,
-            Ipv4Addr::new(127, 0, 0, 2),
             Assertions::AppendForwarded {
+                predecessor: VISITOR,
                 host: "native-proxy.test",
                 scheme: "https",
             },
@@ -927,7 +918,7 @@ mod tests {
         let value = response_json(&response);
         assert_metadata(
             &value,
-            "127.0.0.1",
+            "192.0.2.1",
             "native-proxy.test",
             "https",
             "accepted",
