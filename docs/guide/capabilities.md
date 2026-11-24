@@ -359,6 +359,7 @@ not included. These limitations block whole-response-lifetime certification.
 | `outbound-batch-completion-order`       | Native                            | Native                            | BestEffort⁴                         | Native                            |
 | `outbound-batch-slot-isolation`         | Native                            | Native                            | BestEffort⁴                         | Native                            |
 | `outbound-cache-bypass`                 | Native                            | Native                            | Native                              | Native                            |
+| `outbound-client-identity`              | Unsupported                       | Unsupported                       | Native                              | Unsupported                       |
 | `outbound-complete-resource-accounting` | Unsupported[^resource-accounting] | Unsupported[^resource-accounting] | Unsupported[^resource-accounting]   | Unsupported[^resource-accounting] |
 | `outbound-connect-timeout`              | BestEffort                        | BestEffort                        | Native[^connect-timeout]            | BestEffort                        |
 | `outbound-header-fidelity`              | Native                            | BestEffort⁸                       | Native                              | BestEffort[^spin-header-fidelity] |
@@ -664,6 +665,14 @@ Spin receives the canonicalized entries through `allowed_outbound_hosts`. Cloudf
 need a build-time destination list. Fastly creates deterministic dynamic backends from the
 canonical target. Axum applies the same manifest validation even though the native client does
 not require provider host registration.
+
+## Client Identities
+
+`outbound-client-identity` covers presenting a declared TLS client certificate on outbound
+requests. Fastly reads the binding from a config store and a secret store and is `Native`.
+Cloudflare, Spin and Axum reject identity requests before I/O until their bindings land. An
+identity's runtime hosts list must stay inside `[capabilities.outbound].hosts`. See
+[Client Certificates (mTLS)](/guide/proxying#client-certificates-mtls).
 
 ## Limits And Accounting
 
