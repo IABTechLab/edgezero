@@ -161,7 +161,7 @@ All of these checks run before any network I/O, on the initial request and on ev
 2. **Declaration and scheme.** `dispatch::prepare` looks up the name in the client's identity policy and requires `https`. This runs in core, so every adapter returns the same errors.
 3. **Binding.** The adapter resolves the identity's runtime binding at most once per inbound request. Later hops and later calls in the same inbound request reuse it. The next inbound request reads it again, so rotation takes effect on the next request. On Fastly the binding is two config entries and one Secret Store entry, read through #275's bounded reads, so the reads count against the dispatch deadline.
 4. **Hosts.** Core parses the hosts entry with `ClientIdentityHosts::parse(bytes, allowlist)`, and the adapter calls `ClientIdentityHosts::check(uri)` on every hop. Both are core functions, so parsing and matching are identical across adapters even though only the adapter can read the entry. Parsing rules:
-   - One origin per line: `https://host` or `https://host:port`. No path, query, userinfo or wildcard. Blank lines are ignored. A missing port means 443. Hosts compare case-insensitively after IDNA normalization through `url`.
+   - One origin per line: `https://host` or `https://host:port`. No path, query, userinfo or wildcard. Blank lines are ignored. A missing port means 443. Hosts follow the outbound allowlist grammar: ASCII only, so internationalized names are written in punycode, and compared lowercase.
    - At least one origin.
    - Every origin must be allowed by the outbound allowlist in the identity policy. If any origin isn't, the whole identity fails as `MaterialInvalid`, so a provisioning mistake shows up on the first request instead of the first request to that host.
    - The check compares the request URI's scheme, host and port, which is where the connection goes. `host_authority_override` and the `Host` header are not compared, and overriding `Host` on an allowed origin stays permitted.
@@ -187,7 +187,7 @@ Add `EdgeError::ClientIdentity { name: String, reason: ClientIdentityError }`. I
 
 - A bounded read that hits the deadline keeps #275's existing `GatewayTimeout`. Identity errors do not mask timeouts.
 - An origin that rejects the handshake surfaces through the existing provider failure causes (`TlsCertificateError`, `TlsAlertReceived`, `TlsConfigurationError`) with no new mapping. A mismatched certificate and key, for example during rotation, fails the same way. Viceroy never fills in send-error detail ([Viceroy#727](https://github.com/fastly/Viceroy/issues/727)), so locally the guest sees a generic `InternalError` instead, and local tests don't check these causes.
-- `Display` and `Debug` show the identity name, the reason, and the certificate fingerprint where one exists. They never show key bytes or PEM contents. For `HostNotAllowed` they show the request's scheme, host and port, never the path or query.
+- `Display` and `Debug` show the identity name and the reason. They never show key bytes or PEM contents. For `HostNotAllowed` they show the request's scheme, host and port, never the path or query.
 
 ## Fastly binding
 
@@ -209,14 +209,16 @@ Only the private key needs the Secret Store. The certificate is public, and the 
 
 ### Reads per inbound request
 
-`FastlyOutboundClient` is built fresh for each inbound request, so it holds the resolved binding for exactly one request. The first dispatch that uses an identity reads its three entries. Later hops and calls in the same inbound request, for the same identity, reuse them.
+`FastlyOutboundClient` is built fresh for each inbound request, so it holds the resolved config binding for exactly one request. The first dispatch that uses an identity reads its two config entries. Later hops and calls in the same inbound request, for the same identity, reuse them.
 
-| Per identity, per inbound request | Count |
+The key is different. `fastly::secret_store::Secret` is neither `Clone` nor `Sync`, and `provide_client_certificate` takes it by value, so a handle cannot be cached and reused. The adapter opens the key only when a backend must be registered. A request whose backend is already registered in the instance's registry opens no key.
+
+| Per identity | Count |
 | --- | --- |
-| Secret Store reads | 1 |
-| Config Store reads | 2 |
+| Config Store reads | 2 per inbound request |
+| Secret Store reads | 1 per backend registration; 0 when the backend is already registered |
 
-Whether Fastly counts opening a `Secret` handle as a read is not documented. This design assumes it does. The guide states the budget: one Secret Store read per identity per inbound request, shared with the application's own secret reads, against a default of 5 that Fastly can raise.
+One inbound request registers more than one backend for an identity only when it reaches different origins or uses different timeout settings with that identity. Whether Fastly counts opening a `Secret` handle as a read is not documented; this design assumes it does. The guide states the budget against Fastly's default of 5 reads per request, which the application's own reads share and Fastly can raise.
 
 ### Rotation
 
@@ -270,9 +272,9 @@ Merging requires local evidence only. Certificates are generated per run with `r
 | --- | --- |
 | Manifest and policy | Name rules, unknown stores, unknown fields, default stores, a manifest with no stores, and the policy `App` builds from `Hooks::manifest()`, including absent and malformed manifests. Dispatch attaches the policy to an adapter-built client and to a client supplied by a preparation hook, and leaves a client that already carries a policy unchanged |
 | CLI | Fastly's identity check rejects unresolvable stores. The required-capability check fails for Cloudflare, Spin and Axum and passes for Fastly |
-| Core | `ClientIdentityName` validation. `Undeclared` and `RequiresHttps` before I/O. Hosts parsing, covering ports, case, IDNA, blank lines, paths, wildcards, an empty entry, and an origin outside the allowlist. A host-override request is still allowed. `replay_request` carries the identity. A same-origin hop and a hop to another listed host are sent, and a hop to an unlisted host fails with its index before dispatch. Batch slot isolation. Each error's status and redacted `Display` and `Debug` output |
+| Core | `ClientIdentityName` validation. `Undeclared` and `RequiresHttps` before I/O. Hosts parsing, covering ports, case, non-ASCII names, blank lines, paths, wildcards, an empty entry, and an origin outside the allowlist. A host-override request is still allowed. `replay_request` carries the identity. A same-origin hop and a hop to another listed host are sent, and a hop to an unlisted host fails with its index before dispatch. Batch slot isolation. Each error's status and redacted `Display` and `Debug` output |
 | Unsupported adapters | Cloudflare, Spin and Axum reject an identity request before I/O |
-| Fastly native | `backend_name` differs for no identity, two identities, and two chain fingerprints of one identity. Changing only an intermediate changes the fingerprint. A changed chain registers a new backend in a warm registry. Updated golden names. Missing entries, a malformed certificate and oversized entries map to their reasons. Identity requests are sent with the cache bypassed, and the surrogate-key policy is rejected. Two dispatches with one identity in one inbound request read each entry once |
+| Fastly native | `backend_name` differs for no identity, two identities, and two chain fingerprints of one identity. Changing only an intermediate changes the fingerprint. A changed chain registers a new backend in a warm registry. Updated golden names. Missing entries, a malformed certificate and oversized entries map to their reasons. Identity requests are sent with the cache bypassed, and the surrogate-key policy is rejected. The binding cache reads each config entry once per inbound request, caches missing and invalid material, and retries after a deadline |
 | Fastly runtime (patched Viceroy from `patches/viceroy`) | A new `edgezero-test-harness` runner starts host-side rustls origins that require client certificates from a per-run CA. The origins record every TCP accept before TLS, and separately record the certificate presented in each completed handshake. The runner writes the Viceroy config and secret store entries and runs the cases: the identity request succeeds with the expected certificate; requests without the identity, and with a certificate from a different CA, fail in the guest as a transport error, and the origin's records show a TCP accept with a failed handshake and no accepted client certificate. The runner records whatever cause Viceroy reports without asserting it; a relaunch with a replaced certificate presents the new one; `Undeclared`, `RequiresHttps`, Image Optimizer and a redirect to an unlisted host fail with no TCP accept at the origin they would have reached |
 | Integration | The workspace gates in `CLAUDE.md`, `scripts/test_integration.sh --adapter fastly --suite ci` including the new runner, and the docs ESLint and Prettier checks |
 
