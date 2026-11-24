@@ -2,6 +2,7 @@ use crate::{evidence::*, net::Backend, *};
 use std::collections::{BTreeSet, HashMap, HashSet};
 mod assembly;
 pub(crate) mod ci;
+mod client_identity;
 mod framing;
 mod lifetimes;
 mod overflow;
@@ -380,6 +381,9 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     }
     if args.suite == "record-contract" {
         return record_contract::run(&exe, run, records);
+    }
+    if args.suite == "client-identity" {
+        return client_identity::run(&exe, run, records);
     }
     if args.suite == "portable-record-contract" {
         return record_contract::run_portable(&exe, run, records);
