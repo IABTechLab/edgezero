@@ -1,6 +1,6 @@
 # Outbound client identity (mTLS) implementation plan
 
-Status, 2026-11-23: tasks 0 to 8 implemented through `d1d02171`; local gates and the Fastly ci suite pass. Task 10 runs when the PR opens. Revised after review: the Fastly binding moved the certificate and hosts to the Config Store and reads it once per inbound request; identity requests bypass the response cache; the fingerprint covers the whole chain; core builds the policy from the baked manifest and attaches it to each request's client at dispatch.
+Status, 2026-11-23: tasks 0 to 8 implemented through `d1d02171`; local gates and the Fastly ci suite pass. PR #524 is open and task 10 is done. Revised after review: the Fastly binding moved the certificate and hosts to the Config Store and reads it once per inbound request; identity requests bypass the response cache; the fingerprint covers the whole chain; core builds the policy from the baked manifest and attaches it to each request's client at dispatch.
 
 Worktree: `/home/pav/worktrees/feat-523-outbound-client-identity`, branch `feat/523-outbound-client-identity`, based on `origin/feat/474-portable-record-providers` at `6fb738491584d432516af9e0ec13281f0823ffdd`. The spec commit `2b08eac6` is the first commit on the branch.
 
@@ -239,9 +239,9 @@ Also run the Fastly target-matched runtime unit tests that the `ci` suite alread
 
 Run when the PR opens, with permission to publish.
 
-- [ ] Open the Cloudflare, Spin and Axum follow-up issues. Each states its expected binding and its answers to the spec's "What application code can rely on". Spin's records that a request without an identity still presents a configured certificate, and that two identities can't share a host. Cloudflare's records `wrangler dev --remote` and the proxied-zone 520.
-- [ ] Add #523 to #79's child list.
-- [ ] Comment on #81 that origin CA pinning is not a dependency of #523.
+- [x] Open the Cloudflare, Spin and Axum follow-up issues. Opened as #525 (Cloudflare), #526 (Spin) and #527 (Axum). Each states its expected binding and its answers to the spec's "What application code can rely on". Spin's records that a request without an identity still presents a configured certificate, and that two identities can't share a host. Cloudflare's records `wrangler dev --remote` and the proxied-zone 520.
+- [x] Add #523 to #79's child list.
+- [x] Comment on #81 that origin CA pinning is not a dependency of #523.
 - [ ] Open a follow-up for chunked certificate entries only if an operator needs a chain longer than 8,000 characters.
 
 ## Decisions made during planning
