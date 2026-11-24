@@ -20,6 +20,8 @@
     )
 )]
 
+#[cfg(any(feature = "fastly", test))]
+mod client_identity;
 #[cfg(feature = "fastly")]
 mod image_optimizer;
 
@@ -42,10 +44,12 @@ use edgezero_core::error::EdgeError;
 use edgezero_core::error::{BadGatewayReason, BudgetSource};
 #[cfg(test)]
 use edgezero_core::outbound::OutboundBatchDriverEvent;
+#[cfg(any(feature = "fastly", feature = "test-utils", test))]
+use edgezero_core::outbound::OutboundCachePolicy;
 #[cfg(feature = "test-utils")]
 use edgezero_core::outbound::validate_for_dispatch;
 #[cfg(any(feature = "fastly", feature = "test-utils"))]
-use edgezero_core::outbound::{OutboundRequest, OutboundSendMode};
+use edgezero_core::outbound::{ClientIdentityError, OutboundRequest, OutboundSendMode};
 #[cfg(any(feature = "fastly", test))]
 use edgezero_core::time::{DispatchBudget, MonotonicInstant};
 
@@ -259,7 +263,7 @@ mod fastly_impl {
     use std::io::{Read as _, Result as IoResult, Write};
     use std::net::IpAddr;
     use std::rc::Rc;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Duration;
 
     use async_stream::stream;
@@ -278,6 +282,9 @@ mod fastly_impl {
     use edgezero_core::outbound::test_support::{
         NativeBodyOwner, NativeBodyRecorder, native_body_recorder, own_sdk_operation,
         own_sdk_resource,
+    };
+    use edgezero_core::outbound::{
+        ClientCertificateChain, ClientIdentityMetadata, ClientIdentityPolicy,
     };
     #[cfg(test)]
     use edgezero_core::outbound::{
@@ -306,6 +313,7 @@ mod fastly_impl {
     use futures_util::{FutureExt as _, StreamExt as _};
     use sha2::{Digest as _, Sha256};
 
+    use super::client_identity;
     use super::progress::{HeadPoll, Progress, Transport};
     use super::{timeout_error, validate_supported_options};
 
@@ -540,6 +548,7 @@ mod fastly_impl {
 
     #[derive(Clone, Debug, Eq, Hash, PartialEq)]
     struct BackendIdentity {
+        client_identity: Option<(String, [u8; 32])>,
         host: String,
         phase_ms: u64,
         connect_ms: Option<u64>,
@@ -556,6 +565,7 @@ mod fastly_impl {
     }
 
     struct RequestPlan {
+        client_identity: Option<(ClientIdentityMetadata, Arc<ClientIdentityPolicy>)>,
         identity: Result<BackendIdentity, EdgeError>,
         context: OutboundResponseContext,
         parts: OutboundRequestParts,
@@ -566,11 +576,16 @@ mod fastly_impl {
             let budget = request.budget();
             let mut identity =
                 backend_identity_view(request.request(), budget).map(|(settings, ())| settings);
+            let client_identity = request
+                .client_identity()
+                .cloned()
+                .zip(request.client_identity_policy().cloned());
             let (parts, context) = request.into_parts();
             if let Ok(settings) = &mut identity {
                 settings.phase_ms = backend_timer_ms(parts.timeout.unwrap_or(budget.duration));
             }
             Self {
+                client_identity,
                 identity,
                 context,
                 parts,
@@ -578,6 +593,10 @@ mod fastly_impl {
         }
 
         fn is_registered(&self, cache: &HashMap<String, (BackendIdentity, Backend)>) -> bool {
+            // An identity backend's name depends on the certificate read during dispatch.
+            if self.client_identity.is_some() {
+                return false;
+            }
             self.identity.as_ref().is_ok_and(|identity| {
                 cache
                     .get(&backend_name(identity))
@@ -608,6 +627,7 @@ mod fastly_impl {
 
     /// Native outbound HTTP implementation for Fastly Compute.
     pub struct FastlyOutboundClient {
+        bindings: Arc<client_identity::BindingCache>,
         time: OutboundTime,
     }
 
@@ -618,11 +638,22 @@ mod fastly_impl {
             Self::with_time(native_time(MonotonicClock::default()))
         }
 
+        /// A client for one dispatch that shares this request's identity bindings.
+        fn sharing(&self, time: OutboundTime) -> Self {
+            Self {
+                bindings: Arc::clone(&self.bindings),
+                time,
+            }
+        }
+
         /// Builds a client that evaluates every outbound lifetime against `clock`.
         #[must_use]
         #[inline]
         pub fn with_time(time: OutboundTime) -> Self {
-            Self { time }
+            Self {
+                bindings: Arc::default(),
+                time,
+            }
         }
 
         fn ensure_backend(
@@ -632,6 +663,7 @@ mod fastly_impl {
             budget: DispatchBudget,
             batch_started_at: Option<MonotonicInstant>,
             observation: Option<Rc<Recorder>>,
+            certificate: Option<(&ClientIdentityMetadata, &ClientCertificateChain)>,
         ) -> Result<Backend, EdgeError> {
             let registry = BACKENDS.get_or_init(|| Mutex::new(HashMap::new()));
             let record = observation.clone();
@@ -662,6 +694,25 @@ mod fastly_impl {
                             builder = builder.sni_hostname(&settings.host);
                         }
                     }
+                    if let Some((metadata, chain)) = certificate {
+                        // The key is opened only here, when a backend must be registered.
+                        let key = client_identity::open_private_key(
+                            metadata,
+                            self.time.clock(),
+                            budget.deadline,
+                        )
+                        .map_err(|failure| {
+                            client_identity::binding_error(metadata, failure, || {
+                                timeout_error(budget.cause)
+                            })
+                        })?;
+                        builder = builder.provide_client_certificate(chain.pem(), key);
+                        log::debug!(
+                            "registering client identity backend for `{}` (leaf sha256 {})",
+                            metadata.name(),
+                            encode_string(&chain.leaf_fingerprint())
+                        );
+                    }
                     register_backend_while_live(batch_started_at, budget, self.time.clock(), || {
                         registration.run(|| {
                             let result = builder.finish();
@@ -687,6 +738,7 @@ mod fastly_impl {
 
         fn configure_plan(&self, plan: RequestPlan) -> Result<PreparedRequest, EdgeError> {
             let RequestPlan {
+                client_identity,
                 identity: planned_identity,
                 context,
                 mut parts,
@@ -694,7 +746,32 @@ mod fastly_impl {
             context.scope().check()?;
             let observation = observation::for_scope(context.scope());
             let budget = context.budget();
-            let identity = planned_identity?;
+            let mut identity = planned_identity?;
+            let certificate =
+                match &client_identity {
+                    None => None,
+                    Some((metadata, policy)) => {
+                        let reader = client_identity::FastlyConfigEntries {
+                            clock: context.clock(),
+                            deadline: budget.deadline,
+                        };
+                        let binding = self.bindings.resolve(metadata, policy, &reader).map_err(
+                            |failure| {
+                                client_identity::binding_error(metadata, failure, || {
+                                    timeout_error(budget.cause)
+                                })
+                            },
+                        )?;
+                        binding.hosts.check(&parts.uri).map_err(|reason| {
+                            EdgeError::client_identity(metadata.name(), reason)
+                        })?;
+                        identity.client_identity = Some((
+                            metadata.name().as_str().to_owned(),
+                            binding.chain.chain_fingerprint(),
+                        ));
+                        Some((metadata, binding))
+                    }
+                };
             if !parts.headers.contains_key(ACCEPT_ENCODING) {
                 parts
                     .headers
@@ -703,8 +780,16 @@ mod fastly_impl {
             budget_remaining(budget, context.clock())?;
             let batch_start =
                 (context.mode() == OutboundSendMode::Batch).then_some(context.entered_at());
-            let backend =
-                self.ensure_backend(identity, &parts, budget, batch_start, observation)?;
+            let backend = self.ensure_backend(
+                identity,
+                &parts,
+                budget,
+                batch_start,
+                observation,
+                certificate
+                    .as_ref()
+                    .map(|(metadata, binding)| (*metadata, &binding.chain)),
+            )?;
             budget_remaining(budget, context.clock())?;
             Ok(PreparedRequest {
                 backend,
@@ -728,12 +813,10 @@ mod fastly_impl {
             let time = context.time().clone();
             let configured =
                 super::effective_connect_ms(parts.connect_timeout, budget.duration).is_some();
-            let fastly_request = build_fastly_request(
-                &parts.method,
-                &parts.uri,
-                &parts.headers,
-                parts.cache_policy,
-            );
+            let cache_policy =
+                super::effective_cache_policy(parts.client_identity.is_some(), parts.cache_policy);
+            let fastly_request =
+                build_fastly_request(&parts.method, &parts.uri, &parts.headers, cache_policy);
             let max_request_body_bytes = parts.max_request_body_bytes;
             let (payload, _scope) = parts.body.into_parts();
             let response = match payload {
@@ -792,11 +875,12 @@ mod fastly_impl {
         }
 
         fn pipeline(
+            &self,
             plan: RequestPlan,
             progress: &NativeProgress,
         ) -> OutboundFuture<OutboundResponse> {
             let failure = plan.context.exchange_failure();
-            let client = Self::with_time(plan.context.time().clone());
+            let client = self.sharing(plan.context.time().clone());
             let exchange_progress = progress.with_exchange_failure(failure.clone());
             Box::pin(async move {
                 let budget = plan.context.budget();
@@ -849,7 +933,7 @@ mod fastly_impl {
 
         #[inline]
         fn dispatch_head(&self, request: OutboundDispatchRequest) -> OutboundFuture<OutboundHead> {
-            let client = Self::with_time(request.time().clone());
+            let client = self.sharing(request.time().clone());
             let selected_progress = super::scope::native_progress(
                 request.scope(),
                 request.time(),
@@ -887,7 +971,7 @@ mod fastly_impl {
                 .with_exchange_failure(failure.clone());
             super::scope::begin(
                 &scope,
-                Self::pipeline(plan, &progress),
+                self.pipeline(plan, &progress),
                 &progress,
                 &time,
                 entered,
@@ -946,7 +1030,7 @@ mod fastly_impl {
                 .map(|(index, plan)| {
                     let budget = plan.context.budget();
                     let failure = plan.context.exchange_failure();
-                    let future = Self::pipeline(plan, &progress);
+                    let future = self.pipeline(plan, &progress);
                     let clock = time.clock().clone();
                     async move {
                         let outcome = future.await;
@@ -1013,6 +1097,7 @@ mod fastly_impl {
             .ok_or_else(|| EdgeError::bad_request("outbound request URI has no scheme"))?;
         Ok((
             BackendIdentity {
+                client_identity: None,
                 host: request.host_name().to_owned(),
                 phase_ms: backend_timer_ms(budget.duration),
                 // Keep the configured tuple stable across aggregate-budget ladder rungs.
@@ -1037,7 +1122,7 @@ mod fastly_impl {
     )]
     fn backend_name(identity: &BackendIdentity) -> String {
         // Timer derivation, ladder or canonical-key changes require a new identity version
-        // and matching golden/readback evidence; never reuse b31v1 for a changed policy.
+        // and matching golden/readback evidence; never reuse a version for a changed policy. v2 adds the client identity.
         let mut hasher = Sha256::new();
         for field in [&identity.scheme, &identity.host, &identity.wire_authority] {
             hasher.update(field.as_bytes());
@@ -1050,7 +1135,13 @@ mod fastly_impl {
             hasher.update(b"connect-ms-v1");
             hasher.update(connect_ms.to_be_bytes());
         }
-        format!("ez_b31v1_{}", encode_string(&hasher.finalize()))
+        if let Some((name, chain_fingerprint)) = &identity.client_identity {
+            hasher.update(b"client-identity-v1");
+            hasher.update(name.as_bytes());
+            hasher.update([0_u8]);
+            hasher.update(chain_fingerprint);
+        }
+        format!("ez_b31v2_{}", encode_string(&hasher.finalize()))
     }
 
     fn backend_timer_ms(anchor: Duration) -> u64 {
@@ -5788,6 +5879,7 @@ mod fastly_impl {
         #[test]
         fn backend_identity_uses_every_canonical_property() {
             let first = BackendIdentity {
+                client_identity: None,
                 phase_ms: 128,
                 connect_ms: None,
                 host: "example.com".to_owned(),
@@ -5796,9 +5888,11 @@ mod fastly_impl {
                 tls: true,
                 wire_authority: "example.com".to_owned(),
             };
+            // v2 adds the client identity to the hashed key. Without one, the hashed bytes are
+            // unchanged, so only the version prefix moved from ez_b31v1_.
             assert_eq!(
                 backend_name(&first),
-                "ez_b31v1_a165932b532b7ff063ee219444cb3cb093847ee427d4f76b54a68909b2e279fc"
+                "ez_b31v2_a165932b532b7ff063ee219444cb3cb093847ee427d4f76b54a68909b2e279fc"
             );
             let mut second = first.clone();
             second.phase_ms = 256;
@@ -5818,6 +5912,89 @@ mod fastly_impl {
             second = first.clone();
             second.wire_authority = "tenant.example:8443".to_owned();
             assert_ne!(backend_name(&first), backend_name(&second));
+        }
+
+        #[test]
+        fn identity_without_a_runtime_binding_fails_before_backend_registration() {
+            use edgezero_core::manifest::ManifestLoader;
+            use edgezero_core::outbound::{
+                ClientIdentityError, ClientIdentityMaterial, ClientIdentityName,
+            };
+            let manifest = ManifestLoader::load_from_str(
+                "[capabilities.outbound.client-identities.mtls]\n\
+                 [stores.config]\nids = [\"absent_config\"]\n\
+                 [stores.secrets]\nids = [\"absent_secrets\"]\n",
+            );
+            let policy = Arc::new(ClientIdentityPolicy::from_manifest(manifest.manifest()));
+            let time = native_time(MonotonicClock::default());
+            let request = OutboundRequest::get("https://pbs.example/auction")
+                .expect("request")
+                .client_identity(ClientIdentityName::new("mtls").expect("name"));
+            let dispatch = testing::dispatch_with_policy(request, time.clone(), policy);
+            let Err(error) = FastlyOutboundClient::with_time(time).configure(dispatch) else {
+                panic!("a missing binding must fail before registration");
+            };
+            assert_eq!(
+                error.client_identity_error(),
+                Some(&ClientIdentityError::MaterialMissing {
+                    which: ClientIdentityMaterial::Store
+                })
+            );
+        }
+
+        #[test]
+        fn backend_name_covers_the_client_identity_and_whole_chain() {
+            let request = OutboundRequest::get("https://pbs.example/").expect("request");
+            let budget = clock_budget(MonotonicInstant::now(), Duration::from_secs(1));
+            let (plain, _) = backend_identity(request, budget).expect("identity");
+            let mut identified = plain.clone();
+            identified.client_identity = Some(("mtls".to_owned(), [1_u8; 32]));
+            assert_ne!(backend_name(&plain), backend_name(&identified));
+
+            let same = identified.clone();
+            assert_eq!(backend_name(&identified), backend_name(&same));
+
+            let mut other_name = identified.clone();
+            other_name.client_identity = Some(("other".to_owned(), [1_u8; 32]));
+            assert_ne!(backend_name(&identified), backend_name(&other_name));
+
+            let mut rotated = identified.clone();
+            rotated.client_identity = Some(("mtls".to_owned(), [2_u8; 32]));
+            assert_ne!(backend_name(&identified), backend_name(&rotated));
+        }
+
+        #[test]
+        fn changed_chain_registers_a_new_backend_in_a_warm_registry() {
+            let start = MonotonicInstant::now();
+            let budget = clock_budget(start, Duration::from_secs(1));
+            let clock = constant_clock(start);
+            let request = OutboundRequest::get("https://pbs.example/").expect("request");
+            let (mut identity, _) = backend_identity(request, budget).expect("identity");
+            identity.client_identity = Some(("mtls".to_owned(), [1_u8; 32]));
+            let registry = Mutex::new(HashMap::new());
+            let registered = RefCell::new(Vec::new());
+            let register = |settings: &BackendIdentity| {
+                cached_backend(
+                    &registry,
+                    settings.clone(),
+                    budget,
+                    &clock,
+                    None,
+                    |name, _| {
+                        registered.borrow_mut().push(name.to_owned());
+                        Ok(Ok(name.to_owned()))
+                    },
+                )
+                .expect("backend")
+            };
+            let first = register(&identity);
+            assert_eq!(register(&identity), first, "a warm backend is reused");
+            let mut rotated = identity.clone();
+            rotated.client_identity = Some(("mtls".to_owned(), [2_u8; 32]));
+            let second = register(&rotated);
+            assert_ne!(second, first);
+            assert_eq!(registered.borrow().clone(), [first.clone(), second]);
+            assert!(registry.lock().expect("registry").contains_key(&first));
         }
 
         #[test]
@@ -6942,11 +7119,38 @@ pub use fastly_impl::{DYNAMIC_BACKENDS_DISABLED_MESSAGE, FastlyOutboundClient};
 #[cfg(feature = "fastly")]
 pub(crate) use fastly_impl::{drive_callback, native_time};
 
+/// Identity responses are never cached: Fastly's default cache key is the URL and
+/// `Host`, without the backend or certificate, so a cached identity response could
+/// reach a request without the identity.
+#[cfg(any(feature = "fastly", test))]
+fn effective_cache_policy(
+    has_client_identity: bool,
+    requested: OutboundCachePolicy,
+) -> OutboundCachePolicy {
+    if has_client_identity {
+        OutboundCachePolicy::Bypass
+    } else {
+        requested
+    }
+}
+
 #[cfg(any(feature = "fastly", feature = "test-utils"))]
 fn validate_supported_options(
     request: &OutboundRequest,
     mode: OutboundSendMode,
 ) -> Result<(), EdgeError> {
+    if let Some(name) = request.client_identity_name()
+        && (request.image_optimizer_options().is_some()
+            || matches!(
+                request.cache_policy_setting(),
+                OutboundCachePolicy::PlatformDefaultWithSurrogateKey(_)
+            ))
+    {
+        return Err(EdgeError::client_identity(
+            name,
+            ClientIdentityError::Unsupported { adapter: "fastly" },
+        ));
+    }
     if request.image_optimizer_options().is_some()
         && matches!(mode, OutboundSendMode::Batch | OutboundSendMode::Begin)
     {
@@ -7012,6 +7216,66 @@ mod send_failure_policy_tests {
         }
         for mode in [OutboundSendMode::Send, OutboundSendMode::Follow] {
             validate_supported_options(&request, mode).expect("supported native mode");
+        }
+    }
+
+    #[test]
+    #[cfg(any(feature = "fastly", feature = "test-utils"))]
+    fn client_identity_rejects_optimizer_and_surrogate_keys_in_every_mode() {
+        use edgezero_core::http::HeaderValue;
+        use edgezero_core::{ClientIdentityName, OutboundImageOptimizerOptions};
+        let identified = || {
+            OutboundRequest::get("https://pbs.example/auction")
+                .expect("request")
+                .client_identity(ClientIdentityName::new("mtls").expect("name"))
+        };
+        let unsupported = [
+            identified().image_optimizer(OutboundImageOptimizerOptions::new()),
+            identified().cache_policy(OutboundCachePolicy::PlatformDefaultWithSurrogateKey(
+                HeaderValue::from_static("auction"),
+            )),
+        ];
+        let modes = [
+            OutboundSendMode::Send,
+            OutboundSendMode::Follow,
+            OutboundSendMode::Begin,
+            OutboundSendMode::Batch,
+        ];
+        for request in &unsupported {
+            for mode in modes {
+                let error = validate_supported_options(request, mode).expect_err("unsupported");
+                assert_eq!(
+                    error.client_identity_error(),
+                    Some(&ClientIdentityError::Unsupported { adapter: "fastly" })
+                );
+            }
+        }
+        for policy in [
+            OutboundCachePolicy::PlatformDefault,
+            OutboundCachePolicy::Bypass,
+        ] {
+            let request = identified().cache_policy(policy);
+            for mode in modes {
+                validate_supported_options(&request, mode).expect("identity with plain caching");
+            }
+        }
+    }
+
+    #[test]
+    fn client_identity_requests_always_bypass_the_cache() {
+        use edgezero_core::http::HeaderValue;
+        let tagged =
+            OutboundCachePolicy::PlatformDefaultWithSurrogateKey(HeaderValue::from_static("tag"));
+        for requested in [
+            OutboundCachePolicy::PlatformDefault,
+            OutboundCachePolicy::Bypass,
+            tagged.clone(),
+        ] {
+            assert_eq!(
+                effective_cache_policy(true, requested.clone()),
+                OutboundCachePolicy::Bypass
+            );
+            assert_eq!(effective_cache_policy(false, requested.clone()), requested);
         }
     }
 

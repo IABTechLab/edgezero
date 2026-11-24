@@ -11,6 +11,7 @@ use crate::http::{
     HeaderMap, HeaderValue, Method, Response, StatusCode,
     header::{ALLOW, CONTENT_TYPE, RETRY_AFTER},
 };
+use crate::outbound::{ClientIdentityError, ClientIdentityName};
 use crate::response::{IntoResponse, response_with_body};
 use crate::response_egress_framing::ResponseEgressFramingError;
 
@@ -156,6 +157,13 @@ pub enum EdgeError {
         message: String,
         provider_detail: Option<ProviderFailureDetail>,
     },
+    /// A request that selects a client identity was refused before network I/O.
+    /// The reason chooses the HTTP status.
+    #[error("client identity `{name}`: {reason}")]
+    ClientIdentity {
+        name: String,
+        reason: ClientIdentityError,
+    },
     /// The blob's `data` shape disagrees with the deployed `C`
     /// type. Re-running `<app-cli> config push` for the deployed
     /// code revision fixes it. HTTP 503, kind
@@ -285,6 +293,41 @@ impl EdgeError {
         }
     }
 
+    /// A client-identity refusal.
+    #[inline]
+    #[must_use]
+    pub fn client_identity(name: &ClientIdentityName, reason: ClientIdentityError) -> Self {
+        Self::ClientIdentity {
+            name: name.as_str().to_owned(),
+            reason,
+        }
+    }
+
+    /// The client-identity reason, when this error refused an identity request.
+    #[inline]
+    #[must_use]
+    pub fn client_identity_error(&self) -> Option<&ClientIdentityError> {
+        match self {
+            Self::ClientIdentity { reason, .. } => Some(reason),
+            Self::BadGateway { .. }
+            | Self::BadRequest { .. }
+            | Self::ConfigOutOfDate { .. }
+            | Self::GatewayTimeout { .. }
+            | Self::Internal { .. }
+            | Self::MethodNotAllowed { .. }
+            | Self::NotFound { .. }
+            | Self::NotImplemented { .. }
+            | Self::PayloadTooLarge { .. }
+            | Self::RequestHeaderFieldsTooLarge { .. }
+            | Self::RequestTimeout { .. }
+            | Self::ResponseTooLarge { .. }
+            | Self::ServiceUnavailable { .. }
+            | Self::StoreExtraction { .. }
+            | Self::UriTooLong { .. }
+            | Self::Validation { .. } => None,
+        }
+    }
+
     /// Construct from an explicit `(message, field_path)` pair.
     /// Used by the secret walk and validator paths. `field_path`
     /// SHOULD be a dotted path naming the offending field; pass
@@ -365,6 +408,7 @@ impl EdgeError {
             | EdgeError::RequestTimeout { .. }
             | EdgeError::ResponseTooLarge { .. }
             | EdgeError::MethodNotAllowed { .. }
+            | EdgeError::ClientIdentity { .. }
             | EdgeError::StoreExtraction { .. }
             | EdgeError::UriTooLong { .. }
             | EdgeError::Validation { .. }
@@ -425,6 +469,7 @@ impl EdgeError {
             | EdgeError::RequestTimeout { .. }
             | EdgeError::ResponseTooLarge { .. }
             | EdgeError::ServiceUnavailable { .. }
+            | EdgeError::ClientIdentity { .. }
             | EdgeError::StoreExtraction { .. }
             | EdgeError::UriTooLong { .. }
             | EdgeError::Validation { .. } => None,
@@ -478,6 +523,7 @@ impl EdgeError {
             EdgeError::ResponseTooLarge { .. } => "response_too_large",
             EdgeError::ServiceUnavailable { .. } => "service_unavailable",
             EdgeError::StoreExtraction { reason, .. } => reason.wire_kind(),
+            EdgeError::ClientIdentity { reason, .. } => reason.wire_kind(),
             EdgeError::UriTooLong { .. } => "uri_too_long",
             EdgeError::Validation { .. } => "validation",
         }
@@ -508,6 +554,9 @@ impl EdgeError {
             }
             EdgeError::Internal { source, .. } => format!("internal error: {source}"),
             EdgeError::PayloadTooLarge { .. } => "request body too large".to_owned(),
+            EdgeError::ClientIdentity { name, reason } => {
+                format!("client identity `{name}`: {reason}")
+            }
         }
     }
 
@@ -574,6 +623,7 @@ impl EdgeError {
             | Self::RequestTimeout { .. }
             | Self::ResponseTooLarge { .. }
             | Self::ServiceUnavailable { .. }
+            | Self::ClientIdentity { .. }
             | Self::StoreExtraction { .. }
             | Self::UriTooLong { .. }
             | Self::Validation { .. } => None,
@@ -688,6 +738,7 @@ impl EdgeError {
             EdgeError::NotImplemented { .. } => StatusCode::NOT_IMPLEMENTED,
             EdgeError::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             EdgeError::StoreExtraction { reason, .. } => reason.wire_status(),
+            EdgeError::ClientIdentity { reason, .. } => reason.wire_status(),
             EdgeError::UriTooLong { .. } => StatusCode::URI_TOO_LONG,
             EdgeError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -737,6 +788,7 @@ impl EdgeError {
             Self::StoreExtraction { reason, .. } => Some(*reason),
             Self::BadGateway { .. }
             | Self::BadRequest { .. }
+            | Self::ClientIdentity { .. }
             | Self::ConfigOutOfDate { .. }
             | Self::GatewayTimeout { .. }
             | Self::Internal { .. }
@@ -790,6 +842,7 @@ impl EdgeError {
             | EdgeError::RequestHeaderFieldsTooLarge { .. }
             | EdgeError::RequestTimeout { .. }
             | EdgeError::ServiceUnavailable { .. }
+            | EdgeError::ClientIdentity { .. }
             | EdgeError::StoreExtraction { .. }
             | EdgeError::UriTooLong { .. }
             | EdgeError::Validation { .. } => self.message(),
@@ -1355,6 +1408,7 @@ mod tests {
             | EdgeError::RequestTimeout { .. }
             | EdgeError::ResponseTooLarge { .. }
             | EdgeError::ServiceUnavailable { .. }
+            | EdgeError::ClientIdentity { .. }
             | EdgeError::StoreExtraction { .. }
             | EdgeError::UriTooLong { .. }
             | EdgeError::PayloadTooLarge { .. }

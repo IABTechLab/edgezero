@@ -2299,6 +2299,22 @@ mod native_tests {
         use std::time::Duration;
 
         #[test]
+        fn client_identity_is_unsupported_before_other_preflight() {
+            let request = OutboundRequest::get("https://example.com/mtls")
+                .unwrap()
+                .client_identity(edgezero_core::ClientIdentityName::new("mtls").unwrap())
+                .body(Body::from_stream(stream::pending()))
+                .timeout(Duration::ZERO);
+            let error = validate_batch_request_for_test(&request).expect_err("unsupported");
+            assert_eq!(
+                error.client_identity_error(),
+                Some(&edgezero_core::ClientIdentityError::Unsupported {
+                    adapter: "cloudflare"
+                })
+            );
+        }
+
+        #[test]
         fn image_optimizer_rejection_precedes_other_preflight() {
             let request = OutboundRequest::get("https://example.com/image")
                 .unwrap()

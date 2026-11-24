@@ -34,6 +34,11 @@ use edgezero_core::error::{BadGatewayReason, BudgetSource};
     all(feature = "cloudflare", target_arch = "wasm32"),
     feature = "test-utils"
 ))]
+use edgezero_core::outbound::ClientIdentityError;
+#[cfg(any(
+    all(feature = "cloudflare", target_arch = "wasm32"),
+    feature = "test-utils"
+))]
 use edgezero_core::outbound::OutboundRequest;
 #[cfg(feature = "test-utils")]
 use edgezero_core::outbound::{OutboundSendMode, validate_for_dispatch};
@@ -3843,6 +3848,14 @@ fn timeout_error(cause: BudgetSource) -> EdgeError {
     feature = "test-utils"
 ))]
 fn validate_supported_options(request: &OutboundRequest) -> Result<(), EdgeError> {
+    if let Some(name) = request.client_identity_name() {
+        return Err(EdgeError::client_identity(
+            name,
+            ClientIdentityError::Unsupported {
+                adapter: "cloudflare",
+            },
+        ));
+    }
     if request.image_optimizer_options().is_some() {
         return Err(EdgeError::bad_request(
             "image_optimizer is not supported by cloudflare",

@@ -96,6 +96,7 @@ impl Args {
                 "assembly",
                 "record-contract",
                 "portable-record-contract",
+                "client-identity",
                 "outbound-readiness",
                 "outbound-client-progress",
                 "outbound-progress",
@@ -116,6 +117,10 @@ impl Args {
                 "record-contract" | "portable-record-contract"
             ) || a.adapter == "fastly",
             "record contract requires --adapter fastly",
+        )?;
+        require(
+            a.suite != "client-identity" || a.adapter == "fastly",
+            "client identity contract requires --adapter fastly",
         )?;
         require(
             !matches!(
@@ -1066,6 +1071,16 @@ mod argument_tests {
             assert_eq!(result.is_ok(), adapter != "all", "{adapter}");
         }
         assert!(Args::parse_from(["--suite", "outbound-wire"].map(str::to_owned)).is_err());
+    }
+
+    #[test]
+    fn client_identity_suite_selects_only_fastly() {
+        for adapter in ["fastly", "axum", "cloudflare", "spin", "all"] {
+            let result = Args::parse_from(
+                ["--adapter", adapter, "--suite", "client-identity"].map(str::to_owned),
+            );
+            assert_eq!(result.is_ok(), adapter == "fastly", "{adapter}");
+        }
     }
 
     #[test]
