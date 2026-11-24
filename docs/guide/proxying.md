@@ -173,6 +173,69 @@ metadata on that path, so tagged-default plus optimizer is rejected before uploa
 provider I/O, not accepted with a silently discarded purge tag. Signed HEAD bypass and a
 separate signed optimized GET retain their independent existing policies.
 
+## Client Certificates (mTLS)
+
+An outbound request can present a TLS client certificate by naming a declared client identity.
+The application never holds certificate or key bytes; the adapter resolves the name to its own
+binding at runtime.
+
+```toml
+[capabilities]
+optional = ["outbound-http", "outbound-client-identity"]
+
+[capabilities.outbound.client-identities.prebid-server]
+config-store = "app_config"   # optional; defaults to the [stores.config] default
+secret-store = "default"      # optional; defaults to the [stores.secrets] default
+```
+
+```rust
+use edgezero_core::{ClientIdentityName, OutboundRequest};
+
+let identity = ClientIdentityName::new("prebid-server")?;
+let request = OutboundRequest::post("https://pbs.example.com/openrtb2/auction")?
+    .client_identity(identity);
+```
+
+The manifest holds only the name and its logical stores. The hosts the certificate may be
+presented to, the certificate and the key are bound at runtime, so operator configuration stays
+out of the compiled binary. Names are 1 to 64 characters of `[a-z0-9-]` and cannot start or end
+with `-`.
+
+On every adapter that supports identities:
+
+- The identity applies to one request. `HttpClient` has no default identity.
+- A request that selects an identity is never sent without it. Every refusal below happens
+  before network I/O.
+- The request's scheme, host and port must match one origin in the identity's runtime hosts
+  list. `host_authority_override` and the `Host` header are not compared.
+- Redirect hops keep the identity and are checked again. A hop to an unlisted origin fails with
+  `OutboundFollowFailure::Hop { index, .. }` before it is sent.
+- Identity responses always bypass the provider's response cache. An identity combined with
+  `PlatformDefaultWithSurrogateKey` or with Image Optimizer options is unsupported.
+
+Whether a request without an identity presents a certificate, and whether two identities can
+target the same host, depend on the adapter. Spin attaches certificates by component and
+destination host, so neither holds there once Spin support lands.
+
+Refusals surface as `EdgeError::ClientIdentity`; read the reason with
+`EdgeError::client_identity_error()`:
+
+| `ClientIdentityError`                | When                                                                                             | Status |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------ | ------ |
+| `Undeclared`                         | The name is not declared in the manifest                                                         | 500    |
+| `RequiresHttps`                      | The request URI is not `https`                                                                   | 500    |
+| `Unsupported { adapter }`            | The adapter cannot present an identity, or an option cannot carry one                            | 500    |
+| `MaterialMissing { which }`          | A binding entry or its store is absent                                                           | 503    |
+| `MaterialInvalid { which }`          | A binding entry is malformed, oversized, or lists a host outside `[capabilities.outbound].hosts` | 503    |
+| `HostNotAllowed { redirect: false }` | The request's origin is not in the identity's hosts                                              | 503    |
+| `HostNotAllowed { redirect: true }`  | A redirect hop's origin is not in the identity's hosts                                           | 502    |
+
+A read that hits the request deadline keeps the ordinary `GatewayTimeout`. An origin that rejects
+the handshake is a transport failure with the provider's TLS cause where the provider reports one.
+
+Only Fastly presents identities today; Cloudflare, Spin and Axum reject them with `Unsupported`.
+See [Fastly client certificates](/guide/adapters/fastly#client-certificates) for its binding.
+
 ## Following Redirects
 
 `HttpClient::follow` is an explicit per-call choice with a mandatory target policy and hop limit.
