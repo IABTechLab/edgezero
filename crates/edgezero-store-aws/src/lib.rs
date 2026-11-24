@@ -39,6 +39,8 @@ mod appconfig_tests;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "dynamodb-kv"))]
 mod dynamodb_kv;
+#[cfg(feature = "dynamodb-records-portable")]
+pub mod portable_dynamodb;
 #[cfg(all(
     not(target_arch = "wasm32"),
     any(
@@ -48,6 +50,11 @@ mod dynamodb_kv;
     )
 ))]
 mod preparation;
+#[cfg(any(
+    all(not(target_arch = "wasm32"), feature = "dynamodb-records"),
+    feature = "dynamodb-records-portable"
+))]
+mod records_core;
 #[cfg(all(not(target_arch = "wasm32"), feature = "secrets-manager"))]
 mod secrets_manager;
 #[cfg(test)]
@@ -94,6 +101,8 @@ pub enum PreparationError {
     Malformed,
     #[error("missing resource or version")]
     Missing,
+    #[error("pinned identity mismatch")]
+    PinnedIdentityMismatch,
     #[error("size limit")]
     SizeLimit,
     #[error("throttled")]

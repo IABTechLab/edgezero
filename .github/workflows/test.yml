@@ -188,6 +188,15 @@ jobs:
         if: matrix.suite == 'workspace'
         run: bash scripts/check_native_store_dependency_contract.sh
 
+      - name: Check portable record providers on wasm targets
+        if: matrix.suite == 'workspace'
+        run: |
+          for target in wasm32-wasip1 wasm32-unknown-unknown wasm32-wasip2; do
+            cargo check --offline --locked -p edgezero-store-aws --no-default-features --features dynamodb-records-portable --target "$target"
+            cargo check --offline --locked -p edgezero-store-celld --no-default-features --features portable-records --target "$target"
+          done
+          cargo check --offline --locked -p edgezero-adapter-fastly --features fastly,aws-dynamodb-records,celld-records --target wasm32-wasip1
+
       - name: Geo dependency isolation
         run: bash scripts/check_geo_dependency_contract.sh
 
@@ -321,7 +330,7 @@ jobs:
 
       - name: Native provider integration runner tests
         if: matrix.suite == 'cli'
-        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs scripts/run_celld_store_fleet_proof.test.mjs services/celld-store/test/*.test.mjs
+        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs scripts/fetch_official_celld.test.mjs scripts/run_celld_store_fleet_proof.test.mjs services/celld-store/test/*.test.mjs
 
       - name: Generated native AWS independent service contracts
         if: matrix.suite == 'cli'
@@ -625,6 +634,111 @@ jobs:
         with:
           name: ${{ matrix.adapter }}-lifecycle-evidence
           path: crates/edgezero-test-harness/fixtures/reusable-app/.runs/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Required check: "Portable record contracts (Fastly)". Portable DynamoDB and celld
+  # providers through the canonical Fastly path in pinned Viceroy, against DynamoDB
+  # Local and official celld 0.6.3 behind TLS, plus real-service native interop.
+  portable-record-contracts:
+    name: Portable record contracts (Fastly)
+    runs-on: ubuntu-latest
+    env:
+      VICEROY_REVISION: a69d982d1d95e13c0fc9f92683b9118639bb4b04
+      VICEROY_LOCK_SHA256: d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a
+      VICEROY_PATCH_SHA256: 42ff805147e003e0bec6ec190a5e72cab2ef445582940818c056f2718162663d
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            crates/edgezero-test-harness/fixtures/reusable-app/target/
+            crates/edgezero-test-harness/target/
+          key: ${{ runner.os }}-cargo-portable-records-v1-${{ hashFiles('**/Cargo.lock', '.tool-versions') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-portable-records-v1-
+
+      - name: Retrieve tool versions
+        id: versions
+        shell: bash
+        run: |
+          echo "rust=$(grep '^rust ' .tool-versions | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "node=$(grep '^nodejs ' .tool-versions | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Rust tool chain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: "false"
+          toolchain: ${{ steps.versions.outputs.rust }}
+          target: wasm32-wasip1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ steps.versions.outputs.node }}
+
+      - name: Fetch dependencies (locked)
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
+          cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml
+
+      - name: Resolve Viceroy version
+        id: viceroy-version
+        shell: bash
+        run: bash scripts/ci_viceroy.sh keys
+
+      - name: Cache pinned stock Viceroy
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/viceroy-stock
+          key: viceroy-stock-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.viceroy-version.outputs.stock-key }}
+
+      - name: Setup Viceroy
+        run: bash scripts/ci_viceroy.sh stock
+
+      - name: Cache isolated Viceroy readiness build
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/viceroy-readiness
+          key: viceroy-readiness-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.viceroy-version.outputs.repair-key }}
+
+      - name: Build isolated Viceroy readiness repair
+        id: viceroy-repair
+        shell: bash
+        run: bash scripts/ci_viceroy.sh repair
+
+      - name: Provision official celld 0.6.3
+        id: celld
+        shell: bash
+        run: echo "binary=$(node scripts/fetch_official_celld.mjs "$RUNNER_TEMP/celld")" >> "$GITHUB_OUTPUT"
+
+      - name: Run portable record contracts
+        env:
+          VICEROY_BIN: ${{ steps.viceroy-repair.outputs.executable }}
+          CELLD_BIN: ${{ steps.celld.outputs.binary }}
+        run: |
+          openssl version
+          docker version --format '{{.Server.Version}}'
+          CARGO_NET_OFFLINE=true node scripts/run_portable_record_contract.mjs \
+            --output "$GITHUB_WORKSPACE/.runs/portable-record-contracts"
+
+      - name: Preserve portable record evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-record-contract-evidence
+          path: .runs/portable-record-contracts/
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 14

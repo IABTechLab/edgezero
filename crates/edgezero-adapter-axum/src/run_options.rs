@@ -12,7 +12,7 @@ use edgezero_core::app::{Hooks, StoresMetadata};
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::manifest::BakedManifest;
 use edgezero_store_aws::settings::{AgentAccessToken, AwsPreparationLimits};
-use edgezero_store_celld::settings::{CelldAccessToken, CelldPreparationLimits};
+use edgezero_store_celld::settings::{CelldAccessToken, CelldPreparationLimits, CelldRecordAccess};
 use log::LevelFilter;
 
 use crate::diagnostics::NativeDiagnosticsHandle;
@@ -221,10 +221,15 @@ impl AxumRunOptions {
                 }
             }
             for binding in document.kv().values() {
-                if let NativeKvBinding::Celld(settings) | NativeKvBinding::CelldRecords(settings) =
-                    binding
-                    && let Some(name) = settings.access.token_env()
-                {
+                let token_env = match binding {
+                    NativeKvBinding::Celld(settings) => settings.access.token_env(),
+                    NativeKvBinding::CelldRecords(settings) => match &settings.access {
+                        CelldRecordAccess::Authenticated { token_env, .. } => token_env.as_deref(),
+                        CelldRecordAccess::TrustedNetwork { .. } => None,
+                    },
+                    NativeKvBinding::DynamoDb(_) | NativeKvBinding::DynamoDbRecords(_) => None,
+                };
+                if let Some(name) = token_env {
                     names.entry(name.to_owned()).or_default().1 = true;
                 }
             }

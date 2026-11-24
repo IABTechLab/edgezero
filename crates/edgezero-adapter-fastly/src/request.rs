@@ -54,6 +54,7 @@ use crate::key_value_store::FastlyKvStore;
 use crate::lifecycle::with_callback;
 use crate::outbound::drive_callback;
 use crate::outbound::{FastlyOutboundClient, native_time};
+use crate::portable_bindings::PortableProviders;
 use crate::response::{parse_uri, send_egress_response};
 use crate::secret_store::FastlySecretStore;
 
@@ -92,6 +93,8 @@ impl RecentStringSet {
 struct Stores {
     config_registry: Option<ConfigRegistry>,
     config_store: Option<ConfigStoreHandle>,
+    /// Canonical KV metadata, bound once the request's effective `HttpClient` exists.
+    deferred_kv: Option<StoreMetadata>,
     kv: Option<KvHandle>,
     kv_registry: Option<KvRegistry>,
     secret_registry: Option<SecretRegistry>,
@@ -502,7 +505,7 @@ fn with_after_response<T>(clock: MonotonicClock, run: impl FnOnce() -> T) -> T {
 fn dispatch_with_handles<Prepare>(
     app: &App,
     mut req: FastlyRequest,
-    stores: Stores,
+    mut stores: Stores,
     request_start: MonotonicInstant,
     prepare: Prepare,
 ) -> Result<DispatchOutcome, FastlyNoAttempt>
@@ -526,6 +529,22 @@ where
     // Inserted after the hook's extensions so preparation cannot replace the adapter's handle.
     if let Some(handle) = after_response::handle_if_armed() {
         head_request.extensions_mut().insert(handle);
+    }
+    if let Some(metadata) = stores.deferred_kv.take() {
+        // Portable providers use the same client as `ctx.http_client()`, including one a
+        // preparation hook supplied. Conversion always inserts one; the fallback keeps a
+        // bound ID on its portable provider rather than silently on Fastly KV.
+        let client = head_request
+            .extensions()
+            .get::<HttpClient>()
+            .cloned()
+            .unwrap_or_else(|| outbound_client(app.monotonic_clock()));
+        stores.kv_registry = build_kv_registry_with_records(
+            Some(metadata),
+            app.record_store_requirements(),
+            app.state::<PortableProviders>()
+                .map(|providers| (providers, &client)),
+        );
     }
     let outcome = dispatch_ingress_reader(
         app,
@@ -732,8 +751,6 @@ where
     with_callback(|| {
         init_fastly_abi();
         let request_start = app.monotonic_now();
-        let kv_registry =
-            build_kv_registry_with_records(stores.kv, app.record_store_requirements());
         let config_registry = build_config_registry(stores.config);
         let secret_registry = build_secret_registry(stores.secrets);
         with_after_response(app.monotonic_clock(), || {
@@ -742,7 +759,7 @@ where
                 req,
                 Stores {
                     config_registry,
-                    kv_registry,
+                    deferred_kv: stores.kv,
                     secret_registry,
                     ..Default::default()
                 },
@@ -820,23 +837,31 @@ fn synthesise_store_registries(
 
 #[cfg(test)]
 fn build_kv_registry(kv_meta: Option<StoreMetadata>) -> Option<KvRegistry> {
-    build_kv_registry_with_records(kv_meta, &edgezero_core::RecordStoreRequirements::new())
+    build_kv_registry_with_records(
+        kv_meta,
+        &edgezero_core::RecordStoreRequirements::new(),
+        None,
+    )
 }
 
+/// Bound IDs use their portable provider over `portable`'s client; every other
+/// declared ID stays on Fastly KV.
 fn build_kv_registry_with_records(
     kv_meta: Option<StoreMetadata>,
     requirements: &edgezero_core::RecordStoreRequirements,
+    portable: Option<(&PortableProviders, &HttpClient)>,
 ) -> Option<KvRegistry> {
     let meta = kv_meta?;
     let mut by_id: BTreeMap<String, KvHandle> = BTreeMap::new();
     for id in meta.ids {
-        by_id.insert(
-            (*id).to_owned(),
+        let bound = portable.and_then(|(providers, client)| providers.bind(id, client));
+        let handle = bound.unwrap_or_else(|| {
             KvHandle::new(Arc::new(match requirements.get(*id) {
                 Some(layout) => FastlyKvStore::declared_records(id, layout.clone()),
                 None => FastlyKvStore::declared(id),
-            })),
-        );
+            }))
+        });
+        by_id.insert((*id).to_owned(), handle);
     }
     let default_id = meta.default.to_owned();
     StoreRegistry::from_parts(by_id, default_id)
@@ -1361,6 +1386,7 @@ mod synthesis_tests {
                 ids: &["record_binding_not_opened", "ordinary_binding_not_opened"],
             }),
             &requirements,
+            None,
         )
         .unwrap();
         registry

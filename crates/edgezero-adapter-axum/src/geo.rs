@@ -485,7 +485,7 @@ impl NativeGeoPlan {
                                 .map_err(|_error| NativeGeoConfigError::InvalidSelection)?
                         }
                         Some(NativeStoreSource::BuiltIn(
-                            NativeKvSource::DynamoDbRecords(_)
+                            NativeKvSource::DynamoDbRecords { .. }
                             | NativeKvSource::CelldRecords { .. },
                         )) => return Err(NativeGeoConfigError::InvalidSelection),
                         Some(

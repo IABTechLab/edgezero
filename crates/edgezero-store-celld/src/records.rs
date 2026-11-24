@@ -1,45 +1,91 @@
 //! Prepared records over the EdgeZero-owned service on official stock celld.
 //! Ordinary and record operations share its rows and generation history.
+//!
+//! The record logic is transport-independent. Native preparation reads the service
+//! capabilities; portable bindings use the instance pinned by offline preflight.
 
 #![expect(
     clippy::arbitrary_source_item_ordering,
-    reason = "keep the prepared store and native operations before wire models and validation"
+    reason = "keep the prepared store and record operations before wire models and validation"
 )]
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use bytes::Bytes;
+use edgezero_core::http::Method;
 use edgezero_core::key_value_store::{KvError, KvHandle, KvPage, KvStore};
 use edgezero_core::record_store::{
     Record, RecordBinding, RecordGeneration, RecordLayout, RecordPage, RecordPartition,
     RecordWrite, RecordWriteMode, RecordWriteOutcome,
 };
+#[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
 use edgezero_core::time::Deadline;
-use reqwest::Method;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 
 use crate::PreparationError;
-use crate::client::{ResponseKind, ScopedClient};
+#[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
+use crate::client::ScopedClient;
 use crate::settings::{CelldPreparationLimits, valid_key};
+use crate::wire::{Exchanger, ResponseKind};
 
-const MAX_METADATA_BYTES: usize = 1_024;
+pub(crate) const MAX_METADATA_BYTES: usize = 1_024;
 const MAX_PROVIDER_CURSOR: usize = 8_192;
 const MAX_SERVICE_CURSOR: usize = 2_048;
 
-pub(crate) struct CelldRecordKvStore {
+pub(crate) struct CelldRecordKvStore<E> {
     binding: RecordBinding,
-    client: Arc<ScopedClient>,
+    client: Arc<E>,
     instance: [u8; 22],
     limits: CelldPreparationLimits,
     store: String,
 }
 
-impl CelldRecordKvStore {
+/// The binding every transport reports for one store instance.
+pub(crate) fn record_binding(
+    endpoint: &Url,
+    store: &str,
+    instance: &str,
+    layout: &RecordLayout,
+) -> Result<RecordBinding, PreparationError> {
+    let scope = fingerprint(&[
+        "edgezero-celld-store",
+        "rows-v1",
+        "records-v1",
+        endpoint.as_str(),
+        store,
+        instance,
+    ])?;
+    Ok(RecordBinding {
+        layout: layout.clone(),
+        scope,
+        format: "celld-store-records-v1".to_owned(),
+        max_metadata_bytes: MAX_METADATA_BYTES,
+    })
+}
+
+/// A 22-byte URL-safe store instance, as the service reports it.
+pub(crate) fn instance_bytes(instance: &str) -> Result<[u8; 22], PreparationError> {
+    let bytes: [u8; 22] = instance
+        .as_bytes()
+        .try_into()
+        .map_err(|_error| PreparationError::Malformed)?;
+    if !bytes
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(PreparationError::Malformed);
+    }
+    Ok(bytes)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
+impl CelldRecordKvStore<ScopedClient> {
     pub(crate) async fn prepare(
         client: Arc<ScopedClient>,
         endpoint: &Url,
@@ -48,68 +94,107 @@ impl CelldRecordKvStore {
         layout: &RecordLayout,
         preparation_deadline: Deadline,
     ) -> Result<Self, PreparationError> {
-        let deadline = Deadline::at_instant(
-            preparation_deadline
-                .instant()
-                .min(client.deadline()?.instant()),
-        );
-        let exchange = client
-            .execute(
-                Method::GET,
-                client.url(&store, "capabilities")?,
-                None,
-                usize::try_from(limits.max_page_bytes)
-                    .map_err(|_error| PreparationError::InvalidLimits)?,
-                deadline,
-                ResponseKind::RecordCapabilities,
-            )
-            .await?;
-        let capabilities: Capabilities =
-            serde_json::from_slice(&exchange.body.ok_or(PreparationError::Malformed)?)
-                .map_err(|_error| PreparationError::Malformed)?;
-        if capabilities.service != "edgezero-celld-store"
-            || capabilities.protocol != 1
-            || capabilities.format != "rows-v1"
-            || capabilities.pagination != "keyset"
-            || !capabilities.no_expiry
-            || !capabilities.mutation_ledger
-            || !capabilities.records
-            || capabilities.record_protocol != 1
-            || capabilities.max_metadata_bytes != MAX_METADATA_BYTES
-            || capabilities.max_value_bytes == 0
-        {
-            return Err(PreparationError::UnsupportedVersion);
-        }
-        if exchange.instance.as_deref() != Some(capabilities.instance.as_str()) {
-            return Err(PreparationError::Malformed);
-        }
-        let instance = capabilities
-            .instance
-            .as_bytes()
-            .try_into()
-            .map_err(|_error| PreparationError::Malformed)?;
-        let scope = fingerprint(&[
-            "edgezero-celld-store",
-            "rows-v1",
-            "records-v1",
-            endpoint.as_str(),
-            &store,
-            &capabilities.instance,
-        ])?;
+        let capabilities =
+            read_capabilities(client.as_ref(), &store, limits, preparation_deadline).await?;
         limits.max_value_bytes = limits.max_value_bytes.min(capabilities.max_value_bytes);
-        client.check(deadline)?;
+        let instance = instance_bytes(&capabilities.instance)?;
         Ok(Self {
-            binding: RecordBinding {
-                layout: layout.clone(),
-                scope,
-                format: "celld-store-records-v1".to_owned(),
-                max_metadata_bytes: MAX_METADATA_BYTES,
-            },
+            binding: record_binding(endpoint, &store, &capabilities.instance, layout)?,
             client,
             instance,
             limits,
             store,
         })
+    }
+
+    /// Whether preparation observed exactly this pinned instance.
+    pub(crate) fn has_instance(&self, instance: &str) -> bool {
+        self.instance.as_slice() == instance.as_bytes()
+    }
+}
+
+/// Native read-only capability exchange. It never writes a probe record.
+#[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
+pub(crate) async fn read_capabilities(
+    client: &ScopedClient,
+    store: &str,
+    limits: CelldPreparationLimits,
+    preparation_deadline: Deadline,
+) -> Result<ServiceCapabilities, PreparationError> {
+    let deadline = Deadline::at_instant(
+        preparation_deadline
+            .instant()
+            .min(client.deadline()?.instant()),
+    );
+    let exchange = client
+        .execute(
+            Method::GET,
+            client.url(store, "capabilities")?,
+            None,
+            usize::try_from(limits.max_page_bytes)
+                .map_err(|_error| PreparationError::InvalidLimits)?,
+            deadline,
+            ResponseKind::RecordCapabilities,
+        )
+        .await?;
+    let capabilities: Capabilities =
+        serde_json::from_slice(&exchange.body.ok_or(PreparationError::Malformed)?)
+            .map_err(|_error| PreparationError::Malformed)?;
+    if capabilities.service != "edgezero-celld-store"
+        || capabilities.protocol != 1
+        || capabilities.format != "rows-v1"
+        || capabilities.pagination != "keyset"
+        || !capabilities.no_expiry
+        || !capabilities.mutation_ledger
+        || !capabilities.records
+        || capabilities.record_protocol != 1
+        || capabilities.max_metadata_bytes != MAX_METADATA_BYTES
+        || capabilities.max_value_bytes == 0
+    {
+        return Err(PreparationError::UnsupportedVersion);
+    }
+    if exchange.instance.as_deref() != Some(capabilities.instance.as_str()) {
+        return Err(PreparationError::Malformed);
+    }
+    instance_bytes(&capabilities.instance)?;
+    client.check(deadline)?;
+    Ok(ServiceCapabilities {
+        instance: capabilities.instance,
+        max_value_bytes: capabilities.max_value_bytes,
+    })
+}
+
+/// The capability facts preflight and native preparation keep.
+#[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
+pub(crate) struct ServiceCapabilities {
+    pub instance: String,
+    pub max_value_bytes: u64,
+}
+
+impl<E: Exchanger> CelldRecordKvStore<E> {
+    /// Binds a pinned instance without any I/O. Every request still carries the
+    /// expected instance, so a reset store fails until the binding is re-pinned.
+    #[cfg_attr(
+        not(feature = "portable-records"),
+        expect(
+            dead_code,
+            reason = "only portable bindings construct from a pinned instance"
+        )
+    )]
+    pub(crate) fn pinned(
+        client: Arc<E>,
+        binding: RecordBinding,
+        instance: [u8; 22],
+        limits: CelldPreparationLimits,
+        store: String,
+    ) -> Self {
+        Self {
+            binding,
+            client,
+            instance,
+            limits,
+            store,
+        }
     }
 
     fn point_url(&self, resource: &str, key: &str) -> Result<Url, KvError> {
@@ -373,8 +458,8 @@ impl CelldRecordKvStore {
     }
 }
 
-#[async_trait::async_trait(?Send)]
-impl KvStore for CelldRecordKvStore {
+#[async_trait(?Send)]
+impl<E: Exchanger> KvStore for CelldRecordKvStore<E> {
     async fn delete(&self, key: &str) -> Result<(), KvError> {
         self.delete_value(key).await
     }
@@ -476,6 +561,7 @@ impl KvStore for CelldRecordKvStore {
     }
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Capabilities {
@@ -627,11 +713,13 @@ fn kv_error(error: PreparationError) -> KvError {
         | PreparationError::Malformed
         | PreparationError::UnsupportedVersion
         | PreparationError::InstanceChanged
+        | PreparationError::PinnedIdentityMismatch
         | PreparationError::Unavailable
         | PreparationError::Deadline => KvError::Unavailable,
     }
 }
 
 #[cfg(test)]
+#[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
 #[path = "records_tests.rs"]
 mod tests;

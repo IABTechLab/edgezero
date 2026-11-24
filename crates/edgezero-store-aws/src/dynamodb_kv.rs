@@ -78,16 +78,22 @@ impl AwsPreparation {
         &mut self,
         settings: &DynamoDbKvSettings,
     ) -> Result<KvHandle, PreparationError> {
-        let store = self.prepare_dynamodb_store(settings).await?;
+        let store = self.prepare_dynamodb_store(settings, None).await?;
         Ok(KvHandle::new(Arc::new(store)))
     }
 
+    /// `endpoint` overrides SDK endpoint resolution. It is part of the client cache key.
     async fn prepare_dynamodb_store(
         &mut self,
         settings: &DynamoDbKvSettings,
+        endpoint: Option<&str>,
     ) -> Result<DynamoDbStore, PreparationError> {
         self.validate_dynamodb_mapping(settings)?;
-        let key = (settings.region.clone(), settings.limits);
+        let key = (
+            settings.region.clone(),
+            settings.limits,
+            endpoint.map(str::to_owned),
+        );
         let client = if let Some(client) = self.dynamodb_clients.get(&key) {
             client.clone()
         } else {
@@ -98,17 +104,18 @@ impl AwsPreparation {
                     .load()
                     .await;
                 self.check_deadline()?;
-                Ok::<Client, PreparationError>(Client::from_conf(
-                    aws_sdk_dynamodb::Config::from(&shared)
-                        .to_builder()
-                        .region(Region::new(settings.region.clone()))
-                        .retry_config(RetryConfig::standard().with_max_attempts(1))
-                        .timeout_config(timeout_policy(
-                            settings.limits,
-                            Duration::from_millis(settings.limits.operation_timeout_ms),
-                        ))
-                        .build(),
-                ))
+                let mut builder = aws_sdk_dynamodb::Config::from(&shared)
+                    .to_builder()
+                    .region(Region::new(settings.region.clone()))
+                    .retry_config(RetryConfig::standard().with_max_attempts(1))
+                    .timeout_config(timeout_policy(
+                        settings.limits,
+                        Duration::from_millis(settings.limits.operation_timeout_ms),
+                    ));
+                if let Some(url) = endpoint {
+                    builder = builder.endpoint_url(url);
+                }
+                Ok::<Client, PreparationError>(Client::from_conf(builder.build()))
             })
             .await;
             self.check_deadline()?;

@@ -319,6 +319,46 @@ Reads the Fastly API token from `FASTLY_API_TOKEN` in the environment. A
 production rollback emits `rolled-back-to=<N>` (the version it activated). Exits
 non-zero with a one-line diagnostic on error.
 
+### edgezero config bindings pin
+
+Preflight the providers in a portable bindings file and pin their observed backing
+identities. This command is untyped and runs in both the bundled `edgezero` binary
+and generated app CLIs. It does not read app-config TOML or upload to Fastly.
+
+```sh
+edgezero config bindings pin --adapter fastly --store-bindings portable-stores.toml
+```
+
+- `--adapter <name>` selects the target. Only `fastly` is accepted.
+- `--store-bindings <file>` selects the version 1 portable bindings document to
+  update. It may be unpinned on the first run.
+
+For `aws-dynamodb-records`, native preflight uses the AWS SDK credential chain,
+DescribeTable and the binding's explicit or regional endpoint. It pins the table
+ARN and optional TableId. For `celld-records`, preflight reads capabilities using
+the token in `KV__<ID>__CELLD_TOKEN`, where `<ID>` is the uppercased logical KV ID.
+For example, `sessions` reads `KV__SESSIONS__CELLD_TOKEN` from the operator process's
+environment, even though the runtime binding uses `token_secret`.
+
+Every selected binding must pass before the file changes. The command updates
+only `pinned`, preserving comments, ordering, endpoints and runtime credential
+references. It never creates credentials or writes secret values. Failure leaves
+the input unchanged and reports the binding ID and a fixed provider failure
+category, without URLs, response payloads or credentials.
+
+The CLI default feature `bindings-pin` includes the native preflight dependencies.
+A CLI built without it still recognizes the command but reports that pinning
+support is not compiled. Rebuild with `--features bindings-pin` to enable it.
+When running from the source workspace, select `--bin edgezero` with `cargo run`.
+
+After pinning, run the offline validation below and upload the document manually
+as described in [portable providers on Fastly](./kv-records#portable-providers-on-fastly).
+Pinning alone does not check manifest declarations or prove runtime IAM, write
+permissions or hosted latency.
+
+Exit status is `0` on success and non-zero on failure. Successful output lists
+only the pinned logical KV IDs.
+
 ### edgezero config validate
 
 `config validate` checks every adapter declared in the manifest and compiled
@@ -354,6 +394,34 @@ edgezero config validate
 # capability completeness for the declared adapter set.
 app-demo-cli config validate --strict
 ```
+
+#### Bindings-only validation
+
+With `--adapter` and `--store-bindings`, validation reads the selected bindings
+file instead of typed app configuration:
+
+```sh
+edgezero config validate --adapter fastly \
+  --store-bindings portable-stores.toml --manifest edgezero.toml
+
+edgezero config validate --adapter axum \
+  --store-bindings /etc/my-app/native-stores.toml --manifest edgezero.toml
+```
+
+Fastly validation uses `[stores.kv]` and `[stores.secrets]` declarations and
+`[adapters.fastly.build] features` from the manifest. It requires pins and logical
+credential references, validates lowercase `[a-z0-9_]` KV IDs and authenticated
+HTTPS for celld, and rejects native-only providers or providers absent from those
+build features. The entry must fit 8,000 characters. It never reads tokens,
+contacts services, invokes Cargo or uploads configuration. This validates the
+manifest's selections, not the contents of an already built WASM binary.
+
+Axum keeps structural native validation. Its bindings file must be absolute.
+`--target`, `--target-features`, `--target-all-features` and
+`--target-no-default-features` normalize native target controls without invoking
+Cargo or proving compiled provider availability. These controls are not accepted
+for Fastly bindings validation. `--app-config` is incompatible with either
+bindings-only path. No typed app-config struct is required in either CLI.
 
 **Exit codes:** `0` on success, non-zero with a one-line diagnostic on the first failure (the loader / validator returns early at the first mismatch).
 
