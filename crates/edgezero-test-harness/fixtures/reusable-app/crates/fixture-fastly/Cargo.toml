@@ -10,6 +10,7 @@ qualification = ["progress"]
 progress = ["fixture-core/qualification", "fixture-core/native-body-witness", "edgezero-adapter-fastly/test-utils"]
 readiness = ["dep:fastly-sys"]
 records = ["edgezero-core/test-utils"]
+client-identity = []
 
 [dependencies]
 edgezero-core.workspace = true
@@ -90,6 +91,11 @@ path = "src/bin/faults.rs"
 name = "fixture-fastly-record-contract"
 path = "src/bin/record_contract.rs"
 required-features = ["records"]
+
+[[bin]]
+name = "fixture-fastly-client-identity"
+path = "src/bin/client_identity.rs"
+required-features = ["client-identity"]
 
 [lints]
 workspace = true

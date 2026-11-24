@@ -258,6 +258,27 @@ pub(crate) fn run(args: &Args, run: &Path, records: &mut Records) -> Result<()> 
                 &output.join("events.jsonl"),
                 CI_ARTIFACT_RECORDS,
             )?)?;
+            let identity_output = run.join("client-identity");
+            phase(
+                "fastly",
+                "client-identity",
+                Command::new(std::env::current_exe()?)
+                    .args([
+                        "--adapter",
+                        "fastly",
+                        "--suite",
+                        "client-identity",
+                        "--output",
+                    ])
+                    .arg(&identity_output),
+                &repository_root(),
+                run,
+                records,
+            )?;
+            super::client_identity::validate_events(&read_events(
+                &identity_output.join("events.jsonl"),
+                CI_ARTIFACT_RECORDS,
+            )?)?;
         }
         return platforms::run(args, run, records);
     }
