@@ -35,6 +35,9 @@ section() {
 section "Workspace Tests"
 run cargo test --workspace --all-targets
 
+section "Core Doctests"
+run cargo test -p edgezero-core --doc
+
 section "Workspace Feature Compilation"
 run cargo check --workspace --all-targets --features "fastly cloudflare spin"
 

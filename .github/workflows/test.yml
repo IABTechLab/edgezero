@@ -64,6 +64,12 @@ jobs:
         if: matrix.suite == 'workspace'
         run: ./scripts/check_no_placeholder_pins.sh
 
+      - name: Local CI gate documentation agrees
+        if: matrix.suite == 'workspace'
+        run: |
+          ./scripts/check_ci_gate_docs.sh
+          bash scripts/test_ci_gate_docs.sh
+
       - name: No legacy typed reads
         if: matrix.suite == 'workspace'
         run: ./scripts/check_no_legacy_typed_reads.sh
@@ -111,6 +117,10 @@ jobs:
       - name: Run workspace tests
         if: matrix.suite == 'workspace'
         run: cargo test --workspace --all-targets
+
+      - name: Core doctests
+        if: matrix.suite == 'workspace'
+        run: cargo test -p edgezero-core --doc
 
       - name: Run EdgeZero CLI tests
         if: matrix.suite == 'cli'
