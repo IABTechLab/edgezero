@@ -380,8 +380,8 @@ pub(super) fn inspect_release(
     );
     for (tool, version) in [
         ("rust", "1.98.1"),
-        ("fastly_sdk", "0.13.1"),
-        ("viceroy", "0.21.0"),
+        ("fastly_sdk", "0.13.3"),
+        ("viceroy", "0.22.0"),
         ("spin", "4.1.0"),
     ] {
         check(
