@@ -645,8 +645,8 @@ jobs:
     name: Portable record contracts (Fastly)
     runs-on: ubuntu-latest
     env:
-      VICEROY_REVISION: a69d982d1d95e13c0fc9f92683b9118639bb4b04
-      VICEROY_LOCK_SHA256: d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a
+      VICEROY_REVISION: cbc9c97813769f44a7e12fff7745fbb33287adcf
+      VICEROY_LOCK_SHA256: 665efc3a2c9f2d221869fbb2cbefbedf422b9957405ef05302d90f4888a10af2
       VICEROY_PATCH_SHA256: 42ff805147e003e0bec6ec190a5e72cab2ef445582940818c056f2718162663d
     steps:
       - uses: actions/checkout@v6
