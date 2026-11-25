@@ -29,7 +29,7 @@ scripts/                      # Build/deploy/test helper scripts
 
 - **Rust**: 1.98.1 (from `.tool-versions`)
 - **Node.js**: 24.20.0 (for docs site only)
-- **Fastly CLI**: 16.0.0
+- **Fastly CLI**: 17.2.0
 - **Edition**: 2024
 - **Resolver**: 2
 - **License**: Apache-2.0
