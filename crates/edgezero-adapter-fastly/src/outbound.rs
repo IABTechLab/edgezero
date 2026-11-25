@@ -296,6 +296,7 @@ mod fastly_impl {
     #[cfg(test)]
     use fastly::Body as FastlyBody;
     use fastly::backend::BackendCreationError;
+    use fastly::compute_runtime::products;
     use fastly::handle::BodyHandle;
     use fastly::http::body::StreamingBody;
     use fastly::http::request::{PendingRequest, PollResult, SendErrorCause};
@@ -747,6 +748,18 @@ mod fastly_impl {
                         super::synchronous_send_until(budget, time.clock(), || {
                             #[cfg(test)]
                             observe_native_sdk("optimizer-send", backend.name());
+                            // SDK 0.13.3 sends an optimizer request as an ordinary
+                            // guest-cached request when the service lacks Image Optimizer.
+                            // Keep the typed unavailable outcome instead.
+                            if products().is_ok_and(|enabled| !enabled.image_optimizer) {
+                                return Err(map_configured_send_cause(
+                                    &SendErrorCause::ImageOptimizerUnsupported,
+                                    budget,
+                                    time.clock(),
+                                    configured,
+                                    ProviderFailurePhase::Send,
+                                ));
+                            }
                             let send = || request.send(backend);
                             #[cfg(feature = "test-utils")]
                             let result = match native_body_recorder(&context) {
