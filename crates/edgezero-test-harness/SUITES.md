@@ -1248,7 +1248,7 @@ shared dependencies, and keep its Fastly SDK requirement aligned with the root.
 
 Select executables with `VICEROY_BIN`, `WORKER_BUILD_BIN`, `WRANGLER_BIN`, and
 `SPIN_BIN`. Install tools explicitly; the runner never deploys or installs them.
-The PR pins Fastly SDK 0.13.1, Viceroy 0.21.0, `worker` 0.8.5, and registry `spin-sdk` 8.0.0,
+The PR pins Fastly SDK 0.13.3, Viceroy 0.22.0, `worker` 0.8.5, and registry `spin-sdk` 8.0.0,
 using its
 `wasip3 0.10.0` / `wit-bindgen 0.63.0` re-export and `spawn_local`. See the
 [dependency audit](../../docs/audits/2026-10-27-spin-sdk-eager-progress.md).
