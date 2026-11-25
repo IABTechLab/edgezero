@@ -377,7 +377,23 @@ jobs:
           working-directory: fixture-app
           app-cli-artifact: fixture-app-cli
 
+      # download-artifact resolves the name by listing the run's artifacts, and
+      # that listing can miss an artifact finalized milliseconds earlier in this
+      # job. Retry once after a pause; a second miss still fails the job.
       - name: Download the one application CLI archive
+        id: download-cli
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: fixture-app-cli
+          path: fixture-cli
+
+      - name: Wait for the application CLI artifact to be listed
+        if: steps.download-cli.outcome == 'failure'
+        run: sleep 15
+
+      - name: Retry the application CLI archive download
+        if: steps.download-cli.outcome == 'failure'
         uses: actions/download-artifact@v8
         with:
           name: fixture-app-cli
@@ -436,7 +452,21 @@ jobs:
           working-directory: fixture-app
           app-cli-artifact: fixture-app-cli-store-free
 
+      # Same listing race as the store-aware download in fixture-release.
       - name: Download the store-free application CLI archive
+        id: download-cli
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: fixture-app-cli-store-free
+          path: fixture-cli
+
+      - name: Wait for the store-free application CLI artifact to be listed
+        if: steps.download-cli.outcome == 'failure'
+        run: sleep 15
+
+      - name: Retry the store-free application CLI archive download
+        if: steps.download-cli.outcome == 'failure'
         uses: actions/download-artifact@v8
         with:
           name: fixture-app-cli-store-free

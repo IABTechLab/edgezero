@@ -99,7 +99,7 @@ impl Fixture {
             );
             results.push(json!({"case_id":row["case_id"],"environment":row["environment"],"candidate_sha":sha,"build_id":hash(b"abc"),"source_digest":row["source_digest"],"status":"passed","command":row["command"],"sentinel":row["sentinel"],"artifact_path":row["artifact_path"],"artifact_sha256":hash(raw),"samples":1,"assertions":[{"name":"fixture proof","passed":true}],"measurements":[]}));
         }
-        fixture.input = json!({"schema":1,"stage":"frozen-capture","source_state":"clean","candidate_sha":sha,"builds":[{"build_id":hash(b"abc"),"candidate_sha":sha,"artifact_path":"build/app.bin"}],"runner_image":"qualification@sha256:fixture","toolchain":{"rust":"1.98.1","fastly_sdk":"0.13.1","viceroy":"0.21.0","spin":"4.1.0","workerd":"fixture"},"retention":{"kind":"release-asset","uri":"https://example.invalid/release/evidence","expires_at":null},"comparisons":null,"applicability":applicability,"results":results});
+        fixture.input = json!({"schema":1,"stage":"frozen-capture","source_state":"clean","candidate_sha":sha,"builds":[{"build_id":hash(b"abc"),"candidate_sha":sha,"artifact_path":"build/app.bin"}],"runner_image":"qualification@sha256:fixture","toolchain":{"rust":"1.98.1","fastly_sdk":"0.13.3","viceroy":"0.22.0","spin":"4.1.0","workerd":"fixture"},"retention":{"kind":"release-asset","uri":"https://example.invalid/release/evidence","expires_at":null},"comparisons":null,"applicability":applicability,"results":results});
         let recipe = write(
             &fixture.artifacts.path().join("build/recipe.json"),
             &json!({"schema":1,"candidate_sha":sha,"source_tree":tree,"argv":["synthetic-build-fixture"],"env":{}}),
