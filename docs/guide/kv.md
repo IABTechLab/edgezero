@@ -175,26 +175,68 @@ Both Fastly and Cloudflare KV stores are **eventually consistent**.
 
 - A value written at one edge location may not be immediately visible at another.
 - `read_modify_write()` is **not atomic**. Concurrent updates to the same key may result in lost writes.
-- **TTL**: `put_with_ttl` enforces a minimum of **60 seconds** and a maximum of **1 year** before delegating to an adapter. Spin KV does not support TTL, so the Spin adapter returns `KvError::Unsupported { operation: "put_bytes_with_ttl" }` without writing the value.
+- **TTL**: `put_with_ttl` and `put_bytes_with_ttl` enforce a minimum of **60 seconds** and a maximum of **365 days**, inclusive, before delegating to an adapter. Spin KV does not support TTL, so the Spin adapter returns `KvError::Unsupported { operation: "put_bytes_with_ttl" }` for requests passing handle validation, without writing the value.
 
 ## Limits & Validation
 
-To ensure portability across all providers, `KvHandle` enforces the
-strictest common limits:
+`KvHandle` enforces the following portable policy limits before calling a
+backend. These limits do not describe each provider's maximum capabilities;
+backends can impose additional restrictions or reject unsupported operations.
 
 | Rule          | Limit                                |
 | ------------- | ------------------------------------ |
 | Key size      | Max **512 bytes** (Cloudflare limit) |
 | Value size    | Max **25 MB**                        |
 | TTL minimum   | **60 seconds**                       |
-| TTL maximum   | **1 year**                           |
+| TTL maximum   | **365 days**                         |
 | List page max | **1000 keys**                        |
 | Empty keys    | Rejected                             |
 | Reserved keys | `.` and `..` rejected                |
 | Control chars | Rejected in keys                     |
 
-Violating any of these returns a `KvError::Validation`, which maps to
-`400 Bad Request`.
+Exceeding the TTL maximum returns
+`KvError::TtlLimitExceeded { requested, maximum }`, with both fields expressed
+as `Duration`. Other violations, including a TTL below the minimum, return
+`KvError::Validation`. Both errors map to `400 Bad Request`.
+Callers that previously matched excessive TTLs as `KvError::Validation` should
+handle the new `TtlLimitExceeded` variant explicitly.
+
+### Retention longer than one year
+
+The 365-day TTL cap is a fixed `KvHandle` policy, including handles resolved
+through `KvRegistry::named` or `KvRegistry::default`. Multi-year retention and
+configurable caps are not currently supported. Excessive TTLs, including
+`Duration::MAX`, are rejected before any backend write or expiry arithmetic.
+
+Applications that previously warned and clamped every retention window to
+`KvHandle::MAX_TTL` can instead attempt the configured TTL and explicitly
+handle `TtlLimitExceeded`. For example, this application reports that the
+requested retention cannot be honored:
+
+```rust
+use std::time::Duration;
+use edgezero_core::error::EdgeError;
+use edgezero_core::key_value_store::{KvError, KvHandle};
+
+async fn persist_event(store: &KvHandle, retention: Duration) -> Result<(), EdgeError> {
+    match store.put_with_ttl("event", &"example", retention).await {
+        Ok(()) => Ok(()),
+        Err(KvError::TtlLimitExceeded { requested, maximum }) => {
+            Err(EdgeError::bad_request(format!(
+                "Requested retention {requested:?} exceeds the supported cap {maximum:?}"
+            )))
+        }
+        Err(error) => Err(EdgeError::from(error)),
+    }
+}
+```
+
+Alternatively, an application can deliberately select an allowed retention
+window and retry, if its retention policy permits shortening it. Removing the
+clamp alone still rejects multi-year writes; callers must handle that failure.
+Applications requiring the full multi-year window need a future provider-aware
+extension or a different storage path. TTL writes remain unsupported on Spin;
+handling the cap error does not make that backend support expiry.
 
 ## Next Steps
 
