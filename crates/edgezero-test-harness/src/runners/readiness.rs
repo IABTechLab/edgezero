@@ -238,7 +238,7 @@ pub(super) fn run(
         run,
     )?;
     records.push(json!({"event":"readiness-build", "revision":revision,
-        "source_state":"working-tree-characterization", "sdk":"0.13.1", "artifact":artifact(&binary)?}))?;
+        "source_state":"working-tree-characterization", "sdk":"0.13.3", "artifact":artifact(&binary)?}))?;
     let config = run.join("fastly.toml");
     fs::copy(
         fixture_root().join("crates/fixture-fastly/fastly.toml"),

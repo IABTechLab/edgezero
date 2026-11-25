@@ -56,9 +56,9 @@ edgezero-adapter-fastly = { path = "crates/edgezero-adapter-fastly", default-fea
 edgezero-adapter-spin = { path = "crates/edgezero-adapter-spin", default-features = false }
 edgezero-core = { path = "crates/edgezero-core", default-features = false }
 edgezero-cli = { path = "crates/edgezero-cli", default-features = false }
-fastly = "=0.13.1"
-fastly-shared = "=0.13.1"
-fastly-sys = "=0.13.1"
+fastly = "=0.13.3"
+fastly-shared = "=0.13.3"
+fastly-sys = "=0.13.3"
 fern = "0.7"
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"] }
 futures = { version = "0.3", features = ["std", "executor"] }
@@ -73,7 +73,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 log = "0.4"
 libc = "0.2"
 miniz_oxide = { version = "=0.8.9", default-features = false, features = ["simd", "with-alloc"] }
-log-fastly = "=0.13.1"
+log-fastly = "=0.13.3"
 matchit = "0.9"
 once_cell = "1"
 # 4.2 asserts that no read reference outlives its transaction. That check
@@ -118,7 +118,7 @@ tower = { version = "0.5", features = ["util"] }
 tower-layer = "0.3"
 tower-service = "0.3"
 tracing = "0.1"
-url = "=2.5.8"
+url = "=2.5.9"
 validator = { version = "0.21", features = ["derive"] }
 walkdir = { version = "2" }
 web-time = "1"

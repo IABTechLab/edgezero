@@ -25,8 +25,8 @@ time as the EdgeZero dependency:
 
 | Crate        | Old    | New                     | Applies to                  |
 | ------------ | ------ | ----------------------- | --------------------------- |
-| `fastly`     | `0.12` | `=0.13.1`               | Fastly adapter              |
-| `log-fastly` | `0.12` | `=0.13.1`               | Fastly adapter              |
+| `fastly`     | `0.12` | `=0.13.3`               | Fastly adapter              |
+| `log-fastly` | `0.12` | `=0.13.3`               | Fastly adapter              |
 | `spin-sdk`   | `6`    | `=8.0.0` from crates.io | Spin adapter                |
 | `validator`  | `0.20` | `0.21`                  | Any typed app config        |
 | `rusqlite`   | `0.32` | `0.40`                  | Only if you use it directly |
@@ -74,8 +74,8 @@ those moved too:
 | Tool      | Old         | New         | Applies to                  |
 | --------- | ----------- | ----------- | --------------------------- |
 | `rust`    | 1.95.0      | **1.98.1**  | every app                   |
-| `fastly`  | 15.1.0      | **16.0.0**  | Fastly adapter              |
-| `viceroy` | 0.17.0      | **0.21.0**  | Fastly local testing        |
+| `fastly`  | 15.1.0      | **17.2.0**  | Fastly adapter              |
+| `viceroy` | 0.17.0      | **0.22.0**  | Fastly local testing        |
 | `spin`    | Unspecified | **4.1.0**   | Spin adapter                |
 | `nodejs`  | 24.12.0     | **24.20.0** | Cloudflare (wrangler), docs |
 
