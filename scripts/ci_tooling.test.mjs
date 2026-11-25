@@ -438,11 +438,11 @@ test("Viceroy caches are isolated, exact-keyed, and never gate readiness executi
   }
   assert.equal(
     adapters.env.VICEROY_REVISION,
-    "a69d982d1d95e13c0fc9f92683b9118639bb4b04",
+    "cbc9c97813769f44a7e12fff7745fbb33287adcf",
   );
   assert.equal(
     adapters.env.VICEROY_LOCK_SHA256,
-    "d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a",
+    "665efc3a2c9f2d221869fbb2cbefbedf422b9957405ef05302d90f4888a10af2",
   );
   assert.equal(
     adapters.env.VICEROY_PATCH_SHA256,
@@ -454,7 +454,7 @@ test("Viceroy caches are isolated, exact-keyed, and never gate readiness executi
       .update(
         readFileSync(
           new URL(
-            "../patches/viceroy/0.21.0-body-readiness.patch",
+            "../patches/viceroy/0.22.0-body-readiness.patch",
             import.meta.url,
           ),
         ),
@@ -495,7 +495,7 @@ function fixture(t) {
   }
   writeFileSync(
     join(workspace, ".tool-versions"),
-    "rust 1.98.1\nviceroy 0.21.0\n",
+    "rust 1.98.1\nviceroy 0.22.0\n",
   );
   copyFileSync(
     join(root, "scripts/run_test_nonzero.sh"),
@@ -518,13 +518,13 @@ function fixture(t) {
     "-qm",
     "fixture",
   );
-  git("tag", "v0.21.0");
+  git("tag", "v0.22.0");
   const revision = git("rev-parse", "HEAD");
   writeFileSync(join(upstream, "src/body.rs"), "repaired body\n");
   const patch = git("diff") + "\n";
   git("restore", "src/body.rs");
   writeFileSync(
-    join(workspace, "patches/viceroy/0.21.0-body-readiness.patch"),
+    join(workspace, "patches/viceroy/0.22.0-body-readiness.patch"),
     patch,
   );
   writeFileSync(
@@ -548,7 +548,7 @@ if (args[0] === "--version") { console.log("cargo 1.98.1 fixture"); process.exit
 if (args[0] === "install") {
   const root = args[args.indexOf("--root") + 1];
   fs.mkdirSync(path.join(root, "bin"), { recursive: true });
-  fs.writeFileSync(path.join(root, "bin/viceroy"), "#!/usr/bin/env bash\\necho 'viceroy " + (env.INSTALLED_VERSION || "0.21.0") + "'\\n", { mode: 0o755 });
+  fs.writeFileSync(path.join(root, "bin/viceroy"), "#!/usr/bin/env bash\\necho 'viceroy " + (env.INSTALLED_VERSION || "0.22.0") + "'\\n", { mode: 0o755 });
 } else if (args[0] === "test") {
   const names = ["body::tests::readiness_preserves_bytes_without_polling_the_source_again", "body::tests::readiness_preserves_between_bytes_timeout_without_repolling_source", "config::backends::timeout_tests::configured_timeout_readback_preserves_values_and_rejects_absence_or_overflow"];
   if (!env.ZERO_TESTS) {
@@ -607,7 +607,7 @@ test("stock cache miss installs locked pin; verified hit preserves the exact bin
   const installs = f.calls().filter((c) => c.args[0] === "install");
   assert.equal(installs.length, 1);
   assert.ok(installs[0].args.includes("--locked"));
-  assert.ok(installs[0].args.includes("=0.21.0"));
+  assert.ok(installs[0].args.includes("=0.22.0"));
   assert.deepEqual(readFileSync(f.stock), before);
   assert.ok(
     readFileSync(f.env.GITHUB_PATH, "utf8").includes(
@@ -621,9 +621,9 @@ for (const damage of ["binary", "version", "identity", "compiler"]) {
     const f = fixture(t);
     f.ok("stock");
     if (damage === "binary")
-      writeFileSync(f.stock, "#!/bin/sh\necho 'viceroy 0.21.0'\n# changed\n");
+      writeFileSync(f.stock, "#!/bin/sh\necho 'viceroy 0.22.0'\n# changed\n");
     if (damage === "version") {
-      writeFileSync(f.stock, "#!/bin/sh\necho 'viceroy 0.21.00'\n");
+      writeFileSync(f.stock, "#!/bin/sh\necho 'viceroy 0.22.00'\n");
       writeFileSync(
         join(f.temp, "viceroy-stock/executable.sha256"),
         digest(readFileSync(f.stock)) + "\n",
@@ -642,7 +642,7 @@ for (const damage of ["binary", "version", "identity", "compiler"]) {
 test("stock install failure or wrong installed version cannot publish a usable runtime", (t) => {
   const f = fixture(t);
   assert.equal(f.run("stock", { FAIL_COMMAND: "install" }).status, 37);
-  assert.notEqual(f.run("stock", { INSTALLED_VERSION: "0.21.00" }).status, 0);
+  assert.notEqual(f.run("stock", { INSTALLED_VERSION: "0.22.00" }).status, 0);
   assert.equal(readFileSync(f.env.GITHUB_OUTPUT, "utf8"), "");
   assert.equal(existsSync(f.env.GITHUB_PATH), false);
 });
@@ -679,7 +679,7 @@ test("cache keys bind compiler/platform/upstream/lock/patch/profile, not test re
   }
   const patch = join(
     f.workspace,
-    "patches/viceroy/0.21.0-body-readiness.patch",
+    "patches/viceroy/0.22.0-body-readiness.patch",
   );
   const modified = readFileSync(patch, "utf8") + "\n";
   writeFileSync(patch, modified);
