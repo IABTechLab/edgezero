@@ -70,6 +70,10 @@ case "${1:-}" in
     test "$(sha256 "$source/Cargo.lock")" = "$VICEROY_LOCK_SHA256"
     git -C "$source" apply --check "$patch"
     git -C "$source" apply "$patch"
+    # Viceroy's build script compiles its component adapter for wasm32-unknown-unknown with the
+    # toolchain selected above, which jobs need not have installed. Add it from the checkout so
+    # rustup resolves the same toolchain as the build below; an installed target is a no-op.
+    (cd "$source" && rustup target add wasm32-unknown-unknown)
     export CARGO_HOME="$repair/cargo-home"
     export CARGO_TARGET_DIR="$repair/target"
     export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0

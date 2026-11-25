@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -538,6 +539,16 @@ function fixture(t) {
     { mode: 0o755 },
   );
   writeFileSync(
+    join(bin, "rustup"),
+    `#!${process.execPath}
+const fs = require("node:fs");
+const args = process.argv.slice(2), env = process.env;
+fs.appendFileSync(env.CARGO_LOG, JSON.stringify({ tool: "rustup", args, cwd: process.cwd(), toolchain: env.RUSTUP_TOOLCHAIN }) + "\\n");
+if (env.FAIL_COMMAND === "rustup") process.exit(37);
+`,
+    { mode: 0o755 },
+  );
+  writeFileSync(
     join(bin, "cargo"),
     `#!${process.execPath}
 const fs = require("node:fs"), path = require("node:path");
@@ -726,11 +737,30 @@ test("repair miss and hit both execute guarded regressions and build without cha
       );
     }
     assert.equal(f.calls().filter((c) => c.args[0] === "build").length, run);
+    const targets = f.calls().filter((c) => c.tool === "rustup");
+    assert.equal(targets.length, run);
+    for (const call of targets) {
+      assert.deepEqual(call.args, ["target", "add", "wasm32-unknown-unknown"]);
+      assert.equal(
+        call.cwd,
+        join(realpathSync(f.temp), "viceroy-readiness-source"),
+      );
+      assert.equal(call.toolchain, "1.98.1");
+    }
+    const log = f.calls();
+    assert.ok(
+      log.findLastIndex((c) => c.tool === "rustup") <
+        log.findLastIndex(
+          (c) => c.args[0] === "test" && !c.args.includes("--list"),
+        ),
+      "the adapter target is installed before the regression build",
+    );
     assert.deepEqual(readFileSync(f.stock), before);
   }
 });
 
 for (const failure of [
+  { FAIL_COMMAND: "rustup" },
   { FAIL_COMMAND: "fetch" },
   { FAIL_COMMAND: "test", FAIL_FILTER: "--lib" },
   { FAIL_COMMAND: "build" },
