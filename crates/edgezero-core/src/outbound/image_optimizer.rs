@@ -174,7 +174,7 @@ impl OutboundImageOptimizerRegion {
         }
     }
 
-    /// Accepts exactly the seven region tokens serialized by Fastly SDK 0.13.1.
+    /// Accepts exactly the seven region tokens serialized by Fastly SDK 0.13.3.
     ///
     /// # Errors
     /// Returns a fixed client error for any other token, without echoing input.

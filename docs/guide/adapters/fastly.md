@@ -8,7 +8,7 @@ Deploy EdgeZero applications to Fastly's Compute@Edge platform using WebAssembly
 - Rust `wasm32-wasip1` target: `rustup target add wasm32-wasip1`
 - [Viceroy](https://github.com/fastly/Viceroy) 0.22.0 for local execution and testing
 
-The adapter pins the Fastly SDK to 0.13.1. Older Viceroy releases may reject its
+The adapter pins the Fastly SDK to 0.13.3. Older Viceroy releases may reject its
 host imports before application code executes; use the repository's pinned runtime.
 
 ## Project Setup
