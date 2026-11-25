@@ -53,19 +53,15 @@ if grep -Eq '^(reqwest|tokio|edgezero-core|aws-config|aws-sdk-[^ ]+) v' <<< "$ce
   printf 'Runtime/client dependency leaked into settings-only celld.\n' >&2
   exit 1
 fi
-for feature in config kv; do
-  assert_no_sdk -p edgezero-store-celld --no-default-features --features "$feature"
-  graph="$(cargo tree --offline --locked --edges normal --prefix none -p edgezero-store-celld --no-default-features --features "$feature")"
-  if grep -Eq '^(celld(-[^ ]+)?|v8|worker|worker-build|edgezero-adapter-[^ ]+) v' <<< "$graph"; then
-    printf 'Server/Worker/adapter dependency leaked into celld provider: %s\n' "$feature" >&2
-    exit 1
-  fi
-  selected="$(celld_features -p edgezero-store-celld --no-default-features --features "$feature")"
-  other=config
-  if [[ "$feature" == config ]]; then other=kv; fi
-  if ! grep -Eq "(^|,)$feature(,|$)" <<< "$selected" || grep -Eq "(^|,)$other(,|$)" <<< "$selected"; then
-    printf 'Celld service feature isolation failed: %s: %s\n' "$feature" "$selected" >&2
-    exit 1
-  fi
-done
+assert_no_sdk -p edgezero-store-celld --no-default-features --features kv
+graph="$(cargo tree --offline --locked --edges normal --prefix none -p edgezero-store-celld --no-default-features --features kv)"
+if grep -Eq '^(celld(-[^ ]+)?|v8|worker|worker-build|edgezero-adapter-[^ ]+) v' <<< "$graph"; then
+  printf 'Server/Worker/adapter dependency leaked into the celld KV provider.\n' >&2
+  exit 1
+fi
+selected="$(celld_features -p edgezero-store-celld --no-default-features --features kv)"
+if ! grep -Eq '(^|,)kv(,|$)' <<< "$selected"; then
+  printf 'Celld KV feature selection failed: %s\n' "$selected" >&2
+  exit 1
+fi
 printf 'Native store SDK and celld feature isolation graphs passed.\n'

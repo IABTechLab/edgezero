@@ -1,24 +1,29 @@
 //! Live byte-oriented KV. Each method performs at most one bounded exchange.
+//!
+//! A handle records the store instance from its first response and rejects any
+//! later response from a different instance, so a reset or replaced store cannot
+//! silently answer for the old one.
 
 #![expect(
     clippy::arbitrary_source_item_ordering,
     reason = "group the live store and its operations before private wire models and cursor helpers"
 )]
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
 use edgezero_core::key_value_store::{KvError, KvPage, KvStore};
+use edgezero_core::time::Deadline;
 use reqwest::Method;
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 
 use crate::PreparationError;
-use crate::client::{ResponseKind, ScopedClient};
+use crate::client::{Exchange, ResponseKind, ScopedClient};
 use crate::settings::{CelldPreparationLimits, valid_key};
 
 const MAX_PROVIDER_CURSOR: usize = 8_192;
@@ -27,6 +32,7 @@ const MAX_SERVICE_CURSOR: usize = 2_048;
 pub(crate) struct CelldKvStore {
     client: Arc<ScopedClient>,
     endpoint: Url,
+    instance: OnceLock<String>,
     limits: CelldPreparationLimits,
     store: String,
 }
@@ -41,9 +47,43 @@ impl CelldKvStore {
         Self {
             client,
             endpoint,
+            instance: OnceLock::new(),
             limits,
             store,
         }
+    }
+
+    async fn exchange(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<Bytes>,
+        cap: usize,
+        deadline: Deadline,
+        kind: ResponseKind,
+    ) -> Result<Option<Vec<u8>>, PreparationError> {
+        let Exchange {
+            body: response,
+            instance,
+        } = self
+            .client
+            .execute(method, url, body, cap, deadline, kind)
+            .await?;
+        if let Some(observed) = instance
+            && *self.instance.get_or_init(|| observed.clone()) != observed
+        {
+            return Err(PreparationError::InstanceChanged);
+        }
+        Ok(response)
+    }
+
+    fn mutation_url(&self, resource: &str, key: &str) -> Result<Url, PreparationError> {
+        if !valid_key(key, false) {
+            return Err(PreparationError::InvalidResource);
+        }
+        let mut url = self.client.url(&self.store, resource)?;
+        url.query_pairs_mut().append_pair("key", key);
+        Ok(url)
     }
 
     fn value_url(&self, key: &str) -> Result<Url, PreparationError> {
@@ -62,7 +102,7 @@ impl CelldKvStore {
     fn fingerprint(&self, prefix: &str) -> Result<String, PreparationError> {
         let mut digest = Sha256::new();
         for part in [
-            "celld-store-v1",
+            "edgezero-celld-store-v1",
             self.endpoint.as_str(),
             &self.store,
             prefix,
@@ -81,7 +121,7 @@ impl CelldKvStore {
         ttl: Option<Duration>,
     ) -> Result<(), PreparationError> {
         let deadline = self.client.deadline()?;
-        let mut url = self.value_url(key)?;
+        let mut url = self.mutation_url("put", key)?;
         if u64::try_from(value.len()).map_err(|_error| PreparationError::SizeLimit)?
             > self.limits.max_value_bytes
         {
@@ -91,16 +131,15 @@ impl CelldKvStore {
             url.query_pairs_mut()
                 .append_pair("ttl_seconds", &ttl_seconds(duration)?.to_string());
         }
-        self.client
-            .execute(
-                Method::PUT,
-                url,
-                Some(value),
-                0,
-                deadline,
-                ResponseKind::Mutation,
-            )
-            .await?;
+        self.exchange(
+            Method::POST,
+            url,
+            Some(value),
+            0,
+            deadline,
+            ResponseKind::Mutation,
+        )
+        .await?;
         Ok(())
     }
 
@@ -131,8 +170,7 @@ impl CelldKvStore {
         let cap = usize::try_from(self.limits.max_page_bytes)
             .map_err(|_error| PreparationError::InvalidLimits)?;
         let body = self
-            .client
-            .execute(Method::GET, url, None, cap, deadline, ResponseKind::Page)
+            .exchange(Method::GET, url, None, cap, deadline, ResponseKind::Page)
             .await?
             .ok_or(PreparationError::Malformed)?;
         let result = (|| {
@@ -191,16 +229,8 @@ impl CelldKvStore {
 impl KvStore for CelldKvStore {
     async fn delete(&self, key: &str) -> Result<(), KvError> {
         let deadline = self.client.deadline().map_err(kv_error)?;
-        let url = self.value_url(key).map_err(kv_error)?;
-        self.client
-            .execute(
-                Method::DELETE,
-                url,
-                None,
-                0,
-                deadline,
-                ResponseKind::Mutation,
-            )
+        let url = self.mutation_url("delete", key).map_err(kv_error)?;
+        self.exchange(Method::POST, url, None, 0, deadline, ResponseKind::Mutation)
             .await
             .map_err(kv_error)?;
         Ok(())
@@ -209,8 +239,7 @@ impl KvStore for CelldKvStore {
     async fn exists(&self, key: &str) -> Result<bool, KvError> {
         let deadline = self.client.deadline().map_err(kv_error)?;
         let url = self.value_url(key).map_err(kv_error)?;
-        self.client
-            .execute(Method::HEAD, url, None, 0, deadline, ResponseKind::Exists)
+        self.exchange(Method::HEAD, url, None, 0, deadline, ResponseKind::Exists)
             .await
             .map(|body| body.is_some())
             .map_err(kv_error)
@@ -221,8 +250,7 @@ impl KvStore for CelldKvStore {
         let url = self.value_url(key).map_err(kv_error)?;
         let cap = usize::try_from(self.limits.max_value_bytes)
             .map_err(|_error| kv_error(PreparationError::InvalidLimits))?;
-        self.client
-            .execute(Method::GET, url, None, cap, deadline, ResponseKind::Value)
+        self.exchange(Method::GET, url, None, cap, deadline, ResponseKind::Value)
             .await
             .map(|body| body.map(Bytes::from))
             .map_err(kv_error)
@@ -326,10 +354,9 @@ fn kv_error(error: PreparationError) -> KvError {
         | PreparationError::Missing
         | PreparationError::Malformed
         | PreparationError::UnsupportedVersion
+        | PreparationError::InstanceChanged
         | PreparationError::Unavailable
         | PreparationError::Deadline => KvError::Unavailable,
-        #[cfg(feature = "records")]
-        PreparationError::PreconditionFailed => KvError::Unavailable,
     }
 }
 
@@ -340,7 +367,7 @@ mod tests {
     use std::time::Duration;
 
     use bytes::Bytes;
-    use edgezero_core::key_value_store::KvStore as _;
+    use edgezero_core::key_value_store::{KvError, KvStore as _};
     use edgezero_core::time::{MonotonicClock, MonotonicInstant};
     use url::Url;
 
@@ -381,7 +408,6 @@ mod tests {
         let kv = preparation.prepare_kv(&settings, None).await.unwrap();
         assert_eq!(fixture.count().await, 0);
         assert_eq!(preparation.stats().mappings, 1);
-        assert_eq!(preparation.stats().unique_retained_payload_bytes, 0);
         elapsed.store(60_000, Ordering::SeqCst);
         kv.put_bytes("k", Bytes::from_static(&[0, 255, 7]))
             .await
@@ -397,7 +423,6 @@ mod tests {
         kv.delete("k").await.unwrap();
         assert!(!kv.exists("k").await.unwrap());
         assert_eq!(kv.get_bytes("k").await.unwrap(), None);
-        assert_eq!(preparation.stats().unique_retained_payload_bytes, 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -631,7 +656,6 @@ mod tests {
         let endpoint = Url::parse(fixture.endpoint()).unwrap();
         let limits = CelldPreparationLimits {
             max_value_bytes: 2,
-            max_config_document_bytes: 2,
             max_page_bytes: 4,
             ..CelldPreparationLimits::default()
         };
@@ -684,6 +708,116 @@ mod tests {
                 .delete("k")
                 .await
                 .expect_err("mutation with invalid version or status must be rejected");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_mutation_is_a_post_with_a_fresh_unique_id_and_reads_carry_none() {
+        let fixture = Fixture::new(vec![]).await;
+        let kv = store(&fixture, "state");
+        kv.put_bytes("k", Bytes::from_static(b"v")).await.unwrap();
+        kv.put_bytes("k", Bytes::from_static(b"v")).await.unwrap();
+        kv.put_bytes_with_ttl("k", Bytes::from_static(b"v"), Duration::from_mins(1))
+            .await
+            .unwrap();
+        kv.delete("k").await.unwrap();
+        kv.get_bytes("k").await.unwrap();
+        kv.exists("k").await.unwrap();
+        kv.list_keys_page("", None, 1).await.unwrap();
+        let requests = fixture.requests().await;
+        let mutations: Vec<_> = requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .collect();
+        assert_eq!(mutations.len(), 4);
+        assert!(
+            mutations[..3]
+                .iter()
+                .all(|request| request.target.starts_with("/v1/stores/state/put?"))
+        );
+        assert!(mutations[3].target.starts_with("/v1/stores/state/delete?"));
+        let mut ids: Vec<_> = mutations
+            .iter()
+            .map(|request| request.mutation_id.clone().unwrap())
+            .collect();
+        assert!(ids.iter().all(|id| {
+            id.len() == 22
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        }));
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "a repeated operation must not reuse an ID");
+        assert!(
+            requests
+                .iter()
+                .filter(|request| request.method != "POST")
+                .all(|request| request.mutation_id.is_none())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_changed_or_missing_store_instance_fails_instead_of_answering() {
+        let other =
+            "x-edgezero-store-version: 1\r\nx-edgezero-store-instance: BBBBBBBBBBBBBBBBBBBBBB\r\n";
+        let fixture = Fixture::new(vec![
+            Reply::response(200, "application/octet-stream", b"first"),
+            Reply::custom(200, "application/octet-stream", other, b"second"),
+            Reply::custom(404, "application/json", other, br#"{"error":"not_found"}"#),
+        ])
+        .await;
+        let kv = store(&fixture, "state");
+        assert_eq!(
+            kv.get_bytes("k").await.unwrap(),
+            Some(Bytes::from_static(b"first"))
+        );
+        assert!(matches!(kv.get_bytes("k").await, Err(KvError::Unavailable)));
+        kv.get_bytes("k")
+            .await
+            .expect_err("a miss from another instance must not count as absence");
+        let routed = Fixture::new(vec![
+            Reply::response(200, "application/octet-stream", b"present"),
+            Reply::custom(
+                404,
+                "application/json",
+                "x-edgezero-store-version: 1\r\n",
+                br#"{"error":"not_found"}"#,
+            ),
+            Reply::custom(
+                404,
+                "application/json",
+                "x-edgezero-store-version: 1\r\n",
+                b"",
+            ),
+        ])
+        .await;
+        let pinned = store(&routed, "state");
+        assert!(pinned.get_bytes("k").await.unwrap().is_some());
+        pinned
+            .get_bytes("k")
+            .await
+            .expect_err("a routing 404 without an instance is not an absent key");
+        pinned
+            .exists("k")
+            .await
+            .expect_err("a routing HEAD 404 without an instance is not an absent key");
+        for headers in [
+            "x-edgezero-store-version: 1\r\n",
+            "x-edgezero-store-version: 1\r\nx-edgezero-store-instance: short\r\n",
+            "x-edgezero-store-version: 1\r\nx-edgezero-store-instance: AAAAAAAAAAAAAAAAAAAAAA\r\nx-edgezero-store-instance: AAAAAAAAAAAAAAAAAAAAAA\r\n",
+        ] {
+            let invalid = Fixture::new(vec![Reply::custom(
+                204,
+                "application/octet-stream",
+                headers,
+                b"",
+            )])
+            .await;
+            store(&invalid, "state")
+                .delete("k")
+                .await
+                .expect_err("success without exactly one valid instance must be rejected");
         }
     }
 

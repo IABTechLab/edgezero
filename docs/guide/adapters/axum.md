@@ -338,6 +338,11 @@ for an initial buffered-empty body after expiry.
 Unknown GET/HEAD bodies are settled under the original outbound and admitted inbound deadlines.
 Chunked-empty EOF permits dispatch; the first nonempty byte returns 400 before origin contact.
 Unread rejected bytes cannot become the next HTTP/1 request. Other methods keep streamed uploads.
+When a rejected request declared a `Content-Length` of at most 8 MiB (the core's default JSON
+extractor limit), the connection half-closes and drains upload bytes that are still arriving, for at
+most 2 s and until 250 ms pass without a byte, before it closes. A client that writes its whole
+body before reading then receives the 413 rather than a reset. Larger declared or chunked uploads,
+and clients that have stopped sending, close at once.
 Eager begin/batch work requires the explicit live executor described above; invalid ownership
 returns a typed setup error before provider I/O. No capability level is promoted by this migration.
 
@@ -509,8 +514,8 @@ With explicit AWS bindings, the runner fetches mapped values before its initiali
 and before it accepts requests. It does not fall back to a local provider when an AWS
 lookup or preparation fails. See the [native AWS stores guide](../native-aws-stores.md)
 for the schema, feature selection, permissions, and lifecycle limits.
-The independent [native celld providers](../native-celld-stores.md) add startup
-configuration snapshots and live KV through a scoped listener inside celld.
+The independent [native celld KV provider](../native-celld-stores.md) adds live KV
+through the EdgeZero store service, which runs on an official celld release.
 
 A declared `[stores.secrets]` id resolves to an `EnvSecretStore`, which reads
 secret key `api_key` from the environment variable `EDGEZERO__SECRETS__API_KEY`,

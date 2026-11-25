@@ -231,12 +231,11 @@ jobs:
         if: matrix.suite == 'workspace'
         run: |
           cargo test --offline --locked -p edgezero-store-celld --no-default-features --lib
-          cargo test --offline --locked -p edgezero-store-celld --no-default-features --features config --lib
           cargo test --offline --locked -p edgezero-store-celld --no-default-features --features kv --lib
           cargo test --offline --locked -p edgezero-store-celld --all-features --lib
           cargo test --offline --locked -p edgezero-adapter-axum --no-default-features --features native-bindings --lib
-          cargo test --offline --locked -p edgezero-adapter-axum --features celld-config,celld-kv,test-utils --test native_celld_startup
-          cargo test --offline --locked -p edgezero-adapter-axum --features aws-stores,aws-dynamodb,celld-config,celld-kv,test-utils --lib --test native_aws_startup --test native_celld_startup
+          cargo test --offline --locked -p edgezero-adapter-axum --features celld-kv,test-utils --test native_celld_startup
+          cargo test --offline --locked -p edgezero-adapter-axum --features aws-stores,aws-dynamodb,celld-kv,test-utils --lib --test native_aws_startup --test native_celld_startup
 
       - name: Bundled demo logging and fallback TCP contracts
         if: matrix.suite == 'cli'
@@ -295,11 +294,11 @@ jobs:
         if: matrix.suite == 'cli'
         env:
           EDGEZERO_GENERATED_TEST_TARGET_DIR: ${{ github.workspace }}/target
-        run: scripts/run_test_nonzero.sh --ignored generated_celld_default_off_kv_and_config_restart cargo test --offline --locked -p edgezero-cli --no-default-features --features cli,edgezero-adapter-axum --test celld_generated_proof generated_celld_default_off_kv_and_config_restart
+        run: scripts/run_test_nonzero.sh --ignored generated_celld_default_off_kv_restart cargo test --offline --locked -p edgezero-cli --no-default-features --features cli,edgezero-adapter-axum --test celld_generated_proof generated_celld_default_off_kv_restart
 
       - name: Native provider integration runner tests
         if: matrix.suite == 'cli'
-        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs
+        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs scripts/run_celld_store_fleet_proof.test.mjs services/celld-store/test/service.test.mjs
 
       - name: Generated native AWS independent service contracts
         if: matrix.suite == 'cli'
@@ -338,8 +337,8 @@ jobs:
     name: ${{ matrix.adapter }} wasm tests
     runs-on: ubuntu-latest
     env:
-      VICEROY_REVISION: a69d982d1d95e13c0fc9f92683b9118639bb4b04
-      VICEROY_LOCK_SHA256: d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a
+      VICEROY_REVISION: cbc9c97813769f44a7e12fff7745fbb33287adcf
+      VICEROY_LOCK_SHA256: 665efc3a2c9f2d221869fbb2cbefbedf422b9957405ef05302d90f4888a10af2
       VICEROY_PATCH_SHA256: 42ff805147e003e0bec6ec190a5e72cab2ef445582940818c056f2718162663d
     strategy:
       fail-fast: false
@@ -369,7 +368,7 @@ jobs:
             crates/edgezero-test-harness/fixtures/reusable-app/target/
             crates/edgezero-test-harness/target/
             crates/edgezero-test-harness/fixtures/request-fidelity/target/
-          key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-ingress-v1-${{ hashFiles('**/Cargo.lock', '.tool-versions', 'patches/viceroy/0.21.0-body-readiness.patch') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.adapter }}-ingress-v1-${{ hashFiles('**/Cargo.lock', '.tool-versions', 'patches/viceroy/0.22.0-body-readiness.patch') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.adapter }}-ingress-v1-
             ${{ runner.os }}-cargo-${{ matrix.adapter }}-

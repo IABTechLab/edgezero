@@ -5,11 +5,16 @@
 //! DNS hostname, external socket, image, or real cloud credential is used.
 
 #[cfg(test)]
+#[path = "fixtures/blocking_accept.rs"]
+mod blocking_accept;
+
+#[cfg(test)]
 #[expect(
     clippy::arbitrary_source_item_ordering,
     reason = "loopback fixture helpers remain grouped before startup scenarios"
 )]
 mod tests {
+    use crate::blocking_accept::accept_blocking;
     use std::fmt::Write as _;
     use std::fs;
     use std::io::{ErrorKind, Read, Write as _};
@@ -24,6 +29,7 @@ mod tests {
     use edgezero_core::blob_envelope::BlobEnvelope;
     use serde_json::{Value, json};
     use tempfile::TempDir;
+    use tokio::net::TcpSocket;
 
     const WAIT: Duration = Duration::from_secs(12);
     const ARN: &str = "arn:aws:secretsmanager:us-east-1:111122223333:secret:native-fixture-AbCdEf";
@@ -43,7 +49,6 @@ mod tests {
         reason: &'static str,
         body: String,
         content_type: &'static str,
-        headers: &'static str,
     }
 
     impl Reply {
@@ -53,7 +58,6 @@ mod tests {
                 reason: "OK",
                 body,
                 content_type,
-                headers: "",
             }
         }
     }
@@ -85,7 +89,7 @@ mod tests {
                     .checked_add(watch)
                     .expect("fixture deadline fits the monotonic clock");
                 loop {
-                    match listener.accept() {
+                    match accept_blocking(&listener) {
                         Ok((mut stream, peer)) => {
                             assert!(peer.ip().is_loopback(), "fixture peer was not loopback");
                             stream
@@ -200,12 +204,11 @@ mod tests {
     fn send_response(stream: &mut TcpStream, reply: &Reply) {
         write!(
             stream,
-            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             reply.status,
             reply.reason,
             reply.content_type,
-            reply.body.len(),
-            reply.headers
+            reply.body.len()
         )
         .expect("write response headers");
         stream
@@ -218,10 +221,27 @@ mod tests {
         address: SocketAddr,
         output: Arc<Mutex<Vec<u8>>>,
         readers: Vec<JoinHandle<()>>,
+        /// Keeps a failing host's port bound, but not listening, until the host is dropped.
+        reservation: Option<TcpSocket>,
     }
 
     impl ChildHost {
         fn spawn(root: &TempDir, bindings: &Path, secrets_endpoint: &str) -> Self {
+            Self::start(root, bindings, secrets_endpoint, false)
+        }
+
+        /// Starts a host that must fail before its listener and keeps its port reserved, so no
+        /// parallel test can serve the released port during [`Self::assert_no_listener`].
+        fn spawn_failing(root: &TempDir, bindings: &Path, secrets_endpoint: &str) -> Self {
+            Self::start(root, bindings, secrets_endpoint, true)
+        }
+
+        fn start(
+            root: &TempDir,
+            bindings: &Path,
+            secrets_endpoint: &str,
+            hold_reservation: bool,
+        ) -> Self {
             let home = root.path().join("home");
             let profiles = root.path().join("profiles");
             fs::create_dir_all(&home).expect("isolated HOME");
@@ -230,7 +250,8 @@ mod tests {
             let credentials = profiles.join("credentials");
             fs::write(&config, "").expect("empty AWS config; no profiles");
             fs::write(&credentials, "").expect("empty AWS credentials; no profiles");
-            let address = reserve_address();
+            let (address, reserved) = reserve_address();
+            let reservation = hold_reservation.then_some(reserved);
             let mut child = Command::new(env!("CARGO_BIN_EXE_edgezero-native-aws-host"))
                 .env_clear()
                 .current_dir(root.path())
@@ -280,6 +301,7 @@ mod tests {
                 address,
                 output,
                 readers,
+                reservation,
             }
         }
 
@@ -349,6 +371,18 @@ mod tests {
         }
 
         fn assert_no_listener(&self) {
+            assert!(
+                self.reservation.is_some(),
+                "failing host keeps its port reserved"
+            );
+            // The held reservation refuses every connection, so also prove that the host never
+            // reached its listener bind, which fails on the held port.
+            let output = String::from_utf8_lossy(&self.output.lock().expect("captured output"))
+                .to_ascii_lowercase();
+            assert!(
+                !output.contains("address already in use"),
+                "startup failure must happen before the listener bind: {output}"
+            );
             TcpStream::connect_timeout(&self.address, Duration::from_millis(50))
                 .expect_err("startup failure must happen before listener acceptance");
         }
@@ -370,9 +404,13 @@ mod tests {
         }
     }
 
-    fn reserve_address() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve literal loopback port");
-        listener.local_addr().expect("reserved address")
+    fn reserve_address() -> (SocketAddr, TcpSocket) {
+        let socket = TcpSocket::new_v4().expect("port reservation socket");
+        socket
+            .bind("127.0.0.1:0".parse().expect("literal loopback address"))
+            .expect("reserve literal loopback port");
+        let address = socket.local_addr().expect("reserved address");
+        (address, socket)
     }
 
     fn response_body(response: &str) -> &str {
@@ -399,7 +437,6 @@ mod tests {
                 reason: "Service Unavailable",
                 body: "AGENT_BODY_SENTINEL".to_owned(),
                 content_type: "text/plain",
-                headers: "",
             }
         }
     }
@@ -427,7 +464,6 @@ mod tests {
             })
             .to_string(),
             content_type: "application/x-amz-json-1.1",
-            headers: "",
         }
     }
 
@@ -495,77 +531,6 @@ secret_id = "{ARN}"
         assert!(body.get("VersionId").is_none());
     }
 
-    #[cfg(feature = "celld-config")]
-    #[test]
-    fn production_runner_composes_celld_config_aws_secret_and_local_secret() {
-        let root = tempfile::tempdir().expect("isolated mixed-provider process");
-        let document = envelope("token", "celld-startup-greeting");
-        assert!(
-            document.len() > 128,
-            "celld document exceeds the independent AWS payload budget"
-        );
-        let config = FixtureServer::once(
-            Reply {
-                headers: "x-celld-store-version: 1\r\n",
-                ..Reply::ok(document, "application/octet-stream")
-            },
-            true,
-        );
-        let secrets = FixtureServer::once(secrets_reply(TOKEN_SENTINEL), true);
-        let path = root.path().join("mixed-native-stores.toml");
-        fs::write(
-            &path,
-            format!(
-                r#"version = 1
-[config.app]
-provider = "celld-config"
-endpoint = "{}"
-default_key = "settings"
-[config.app.access]
-mode = "trusted-network"
-[config.app.documents.settings]
-store = "app-config"
-key = "settings"
-[secrets.vault]
-provider = "aws-secrets-manager"
-region = "us-east-1"
-[secrets.vault.entries.token]
-secret_id = "{ARN}"
-[limits.aws]
-max_snapshot_bytes = 128
-max_config_document_bytes = 128
-max_secret_value_bytes = 128
-"#,
-                config.endpoint()
-            ),
-        )
-        .expect("mixed binding variants");
-        let mut child = ChildHost::spawn(&root, &path, secrets.endpoint());
-        assert_eq!(
-            response_body(&child.wait_http("/snapshot")),
-            "celld-startup-greeting|native-fixture-secret-value"
-        );
-        assert_eq!(
-            response_body(&child.wait_http("/local-secret")),
-            LOCAL_SENTINEL
-        );
-        let request = config.take_request();
-        assert!(
-            request
-                .headers
-                .starts_with("get /v1/stores/app-config/value?key=settings "),
-            "scoped config request"
-        );
-        assert!(
-            !request.headers.contains("authorization:"),
-            "unrelated Agent token must not enter trusted celld transport"
-        );
-        request_body_is_serialized_get_secret(&secrets.take_request());
-        child.stop();
-        assert!(config.finish().is_some());
-        assert!(secrets.finish().is_some());
-    }
-
     #[test]
     fn production_runner_loads_envelope_and_real_sdk_secret_before_serving_mixed_stores() {
         let root = tempfile::tempdir().expect("temporary process root");
@@ -625,7 +590,7 @@ max_secret_value_bytes = 128
         let secrets = FixtureServer::once(denied_secrets_reply(), false);
         let bindings = root.path().join("native-stores.toml");
         bindings_file(&bindings, agent.endpoint(), None);
-        let mut child = ChildHost::spawn(&root, &bindings, secrets.endpoint());
+        let mut child = ChildHost::spawn_failing(&root, &bindings, secrets.endpoint());
         let output = child.wait_failure();
         assert_safe_error(&output);
         child.assert_no_listener();
@@ -644,7 +609,7 @@ max_secret_value_bytes = 128
         let secrets = FixtureServer::once(denied_secrets_reply(), true);
         let bindings = root.path().join("native-stores.toml");
         bindings_file(&bindings, agent.endpoint(), None);
-        let mut child = ChildHost::spawn(&root, &bindings, secrets.endpoint());
+        let mut child = ChildHost::spawn_failing(&root, &bindings, secrets.endpoint());
         let output = child.wait_failure();
         assert_safe_error(&output);
         child.assert_no_listener();
@@ -661,7 +626,7 @@ max_secret_value_bytes = 128
         let secrets = FixtureServer::once(secrets_reply(TOKEN_SENTINEL), true);
         let bindings = root.path().join("native-stores.toml");
         bindings_file(&bindings, agent.endpoint(), None);
-        let mut child = ChildHost::spawn(&root, &bindings, secrets.endpoint());
+        let mut child = ChildHost::spawn_failing(&root, &bindings, secrets.endpoint());
         let output = child.wait_failure();
         assert_safe_error(&output);
         child.assert_no_listener();
@@ -688,7 +653,7 @@ max_secret_value_bytes = 128
             agent.endpoint(),
             Some((aggregate_cap, document.len(), secret.len())),
         );
-        let mut child = ChildHost::spawn(&root, &bindings, secrets.endpoint());
+        let mut child = ChildHost::spawn_failing(&root, &bindings, secrets.endpoint());
         let output = child.wait_failure();
         assert_safe_error(&output);
         assert!(

@@ -1,6 +1,8 @@
-//! Explicit generated native consumer proofs for the scoped API embedded in celld.
+//! Explicit generated native consumer proofs for the `EdgeZero` store service.
 //! Ordinary tests require no service. The ignored real-service proof requires an
-//! explicit `CELLD_BIN`, curl and OpenSSL; missing tools are failures, not skips.
+//! explicit official `CELLD_BIN`, the service directory in
+//! `EDGEZERO_CELLD_STORE_SERVICE`, Node.js and OpenSSL; missing tools are
+//! failures, not skips.
 
 #[cfg(test)]
 #[cfg(unix)]
@@ -23,14 +25,13 @@ mod tests {
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
-    use edgezero_core::blob_envelope::BlobEnvelope;
     use serde_json::json;
     use sha2::{Digest as _, Sha256};
     use tempfile::TempDir;
     use url::Url;
 
     const APP_TOKEN: &str = "fixture-app-token-not-a-production-credential-1234567890";
-    const OPERATOR_TOKEN: &str = "fixture-operator-token-not-a-production-credential-123456";
+    const INSTANCE: &str = "AAAAAAAAAAAAAAAAAAAAAA";
     const WAIT: Duration = Duration::from_secs(30);
 
     fn token_sha256(token: &str) -> String {
@@ -47,21 +48,12 @@ mod tests {
             .expect("representable proof deadline")
     }
 
-    fn envelope(greeting: &str) -> Vec<u8> {
-        serde_json::to_vec(&BlobEnvelope::new(
-            json!({"greeting":greeting}),
-            "2026-10-15T12:00:00Z".to_owned(),
-        ))
-        .expect("whole configuration envelope")
-    }
-
     type Rows = BTreeMap<(String, String), Vec<u8>>;
 
     struct Fixture {
         endpoint: String,
-        rows: Arc<Mutex<Rows>>,
         requests: Arc<AtomicUsize>,
-        config_reads: Arc<AtomicUsize>,
+        mutation_ids: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
         worker: Option<JoinHandle<()>>,
     }
@@ -71,17 +63,14 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").expect("scoped fixture");
             listener.set_nonblocking(true).expect("nonblocking fixture");
             let endpoint = format!("http://{}", listener.local_addr().expect("fixture address"));
-            let rows = Arc::new(Mutex::new(BTreeMap::from([(
-                ("app-config".to_owned(), "settings".to_owned()),
-                envelope("first-config"),
-            )])));
+            let rows = Arc::new(Mutex::new(Rows::new()));
             let requests = Arc::new(AtomicUsize::new(0));
-            let config_reads = Arc::new(AtomicUsize::new(0));
+            let mutation_ids = Arc::new(Mutex::new(Vec::new()));
             let stop = Arc::new(AtomicBool::new(false));
-            let (worker_rows, worker_requests, worker_config, worker_stop) = (
+            let (worker_rows, worker_requests, worker_ids, worker_stop) = (
                 Arc::clone(&rows),
                 Arc::clone(&requests),
-                Arc::clone(&config_reads),
+                Arc::clone(&mutation_ids),
                 Arc::clone(&stop),
             );
             let worker = thread::spawn(move || {
@@ -97,15 +86,13 @@ mod tests {
                                 .set_write_timeout(Some(Duration::from_secs(3)))
                                 .expect("fixture timeout");
                             worker_requests.fetch_add(1, Ordering::Relaxed);
-                            let (method, target, body) = read_request(&mut stream);
-                            let (status, payload, kind) = fixture_response(
-                                &method,
-                                &target,
-                                &body,
-                                &worker_rows,
-                                &worker_config,
-                            );
-                            write!(stream,"HTTP/1.1 {status}\r\nx-celld-store-version: 1\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",payload.len()).expect("fixture headers");
+                            let (method, target, body, mutation_id) = read_request(&mut stream);
+                            if let Some(id) = mutation_id {
+                                worker_ids.lock().expect("mutation IDs").push(id);
+                            }
+                            let (status, payload, kind) =
+                                fixture_response(&method, &target, &body, &worker_rows);
+                            write!(stream,"HTTP/1.1 {status}\r\nx-edgezero-store-version: 1\r\nx-edgezero-store-instance: {INSTANCE}\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",payload.len()).expect("fixture headers");
                             stream.write_all(&payload).expect("fixture body");
                         }
                         Err(error) if error.kind() == ErrorKind::WouldBlock => {
@@ -117,9 +104,8 @@ mod tests {
             });
             Self {
                 endpoint,
-                rows,
                 requests,
-                config_reads,
+                mutation_ids,
                 stop,
                 worker: Some(worker),
             }
@@ -138,7 +124,7 @@ mod tests {
         }
     }
 
-    fn read_request(stream: &mut TcpStream) -> (String, String, Vec<u8>) {
+    fn read_request(stream: &mut TcpStream) -> (String, String, Vec<u8>, Option<String>) {
         let mut bytes = Vec::new();
         loop {
             let mut byte = [0];
@@ -157,18 +143,19 @@ mod tests {
             .split_ascii_whitespace();
         let method = line.next().expect("method").to_owned();
         let target = line.next().expect("target").to_owned();
-        let length = head
-            .lines()
-            .filter_map(|header| header.split_once(':'))
-            .find_map(|(key, value)| {
-                key.eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse::<usize>().expect("length"))
-            })
-            .unwrap_or(0);
+        let header = |name: &str| {
+            head.lines()
+                .filter_map(|header_line| header_line.split_once(':'))
+                .find_map(|(key, value)| {
+                    key.eq_ignore_ascii_case(name)
+                        .then(|| value.trim().to_owned())
+                })
+        };
+        let length = header("content-length").map_or(0, |value| value.parse().expect("length"));
         assert!(length <= 1024 * 1024, "bounded fixture value");
         let mut body = vec![0; length];
         stream.read_exact(&mut body).expect("fixture request body");
-        (method, target, body)
+        (method, target, body, header("x-edgezero-mutation-id"))
     }
 
     fn fixture_response(
@@ -176,7 +163,6 @@ mod tests {
         target: &str,
         body: &[u8],
         contents: &Mutex<Rows>,
-        reads: &AtomicUsize,
     ) -> (&'static str, Vec<u8>, &'static str) {
         let url = Url::parse(&format!("http://fixture{target}")).expect("fixture URL");
         let parts = url.path().split('/').collect::<Vec<_>>();
@@ -210,42 +196,37 @@ mod tests {
                 "application/json",
             );
         }
-        let pair = (store.clone(), value_key);
-        match method {
-            "GET" | "HEAD" => {
-                if store == "app-config" {
-                    reads.fetch_add(1, Ordering::Relaxed);
-                }
-                match rows.get(&pair) {
-                    Some(value) => (
-                        "200 OK",
-                        if method == "HEAD" {
-                            Vec::new()
-                        } else {
-                            value.clone()
-                        },
-                        "application/octet-stream",
-                    ),
-                    None => (
-                        "404 Not Found",
-                        if method == "HEAD" {
-                            Vec::new()
-                        } else {
-                            serde_json::to_vec(&json!({"error":"not_found"})).expect("miss")
-                        },
-                        "application/json",
-                    ),
-                }
-            }
-            "PUT" => {
+        let pair = (store, value_key);
+        match (method, parts.last().copied()) {
+            ("GET" | "HEAD", Some("value")) => match rows.get(&pair) {
+                Some(value) => (
+                    "200 OK",
+                    if method == "HEAD" {
+                        Vec::new()
+                    } else {
+                        value.clone()
+                    },
+                    "application/octet-stream",
+                ),
+                None => (
+                    "404 Not Found",
+                    if method == "HEAD" {
+                        Vec::new()
+                    } else {
+                        serde_json::to_vec(&json!({"error":"not_found"})).expect("miss")
+                    },
+                    "application/json",
+                ),
+            },
+            ("POST", Some("put")) => {
                 rows.insert(pair, body.to_vec());
                 ("204 No Content", Vec::new(), "application/octet-stream")
             }
-            "DELETE" => {
+            ("POST", Some("delete")) => {
                 rows.remove(&pair);
                 ("204 No Content", Vec::new(), "application/octet-stream")
             }
-            _ => panic!("unexpected scoped fixture method"),
+            _ => panic!("unexpected store fixture request"),
         }
     }
 
@@ -367,8 +348,6 @@ path = "/celld-proof"
 methods = ["GET"]
 handler = "celld_proof_core::handlers::celld_probe"
 adapters = ["axum"]
-[stores.config]
-ids = ["app_config"]
 [stores.kv]
 ids = ["state"]
 "#,
@@ -377,21 +356,12 @@ ids = ["state"]
         fs::write(
             project.join("crates/celld-proof-core/src/config.rs"),
             "
-use serde::Deserialize;
-use validator::Validate;
-#[derive(Debug, Deserialize, Validate, edgezero_core::AppConfig)]
-#[serde(deny_unknown_fields)]
-pub struct CelldProofConfig {
-    #[validate(length(min = 3_u64))]
-    pub greeting: String,
-}
 pub struct StartupState {
-    pub greeting: String,
     pub mutated: std::sync::atomic::AtomicBool,
 }
 ",
         )
-        .expect("typed config");
+        .expect("startup state");
         let handlers = project.join("crates/celld-proof-core/src/handlers.rs");
         let mut source = fs::read_to_string(&handlers).expect("generated handlers");
         source.push_str(r#"
@@ -418,29 +388,28 @@ pub async fn celld_probe(
     let ttl = store.get_bytes("probe/ttl").await?.is_some();
     let page = store.list_keys_page("probe/",None,1).await?;
     let next = store.list_keys_page("probe/",page.cursor.as_deref(),1).await?;
-    Ok(Text::new(format!("greeting={};binary={binary:?};empty={empty};exists={exists};ttl={ttl};first={};next={}",state.greeting,page.keys.join(","),next.keys.join(","))))
+    Ok(Text::new(format!("binary={binary:?};empty={empty};exists={exists};ttl={ttl};first={};next={}",page.keys.join(","),next.keys.join(","))))
 }
 "#);
         fs::write(handlers, source).expect("portable proof handler");
-        fs::write(project.join("crates/celld-proof-adapter-axum/src/main.rs"),r#"
+        fs::write(
+            project.join("crates/celld-proof-adapter-axum/src/main.rs"),
+            "
 use std::sync::{Arc,atomic::AtomicBool};
 use edgezero_adapter_axum::dev_server::run_production_app_with_initializer;
-use edgezero_core::{EdgeError,extractor::AppConfig};
-use celld_proof_core::config::{CelldProofConfig,StartupState};
+use celld_proof_core::config::StartupState;
 fn main() -> anyhow::Result<()> {
-    run_production_app_with_initializer::<celld_proof_core::App,_>(|app,stores| {
+    run_production_app_with_initializer::<celld_proof_core::App,_>(|app,_stores| {
         Box::pin(async move {
-            let binding=stores.config().and_then(|r|r.named_ref("app_config"))
-                .ok_or_else(|| EdgeError::service_unavailable("config binding missing"))?;
-            let config=AppConfig::<CelldProofConfig>::from_binding(binding,None,stores.secrets(),
-                app.config_extraction_limits(),app.monotonic_clock()).await?;
-            app.insert_state(Arc::new(StartupState{greeting:config.greeting.clone(),mutated:AtomicBool::new(false)}));
+            app.insert_state(Arc::new(StartupState{mutated:AtomicBool::new(false)}));
             Ok(())
         })
     })?;
     Ok(())
 }
-"#).expect("production initializer");
+",
+        )
+        .expect("production initializer");
         project
     }
 
@@ -455,15 +424,6 @@ fn main() -> anyhow::Result<()> {
             &path,
             format!(
                 r#"version = 1
-[config.app_config]
-provider = "celld-config"
-endpoint = "{endpoint}"
-default_key = "settings"
-[config.app_config.access]
-{access}
-[config.app_config.documents.settings]
-store = "app-config"
-key = "settings"
 [kv.state]
 provider = "celld-kv"
 endpoint = "{endpoint}"
@@ -499,93 +459,67 @@ store = "state"
 
     #[test]
     #[ignore = "builds actual generated native consumers; coordinator owns Cargo integration"]
-    fn generated_celld_default_off_kv_and_config_restart() {
+    fn generated_celld_default_off_kv_restart() {
         let temp = TempDir::new().expect("project");
         let project = generate(temp.path());
         let fixture = Fixture::start();
         let binding = bindings(&project, &fixture.endpoint, false);
-        for features in [None, Some("celld-config"), Some("celld-kv")] {
-            let binary = build(&project, features);
-            let mut app = App::start(&binary, &project, &binding, "read", None);
-            app.rejected();
-            assert_eq!(
-                fixture.requests.load(Ordering::Relaxed),
-                0,
-                "all source validation must precede config I/O"
-            );
-        }
-        let binary = build(&project, Some("celld-config,celld-kv"));
+        let default_off = build(&project, None);
+        let mut app = App::start(&default_off, &project, &binding, "read", None);
+        app.rejected();
+        assert_eq!(
+            fixture.requests.load(Ordering::Relaxed),
+            0,
+            "source validation precedes any store I/O"
+        );
+        let binary = build(&project, Some("celld-kv"));
         let mut first = App::start(&binary, &project, &binding, "put", None);
         let response = first.request();
         assert!(
             response.contains("200 OK")
-                && response.contains("greeting=first-config")
                 && response.contains("binary=Some([0, 255, 1, 128])")
                 && response.contains("empty=true")
                 && response.contains("exists=true")
                 && response.contains("first=probe/binary")
                 && response.contains("next=probe/empty"),
-            "generated live KV/config: {response}"
-        );
-        assert_eq!(fixture.config_reads.load(Ordering::Relaxed), 1);
-        fixture.rows.lock().expect("fixture update").insert(
-            ("app-config".to_owned(), "settings".to_owned()),
-            envelope("second-config"),
-        );
-        assert!(first.request().contains("greeting=first-config"));
-        assert_eq!(
-            fixture.config_reads.load(Ordering::Relaxed),
-            1,
-            "requests use immutable startup snapshot"
+            "generated live KV: {response}"
         );
         drop(first);
+        let ids = fixture.mutation_ids.lock().expect("mutation IDs").clone();
+        assert_eq!(ids.len(), 3, "one ID per mutation, never resent");
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len());
         let mut second = App::start(&binary, &project, &binding, "read", None);
         let restarted_response = second.request();
         assert!(
-            restarted_response.contains("greeting=second-config")
-                && restarted_response.contains("binary=Some([0, 255, 1, 128])"),
-            "restart adoption and persistence: {restarted_response}"
+            restarted_response.contains("binary=Some([0, 255, 1, 128])"),
+            "restart keeps remote values: {restarted_response}"
         );
         drop(second);
-        let all_binary = build(
-            &project,
-            Some("celld-config,celld-kv,aws-stores,aws-dynamodb"),
-        );
+        let all_binary = build(&project, Some("celld-kv,aws-stores,aws-dynamodb"));
         let mut coexistence = App::start(&all_binary, &project, &binding, "read", None);
         let coexistence_response = coexistence.request();
         assert!(
-            coexistence_response.contains("greeting=second-config")
-                && coexistence_response.contains("empty=true"),
+            coexistence_response.contains("empty=true"),
             "compiled AWS providers do not require AWS inputs for celld-only bindings: {coexistence_response}"
         );
         drop(coexistence);
         let mut deleting = App::start(&binary, &project, &binding, "delete", None);
         assert!(deleting.request().contains("binary=None"));
         drop(deleting);
-        for value in [vec![255], Vec::new(), envelope("x")] {
-            fixture
-                .rows
-                .lock()
-                .expect("malformed config")
-                .insert(("app-config".to_owned(), "settings".to_owned()), value);
-            let mut failed = App::start(&binary, &project, &binding, "read", None);
-            failed.rejected();
-        }
-        fixture
-            .rows
-            .lock()
-            .expect("missing config")
-            .remove(&("app-config".to_owned(), "settings".to_owned()));
-        let mut missing = App::start(&binary, &project, &binding, "read", None);
-        missing.rejected();
         assert!(
             !project.join(".edgezero").exists(),
             "remote-bound IDs create no local roots"
         );
     }
 
-    struct Celld {
-        child: Child,
+    /// The official celld binary running the `EdgeZero` store service, behind a
+    /// local TLS terminator because celld does not terminate TLS itself.
+    struct StoreService {
+        celld: Child,
+        terminator: Child,
         endpoint: String,
         cert: PathBuf,
     }
@@ -593,23 +527,59 @@ store = "state"
         clippy::missing_trait_methods,
         reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
     )]
-    impl Drop for Celld {
+    impl Drop for StoreService {
         fn drop(&mut self) {
-            let _killed = self.child.kill();
-            let _reaped = self.child.wait();
+            for child in [&mut self.terminator, &mut self.celld] {
+                // celld dev runs one process group; stop it like a supervisor would.
+                let _signalled = Command::new("kill")
+                    .args(["-TERM", &format!("-{}", child.id())])
+                    .status();
+                let end = deadline(Duration::from_secs(15));
+                while child.try_wait().ok().flatten().is_none() && Instant::now() < end {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                let _killed = child.kill();
+                let _reaped = child.wait();
+            }
         }
     }
-    impl Celld {
-        fn start(root: &Path) -> Self {
-            let binary = env::var_os("CELLD_BIN")
+    impl StoreService {
+        fn prepare(root: &Path) -> PathBuf {
+            let source = env::var_os("EDGEZERO_CELLD_STORE_SERVICE")
                 .map(PathBuf::from)
-                .expect("CELLD_BIN is required; this proof never silently skips");
-            assert!(
-                binary.is_absolute() && binary.is_file(),
-                "explicit celld executable required"
-            );
-            let cert = root.join("celld-cert.pem");
-            let key = root.join("celld-key.pem");
+                .expect(
+                    "EDGEZERO_CELLD_STORE_SERVICE is required; this proof never silently skips",
+                );
+            assert!(source.is_absolute(), "explicit service directory required");
+            let service = root.join("store-service");
+            fs::create_dir_all(service.join("src")).expect("service copy");
+            fs::copy(source.join("src/index.js"), service.join("src/index.js"))
+                .expect("exact service module");
+            let policy = json!({
+                "version": 1_u8,
+                "stores": [{"alias": "state", "namespace": "proof-state"}],
+                "access": {"mode": "authenticated", "tokens": [{
+                    "id": "app",
+                    "sha256": token_sha256(APP_TOKEN),
+                    "grants": [{"store": "state", "operations": ["read", "write", "delete", "list"]}]
+                }]}
+            });
+            let wrangler = json!({
+                "name": "edgezero-store",
+                "main": "src/index.js",
+                "no_bundle": true,
+                "compatibility_date": "2026-10-01",
+                "durable_objects": {"bindings": [{"name": "EDGEZERO_STORE", "class_name": "EdgeZeroStore"}]},
+                "migrations": [{"tag": "v1", "new_sqlite_classes": ["EdgeZeroStore"]}],
+                "vars": {"EDGEZERO_STORE_POLICY": policy.to_string()}
+            });
+            fs::write(
+                service.join("wrangler.json"),
+                serde_json::to_vec_pretty(&wrangler).expect("service configuration"),
+            )
+            .expect("write service configuration");
+            let cert = root.join("terminator-cert.pem");
+            let key = root.join("terminator-key.pem");
             let certificate_status = Command::new("openssl")
                 .args([
                     "req",
@@ -637,114 +607,106 @@ store = "state"
                 .status()
                 .expect("explicit OpenSSL prerequisite");
             assert!(certificate_status.success());
-            let policy = root.join("celld-policy.json");
-            fs::write(&policy,serde_json::to_vec(&json!({
-                "version":1_u8,"listen":"127.0.0.1:0","tls":{"cert":cert,"key":key},
-                "stores":[{"alias":"app-config","namespace":"proof-config"},{"alias":"state","namespace":"proof-state"}],
-                "access":{"mode":"authenticated","tokens":[
-                    {"id":"app","sha256":token_sha256(APP_TOKEN),"grants":[{"store":"app-config","operations":["read"]},{"store":"state","operations":["read","write","delete","list"]}]},
-                    {"id":"operator","sha256":token_sha256(OPERATOR_TOKEN),"grants":[{"store":"app-config","operations":["read","write"]}]}
-                ]}
-            })).expect("operator policy")).expect("write operator policy");
-            let log = root.join("celld.log");
+            service
+        }
+
+        fn wait_for_line(log: &Path, child: &mut Child, marker: &str) -> String {
+            let end = deadline(Duration::from_mins(2));
+            loop {
+                let text = fs::read_to_string(log).unwrap_or_default();
+                if let Some(rest) = text
+                    .lines()
+                    .find_map(|line| line.split_once(marker).map(|(_, rest)| rest.trim()))
+                {
+                    return rest
+                        .split_whitespace()
+                        .next()
+                        .expect("listener address")
+                        .to_owned();
+                }
+                if let Some(status) = child.try_wait().expect("child state") {
+                    panic!("{marker} process exited {status}: {text}");
+                }
+                assert!(Instant::now() < end, "{marker} deadline");
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn start(root: &Path, service: &Path) -> Self {
+            use std::os::unix::process::CommandExt as _;
+            let binary = env::var_os("CELLD_BIN")
+                .map(PathBuf::from)
+                .expect("CELLD_BIN is required; this proof never silently skips");
+            assert!(
+                binary.is_absolute() && binary.is_file(),
+                "explicit official celld executable required"
+            );
+            let reserved = TcpListener::bind("127.0.0.1:0").expect("celld port");
+            let port = reserved.local_addr().expect("celld port").port();
+            drop(reserved);
+            let log = root.join(format!("celld-{port}.log"));
             let output = fs::File::create(&log).expect("celld log");
-            let child = Command::new(binary)
-                .current_dir(root)
+            let mut celld = Command::new(binary)
+                .current_dir(service)
                 .env_clear()
-                .env("CELLD_TEST_DATA_DIR", root.join("celld-data"))
+                .env("PATH", env::var_os("PATH").unwrap_or_default())
+                .env("HOME", root.join("celld-home"))
+                .env("NO_COLOR", "1")
                 .args([
-                    "--listen",
-                    "127.0.0.1:0",
-                    "--internal-listen",
-                    "127.0.0.1:0",
-                    "--store-api-config",
+                    "dev",
+                    ".",
+                    "--no-watch",
+                    "--logs",
+                    "--port",
+                    &port.to_string(),
                 ])
-                .arg(&policy)
+                .process_group(0)
                 .stdout(Stdio::from(output.try_clone().expect("log clone")))
                 .stderr(Stdio::from(output))
                 .spawn()
-                .expect("real celld process");
-            let mut service = Self {
-                child,
-                endpoint: String::new(),
-                cert,
-            };
-            let end = deadline(WAIT);
-            loop {
-                let text = fs::read_to_string(&log).expect("celld log");
-                if let Some(address) = text.lines().find_map(|line| {
-                    line.split_once("celld scoped stores listening on ")
-                        .map(|(_, listen_address)| listen_address.trim())
-                }) {
-                    service.endpoint = format!("https://{address}");
-                    break;
-                }
-                if let Some(status) = service.child.try_wait().expect("celld state") {
-                    panic!("celld startup {status}: {text}");
-                }
-                assert!(Instant::now() < end, "real celld startup deadline");
-                thread::sleep(Duration::from_millis(10));
-            }
-            service
-        }
-        fn publish(&self, root: &Path, greeting: &str) {
-            let document = root.join("published-config.json");
-            fs::write(&document, envelope(greeting)).expect("operator-owned document");
-            let mut child = Command::new("curl")
-                .args([
-                    "--disable",
-                    "--silent",
-                    "--show-error",
-                    "--noproxy",
-                    "*",
-                    "--max-time",
-                    "10",
-                    "--cacert",
-                ])
-                .arg(&self.cert)
-                .args(["--request", "PUT", "--data-binary"])
-                .arg(format!("@{}", document.display()))
-                .args([
-                    "--url",
-                    &format!("{}/v1/stores/app-config/value?key=settings", self.endpoint),
-                    "--config",
-                    "-",
-                    "--output",
-                ])
-                .arg(root.join("publish-response"))
-                .args(["--write-out", "%{http_code}"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+                .expect("official celld process");
+            let address = Self::wait_for_line(&log, &mut celld, "celld listening on ");
+            assert_eq!(address, format!("127.0.0.1:{port}"));
+            let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/celld_store_tls_terminator.mjs");
+            let terminator_log = root.join(format!("terminator-{port}.log"));
+            let terminator_output = fs::File::create(&terminator_log).expect("terminator log");
+            let cert = root.join("terminator-cert.pem");
+            let mut terminator = Command::new("node")
+                .arg(script)
+                .arg("--cert")
+                .arg(&cert)
+                .arg("--key")
+                .arg(root.join("terminator-key.pem"))
+                .args(["--target", &address])
+                .env_clear()
+                .env("PATH", env::var_os("PATH").unwrap_or_default())
+                .process_group(0)
+                .stdout(Stdio::from(
+                    terminator_output.try_clone().expect("log clone"),
+                ))
+                .stderr(Stdio::from(terminator_output))
                 .spawn()
-                .expect("explicit curl operator prerequisite");
-            child
-                .stdin
-                .take()
-                .expect("operator pipe")
-                .write_all(
-                    format!("header = \"Authorization: Bearer {OPERATOR_TOKEN}\"\n").as_bytes(),
-                )
-                .expect("operator credential on private stdin");
-            let output = child.wait_with_output().expect("operator publish");
-            assert!(
-                output.status.success(),
-                "operator publish: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(String::from_utf8_lossy(&output.stdout), "204");
+                .expect("explicit Node.js prerequisite");
+            let tls = Self::wait_for_line(&terminator_log, &mut terminator, "listening on ");
+            Self {
+                celld,
+                terminator,
+                endpoint: format!("https://{tls}"),
+                cert,
+            }
         }
     }
 
     #[test]
-    #[ignore = "requires explicit modified CELLD_BIN, curl and OpenSSL; runs actual generated consumer over verified TLS"]
-    fn generated_native_consumer_uses_embedded_celld_over_tls() {
+    #[ignore = "requires explicit official CELLD_BIN, EDGEZERO_CELLD_STORE_SERVICE, Node.js and OpenSSL; runs actual generated consumer over verified TLS"]
+    fn generated_native_consumer_uses_stock_celld_store_service() {
         let temp = TempDir::new().expect("real-service fixture");
-        let service = Celld::start(temp.path());
-        service.publish(temp.path(), "first-config");
+        let service_dir = StoreService::prepare(temp.path());
+        let service = StoreService::start(temp.path(), &service_dir);
         let project = generate(temp.path());
         let binding = bindings(&project, &service.endpoint, true);
-        let binary = build(&project, Some("celld-config,celld-kv"));
+        let binary = build(&project, Some("celld-kv"));
         let mut first = App::start(
             &binary,
             &project,
@@ -755,22 +717,23 @@ store = "state"
         let response = first.request();
         assert!(
             response.contains("200 OK")
-                && response.contains("greeting=first-config")
                 && response.contains("binary=Some([0, 255, 1, 128])")
-                && response.contains("ttl=true"),
+                && response.contains("empty=true")
+                && response.contains("exists=true")
+                && response.contains("ttl=true")
+                && response.contains("first=probe/binary")
+                && response.contains("next=probe/empty"),
             "real service path: {response}"
         );
-        service.publish(temp.path(), "second-config");
-        assert!(first.request().contains("greeting=first-config"));
         thread::sleep(Duration::from_secs(61));
         let expired = first.request();
         assert!(
-            expired.contains("ttl=false") && expired.contains("greeting=first-config"),
-            "live elapsed service expiry with immutable configuration: {expired}"
+            expired.contains("ttl=false") && expired.contains("binary=Some([0, 255, 1, 128])"),
+            "live elapsed service expiry: {expired}"
         );
         drop(first);
         drop(service);
-        let restarted_service = Celld::start(temp.path());
+        let restarted_service = StoreService::start(temp.path(), &service_dir);
         let restarted_binding = bindings(&project, &restarted_service.endpoint, true);
         let mut second = App::start(
             &binary,
@@ -781,26 +744,34 @@ store = "state"
         );
         let restarted_response = second.request();
         assert!(
-            restarted_response.contains("greeting=second-config")
-                && restarted_response.contains("binary=Some([0, 255, 1, 128])"),
-            "real service restart adoption: {restarted_response}"
+            restarted_response.contains("binary=Some([0, 255, 1, 128])")
+                && restarted_response.contains("ttl=false"),
+            "real service restart keeps acknowledged writes: {restarted_response}"
         );
         drop(second);
+        let wrong = "wrong-fixture-token-longer-than-32-bytes";
         let mut rejected = App::start(
             &binary,
             &project,
             &restarted_binding,
             "read",
-            Some((
-                "wrong-fixture-token-longer-than-32-bytes",
-                &restarted_service.cert,
-            )),
+            Some((wrong, &restarted_service.cert)),
         );
-        rejected.rejected();
-        let diagnostic = fs::read_to_string(&rejected.log).expect("closed error");
+        let denied = rejected.request();
+        assert!(
+            denied.starts_with("HTTP/1.1 5"),
+            "an unknown token gets no data: {denied}"
+        );
+        drop(rejected);
+        let diagnostic = fs::read_dir(&project)
+            .expect("project logs")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("app-"))
+            .map(|entry| fs::read_to_string(entry.path()).unwrap_or_default())
+            .collect::<String>();
         assert!(
             !diagnostic.contains(APP_TOKEN)
-                && !diagnostic.contains(OPERATOR_TOKEN)
+                && !diagnostic.contains(wrong)
                 && !diagnostic.contains(&restarted_service.endpoint)
         );
         assert!(!project.join(".edgezero").exists());
