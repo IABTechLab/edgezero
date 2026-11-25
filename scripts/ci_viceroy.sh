@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "${GITHUB_WORKSPACE:?}"
 version="$(awk '$1 == "viceroy" {print $2}' .tool-versions)"
-test "$version" = 0.21.0
+test "$version" = 0.22.0
 RUSTUP_TOOLCHAIN="$(awk '$1 == "rust" {print $2}' .tool-versions)"
 export RUSTUP_TOOLCHAIN
 export ASDF_RUST_VERSION="$RUSTUP_TOOLCHAIN"
