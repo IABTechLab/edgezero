@@ -272,7 +272,7 @@ fn seed_workspace_dependencies() -> BTreeMap<String, String> {
         "worker = { version = \"=0.8.5\", default-features = false, features = [\"http\"] }"
             .to_owned(),
     );
-    deps.insert("fastly".to_owned(), "fastly = \"=0.13.1\"".to_owned());
+    deps.insert("fastly".to_owned(), "fastly = \"=0.13.3\"".to_owned());
     deps.insert("once_cell".to_owned(), "once_cell = \"1\"".to_owned());
     deps.insert(
         "tokio".to_owned(),
@@ -1783,7 +1783,7 @@ git = "https://example.invalid/spin-sdk-test"
 
     fn assert_scaffold_sdk_dependencies(cargo_toml: &str) {
         assert!(
-            cargo_toml.contains("fastly = \"=0.13.1\""),
+            cargo_toml.contains("fastly = \"=0.13.3\""),
             "generated Fastly adapter must use the current SDK release line"
         );
         assert!(
