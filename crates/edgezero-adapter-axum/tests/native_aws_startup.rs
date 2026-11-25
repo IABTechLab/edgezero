@@ -29,6 +29,7 @@ mod tests {
     use edgezero_core::blob_envelope::BlobEnvelope;
     use serde_json::{Value, json};
     use tempfile::TempDir;
+    use tokio::net::TcpSocket;
 
     const WAIT: Duration = Duration::from_secs(12);
     const ARN: &str = "arn:aws:secretsmanager:us-east-1:111122223333:secret:native-fixture-AbCdEf";
@@ -220,10 +221,27 @@ mod tests {
         address: SocketAddr,
         output: Arc<Mutex<Vec<u8>>>,
         readers: Vec<JoinHandle<()>>,
+        /// Keeps a failing host's port bound, but not listening, until the host is dropped.
+        reservation: Option<TcpSocket>,
     }
 
     impl ChildHost {
         fn spawn(root: &TempDir, bindings: &Path, secrets_endpoint: &str) -> Self {
+            Self::start(root, bindings, secrets_endpoint, false)
+        }
+
+        /// Starts a host that must fail before its listener and keeps its port reserved, so no
+        /// parallel test can serve the released port during [`Self::assert_no_listener`].
+        fn spawn_failing(root: &TempDir, bindings: &Path, secrets_endpoint: &str) -> Self {
+            Self::start(root, bindings, secrets_endpoint, true)
+        }
+
+        fn start(
+            root: &TempDir,
+            bindings: &Path,
+            secrets_endpoint: &str,
+            hold_reservation: bool,
+        ) -> Self {
             let home = root.path().join("home");
             let profiles = root.path().join("profiles");
             fs::create_dir_all(&home).expect("isolated HOME");
@@ -232,7 +250,8 @@ mod tests {
             let credentials = profiles.join("credentials");
             fs::write(&config, "").expect("empty AWS config; no profiles");
             fs::write(&credentials, "").expect("empty AWS credentials; no profiles");
-            let address = reserve_address();
+            let (address, reserved) = reserve_address();
+            let reservation = hold_reservation.then_some(reserved);
             let mut child = Command::new(env!("CARGO_BIN_EXE_edgezero-native-aws-host"))
                 .env_clear()
                 .current_dir(root.path())
@@ -282,6 +301,7 @@ mod tests {
                 address,
                 output,
                 readers,
+                reservation,
             }
         }
 
@@ -351,6 +371,18 @@ mod tests {
         }
 
         fn assert_no_listener(&self) {
+            assert!(
+                self.reservation.is_some(),
+                "failing host keeps its port reserved"
+            );
+            // The held reservation refuses every connection, so also prove that the host never
+            // reached its listener bind, which fails on the held port.
+            let output = String::from_utf8_lossy(&self.output.lock().expect("captured output"))
+                .to_ascii_lowercase();
+            assert!(
+                !output.contains("address already in use"),
+                "startup failure must happen before the listener bind: {output}"
+            );
             TcpStream::connect_timeout(&self.address, Duration::from_millis(50))
                 .expect_err("startup failure must happen before listener acceptance");
         }
@@ -372,9 +404,13 @@ mod tests {
         }
     }
 
-    fn reserve_address() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve literal loopback port");
-        listener.local_addr().expect("reserved address")
+    fn reserve_address() -> (SocketAddr, TcpSocket) {
+        let socket = TcpSocket::new_v4().expect("port reservation socket");
+        socket
+            .bind("127.0.0.1:0".parse().expect("literal loopback address"))
+            .expect("reserve literal loopback port");
+        let address = socket.local_addr().expect("reserved address");
+        (address, socket)
     }
 
     fn response_body(response: &str) -> &str {
@@ -554,7 +590,7 @@ secret_id = "{ARN}"
         let secrets = FixtureServer::once(denied_secrets_reply(), false);
         let bindings = root.path().join("native-stores.toml");
         bindings_file(&bindings, agent.endpoint(), None);
-        let mut child = ChildHost::spawn(&root, &bindings, secrets.endpoint());
+        let mut child = ChildHost::spawn_failing(&root, &bindings, secrets.endpoint());
         let output = child.wait_failure();
         assert_safe_error(&output);
         child.assert_no_listener();
@@ -573,7 +609,7 @@ secret_id = "{ARN}"
         let secrets = FixtureServer::once(denied_secrets_reply(), true);
         let bindings = root.path().join("native-stores.toml");
         bindings_file(&bindings, agent.endpoint(), None);
-        let mut child = ChildHost::spawn(&root, &bindings, secrets.endpoint());
+        let mut child = ChildHost::spawn_failing(&root, &bindings, secrets.endpoint());
         let output = child.wait_failure();
         assert_safe_error(&output);
         child.assert_no_listener();
@@ -590,7 +626,7 @@ secret_id = "{ARN}"
         let secrets = FixtureServer::once(secrets_reply(TOKEN_SENTINEL), true);
         let bindings = root.path().join("native-stores.toml");
         bindings_file(&bindings, agent.endpoint(), None);
-        let mut child = ChildHost::spawn(&root, &bindings, secrets.endpoint());
+        let mut child = ChildHost::spawn_failing(&root, &bindings, secrets.endpoint());
         let output = child.wait_failure();
         assert_safe_error(&output);
         child.assert_no_listener();
@@ -617,7 +653,7 @@ secret_id = "{ARN}"
             agent.endpoint(),
             Some((aggregate_cap, document.len(), secret.len())),
         );
-        let mut child = ChildHost::spawn(&root, &bindings, secrets.endpoint());
+        let mut child = ChildHost::spawn_failing(&root, &bindings, secrets.endpoint());
         let output = child.wait_failure();
         assert_safe_error(&output);
         assert!(
