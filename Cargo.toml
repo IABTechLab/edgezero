@@ -42,7 +42,7 @@ base16ct = { version = "1", features = ["alloc"] }
 # allocator/decompressor stack to every adapter graph (~40 KB of extra
 # wasm in the demo Spin build). We only use `Decompressor` and
 # `CompressorWriter`, unchanged across the two majors.
-brotli = "8"
+brotli = "9"
 bytes = "1"
 chrono = "0.4"
 ctor = "1.0"
