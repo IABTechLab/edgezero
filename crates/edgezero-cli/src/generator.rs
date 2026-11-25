@@ -658,7 +658,7 @@ fn build_tool_versions(adapter_ids: &[String]) -> String {
     }
     if has("fastly") {
         lines.push("fastly 16.0.0".to_owned());
-        lines.push("viceroy 0.21.0".to_owned());
+        lines.push("viceroy 0.22.0".to_owned());
     }
     lines.push("rust 1.98.1".to_owned());
     // Sort + dedup so the file is stable regardless of adapter
@@ -1000,7 +1000,7 @@ mod tests {
         // requirement.
         let out = build_tool_versions(&["fastly".to_owned()]);
         assert!(out.contains("fastly 16.0.0"), "must pin fastly: {out}");
-        assert!(out.contains("viceroy 0.21.0"), "must pin viceroy: {out}");
+        assert!(out.contains("viceroy 0.22.0"), "must pin viceroy: {out}");
         assert!(out.contains("rust 1.98.1"));
         assert!(
             !out.contains("nodejs"),
@@ -1053,7 +1053,7 @@ mod tests {
         for pin in [
             "nodejs 24.20.0",
             "fastly 16.0.0",
-            "viceroy 0.21.0",
+            "viceroy 0.22.0",
             "rust 1.98.1",
         ] {
             assert_eq!(

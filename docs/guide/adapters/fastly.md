@@ -442,7 +442,7 @@ measured from `Serve` construction, including time before the first callback.
 `with_timeout` bounds only the idle wait for the next request; it does not bound
 handler or backend time. If your service is billed by memory × wall-clock time,
 idle waiting is billed too. Limits do not guarantee reuse; any request may start a
-fresh sandbox. The fixtures pin standalone Viceroy 0.21.0. Local request ceilings depend on
+fresh sandbox. The fixtures pin standalone Viceroy 0.22.0. Local request ceilings depend on
 the runtime version and must be checked when pins change. `edgezero serve` runs
 `fastly compute serve`, whose bundled Viceroy can differ. Neither local runtime
 establishes deployed behavior.
