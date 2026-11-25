@@ -566,14 +566,14 @@ reconfigure filters on later callbacks. Use `setup_once` for other application-o
 not a second managed logger. Store-open diagnostics use the bounded
 boot channel after logger setup; an absent warning is not proof of a healthy binding.
 
-SDK 0.13.1 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
+SDK 0.13.3 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
 `with_max_memory`. A value of zero disables the request-count or memory limit;
 it does not request zero callbacks or zero memory use. The lifetime limit is
 measured from `Serve` construction, including time before the first callback.
 `with_timeout` bounds only the idle wait for the next request; it does not bound
 handler or backend time. If your service is billed by memory × wall-clock time,
 idle waiting is billed too. Limits do not guarantee reuse; any request may start a
-fresh sandbox. The fixtures pin standalone Viceroy 0.21.0; any observed per-guest
+fresh sandbox. The fixtures pin standalone Viceroy 0.22.0; any observed per-guest
 request ceiling belongs to that runtime and run, not to the SDK request limit.
 `edgezero serve` runs `fastly compute serve`, whose bundled Viceroy can differ.
 Record the executable and observed reuse; recheck local ceilings when pins
@@ -837,7 +837,7 @@ entry point and removing retained state, not merely setting a request limit of o
 
 Call `request::capture_request_ingress(&req)` immediately after acquiring the
 native request and before URL-based shortcuts or native mutation. It borrows
-the same request without round-tripping handles. With Fastly SDK 0.13.1,
+the same request without round-tripping handles. With Fastly SDK 0.13.3,
 safe raw-target acquisition is unavailable: the snapshot records `NotExposed`
 first, then uses the SDK runtime URL only to recover the canonical origin.
 This URL access can normalize the path; it never establishes original-target

@@ -621,8 +621,8 @@ fn build_tool_versions(adapter_ids: &[String]) -> String {
         lines.push("nodejs 24.20.0".to_owned());
     }
     if has("fastly") {
-        lines.push("fastly 16.0.0".to_owned());
-        lines.push("viceroy 0.21.0".to_owned());
+        lines.push("fastly 17.2.0".to_owned());
+        lines.push("viceroy 0.22.0".to_owned());
     }
     if has("spin") {
         lines.push("spin 4.1.0".to_owned());
@@ -1311,8 +1311,8 @@ git = "https://example.invalid/spin-sdk-test"
         // project doesn't end up with a fastly-CLI install
         // requirement.
         let out = build_tool_versions(&["fastly".to_owned()]);
-        assert!(out.contains("fastly 16.0.0"), "must pin fastly: {out}");
-        assert!(out.contains("viceroy 0.21.0"), "must pin viceroy: {out}");
+        assert!(out.contains("fastly 17.2.0"), "must pin fastly: {out}");
+        assert!(out.contains("viceroy 0.22.0"), "must pin viceroy: {out}");
         assert!(out.contains("rust 1.98.1"));
         assert!(
             !out.contains("nodejs"),
@@ -1356,9 +1356,9 @@ git = "https://example.invalid/spin-sdk-test"
         // Each pin appears exactly once.
         for pin in [
             "nodejs 24.20.0",
-            "fastly 16.0.0",
+            "fastly 17.2.0",
             "spin 4.1.0",
-            "viceroy 0.21.0",
+            "viceroy 0.22.0",
             "rust 1.98.1",
         ] {
             assert_eq!(
