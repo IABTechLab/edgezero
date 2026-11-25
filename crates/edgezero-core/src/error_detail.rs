@@ -37,7 +37,7 @@ pub enum CloudflareFailureCause {
     Unknown,
 }
 
-/// Fastly 0.13.1 send/backend causes, with only safe numeric or I/O-kind payloads.
+/// Fastly 0.13.3 send/backend causes, with only safe numeric or I/O-kind payloads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum FastlyFailureCause {

@@ -811,7 +811,7 @@ fn build_secret_registry(secret_meta: Option<StoreMetadata>) -> Option<SecretReg
 
 /// Capture available ingress facts without consuming the native request.
 ///
-/// Fastly SDK 0.13.1 does not expose a safe borrowed raw target accessor.
+/// Fastly SDK 0.13.3 does not expose a safe borrowed raw target accessor.
 /// Record target unavailability before reading the SDK URL for the canonical
 /// origin. That URL may normalize the path and is never used as an original
 /// target. Client requests require exactly one validated Host matching the
