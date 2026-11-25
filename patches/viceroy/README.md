@@ -1,12 +1,15 @@
-# Viceroy 0.21.0 Local Runtime Repairs
+# Viceroy 0.22.0 Local Runtime Repairs
 
 This patch is part of PR #275. It repairs the local runtime, not the Fastly SDK or hosted
 service. The repository's SDK/runtime version pins are unchanged. Do not replace an installed
-Viceroy silently or describe a patched executable as unmodified 0.21.0 evidence.
+Viceroy silently or describe a patched executable as unmodified 0.22.0 evidence.
 
-Base: official Fastly Viceroy commit `a69d982d1d95e13c0fc9f92683b9118639bb4b04`, tag `v0.21.0`.
+Base: official Fastly Viceroy commit `cbc9c97813769f44a7e12fff7745fbb33287adcf`, tag `v0.22.0`.
 The upstream Cargo.lock SHA-256 is
-`d642d177081f42aec75d25c0d1124c013d3abcb081886251420a90e9c53c1a2a`.
+`665efc3a2c9f2d221869fbb2cbefbedf422b9957405ef05302d90f4888a10af2`.
+The patch was written against tag `v0.21.0` (`a69d982d1d95e13c0fc9f92683b9118639bb4b04`) and
+applies to `v0.22.0` unchanged, so its SHA-256 is unchanged. The files it touches differ between
+the two tags only in lint and rustls certificate-type edits.
 Upstream source is licensed under Apache-2.0 WITH LLVM-exception; its license files remain
 authoritative. The patch repairs body readiness and dynamic-backend timeout readback, with
 co-located regression tests. Both repairs are local-runtime evidence, not hosted qualification.
@@ -44,10 +47,10 @@ set -eu
 EDGEZERO_ROOT=$(git rev-parse --show-toplevel)
 : "${VICEROY_SOURCE:?choose a new absolute temporary directory}"
 test ! -e "$VICEROY_SOURCE"
-git clone --depth 1 --branch v0.21.0 https://github.com/fastly/Viceroy.git "$VICEROY_SOURCE"
+git clone --depth 1 --branch v0.22.0 https://github.com/fastly/Viceroy.git "$VICEROY_SOURCE"
 base=$(git -C "$VICEROY_SOURCE" rev-parse --verify HEAD)
-test "$base" = a69d982d1d95e13c0fc9f92683b9118639bb4b04
-patch="$EDGEZERO_ROOT/patches/viceroy/0.21.0-body-readiness.patch"
+test "$base" = cbc9c97813769f44a7e12fff7745fbb33287adcf
+patch="$EDGEZERO_ROOT/patches/viceroy/0.22.0-body-readiness.patch"
 git -C "$VICEROY_SOURCE" apply --check "$patch"
 git -C "$VICEROY_SOURCE" apply "$patch"
 export RUSTUP_TOOLCHAIN=1.98.1
@@ -60,7 +63,7 @@ cargo test --offline --locked --manifest-path "$VICEROY_SOURCE/Cargo.toml" -p vi
 cargo build --offline --locked --manifest-path "$VICEROY_SOURCE/Cargo.toml" -p viceroy
 ```
 
-Require all 136 library tests, including the ten readiness regressions and the timeout-readback
+Require all 138 library tests, including the ten readiness regressions and the timeout-readback
 boundary test, with zero failures. CI additionally checks that the named readiness and timeout
 guards actually executed; an empty selection cannot pass. These counts are not hosted cases.
 The development profile has no debug symbols/incremental state; record actual compiler,
@@ -116,6 +119,6 @@ recorded separately; the earlier report and its binary identities are not rewrit
 The [timeout-readback record](../../docs/audits/evidence/2026-11-02-viceroy-timeout-readback.json)
 names the combined patch and actual SDK control, and discloses the prior failed control's missing
 binary identity rather than treating it as frozen evidence.
-Strict upstream clippy under Rust 1.98.1 reports the same diagnostics
-on the untouched base and repaired source (7 library / 25 test errors); this patch does not
+Strict upstream clippy under Rust 1.98.1 reported the same diagnostics
+on the untouched v0.21.0 base and repaired source (7 library / 25 test errors); this patch does not
 suppress or refactor those unrelated upstream warnings. EdgeZero's own strict clippy is separate.
