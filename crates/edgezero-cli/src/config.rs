@@ -37,8 +37,10 @@ use edgezero_core::manifest::{Manifest, ManifestAdapter, ManifestLoader, StoreDe
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use similar::TextDiff;
+use std::any::type_name;
 use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::io::{Error as IoError, IsTerminal as _, Write, stdin};
 use std::iter;
 use std::path::{Path, PathBuf};
@@ -98,6 +100,84 @@ struct ResolvedAdapterPushContext {
     runtime_config_path: Option<PathBuf>,
 }
 
+/// Typed config command invoking application validation hooks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TypedConfigCommand {
+    /// Compare a typed source with its selected destination.
+    Diff,
+    /// Publish a typed source to its selected destination.
+    Push,
+    /// Validate without reading or writing a destination.
+    Validate,
+}
+
+/// Exact source and command selection, before typed deserialization.
+///
+/// Source bytes and secret references must not be logged.
+pub struct TypedConfigSourceContext<'context> {
+    /// Application-selected targets; validate may select none or several.
+    pub adapters: &'context [String],
+    /// App environment prefix, including the trailing double underscore.
+    pub app_environment_prefix: String,
+    /// Manifest application name.
+    pub app_name: &'context str,
+    /// Command that resolved this context.
+    pub command: TypedConfigCommand,
+    /// Whether environment overlays are disabled.
+    pub no_env: bool,
+    /// Resolved app-config path; callbacks must not reopen it.
+    pub path: &'context Path,
+    /// Exact bytes read once for this command.
+    pub raw_bytes: &'context [u8],
+    /// Existing `EdgeZero` manifest-completeness validation setting.
+    pub strict: bool,
+}
+
+/// The effective typed value that this command will validate and serialize.
+pub struct TypedConfigCommandContext<'context, C> {
+    /// Overlay-applied value, borrowed without rebuilding or reopening source.
+    pub config: &'context C,
+    /// Exact source and resolved command metadata.
+    pub source: TypedConfigSourceContext<'context>,
+}
+
+/// Application source and deploy checks over a single command read.
+///
+/// Hooks must not reopen the source, resolve secret values, or perform writes.
+pub trait TypedConfigHooks<C> {
+    /// Check the same effective value used for diff or publication.
+    ///
+    /// # Errors
+    /// Return a non-disclosing application validation error before provider I/O.
+    #[inline]
+    fn validate_command(&self, _context: &TypedConfigCommandContext<'_, C>) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Check source structure before the environment overlay and typed parse.
+    ///
+    /// # Errors
+    /// Return a non-disclosing application source error to stop the command.
+    #[inline]
+    fn validate_source(&self, _context: &TypedConfigSourceContext<'_>) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Default hooks used by existing typed config entry points.
+pub struct NoopTypedConfigHooks;
+impl<C> TypedConfigHooks<C> for NoopTypedConfigHooks {
+    #[inline]
+    fn validate_command(&self, _context: &TypedConfigCommandContext<'_, C>) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[inline]
+    fn validate_source(&self, _context: &TypedConfigSourceContext<'_>) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 /// Pre-loaded state shared by the raw and typed flows.
 struct ValidationContext {
     /// Resolved app-config TOML path. Either the explicit
@@ -118,6 +198,7 @@ struct ValidationContext {
     /// overlay setting the typed flow will use, so the same
     /// flattened key set drives every adapter's `validate_*` call.
     raw_config: Value,
+    source: String,
 }
 
 #[derive(Clone, Copy)]
@@ -127,8 +208,52 @@ enum AdapterValidationScope {
 }
 
 impl ValidationContext {
+    fn apply_overlay(&mut self, no_env: bool) -> Result<(), String> {
+        let mut opts = AppConfigLoadOptions::default();
+        opts.env_overlay = !no_env;
+        self.raw_config = app_config::parse_app_config_raw_with_options(
+            &self.source,
+            &self.app_config_path,
+            &self.app_name,
+            &opts,
+        )
+        .map_err(|err| format_app_config_error(&err))?;
+        Ok(())
+    }
+
+    fn deserialize<C>(&self) -> Result<C, String>
+    where
+        C: DeserializeOwned,
+    {
+        self.raw_config.clone().try_into().map_err(|source| {
+            format_app_config_error(&AppConfigError::Deserialize {
+                path: self.app_config_path.clone(),
+                target_type: type_name::<C>(),
+                source: Box::new(source),
+            })
+        })
+    }
+
     fn manifest(&self) -> &Manifest {
         self.manifest_loader.manifest()
+    }
+
+    fn source_context<'context>(
+        &'context self,
+        command: TypedConfigCommand,
+        adapters: &'context [String],
+        no_env: bool,
+    ) -> TypedConfigSourceContext<'context> {
+        TypedConfigSourceContext {
+            path: &self.app_config_path,
+            raw_bytes: self.source.as_bytes(),
+            app_name: &self.app_name,
+            app_environment_prefix: format!("{}__", app_config::app_name_prefix(&self.app_name)),
+            command,
+            adapters,
+            no_env,
+            strict: self.args_strict,
+        }
     }
 }
 
@@ -218,6 +343,42 @@ struct ResolvedTomlLeaf<'raw> {
     value: &'raw str,
 }
 
+/// Validate typed app config using the default no-op application hooks.
+///
+/// # Errors
+/// Returns an error for invalid source, manifest, or typed configuration.
+#[inline]
+pub fn run_config_validate_typed<C>(args: &ConfigValidateArgs) -> Result<(), String>
+where
+    C: DeserializeOwned + Validate + AppConfigMeta,
+{
+    run_config_validate_typed_with_hooks::<C>(args, &[], &NoopTypedConfigHooks)
+}
+
+/// Publish typed app config using the default no-op application hooks.
+///
+/// # Errors
+/// Returns an error for invalid configuration or a failed provider operation.
+#[inline]
+pub fn run_config_push_typed<C>(args: &ConfigPushArgs) -> Result<(), String>
+where
+    C: DeserializeOwned + Serialize + Validate + AppConfigMeta,
+{
+    run_config_push_typed_with_hooks::<C>(args, &NoopTypedConfigHooks)
+}
+
+/// Diff typed app config using the default no-op application hooks.
+///
+/// # Errors
+/// Returns an error for invalid configuration or a failed provider operation.
+#[inline]
+pub fn run_config_diff_typed<C>(args: &ConfigDiffArgs) -> Result<DiffExit, String>
+where
+    C: DeserializeOwned + Serialize + Validate + AppConfigMeta,
+{
+    run_config_diff_typed_with_hooks::<C>(args, &NoopTypedConfigHooks)
+}
+
 /// Raw flow — no typed `C`. Runs every check the typed flow runs
 /// *except* the typed deserialise, the validator rules, the secret
 /// presence / store-ref checks, and the Spin config-vs-secret
@@ -227,7 +388,8 @@ struct ResolvedTomlLeaf<'raw> {
 /// Returns a human-readable error string on any validation failure.
 #[inline]
 pub fn run_config_validate(args: &ConfigValidateArgs) -> Result<(), String> {
-    let ctx = load_validation_context(args)?;
+    let mut ctx = load_validation_context(args)?;
+    ctx.apply_overlay(args.no_env)?;
     run_shared_checks(&ctx, AdapterValidationScope::All)?;
     log::info!(
         "[edgezero] config validate (raw): {} OK{}",
@@ -242,30 +404,33 @@ pub fn run_config_validate(args: &ConfigValidateArgs) -> Result<(), String> {
 /// # Errors
 /// Returns a human-readable error string on any validation failure.
 #[inline]
-pub fn run_config_validate_typed<C>(args: &ConfigValidateArgs) -> Result<(), String>
+pub fn run_config_validate_typed_with_hooks<C>(
+    args: &ConfigValidateArgs,
+    adapters: &[String],
+    hooks: &dyn TypedConfigHooks<C>,
+) -> Result<(), String>
 where
     C: DeserializeOwned + Validate + AppConfigMeta,
 {
-    let ctx = load_validation_context(args)?;
+    let mut ctx = load_validation_context(args)?;
+    hooks.validate_source(&ctx.source_context(
+        TypedConfigCommand::Validate,
+        adapters,
+        args.no_env,
+    ))?;
+    ctx.apply_overlay(args.no_env)?;
     run_shared_checks(&ctx, AdapterValidationScope::All)?;
 
-    // Typed deserialise + validate_excluding_secrets (push,
-    // diff, AND typed validate all use deserialize-only +
-    // validate_excluding_secrets; the runtime is the only path that runs
-    // full validate against RESOLVED secret values).
-    let mut opts = AppConfigLoadOptions::default();
-    opts.env_overlay = !args.no_env;
-    let typed: C = app_config::deserialize_app_config_with_options::<C>(
-        &ctx.app_config_path,
-        &ctx.app_name,
-        &opts,
-    )
-    .map_err(|err| format_app_config_error(&err))?;
+    let typed: C = ctx.deserialize()?;
     app_config::validate_excluding_secrets(&typed)
         .map_err(|err| format!("typed app-config failed validation: {err}"))?;
 
     typed_secret_checks(&typed, &ctx)?;
     run_adapter_typed_checks::<C>(&ctx, AdapterValidationScope::All)?;
+    hooks.validate_command(&TypedConfigCommandContext {
+        source: ctx.source_context(TypedConfigCommand::Validate, adapters, args.no_env),
+        config: &typed,
+    })?;
 
     log::info!(
         "[edgezero] config validate (typed): {} + {} OK{}",
@@ -449,26 +614,35 @@ pub fn run_config_gc(args: &ConfigGcArgs) -> Result<(), String> {
 /// Returns a human-readable error string on any validation, read-back,
 /// consent, or push failure.
 #[inline]
-pub fn run_config_push_typed<C>(args: &ConfigPushArgs) -> Result<(), String>
+pub fn run_config_push_typed_with_hooks<C>(
+    args: &ConfigPushArgs,
+    hooks: &dyn TypedConfigHooks<C>,
+) -> Result<(), String>
 where
     C: DeserializeOwned + Serialize + Validate + AppConfigMeta,
 {
     // Pre-flight: load + validate.
-    let ctx = load_push_context(args)?;
+    let mut ctx = load_push_context(args)?;
+    let adapters = [ctx.adapter.name().to_owned()];
+    hooks.validate_source(&ctx.validation.source_context(
+        TypedConfigCommand::Push,
+        &adapters,
+        args.no_env,
+    ))?;
+    ctx.validation.apply_overlay(args.no_env)?;
     let validation_scope = AdapterValidationScope::Selected(ctx.adapter);
     run_shared_checks(&ctx.validation, validation_scope)?;
-    let mut opts = AppConfigLoadOptions::default();
-    opts.env_overlay = !args.no_env;
-    let typed: C = app_config::deserialize_app_config_with_options::<C>(
-        &ctx.validation.app_config_path,
-        &ctx.validation.app_name,
-        &opts,
-    )
-    .map_err(|err| format_app_config_error(&err))?;
+    let typed: C = ctx.validation.deserialize()?;
     app_config::validate_excluding_secrets(&typed)
         .map_err(|err| format!("typed app-config failed validation: {err}"))?;
     typed_secret_checks(&typed, &ctx.validation)?;
     run_adapter_typed_checks::<C>(&ctx.validation, validation_scope)?;
+    hooks.validate_command(&TypedConfigCommandContext {
+        source: ctx
+            .validation
+            .source_context(TypedConfigCommand::Push, &adapters, args.no_env),
+        config: &typed,
+    })?;
 
     // Resolve adapter paths.
     let (manifest_root, adapter_manifest_path, component_selector, push_ctx) =
@@ -606,7 +780,10 @@ fn apply_exit_code(exit_code_flag: bool, outcome: DiffOutcome) -> DiffExit {
     reason = "config diff orchestration: 6 sequential steps (load + structural checks, envelope, adapter resolve, paths, read, branch) each with its own error handling — extracting sub-functions would just move the lines without reducing conceptual complexity"
 )]
 #[inline]
-pub fn run_config_diff_typed<C>(args: &ConfigDiffArgs) -> Result<DiffExit, String>
+pub fn run_config_diff_typed_with_hooks<C>(
+    args: &ConfigDiffArgs,
+    hooks: &dyn TypedConfigHooks<C>,
+) -> Result<DiffExit, String>
 where
     C: DeserializeOwned + Serialize + Validate + AppConfigMeta,
 {
@@ -619,7 +796,7 @@ where
         no_env: args.no_env,
         strict: false,
     };
-    let ctx = load_validation_context(&validate_args)?;
+    let mut ctx = load_validation_context(&validate_args)?;
     ensure_adapter_defined(&args.adapter, Some(&ctx.manifest_loader))?;
     let adapter = adapter_registry::get_adapter(&args.adapter).ok_or_else(|| {
         format!(
@@ -629,19 +806,19 @@ where
         )
     })?;
     let validation_scope = AdapterValidationScope::Selected(adapter);
+    let adapters = [adapter.name().to_owned()];
+    hooks.validate_source(&ctx.source_context(TypedConfigCommand::Diff, &adapters, args.no_env))?;
+    ctx.apply_overlay(args.no_env)?;
     run_shared_checks(&ctx, validation_scope)?;
-    let mut opts = AppConfigLoadOptions::default();
-    opts.env_overlay = !args.no_env;
-    let typed: C = app_config::deserialize_app_config_with_options::<C>(
-        &ctx.app_config_path,
-        &ctx.app_name,
-        &opts,
-    )
-    .map_err(|err| format_app_config_error(&err))?;
+    let typed: C = ctx.deserialize()?;
     app_config::validate_excluding_secrets(&typed)
         .map_err(|err| format!("local validation failed: {err}"))?;
     typed_secret_checks(&typed, &ctx)?;
     run_adapter_typed_checks::<C>(&ctx, validation_scope)?;
+    hooks.validate_command(&TypedConfigCommandContext {
+        source: ctx.source_context(TypedConfigCommand::Diff, &adapters, args.no_env),
+        config: &typed,
+    })?;
 
     // Build the local envelope.
     let local_data: serde_json::Value = serde_json::to_value(&typed)
@@ -1538,17 +1715,25 @@ fn load_validation_context(args: &ConfigValidateArgs) -> Result<ValidationContex
 
     let app_config_path = resolve_app_config_path(args, &args.manifest, &app_name);
 
-    // Load the raw root table once. The typed flow will re-load it
-    // via `load_app_config_with_options::<C>` to drive deserialise +
-    // validator; we keep this copy for shared checks (e.g. Spin
-    // `[component.*]` discovery) that don't need `C`.
-    let mut opts = AppConfigLoadOptions::default();
-    opts.env_overlay = !args.no_env;
-    let raw_config =
-        app_config::load_app_config_raw_with_options(&app_config_path, &app_name, &opts)
-            .map_err(|err| format_app_config_error(&err))?;
+    // Read once. Source hooks run before the only environment overlay, and
+    // typed parsing, secret checks and serialization consume the same value.
+    let source = fs::read_to_string(&app_config_path).map_err(|source| {
+        format_app_config_error(&AppConfigError::Io {
+            path: app_config_path.clone(),
+            source,
+        })
+    })?;
+    // Check syntax only here. Value validation must follow the overlay so
+    // finite environment overrides can replace non-finite source values.
+    let raw_config = toml::from_str(&source).map_err(|error| {
+        format_app_config_error(&AppConfigError::Parse {
+            path: app_config_path.clone(),
+            source: Box::new(error),
+        })
+    })?;
 
     Ok(ValidationContext {
+        source,
         app_config_path,
         app_name,
         args_strict: args.strict,
@@ -2094,6 +2279,7 @@ mod tests {
     use edgezero_core::test_env::PathPrepend;
     use serde::{Deserialize, Serialize};
     use std::borrow::Cow;
+    use std::cell::RefCell;
 
     use std::fs;
     use tempfile::TempDir;
@@ -2946,7 +3132,296 @@ serve = "echo"
         );
     }
 
+    #[test]
+    fn config_commands_validate_non_finite_floats_after_environment_overrides() {
+        #[derive(Deserialize, Serialize, Validate, edgezero_core::AppConfig)]
+        struct FloatConfig {
+            ratio: f64,
+        }
+
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        for literal in ["nan", "inf", "-inf"] {
+            for (source, overlay, no_env, succeeds) in [
+                (literal, Some("2.5"), false, true),
+                (literal, None, false, false),
+                (literal, Some("2.5"), true, false),
+                ("1.5", Some(literal), false, false),
+            ] {
+                let _overlay = overlay.map_or_else(
+                    || EnvOverride::remove("DEMO_APP__RATIO"),
+                    |value| EnvOverride::set("DEMO_APP__RATIO", value),
+                );
+                let (dir, manifest, _) =
+                    setup_project(PUSH_MANIFEST, &format!("ratio = {source}\n"));
+                let mut validate = args_for(&manifest);
+                validate.no_env = no_env;
+                let mut push = push_args(&manifest, "axum");
+                push.local = true;
+                push.yes = true;
+                push.no_env = no_env;
+                let diff = ConfigDiffArgs {
+                    adapter: "axum".to_owned(),
+                    exit_code: true,
+                    local: true,
+                    manifest,
+                    no_env,
+                    ..ConfigDiffArgs::default()
+                };
+
+                for (command, result) in [
+                    ("raw validate", run_config_validate(&validate)),
+                    (
+                        "typed validate",
+                        run_config_validate_typed::<FloatConfig>(&validate),
+                    ),
+                    ("push", run_config_push_typed::<FloatConfig>(&push)),
+                    (
+                        "diff",
+                        run_config_diff_typed::<FloatConfig>(&diff)
+                            .map(|exit| assert_eq!(exit.code, 0)),
+                    ),
+                ] {
+                    if succeeds {
+                        result.unwrap_or_else(|error| {
+                            panic!("{command} must accept the finite override of {source}: {error}")
+                        });
+                    } else {
+                        let error = result.expect_err("effective non-finite values must fail");
+                        assert!(
+                            error.contains("non-finite f64"),
+                            "{command} must reject the effective value: {error}"
+                        );
+                    }
+                }
+
+                let store_path = dir.path().join(".edgezero/local-config-app_config.json");
+                if succeeds {
+                    let outer: serde_json::Value = serde_json::from_str(
+                        &fs::read_to_string(&store_path).expect("read local store"),
+                    )
+                    .expect("parse local store");
+                    let envelope: BlobEnvelope = serde_json::from_str(
+                        outer["app_config"].as_str().expect("stored envelope"),
+                    )
+                    .expect("parse envelope");
+                    envelope.verify().expect("envelope integrity");
+                    assert_eq!(envelope.data["ratio"], 2.5_f64);
+                } else {
+                    assert!(!store_path.exists(), "invalid config must not be published");
+                }
+            }
+        }
+    }
+
     // ---------- typed flow ----------
+
+    struct ReplacingSourceHook {
+        expected: TypedConfigCommand,
+        expected_greeting: &'static str,
+        expected_no_env: bool,
+        seen: RefCell<Vec<String>>,
+    }
+
+    impl ReplacingSourceHook {
+        fn check_command(&self, context: &TypedConfigCommandContext<'_, FixtureConfig>) {
+            assert_eq!(context.config.greeting, self.expected_greeting);
+            assert_eq!(context.source.raw_bytes, FIXTURE_APP_CONFIG.as_bytes());
+            assert_eq!(context.source.command, self.expected);
+        }
+
+        fn check_source(&self, context: &TypedConfigSourceContext<'_>) {
+            assert_eq!(context.command, self.expected);
+            assert_eq!(context.raw_bytes, FIXTURE_APP_CONFIG.as_bytes());
+            assert_eq!(context.app_environment_prefix, "DEMO_APP__");
+            assert_eq!(context.adapters, &["axum".to_owned()]);
+            assert_eq!(context.no_env, self.expected_no_env);
+            assert_eq!(context.strict, self.expected == TypedConfigCommand::Push);
+        }
+    }
+
+    impl TypedConfigHooks<FixtureConfig> for ReplacingSourceHook {
+        fn validate_command(
+            &self,
+            context: &TypedConfigCommandContext<'_, FixtureConfig>,
+        ) -> Result<(), String> {
+            self.check_command(context);
+            self.seen.borrow_mut().push("command".to_owned());
+            Ok(())
+        }
+
+        fn validate_source(&self, context: &TypedConfigSourceContext<'_>) -> Result<(), String> {
+            self.check_source(context);
+            fs::write(
+                context.path,
+                FIXTURE_APP_CONFIG.replace("hello", "replaced"),
+            )
+            .map_err(|error| error.to_string())?;
+            self.seen.borrow_mut().push("source".to_owned());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn typed_config_hooks_validate_the_exact_read_despite_source_replacement() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let (_dir, manifest, _) = setup_project(VALID_MANIFEST, FIXTURE_APP_CONFIG);
+        let hook = ReplacingSourceHook {
+            expected: TypedConfigCommand::Validate,
+            expected_no_env: true,
+            expected_greeting: "hello",
+            seen: RefCell::new(Vec::new()),
+        };
+        run_config_validate_typed_with_hooks::<FixtureConfig>(
+            &args_for(&manifest),
+            &["axum".to_owned()],
+            &hook,
+        )
+        .expect("validate original bytes after source replacement");
+        assert_eq!(*hook.seen.borrow(), ["source", "command"]);
+    }
+
+    #[test]
+    fn typed_config_hooks_push_serializes_the_value_seen_by_validation() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let (dir, manifest, _) = setup_project(PUSH_MANIFEST, FIXTURE_APP_CONFIG);
+        let hook = ReplacingSourceHook {
+            expected: TypedConfigCommand::Push,
+            expected_no_env: true,
+            expected_greeting: "hello",
+            seen: RefCell::new(Vec::new()),
+        };
+        let mut args = push_args(&manifest, "axum");
+        args.local = true;
+        args.yes = true;
+        run_config_push_typed_with_hooks::<FixtureConfig>(&args, &hook)
+            .expect("push original bytes after source replacement");
+        let outer: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.path().join(".edgezero/local-config-app_config.json"))
+                .expect("read local pushed envelope"),
+        )
+        .expect("parse local store");
+        let envelope: BlobEnvelope =
+            serde_json::from_str(outer["app_config"].as_str().expect("read stored envelope"))
+                .expect("parse envelope");
+        assert_eq!(envelope.data["greeting"], "hello");
+        assert_eq!(*hook.seen.borrow(), ["source", "command"]);
+    }
+
+    #[test]
+    fn typed_config_hooks_diff_uses_the_exact_read_without_writing() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let (dir, manifest, _) = setup_project(PUSH_MANIFEST, FIXTURE_APP_CONFIG);
+        let hook = ReplacingSourceHook {
+            expected: TypedConfigCommand::Diff,
+            expected_no_env: true,
+            expected_greeting: "hello",
+            seen: RefCell::new(Vec::new()),
+        };
+        let args = ConfigDiffArgs {
+            adapter: "axum".to_owned(),
+            app_config: None,
+            exit_code: false,
+            format: DiffFormat::Unified,
+            key: None,
+            local: true,
+            manifest,
+            no_env: true,
+            runtime_config: None,
+            store: None,
+            staging: false,
+        };
+        run_config_diff_typed_with_hooks::<FixtureConfig>(&args, &hook)
+            .expect("diff original bytes after replacement");
+        assert_eq!(*hook.seen.borrow(), ["source", "command"]);
+        assert!(
+            !dir.path()
+                .join(".edgezero/local-config-app_config.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn typed_config_hooks_share_the_effective_overlay_with_an_explicit_path() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let (_dir, manifest, app_config) = setup_project(VALID_MANIFEST, FIXTURE_APP_CONFIG);
+        let _overlay = EnvOverride::set("DEMO_APP__GREETING", "overlaid");
+        let hook = ReplacingSourceHook {
+            expected: TypedConfigCommand::Validate,
+            expected_no_env: false,
+            expected_greeting: "overlaid",
+            seen: RefCell::new(Vec::new()),
+        };
+        let mut args = args_for(&manifest);
+        args.no_env = false;
+        args.app_config = Some(app_config);
+        run_config_validate_typed_with_hooks::<FixtureConfig>(&args, &["axum".to_owned()], &hook)
+            .expect("validate the exact overlay-applied value");
+        assert_eq!(*hook.seen.borrow(), ["source", "command"]);
+    }
+
+    struct RejectingSourceHook;
+    impl TypedConfigHooks<FixtureConfig> for RejectingSourceHook {
+        fn validate_command(
+            &self,
+            _context: &TypedConfigCommandContext<'_, FixtureConfig>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn validate_source(&self, _context: &TypedConfigSourceContext<'_>) -> Result<(), String> {
+            Err("application source rejected".to_owned())
+        }
+    }
+
+    #[test]
+    fn typed_config_hooks_reject_source_before_overlay_or_publication() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let (dir, manifest, _) = setup_project(PUSH_MANIFEST, FIXTURE_APP_CONFIG);
+        let _overlay = EnvOverride::set("DEMO_APP__SERVICE__TIMEOUT_MS", "not-an-integer");
+        let mut args = push_args(&manifest, "axum");
+        args.local = true;
+        args.yes = true;
+        args.no_env = false;
+        let error = run_config_push_typed_with_hooks::<FixtureConfig>(&args, &RejectingSourceHook)
+            .expect_err("source rejection must stop before the invalid overlay");
+        assert_eq!(error, "application source rejected");
+        assert!(
+            !dir.path()
+                .join(".edgezero/local-config-app_config.json")
+                .exists()
+        );
+    }
+
+    struct RejectingCommandHook;
+    impl TypedConfigHooks<FixtureConfig> for RejectingCommandHook {
+        fn validate_command(
+            &self,
+            _context: &TypedConfigCommandContext<'_, FixtureConfig>,
+        ) -> Result<(), String> {
+            Err("application target rejected".to_owned())
+        }
+
+        fn validate_source(&self, _context: &TypedConfigSourceContext<'_>) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn typed_config_hooks_reject_target_before_publication() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
+        let (dir, manifest, _) = setup_project(PUSH_MANIFEST, FIXTURE_APP_CONFIG);
+        let mut args = push_args(&manifest, "axum");
+        args.local = true;
+        args.yes = true;
+        let error = run_config_push_typed_with_hooks::<FixtureConfig>(&args, &RejectingCommandHook)
+            .expect_err("application command validation must stop publication");
+        assert_eq!(error, "application target rejected");
+        assert!(
+            !dir.path()
+                .join(".edgezero/local-config-app_config.json")
+                .exists()
+        );
+    }
 
     #[test]
     fn typed_validates_a_well_formed_project() {
@@ -4370,7 +4845,7 @@ ids = ["default"]
 
     #[test]
     fn typed_push_writes_blob_envelope_to_local_config_file() {
-        use edgezero_core::blob_envelope::{BlobEnvelope, ENVELOPE_VERSION_V1};
+        let _lock = manifest_guard().lock().expect("manifest guard");
 
         let (dir, manifest, _) = setup_project(PUSH_MANIFEST, FIXTURE_APP_CONFIG);
         let mut args = push_args(&manifest, "axum");
@@ -4431,6 +4906,7 @@ ids = ["default"]
         // All fields are present verbatim — secret key names included.
         // Secret-field VALUES at rest are the operator-supplied
         // key NAMEs (not the resolved secret values).
+        let _lock = manifest_guard().lock().expect("manifest guard");
         let data = serde_json::json!({
             "api_token": "demo_api_token",
             "greeting": "hello",
@@ -4557,6 +5033,7 @@ ids = ["default"]
 
     #[test]
     fn typed_push_runs_validator_and_errors_on_bad_config() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
         let bad_config = r#"
 api_token = "demo"
 greeting = "hi"
@@ -4576,6 +5053,7 @@ timeout_ms = 50
 
     #[test]
     fn typed_push_dry_run_does_not_write() {
+        let _lock = manifest_guard().lock().expect("manifest guard");
         let (dir, manifest, _) = setup_project(PUSH_MANIFEST, FIXTURE_APP_CONFIG);
         let mut args = push_args(&manifest, "axum");
         args.dry_run = true;
@@ -4695,6 +5173,7 @@ ids = ["default"]
         // declaring two ids is a `--strict` capability violation
         // that the typed push must catch before invoking the
         // adapter.
+        let _lock = manifest_guard().lock().expect("manifest guard");
         let manifest_strict_violation = r#"
 [app]
 name = "demo-app"
