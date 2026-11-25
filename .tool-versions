@@ -1,4 +1,4 @@
-fastly 16.0.0
+fastly 17.2.0
 nodejs 24.20.0
 rust 1.98.1
 # spin-cli is not pinned by asdf-style version managers (no
