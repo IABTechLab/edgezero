@@ -64,7 +64,7 @@ Known gates:
   which normalizes these targets before Worker invocation. A no-hook
   application must match `/caf%C3%A9` and `/a/b` while ingress metadata
   independently retains the raw runtime URL with unknown wire preservation.
-- Fastly 0.13.1 lacks a safe borrowed original-target getter. Ingress reports
+- Fastly 0.13.3 lacks a safe borrowed original-target getter. Ingress reports
   `NotExposed`; a preceding native path shortcut can see a normalized target.
   Its canonical origin is recovered separately from the client runtime URI
   and one validated consistent Host, before native mutation.

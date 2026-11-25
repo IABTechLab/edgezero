@@ -6,9 +6,9 @@ Deploy EdgeZero applications to Fastly's Compute@Edge platform using WebAssembly
 
 - [Fastly CLI](https://developer.fastly.com/learning/compute/#install-the-fastly-cli)
 - Rust `wasm32-wasip1` target: `rustup target add wasm32-wasip1`
-- [Viceroy](https://github.com/fastly/Viceroy) 0.21.0 for local execution and testing
+- [Viceroy](https://github.com/fastly/Viceroy) 0.22.0 for local execution and testing
 
-The adapter pins the Fastly SDK to 0.13.1. Older Viceroy releases may reject its
+The adapter pins the Fastly SDK to 0.13.3. Older Viceroy releases may reject its
 host imports before application code executes; use the repository's pinned runtime.
 
 ## Project Setup
@@ -503,7 +503,7 @@ See the [Streaming guide](/guide/streaming) and
 Run contract tests for the Fastly adapter:
 
 ```bash
-cargo install viceroy --version 0.21.0 --locked
+cargo install viceroy --version 0.22.0 --locked
 export CARGO_TARGET_WASM32_WASIP1_RUNNER="viceroy run"
 
 # Run tests
@@ -514,8 +514,8 @@ This installs the stock reference runtime. The bounded-readiness, subsequent-rea
 backend timeout setter/getter readback legs instead
 require the explicitly selected, hash-verified [tracked Viceroy repair](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/patches/viceroy/README.md).
 Select that binary through `CARGO_TARGET_WASM32_WASIP1_RUNNER` and the harness's `VICEROY_BIN`;
-do not cite stock 0.21.0 as bounded-read or timeout-readback evidence. The SDK readback assertions
-are intentional: the tracked repair implements those hostcalls, while stock 0.21.0 does not.
+do not cite stock 0.22.0 as bounded-read or timeout-readback evidence. The SDK readback assertions
+are intentional: the tracked repair implements those hostcalls, while stock 0.22.0 does not.
 The shared version string alone cannot identify the repaired binary. This local selection does not change installed
 runtime pins or establish hosted Fastly guarantees.
 
@@ -583,14 +583,14 @@ reconfigure filters on later callbacks. Use `setup_once` for other application-o
 not a second managed logger. Store-open diagnostics use the bounded
 boot channel after logger setup; an absent warning is not proof of a healthy binding.
 
-SDK 0.13.1 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
+SDK 0.13.3 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
 `with_max_memory`. A value of zero disables the request-count or memory limit;
 it does not request zero callbacks or zero memory use. The lifetime limit is
 measured from `Serve` construction, including time before the first callback.
 `with_timeout` bounds only the idle wait for the next request; it does not bound
 handler or backend time. If your service is billed by memory × wall-clock time,
 idle waiting is billed too. Limits do not guarantee reuse; any request may start a
-fresh sandbox. The fixtures pin standalone Viceroy 0.21.0; any observed per-guest
+fresh sandbox. The fixtures pin standalone Viceroy 0.22.0; any observed per-guest
 request ceiling belongs to that runtime and run, not to the SDK request limit.
 `edgezero serve` runs `fastly compute serve`, whose bundled Viceroy can differ.
 Record the executable and observed reuse; recheck local ceilings when pins
@@ -854,7 +854,7 @@ entry point and removing retained state, not merely setting a request limit of o
 
 Call `request::capture_request_ingress(&req)` immediately after acquiring the
 native request and before URL-based shortcuts or native mutation. It borrows
-the same request without round-tripping handles. With Fastly SDK 0.13.1,
+the same request without round-tripping handles. With Fastly SDK 0.13.3,
 safe raw-target acquisition is unavailable: the snapshot records `NotExposed`
 first, then uses the SDK runtime URL only to recover the canonical origin.
 This URL access can normalize the path; it never establishes original-target
