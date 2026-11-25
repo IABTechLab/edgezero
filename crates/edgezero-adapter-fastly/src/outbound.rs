@@ -1177,7 +1177,7 @@ mod fastly_impl {
         {
             return value;
         }
-        // SDK 0.13.1 converts the entire value to text, so one opaque token would
+        // SDK 0.13.3 converts the entire value to text, so one opaque token would
         // otherwise discard valid neighboring keys as well.
         let mut filtered = Vec::with_capacity(bytes.len());
         for key in bytes.split(|byte| *byte == b' ') {
