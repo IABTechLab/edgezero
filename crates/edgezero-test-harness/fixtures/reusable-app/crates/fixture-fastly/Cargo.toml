@@ -16,7 +16,7 @@ edgezero-core.workspace = true
 edgezero-adapter-fastly.workspace = true
 fixture-core.workspace = true
 fastly.workspace = true
-fastly-sys = { version = "=0.13.1", optional = true }
+fastly-sys = { version = "=0.13.3", optional = true }
 futures.workspace = true
 serde_json.workspace = true
 log.workspace = true
