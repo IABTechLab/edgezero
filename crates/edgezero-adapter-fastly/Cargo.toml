@@ -13,6 +13,7 @@ workspace = true
 [features]
 default = []
 cli = [
+    "dep:base64",
     "dep:edgezero-adapter",
     "edgezero-adapter/cli",
     "dep:ctor",
@@ -29,6 +30,7 @@ edgezero-adapter = { path = "../edgezero-adapter", optional = true, features = [
 ] }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+base64 = { workspace = true, optional = true }
 brotli = { workspace = true }
 bytes = { workspace = true }
 ctor = { workspace = true, optional = true }

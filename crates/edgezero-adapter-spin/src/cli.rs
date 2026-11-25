@@ -536,17 +536,20 @@ impl Adapter for SpinCliAdapter {
         // tells us which field already claimed it.
         let mut seen: HashMap<String, &str> = HashMap::with_capacity(entries.len());
         for entry in entries {
-            let spin_var = entry.key_value.to_ascii_lowercase();
+            let spin_var = entry
+                .native_name
+                .clone()
+                .unwrap_or_else(|| entry.key_value.to_ascii_lowercase());
             if !is_valid_spin_key(&spin_var) {
                 let reason = spin_key_rule_violation(&spin_var);
                 return Err(format!(
-                    "`#[secret]` field `{field}` does not reference a valid Spin variable name. {reason}. Pick a secret reference that conforms; its value is redacted.",
+                    "secret lookup at `{field}` does not reference a valid Spin variable name. {reason}. Use a conforming native name; the name is redacted.",
                     field = entry.field_name,
                 ));
             }
             if let Some(prev_field) = seen.insert(spin_var.clone(), entry.field_name.as_str()) {
                 return Err(format!(
-                    "`#[secret]` fields `{prev_field}` and `{this_field}` reference the same Spin variable after lowercasing; Spin's flat variable namespace cannot disambiguate them. Pick distinct secret references; their values are redacted.",
+                    "secret lookups at `{prev_field}` and `{this_field}` reference the same Spin variable; Spin's flat variable namespace cannot disambiguate them. Use distinct native names; the names are redacted.",
                     this_field = entry.field_name,
                 ));
             }
@@ -942,7 +945,12 @@ fn read_sqlite_entry(db_path: &Path, store: &str, key: &str) -> Result<ReadConfi
 /// multi-component requires an explicit `component = "..."` in
 /// `[adapters.spin.adapter]`, and a selector that doesn't match
 /// any declared id is an error.
-fn resolve_spin_component(
+///
+/// # Errors
+/// Returns an error for unreadable/invalid manifests, missing components,
+/// ambiguous selection or an undeclared selector.
+#[inline]
+pub fn resolve_spin_component(
     spin_path: &Path,
     component_selector: Option<&str>,
 ) -> Result<String, String> {

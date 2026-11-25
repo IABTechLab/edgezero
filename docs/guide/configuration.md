@@ -319,6 +319,104 @@ let value = ctx
     .await?;
 ```
 
+### Application-compiled secret lookups
+
+Applications that derive credential requests from effective settings, rather than
+scalar secret-reference fields, can implement `AppConfigMeta` by hand and override:
+
+```rust
+fn implicit_secret_lookups(&self)
+    -> Result<Option<Vec<ImplicitSecretLookup>>, String>;
+
+fn render_implicit_secret_name(
+    &self,
+    adapter: &str,
+    lookup: &ImplicitSecretLookup,
+    environment: &EnvConfig,
+) -> Result<String, String>;
+```
+
+The types are `edgezero_core::app_config::{AppConfigMeta, ImplicitSecretLookup}`
+and `edgezero_core::env_config::EnvConfig`. Construct a request with public,
+credential-free metadata:
+
+```rust
+ImplicitSecretLookup::new(
+    "partner.pull",       // application-owned purpose
+    "partners[0]",        // concrete owning path
+    "default",            // declared logical secret-store ID
+    "app_partner_pull",   // derived key, never a credential value
+)
+```
+
+The compiler must return every active credential request together, including
+requests derived from omitted/defaulted fields. It owns activation and descriptor
+coverage. Typed `config validate`, `push` and `diff` compile once per preflight
+and apply the same metadata, declaration, native-name and collision checks.
+
+- `Ok(None)` retains the existing annotation-leaf walk.
+- `Ok(Some(vec![]))` opts in with no active credentials.
+- Any `Some` plan **replaces all legacy CLI leaf checks**, even if
+  `secret_fields()` returns metadata. Empty leaves, missing store declarations
+  for legacy leaves and invalid legacy store references are no longer checked.
+  The compiler must cover any active credential still represented by those fields.
+  This hook does not change runtime annotation-leaf resolution.
+
+The renderer returns the exact name used by the application's runtime bridge,
+not a generic EdgeZero mapping or a raw-key fallback. Its environment merges the
+selected adapter's manifest defaults with parent-process overrides. An active
+plan without a renderer fails preflight. Repeated requests with the same
+purpose/store/key may have different owning paths but must render identically.
+Different purposes may share store/key metadata when they render to distinct
+native identities; they cannot claim the same physical credential. Fastly names
+are scoped per selected physical store, including alias detection. Other built-in
+adapters use flat namespaces.
+
+Axum exact native environment names must start with an uppercase ASCII letter or
+`_`, followed by uppercase ASCII letters, digits or `_`. Spin and Fastly apply
+their native variable/key rules. Cloudflare bindings are string-named properties,
+not necessarily JavaScript identifiers; no guessed identifier restriction is
+applied. Provisioning tools may have additional requirements that need separate
+provider verification.
+
+The derive currently emits the entire `AppConfigMeta` implementation and cannot
+forward these hooks. A handwritten implementation must maintain its own metadata
+and cannot rely on the derive's compile-time annotation checks. Plans are public
+metadata, not credentials or authorization. Applications remain responsible for
+runtime lookup scoping and destination restrictions.
+
+### Shared Fastly secret operations
+
+Host-side application CLIs can use `edgezero_cli::fastly_secrets`:
+
+- `context_from_manifest(path, service_id)` uses the same manifest-selected paths,
+  logical stores and variable defaults as deploy. Supply the effective application
+  manifest path, including any `EDGEZERO_MANIFEST` selection.
+- `resolve_resources(&context)` returns the selected service and comparable
+  logical/physical resource metadata. **Every declared Config, KV and Secret
+  Store must already exist**, even when the intended operation writes only one
+  secret. Resolution is read-only and does not provision or link resources.
+- `secret_exists(resource_id, key)` checks a complete paginated metadata listing,
+  never the credential value. An operational error is distinct from absence.
+  Repeated key checks currently repeat the listing.
+- `write_secret(resource_id, key, bytes, SecretWriteAction::Create)` uses POST;
+  `Replace` uses PATCH. The provider enforces the selected action without a
+  delete/recreate gap. Injectable `_with_transport` variants support fictional tests.
+
+Credentials travel to curl through stdin, not argv. Errors redact provider bodies,
+transport text and stderr. Manifest-load errors include the path and error kind,
+not parser source. Explicit HTTP rejections are distinguished from uncertain
+outcomes; unclassified responses and transport failures remain uncertain. Writes
+are never retried automatically. The local `FASTLY_SECRET_MAX_BYTES` is 65,536 raw
+bytes before Base64; [Fastly documents the limit as "64KB"](https://www.fastly.com/documentation/reference/api/services/resources/secret-store-secret/)
+without disambiguating 64,000 versus 65,536 bytes. Exact provider boundary
+acceptance remains unverified.
+
+Successful storage does not deploy, link, activate or refresh retained runtime
+state, and does not guarantee immediate fleet-wide rotation. These host helpers
+do not prove provider IAM separation or the consuming application's runtime
+secret-scoping guarantees.
+
 ### Nested and array secrets
 
 `#[secret]` fields don't have to live at the config root. They can sit

@@ -245,6 +245,9 @@ pub struct TypedSecretEntry<'entry> {
     pub field_name: String,
     /// Blob value — i.e. the secret-store KEY NAME.
     pub key_value: &'entry str,
+    /// Exact native identity supplied by an opt-in application's runtime renderer.
+    /// `None` retains this adapter's generic key mapping.
+    pub native_name: Option<String>,
     /// Logical secret-store id this key targets.
     pub store_id: &'entry str,
 }
@@ -261,7 +264,16 @@ impl<'entry> TypedSecretEntry<'entry> {
             field_name: field_name.into(),
             key_value,
             store_id,
+            native_name: None,
         }
+    }
+
+    /// Supply the exact native identity used by an application's runtime bridge.
+    #[must_use]
+    #[inline]
+    pub fn with_native_name(mut self, native_name: String) -> Self {
+        self.native_name = Some(native_name);
+        self
     }
 }
 
@@ -710,6 +722,14 @@ pub trait Adapter: Sync + Send {
         Ok(())
     }
 
+    /// Whether native secret names have separate namespaces per physical store.
+    /// Flat-namespace adapters retain the default. The CLI resolves store aliases
+    /// before collision checks when this is true.
+    #[inline]
+    fn secret_names_scoped_per_store(&self) -> bool {
+        false
+    }
+
     /// Typed-only check that needs `#[secret]` field values — the
     /// CLI calls this only from the typed validation flow.
     /// `entries` carries both `KeyInDefault` and `KeyInNamedStore`
@@ -901,6 +921,7 @@ mod tests {
         // method here exercises the trait's default impl.
         assert!(FIRST.merged_id_kinds().is_empty());
         assert!(FIRST.single_store_kinds().is_empty());
+        assert!(!FIRST.secret_names_scoped_per_store());
         assert_eq!(
             FIRST.validate_adapter_manifest(Path::new("/tmp"), None, None),
             Ok(())

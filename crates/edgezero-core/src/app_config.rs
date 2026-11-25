@@ -13,6 +13,7 @@
 //!   push` flow) — [`load_app_config_raw`] /
 //!   [`load_app_config_raw_with_options`].
 
+use crate::env_config::EnvConfig;
 use std::any;
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -83,10 +84,87 @@ impl SecretField {
     }
 }
 
+/// One active credential request compiled from effective application settings.
+///
+/// This is public lookup metadata, not a resolved credential or authorization.
+/// The owning field may be an object or an omitted defaulted field; it need not
+/// be a scalar secret-reference leaf. Applications own activation and descriptor
+/// coverage and must return all active requests together.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct ImplicitSecretLookup {
+    /// Fixed application-owned purpose identifier.
+    pub descriptor_id: String,
+    /// Concrete owning schema path, including array indexes where applicable.
+    pub field_path: String,
+    /// Derived physical key, never a credential value.
+    pub key: String,
+    /// Logical secret-store declaration ID.
+    pub store_id: String,
+}
+
+impl ImplicitSecretLookup {
+    /// Construct public lookup metadata, never a resolved credential.
+    #[must_use]
+    #[inline]
+    pub fn new<Descriptor, FieldPath, Store, Key>(
+        descriptor_id: Descriptor,
+        field_path: FieldPath,
+        store_id: Store,
+        key: Key,
+    ) -> Self
+    where
+        Descriptor: Into<String>,
+        FieldPath: Into<String>,
+        Store: Into<String>,
+        Key: Into<String>,
+    {
+        Self {
+            descriptor_id: descriptor_id.into(),
+            field_path: field_path.into(),
+            key: key.into(),
+            store_id: store_id.into(),
+        }
+    }
+}
+
 /// Per-field metadata emitted by `#[derive(AppConfig)]`. `config validate`
 /// / `config push` and the runtime secret walk reflect over this to gate
 /// secret-aware behaviour.
 pub trait AppConfigMeta {
+    /// Opt into compiled, active credential requests instead of raw secret leaves.
+    /// `None` preserves the existing annotation walk; `Some(vec![])` means no
+    /// credentials are active. Compile from effective defaults and reject invalid
+    /// or incomplete application metadata before returning a plan. `Some` replaces
+    /// all CLI annotation-leaf checks, including non-empty values, store declarations
+    /// and store references, even when `secret_fields()` is non-empty. The compiler
+    /// must cover every active credential; this does not change runtime leaf resolution.
+    ///
+    /// # Errors
+    /// Returns a credential-free application compilation diagnostic.
+    #[inline]
+    fn implicit_secret_lookups(&self) -> Result<Option<Vec<ImplicitSecretLookup>>, String> {
+        Ok(None)
+    }
+
+    /// Render the exact native identity used by the application's runtime bridge.
+    /// Required when opting into implicit lookups. The CLI still applies adapter
+    /// native-name and collision checks. `environment` merges the selected
+    /// adapter's manifest defaults with process overrides using deployment rules.
+    /// Do not re-read process environment or return a generic raw-key fallback.
+    ///
+    /// # Errors
+    /// Returns a credential-free diagnostic for unsupported adapters or mappings.
+    #[inline]
+    fn render_implicit_secret_name(
+        &self,
+        _adapter: &str,
+        _lookup: &ImplicitSecretLookup,
+        _environment: &EnvConfig,
+    ) -> Result<String, String> {
+        Err("implicit secret lookups require an application native renderer".to_owned())
+    }
+
     /// Every `#[secret]` / `#[secret(store_ref)]` leaf on the struct,
     /// including those reached through `#[app_config(nested)]` children,
     /// each carrying its full path from this struct's root.
@@ -753,6 +831,10 @@ fn walk_and_overlay(
               match arms in `expect_err` assertions intentionally collapse all unexpected \
               variants into a single panic"
 )]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "legacy app-config fixtures intentionally exercise the default-compatible implicit lookup hooks"
+)]
 mod tests {
     use super::*;
     use crate::test_env::{EnvOverride, env_lock};
@@ -779,6 +861,15 @@ mod tests {
         fn secret_fields() -> Vec<SecretField> {
             vec![]
         }
+    }
+
+    #[test]
+    fn implicit_lookup_constructor_preserves_public_metadata() {
+        let lookup = ImplicitSecretLookup::new("purpose", "owners[0]", "vault", "derived_key");
+        assert_eq!(lookup.descriptor_id, "purpose");
+        assert_eq!(lookup.field_path, "owners[0]");
+        assert_eq!(lookup.store_id, "vault");
+        assert_eq!(lookup.key, "derived_key");
     }
 
     fn write_fixture(contents: &str) -> NamedTempFile {
