@@ -470,7 +470,8 @@ pub struct ConfigDiffArgs {
     /// typed app-config.
     #[arg(long)]
     pub no_env: bool,
-    /// Path to the adapter's runtime configuration file.
+    /// Path to Spin's host runtime configuration file (Spin only).
+    /// Rejected for other adapters; not the app-config payload.
     #[arg(long)]
     pub runtime_config: Option<PathBuf>,
     /// Diff against the environment-selected staging Config Store. The entry
@@ -556,8 +557,8 @@ pub struct ConfigPushArgs {
     /// and the push see the same resolved values.
     #[arg(long)]
     pub no_env: bool,
-    /// Path to the adapter's runtime configuration file. Currently
-    /// only honoured by Spin, which reads
+    /// Path to Spin's host runtime configuration file (Spin only).
+    /// Rejected for other adapters; not the app-config payload. Spin reads
     /// `[key_value_store.<label>]` stanzas to dispatch
     /// `config push --adapter spin` to the right backend writer
     /// (`type = "spin"` → direct `SQLite` write; redis/azure-*/etc. →
@@ -697,6 +698,24 @@ mod tests {
     struct DiffTestWrapper {
         #[command(flatten)]
         args: ConfigDiffArgs,
+    }
+
+    #[derive(clap::Parser)]
+    struct PushTestWrapper {
+        #[command(flatten)]
+        args: ConfigPushArgs,
+    }
+
+    #[test]
+    fn runtime_config_help_identifies_spin_only_for_both_commands() {
+        use clap::CommandFactory as _;
+        for mut command in [PushTestWrapper::command(), DiffTestWrapper::command()] {
+            let help = command.render_long_help().to_string();
+            assert!(
+                help.contains("Spin only"),
+                "must explain runtime-config restriction: {help}"
+            );
+        }
     }
 
     /// Parse `ConfigDiffArgs` from a CLI token slice via clap.

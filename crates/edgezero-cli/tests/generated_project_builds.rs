@@ -43,6 +43,45 @@ mod tests {
             .unwrap_or_else(|err| panic!("run generated CLI with {args:?}: {err}"))
     }
 
+    fn assert_runtime_config_rejected(project: &Path) {
+        // The generated CLI inherits shared typed validation, including failures
+        // before manifest access. A missing manifest also prevents real provider
+        // calls if this validation regresses.
+        for command in ["push", "diff"] {
+            for adapter in ["axum", "cloudflare", "fastly"] {
+                let output = Command::new(env!("CARGO"))
+                    .args([
+                        "run",
+                        "-p",
+                        "scaffold-probe-cli",
+                        "--quiet",
+                        "--",
+                        "config",
+                        command,
+                        "--adapter",
+                        adapter,
+                        "--manifest",
+                        "missing-manifest.toml",
+                        "--runtime-config",
+                        "missing-runtime.toml",
+                    ])
+                    .current_dir(project)
+                    .output()
+                    .expect("run generated config command");
+                let diagnostic = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(output.status.code(), Some(2_i32), "{diagnostic}");
+                assert!(
+                    diagnostic.contains("--runtime-config is only supported with --adapter spin"),
+                    "{diagnostic}"
+                );
+            }
+        }
+    }
+
     #[test]
     #[ignore = "compiles a generated workspace and may fetch crates; run explicitly"]
     #[expect(
@@ -128,6 +167,8 @@ mod tests {
             run_scaffold_probe(&project, &["config", "gc", "--help"]).success(),
             "generated typed CLI should parse `config gc --help`",
         );
+
+        assert_runtime_config_rejected(&project);
 
         // Per-adapter wasm targets: where target-gated template code lives
         // (entrypoint signatures, macro-generated unsafe exports).

@@ -14,6 +14,7 @@ use app_demo_core::config::AppDemoConfig;
 use edgezero_cli::args::{ConfigPushArgs, ConfigValidateArgs};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// `AppDemoConfig`-shaped TOML — exercises every field the macro
 /// emits: `greeting` (plain), `feature.new_checkout` (nested),
@@ -337,5 +338,42 @@ fn config_push_spin_writes_sqlite_round_tripped_via_rusqlite() {
     assert_eq!(
         data["vault"], "default",
         "`#[secret(store_ref)]` field must persist its store id at rest: {data}"
+    );
+}
+
+#[test]
+fn config_commands_reject_non_spin_runtime_config_through_demo_binary() {
+    let (dir, _) = write_app_demo_project("axum");
+    for command in ["push", "diff"] {
+        for adapter in ["axum", "Cloudflare", "FASTLY"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_app-demo-cli"))
+                .args([
+                    "config",
+                    command,
+                    "--adapter",
+                    adapter,
+                    "--manifest",
+                    "missing-manifest.toml",
+                    "--runtime-config",
+                    "missing-runtime.toml",
+                ])
+                .current_dir(dir.path())
+                .output()
+                .expect("run demo config command");
+            let diagnostic = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.status.code(), Some(2_i32), "{diagnostic}");
+            assert!(
+                diagnostic.contains("--runtime-config is only supported with --adapter spin"),
+                "{diagnostic}"
+            );
+        }
+    }
+    assert!(
+        !dir.path().join(".edgezero").exists(),
+        "invalid commands must not write config"
     );
 }
