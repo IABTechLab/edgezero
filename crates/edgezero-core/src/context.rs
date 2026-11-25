@@ -1,6 +1,8 @@
 use crate::body::Body;
 use crate::error::EdgeError;
 use crate::http::Request;
+use crate::ingress::RequestIngress;
+use crate::ja4::CapturedJa4;
 use crate::params::PathParams;
 use crate::proxy::ProxyHandle;
 use crate::store_registry::{
@@ -100,6 +102,16 @@ impl RequestContext {
     #[inline]
     pub fn into_request(self) -> Request {
         self.request
+    }
+
+    /// The adapter's JA4 capture for this request, read from [`RequestIngress`].
+    /// `None` if the request has no ingress metadata or the adapter made no claim.
+    #[inline]
+    pub fn ja4(&self) -> Option<&CapturedJa4> {
+        self.request
+            .extensions()
+            .get::<RequestIngress>()
+            .and_then(RequestIngress::ja4)
     }
 
     /// # Errors
@@ -755,5 +767,23 @@ mod tests {
             ctx.config_store_binding("undeclared").is_none(),
             "unknown id must yield None"
         );
+    }
+
+    #[test]
+    fn ja4_reads_adapter_ingress_claim() {
+        use crate::ingress::{CapturedTarget, HeaderFidelity, TargetUnavailable};
+        use crate::ja4::{CapturedJa4, Ja4Unavailable};
+        let mut context = ctx("/", Body::empty(), PathParams::default());
+        assert!(context.ja4().is_none());
+        let unavailable = CapturedJa4::Unavailable(Ja4Unavailable::NotExposed);
+        context.request_mut().extensions_mut().insert(
+            RequestIngress::new(
+                CapturedTarget::Unavailable(TargetUnavailable::NotExposed),
+                None,
+                HeaderFidelity::default(),
+            )
+            .with_ja4(unavailable.clone()),
+        );
+        assert_eq!(context.ja4(), Some(&unavailable));
     }
 }
