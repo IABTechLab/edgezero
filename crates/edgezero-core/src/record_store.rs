@@ -221,6 +221,7 @@ pub mod contract {
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::NonZeroU8;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -295,6 +296,40 @@ pub enum RecordWriteOutcome {
     PreconditionFailed,
     /// The provider acknowledged the write, without returning its generation.
     Written,
+}
+
+/// A replacement planned against the record [`RecordHandle::update`] read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordReplacement {
+    /// Replacement value bytes.
+    pub body: Bytes,
+    /// Optional UTF-8 text, normalized before provider I/O.
+    pub metadata: Option<String>,
+    /// Native provider TTL, or no expiry.
+    pub ttl: Option<Duration>,
+}
+
+/// How a [`RecordHandle::update`] ended when no read or write failed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordUpdateOutcome<Reason> {
+    /// Every attempt lost its Add/CAS precondition. Nothing was written.
+    Conflict,
+    /// The planner declined the record as read, with its reason.
+    Skipped(Reason),
+    /// A re-read after a lost precondition was older than the rejection. Nothing
+    /// was written.
+    StaleRead,
+    /// One replacement won its precondition and was acknowledged.
+    Written,
+}
+
+/// The result of a [`RecordHandle::update`] and the conflicts it met.
+#[derive(Debug)]
+pub struct RecordUpdate<Reason> {
+    /// Add/CAS precondition rejections, counted even when the update fails.
+    pub conflicts: u8,
+    /// The outcome, or the read or write error that ended the update.
+    pub result: Result<RecordUpdateOutcome<Reason>, KvError>,
 }
 
 /// Full logical keys from one strong partition page, without ordering promises.
@@ -706,5 +741,545 @@ impl RecordHandle {
     #[inline]
     pub fn partition(&self, prefix: &str) -> Result<RecordPartition, KvError> {
         self.binding.layout.partition(prefix)
+    }
+
+    /// Read a record, plan its replacement and write it conditionally, re-planning
+    /// after a lost precondition for at most `attempts` writes.
+    ///
+    /// Each attempt looks the record up and passes it to `plan`, then writes the
+    /// replacement with [`RecordWriteMode::IfGenerationMatch`] on the generation
+    /// read, or [`RecordWriteMode::Add`] when the lookup missed. `plan` returns
+    /// `Err` with its reason to leave the record unchanged. A definitive
+    /// precondition rejection wrote nothing, so the record is read and planned
+    /// again; the update stops at the first acknowledged write, so at most one
+    /// replacement lands.
+    ///
+    /// A lost precondition proves the record exists under another generation. A
+    /// re-read that returns the rejected generation or misses is older than that
+    /// rejection, as an eventually consistent lookup can be, and ends the update
+    /// with [`RecordUpdateOutcome::StaleRead`]. A record deleted after the
+    /// rejection reads the same way. Generations are not ordered, so an older
+    /// distinct generation cannot be detected; a replacement planned on it loses
+    /// its precondition.
+    ///
+    /// Read and write errors end the update without a retry. A
+    /// [`KvError::MutationUncertain`] write is never replayed. A binding whose
+    /// provider lacks record operations reports [`KvError::Unsupported`].
+    ///
+    /// # Performance
+    /// One lookup and at most one conditional insert per attempt.
+    #[inline]
+    pub async fn update<Reason, Plan>(
+        &self,
+        key: &str,
+        attempts: NonZeroU8,
+        mut plan: Plan,
+    ) -> RecordUpdate<Reason>
+    where
+        Plan: FnMut(Option<&Record>) -> Result<RecordReplacement, Reason>,
+    {
+        let mut conflicts = 0_u8;
+        let mut rejected = None;
+        let result = loop {
+            let current = match self.lookup(key).await {
+                Ok(current) => current,
+                Err(error) => break Err(error),
+            };
+            if let Some(lost) = rejected
+                && current.as_ref().is_none_or(|record| {
+                    lost == RecordWriteMode::IfGenerationMatch(record.generation)
+                })
+            {
+                break Ok(RecordUpdateOutcome::StaleRead);
+            }
+            let mode = current.as_ref().map_or(RecordWriteMode::Add, |record| {
+                RecordWriteMode::IfGenerationMatch(record.generation)
+            });
+            let replacement = match plan(current.as_ref()) {
+                Ok(replacement) => replacement,
+                Err(reason) => break Ok(RecordUpdateOutcome::Skipped(reason)),
+            };
+            let write = RecordWrite {
+                body: &replacement.body,
+                metadata: replacement.metadata.as_deref(),
+                mode,
+                ttl: replacement.ttl,
+            };
+            match self.insert(key, write).await {
+                Ok(RecordWriteOutcome::Written) => break Ok(RecordUpdateOutcome::Written),
+                Ok(RecordWriteOutcome::PreconditionFailed) => {
+                    conflicts = conflicts.saturating_add(1);
+                    if conflicts >= attempts.get() {
+                        break Ok(RecordUpdateOutcome::Conflict);
+                    }
+                    rejected = Some(mode);
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        RecordUpdate { conflicts, result }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use futures::executor::block_on;
+
+    use super::*;
+    use crate::key_value_store::KvPage;
+
+    // Advertises a record binding but keeps every record operation Unsupported.
+    struct BindingOnly;
+
+    struct FirstSegment;
+
+    // Replays scripted lookups and insert outcomes, recording each insert mode.
+    #[derive(Default)]
+    struct Scripted {
+        lookups: Mutex<VecDeque<Result<Option<Record>, KvError>>>,
+        modes: Mutex<Vec<RecordWriteMode>>,
+        writes: Mutex<VecDeque<Result<RecordWriteOutcome, KvError>>>,
+    }
+
+    impl RecordKeyLayout for FirstSegment {
+        fn id(&self) -> &'static str {
+            "test-first-segment"
+        }
+
+        fn partition_prefix<'key>(&self, key: &'key str) -> Result<&'key str, KvError> {
+            key.find('/')
+                .and_then(|slash| key.get(..=slash))
+                .ok_or_else(|| KvError::Validation("missing key group".to_owned()))
+        }
+
+        fn validate(&self) -> Result<(), KvError> {
+            Ok(())
+        }
+
+        fn validate_partition(&self, _prefix: &str) -> Result<(), KvError> {
+            Ok(())
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+    }
+
+    impl Scripted {
+        fn modes(&self) -> Vec<RecordWriteMode> {
+            self.modes.lock().unwrap().clone()
+        }
+
+        fn new(
+            lookups: impl IntoIterator<Item = Result<Option<Record>, KvError>>,
+            writes: impl IntoIterator<Item = Result<RecordWriteOutcome, KvError>>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                lookups: Mutex::new(lookups.into_iter().collect()),
+                modes: Mutex::default(),
+                writes: Mutex::new(writes.into_iter().collect()),
+            })
+        }
+    }
+
+    #[async_trait(?Send)]
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "update uses only lookup and insert, so the other record operations stay Unsupported"
+    )]
+    impl KvStore for Scripted {
+        async fn delete(&self, _key: &str) -> Result<(), KvError> {
+            Err(KvError::Unavailable)
+        }
+
+        async fn get_bytes(&self, _key: &str) -> Result<Option<Bytes>, KvError> {
+            Err(KvError::Unavailable)
+        }
+
+        async fn list_keys_page(
+            &self,
+            _prefix: &str,
+            _cursor: Option<&str>,
+            _limit: usize,
+        ) -> Result<KvPage, KvError> {
+            Err(KvError::Unavailable)
+        }
+
+        async fn put_bytes(&self, _key: &str, _value: Bytes) -> Result<(), KvError> {
+            Err(KvError::Unavailable)
+        }
+
+        async fn put_bytes_with_ttl(
+            &self,
+            _key: &str,
+            _value: Bytes,
+            _ttl: Duration,
+        ) -> Result<(), KvError> {
+            Err(KvError::Unavailable)
+        }
+
+        fn record_binding(&self) -> Option<RecordBinding> {
+            Some(binding())
+        }
+
+        async fn record_insert(
+            &self,
+            _key: &str,
+            _partition: &RecordPartition,
+            write: RecordWrite<'_>,
+        ) -> Result<RecordWriteOutcome, KvError> {
+            self.modes.lock().unwrap().push(write.mode);
+            self.writes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("should script every insert")
+        }
+
+        async fn record_lookup(
+            &self,
+            _key: &str,
+            _partition: &RecordPartition,
+        ) -> Result<Option<Record>, KvError> {
+            self.lookups
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("should script every lookup")
+        }
+    }
+
+    #[async_trait(?Send)]
+    #[expect(
+        clippy::missing_trait_methods,
+        reason = "the provider intentionally retains Unsupported record operations"
+    )]
+    impl KvStore for BindingOnly {
+        async fn delete(&self, _key: &str) -> Result<(), KvError> {
+            Ok(())
+        }
+
+        async fn get_bytes(&self, _key: &str) -> Result<Option<Bytes>, KvError> {
+            Ok(None)
+        }
+
+        async fn list_keys_page(
+            &self,
+            _prefix: &str,
+            _cursor: Option<&str>,
+            _limit: usize,
+        ) -> Result<KvPage, KvError> {
+            Ok(KvPage::default())
+        }
+
+        async fn put_bytes(&self, _key: &str, _value: Bytes) -> Result<(), KvError> {
+            Ok(())
+        }
+
+        async fn put_bytes_with_ttl(
+            &self,
+            _key: &str,
+            _value: Bytes,
+            _ttl: Duration,
+        ) -> Result<(), KvError> {
+            Ok(())
+        }
+
+        fn record_binding(&self) -> Option<RecordBinding> {
+            Some(binding())
+        }
+    }
+
+    fn record(generation: u64) -> Record {
+        Record {
+            body: Bytes::from_static(b"current"),
+            generation: RecordGeneration::from_u64(generation),
+            metadata: None,
+        }
+    }
+
+    fn binding() -> RecordBinding {
+        RecordBinding {
+            format: "test-v1".to_owned(),
+            layout: RecordLayout::new(FirstSegment).unwrap(),
+            max_metadata_bytes: 1024,
+            scope: "test".to_owned(),
+        }
+    }
+
+    fn handle(store: &Arc<Scripted>) -> RecordHandle {
+        let shared: Arc<Scripted> = Arc::clone(store);
+        RecordHandle::new(shared).unwrap()
+    }
+
+    fn if_match(generation: u64) -> RecordWriteMode {
+        RecordWriteMode::IfGenerationMatch(RecordGeneration::from_u64(generation))
+    }
+
+    fn replacement() -> RecordReplacement {
+        RecordReplacement {
+            body: Bytes::from_static(b"next"),
+            metadata: None,
+            ttl: None,
+        }
+    }
+
+    // Runs an update that always plans a replacement and returns the generations
+    // each attempt planned against.
+    fn update(
+        store: &Arc<Scripted>,
+        attempts: u8,
+    ) -> (RecordUpdate<&'static str>, Vec<Option<RecordGeneration>>) {
+        let records = handle(store);
+        let mut planned = Vec::new();
+        let result = block_on(records.update(
+            "group/key",
+            NonZeroU8::new(attempts).unwrap(),
+            |current: Option<&Record>| {
+                planned.push(current.map(|record| record.generation));
+                Ok(replacement())
+            },
+        ));
+        (result, planned)
+    }
+
+    #[test]
+    fn update_writes_against_the_generation_read() {
+        let store = Scripted::new([Ok(Some(record(1)))], [Ok(RecordWriteOutcome::Written)]);
+
+        let (result, planned) = update(&store, 2);
+
+        assert_eq!(
+            result.result.unwrap(),
+            RecordUpdateOutcome::Written,
+            "should write on the first attempt"
+        );
+        assert_eq!(result.conflicts, 0, "should report no conflicts");
+        assert_eq!(planned, [Some(RecordGeneration::from_u64(1))]);
+        assert_eq!(
+            store.modes(),
+            [if_match(1)],
+            "should CAS on the read generation"
+        );
+    }
+
+    #[test]
+    fn update_adds_when_the_lookup_misses() {
+        let store = Scripted::new([Ok(None)], [Ok(RecordWriteOutcome::Written)]);
+
+        let (result, planned) = update(&store, 2);
+
+        assert_eq!(result.result.unwrap(), RecordUpdateOutcome::Written);
+        assert_eq!(planned, [None], "should plan against the missing record");
+        assert_eq!(
+            store.modes(),
+            [RecordWriteMode::Add],
+            "should write with Add"
+        );
+    }
+
+    #[test]
+    fn update_replans_against_a_fresh_read_after_a_conflict() {
+        let store = Scripted::new(
+            [Ok(Some(record(1))), Ok(Some(record(2)))],
+            [
+                Ok(RecordWriteOutcome::PreconditionFailed),
+                Ok(RecordWriteOutcome::Written),
+            ],
+        );
+
+        let (result, planned) = update(&store, 2);
+
+        assert_eq!(
+            result.result.unwrap(),
+            RecordUpdateOutcome::Written,
+            "should land the re-planned write"
+        );
+        assert_eq!(result.conflicts, 1, "should count the lost CAS");
+        assert_eq!(
+            planned,
+            [
+                Some(RecordGeneration::from_u64(1)),
+                Some(RecordGeneration::from_u64(2))
+            ],
+            "should plan again against the re-read"
+        );
+        assert_eq!(store.modes(), [if_match(1), if_match(2)]);
+    }
+
+    #[test]
+    fn update_gives_up_when_every_attempt_conflicts() {
+        let store = Scripted::new(
+            [Ok(Some(record(1))), Ok(Some(record(2)))],
+            [
+                Ok(RecordWriteOutcome::PreconditionFailed),
+                Ok(RecordWriteOutcome::PreconditionFailed),
+            ],
+        );
+
+        let (result, _planned) = update(&store, 2);
+
+        assert_eq!(
+            result.result.unwrap(),
+            RecordUpdateOutcome::Conflict,
+            "should give up after the attempt bound"
+        );
+        assert_eq!(result.conflicts, 2, "should count both lost CAS writes");
+        assert_eq!(store.modes().len(), 2, "should write at most twice");
+    }
+
+    #[test]
+    fn update_with_one_attempt_does_not_reread() {
+        let store = Scripted::new(
+            [Ok(Some(record(1)))],
+            [Ok(RecordWriteOutcome::PreconditionFailed)],
+        );
+
+        let (result, planned) = update(&store, 1);
+
+        assert_eq!(result.result.unwrap(), RecordUpdateOutcome::Conflict);
+        assert_eq!(result.conflicts, 1);
+        assert_eq!(planned.len(), 1, "should read and plan once");
+    }
+
+    #[test]
+    fn update_returns_the_planner_reason_without_writing() {
+        let store = Scripted::new([Ok(Some(record(1)))], []);
+        let records = handle(&store);
+
+        let result = block_on(records.update(
+            "group/key",
+            NonZeroU8::MIN,
+            |_current: Option<&Record>| Err("withdrawn"),
+        ));
+
+        assert_eq!(
+            result.result.unwrap(),
+            RecordUpdateOutcome::Skipped("withdrawn"),
+            "should return the planner reason"
+        );
+        assert_eq!(result.conflicts, 0);
+        assert!(
+            store.modes().is_empty(),
+            "should not write a skipped record"
+        );
+    }
+
+    #[test]
+    fn update_stops_when_the_reread_returns_the_rejected_generation() {
+        let store = Scripted::new(
+            [Ok(Some(record(1))), Ok(Some(record(1)))],
+            [Ok(RecordWriteOutcome::PreconditionFailed)],
+        );
+
+        let (result, planned) = update(&store, 2);
+
+        assert_eq!(
+            result.result.unwrap(),
+            RecordUpdateOutcome::StaleRead,
+            "should treat the rejected generation as stale"
+        );
+        assert_eq!(result.conflicts, 1);
+        assert_eq!(planned.len(), 1, "should not plan against a stale read");
+        assert_eq!(store.modes().len(), 1, "should not write again");
+    }
+
+    #[test]
+    fn update_stops_when_the_reread_misses_after_a_lost_cas() {
+        let store = Scripted::new(
+            [Ok(Some(record(1))), Ok(None)],
+            [Ok(RecordWriteOutcome::PreconditionFailed)],
+        );
+
+        let (result, _planned) = update(&store, 2);
+
+        assert_eq!(
+            result.result.unwrap(),
+            RecordUpdateOutcome::StaleRead,
+            "should treat a miss after a lost CAS as stale"
+        );
+        assert_eq!(result.conflicts, 1);
+        assert_eq!(store.modes().len(), 1, "should not Add after a lost CAS");
+    }
+
+    #[test]
+    fn update_stops_when_the_reread_misses_after_a_lost_add() {
+        let store = Scripted::new(
+            [Ok(None), Ok(None)],
+            [Ok(RecordWriteOutcome::PreconditionFailed)],
+        );
+
+        let (result, _planned) = update(&store, 2);
+
+        assert_eq!(
+            result.result.unwrap(),
+            RecordUpdateOutcome::StaleRead,
+            "should treat a miss after a lost Add as stale"
+        );
+        assert_eq!(store.modes(), [RecordWriteMode::Add]);
+    }
+
+    #[test]
+    fn update_keeps_the_conflict_count_when_the_reread_fails() {
+        let store = Scripted::new(
+            [Ok(Some(record(1))), Err(KvError::Unavailable)],
+            [Ok(RecordWriteOutcome::PreconditionFailed)],
+        );
+
+        let (result, _planned) = update(&store, 2);
+
+        assert!(
+            matches!(result.result, Err(KvError::Unavailable)),
+            "should return the read error"
+        );
+        assert_eq!(result.conflicts, 1, "should keep the conflict count");
+    }
+
+    #[test]
+    fn update_does_not_retry_a_store_error() {
+        let store = Scripted::new([Ok(Some(record(1)))], [Err(KvError::Unavailable)]);
+
+        let (result, _planned) = update(&store, 2);
+
+        assert!(
+            matches!(result.result, Err(KvError::Unavailable)),
+            "should return the write error"
+        );
+        assert_eq!(result.conflicts, 0);
+        assert_eq!(store.modes().len(), 1, "should write once");
+    }
+
+    #[test]
+    fn update_does_not_replay_an_uncertain_mutation() {
+        let store = Scripted::new([Ok(Some(record(1)))], [Err(KvError::MutationUncertain)]);
+
+        let (result, _planned) = update(&store, 2);
+
+        assert!(
+            matches!(result.result, Err(KvError::MutationUncertain)),
+            "should return the uncertain mutation"
+        );
+        assert_eq!(store.modes().len(), 1, "should not replay the write");
+    }
+
+    #[test]
+    fn update_reports_unsupported_record_operations() {
+        let records = RecordHandle::new(Arc::new(BindingOnly)).unwrap();
+
+        let result = block_on(records.update(
+            "group/key",
+            NonZeroU8::MIN,
+            |_current: Option<&Record>| Ok::<_, ()>(replacement()),
+        ));
+
+        assert!(
+            matches!(result.result, Err(KvError::Unsupported { .. })),
+            "should report Unsupported"
+        );
+        assert_eq!(result.conflicts, 0);
     }
 }

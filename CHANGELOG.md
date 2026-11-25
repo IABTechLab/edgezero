@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Bounded record update (#535)
+
+`RecordHandle::update` reads a record, asks a caller's planner for its replacement and writes
+it with `IfGenerationMatch`, or `Add` after a miss. After a lost precondition it reads and
+plans again, up to a caller-supplied number of attempts, and reports `Written`, `Skipped`,
+`Conflict` or `StaleRead` with the number of conflicts. A re-read that returns the rejected
+generation or misses ends the update as `StaleRead`. Errors are not retried and
+`MutationUncertain` is never replayed. Providers without record operations report
+`Unsupported`.
+
 ### Axum buffered JSON limits and body API
 
 Axum now defaults framework-managed JSON buffering to 2 MiB, exactly 2,097,152 bytes.
