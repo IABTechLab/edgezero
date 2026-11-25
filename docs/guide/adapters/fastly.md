@@ -435,7 +435,7 @@ from an unavailable first snapshot. Warnings through the log facade may be lost
 before a logger is installed; absence of a warning does not establish a healthy
 configuration read.
 
-SDK 0.13.1 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
+SDK 0.13.3 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
 `with_max_memory`. A value of zero disables the request-count or memory limit;
 it does not request zero callbacks or zero memory use. The lifetime limit is
 measured from `Serve` construction, including time before the first callback.
@@ -605,7 +605,7 @@ entry point and removing retained state, not merely setting a request limit of o
 
 Call `request::capture_request_ingress(&req)` immediately after acquiring the
 native request and before URL-based shortcuts or native mutation. It borrows
-the same request without round-tripping handles. With Fastly SDK 0.13.1,
+the same request without round-tripping handles. With Fastly SDK 0.13.3,
 safe raw-target acquisition is unavailable: the snapshot records `NotExposed`
 first, then uses the SDK runtime URL only to recover the canonical origin.
 This URL access can normalize the path; it never establishes original-target
