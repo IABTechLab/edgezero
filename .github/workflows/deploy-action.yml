@@ -49,6 +49,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # Keep validator versions paired with .github/workflows/axum-container.yml.
   ACTIONLINT_VERSION: 1.7.7
   ZIZMOR_VERSION: 1.16.3
   YQ_VERSION: 4.53.3
