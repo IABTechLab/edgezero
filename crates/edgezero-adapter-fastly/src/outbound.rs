@@ -751,7 +751,9 @@ mod fastly_impl {
                             // SDK 0.13.3 sends an optimizer request as an ordinary
                             // guest-cached request when the service lacks Image Optimizer.
                             // Keep the typed unavailable outcome instead.
-                            if products().is_ok_and(|enabled| !enabled.image_optimizer) {
+                            if image_optimizer_disabled(
+                                products().ok().map(|enabled| enabled.image_optimizer),
+                            ) {
                                 return Err(map_configured_send_cause(
                                     &SendErrorCause::ImageOptimizerUnsupported,
                                     budget,
@@ -1387,6 +1389,17 @@ mod fastly_impl {
         }
     }
 
+    /// Reports whether SDK 0.13.3 would send an optimizer request as an ordinary request.
+    ///
+    /// The SDK takes that fallback only when `products()` succeeds and reports Image Optimizer
+    /// disabled. A `products()` error (`None`) keeps the SDK's optimizer hostcall, as does an
+    /// enabled product. Core validation already limits optimizer requests to GET or HEAD with
+    /// default caching and an absolute HTTP(S) URI, so the SDK's earlier pass, PURGE and URI
+    /// checks never take precedence on this path.
+    fn image_optimizer_disabled(enabled: Option<bool>) -> bool {
+        enabled == Some(false)
+    }
+
     fn map_configured_send_cause(
         cause: &SendErrorCause,
         budget: DispatchBudget,
@@ -1807,6 +1820,13 @@ mod fastly_impl {
         use futures_util::stream;
 
         use super::*;
+
+        #[test]
+        fn image_optimizer_guard_fires_only_when_the_product_is_reported_disabled() {
+            assert!(image_optimizer_disabled(Some(false)));
+            assert!(!image_optimizer_disabled(Some(true)));
+            assert!(!image_optimizer_disabled(None));
+        }
 
         #[test]
         fn retained_head_failure_precedes_later_deadline_without_polling_io() {

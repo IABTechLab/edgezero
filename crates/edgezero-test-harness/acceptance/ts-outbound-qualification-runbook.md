@@ -258,6 +258,13 @@ per fresh execution for each role with the same independently controlled persist
 the fixture cannot manufacture provider connection identity or certify pooling from registrations.
 For cache 14a use the candidate pairs above, not this non-caching local SDK control.
 
+With Fastly SDK 0.13.3 a direct optimizer send on a service without Image Optimizer is not an
+SDK error: the SDK fetches the origin as an ordinary request and adds
+`Fastly-Io-Error: Image Optimizer is not enabled on this service`, which the native image control
+forwards. Such a response is not optimizer evidence; run the image profiles on a service with
+Image Optimizer enabled. The candidate does not take that fallback and returns typed
+`ImageOptimizerUnavailable` (502).
+
 The same package retains `/progress/forward/{send,late,outbound-deadline,inbound-deadline}`
 for EZ-1: `x-origin` is the allowlisted `/forward/send/TOKEN` target. The last two set a
 200 ms outbound timeout; `inbound-deadline` also admits a 100 ms body-read budget, while
