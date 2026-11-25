@@ -1,9 +1,9 @@
 {
   "fastly": {
-    "version": "16.0.0",
+    "version": "17.2.0",
     "linux_amd64": {
-      "url": "https://github.com/fastly/cli/releases/download/v16.0.0/fastly_v16.0.0_linux-amd64.tar.gz",
-      "sha256": "b1b89112f1f1291ff275393779ffdacba8724ac64091bda0fa6000ae06308459"
+      "url": "https://github.com/fastly/cli/releases/download/v17.2.0/fastly_v17.2.0_linux-amd64.tar.gz",
+      "sha256": "0879ac89d8bfa73ab537e6f9d0bfbf58382ba0c2c45cb51a9a3c898dc136c7c4"
     }
   },
   "rust_target": "wasm32-wasip1"
