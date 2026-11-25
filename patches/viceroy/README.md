@@ -41,6 +41,8 @@ backend policy, or establish hosted connect behavior.
 Run from the EdgeZero checkout with Rust 1.98.1. Choose a new temporary source directory;
 the commands never modify the installed executable or the EdgeZero dependency graph. Fetching
 the official source/dependencies needs network access; builds/tests afterward are offline/locked.
+Viceroy's build script compiles its component adapter for `wasm32-unknown-unknown`, so that
+target is added for the selected toolchain first.
 
 ```sh
 set -eu
@@ -55,6 +57,7 @@ git -C "$VICEROY_SOURCE" apply --check "$patch"
 git -C "$VICEROY_SOURCE" apply "$patch"
 export RUSTUP_TOOLCHAIN=1.98.1
 export ASDF_RUST_VERSION=1.98.1
+(cd "$VICEROY_SOURCE" && rustup target add wasm32-unknown-unknown)
 export CARGO_TARGET_DIR="$VICEROY_SOURCE/target"
 export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_INCREMENTAL=0
