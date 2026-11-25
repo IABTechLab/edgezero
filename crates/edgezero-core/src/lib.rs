@@ -20,6 +20,7 @@ pub mod blob_envelope;
 pub mod body;
 pub mod canonical_form;
 pub mod compression;
+pub mod config_diagnostics;
 pub mod config_store;
 pub mod context;
 pub mod env_config;

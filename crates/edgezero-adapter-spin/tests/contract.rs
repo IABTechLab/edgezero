@@ -39,6 +39,35 @@ mod tests {
         use http_body_util::BodyExt as _;
 
         #[test]
+        fn approved_config_diagnostics_stay_private_after_conversion() {
+            use edgezero_core::config_diagnostics::contract_fixture::{self, CANARY, EXPLANATION};
+            use edgezero_core::response::IntoResponse as _;
+            block_on(async {
+                let error = contract_fixture::extraction_error()
+                    .await
+                    .expect("extraction failure");
+                assert_eq!(error.validation_diagnostics().len(), 1);
+                assert!(error.operator_message().contains(EXPLANATION));
+                let response = from_core_response(error.into_response().expect("core response"))
+                    .await
+                    .expect("spin response");
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert_eq!(response.headers()["retry-after"], "60");
+                let bytes = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("body")
+                    .to_bytes();
+                let body = String::from_utf8_lossy(&bytes);
+                assert!(body.contains("config_out_of_date"));
+                for hidden in [CANARY, EXPLANATION, "implementation_unavailable"] {
+                    assert!(!body.contains(hidden));
+                }
+            });
+        }
+
+        #[test]
         fn from_core_response_translates_status_and_headers() {
             block_on(async {
                 let response = response_builder()

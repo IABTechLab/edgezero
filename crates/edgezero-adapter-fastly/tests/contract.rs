@@ -121,6 +121,25 @@ mod tests {
     }
 
     #[test]
+    fn approved_config_diagnostics_stay_private_after_conversion() {
+        use edgezero_core::config_diagnostics::contract_fixture::{self, CANARY, EXPLANATION};
+        use edgezero_core::response::IntoResponse as _;
+        let error = block_on(contract_fixture::extraction_error()).expect("extraction failure");
+        assert_eq!(error.validation_diagnostics().len(), 1);
+        assert!(error.operator_message().contains(EXPLANATION));
+        let mut response = from_core_response(error.into_response().expect("core response"))
+            .expect("fastly response");
+        assert_eq!(response.get_status().as_u16(), 503);
+        assert_eq!(response.get_header_str("retry-after"), Some("60"));
+        let bytes = response.take_body_bytes();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("config_out_of_date"));
+        for hidden in [CANARY, EXPLANATION, "implementation_unavailable"] {
+            assert!(!body.contains(hidden));
+        }
+    }
+
+    #[test]
     fn into_core_request_preserves_method_uri_headers_body_and_context() {
         let req = fastly_request(FastlyMethod::POST, "/mirror?foo=bar", Some(b"payload"));
         let expected_ip = req.get_client_ip_addr();
