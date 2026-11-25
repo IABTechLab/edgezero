@@ -155,7 +155,7 @@ let policy = request.cache_policy_setting();
 Fastly extends origin response surrogate keys without a TTL/stale override. Origin
 `private`/`no-store` remains origin policy; tags are not permission to cache a private response.
 The Fastly adapter discards individual space-delimited keys outside printable ASCII
-`0x21..=0x7e` before calling the SDK, preserving valid neighboring keys. SDK 0.13.1 would
+`0x21..=0x7e` before calling the SDK, preserving valid neighboring keys. SDK 0.13.3 would
 otherwise discard the whole list when its text conversion fails. This API adds no
 key-size/count or extra ASCII policy. Parse application strings into `HeaderValue` at their
 boundary. A caller whose purge contract requires a tag must fail closed, such as selecting
@@ -168,7 +168,7 @@ Axum and Spin ignore the tag without changing their transport. Cloudflare retain
 Fetch caching and does not emulate Fastly purge; its `Bypass` mapping remains `NoStore`.
 Existing capability declarations are unchanged.
 
-Image Optimizer still requires exactly `PlatformDefault`. SDK 0.13.1 overrides custom cache
+Image Optimizer still requires exactly `PlatformDefault`. SDK 0.13.3 overrides custom cache
 metadata on that path, so tagged-default plus optimizer is rejected before upload polling or
 provider I/O, not accepted with a silently discarded purge tag. Signed HEAD bypass and a
 separate signed optimized GET retain their independent existing policies.
