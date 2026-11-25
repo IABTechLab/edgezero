@@ -480,13 +480,14 @@ fn custom_stream_checks(
         large,
         json!({"variant":variant,"repetition":repetition,"assertion":"large_progressive_stream"}),
     ))?;
+    *backend.release.0.lock().unwrap() = false;
     let failure_token = crate::token();
     let failure = net::request(
         port,
         "/stream-error",
         &failure_token,
-        Some(&backend.url(&format!("/abort?token={failure_token}"))),
-        None,
+        Some(&backend.url(&format!("/abort-after-first-byte?token={failure_token}"))),
+        Some(&backend.release),
     );
     let failure = match failure {
         Ok(reply) => {
@@ -496,7 +497,11 @@ fn custom_stream_checks(
     };
     let partial = failure
         .downcast_ref::<net::InterruptedResponse>()
-        .ok_or("stream failure occurred before response body: not post-commit evidence")?;
+        .ok_or_else(|| {
+            format!(
+                "stream failure did not capture a partial response: not post-commit evidence: {failure}"
+            )
+        })?;
     require(
         partial.status == 200 && partial.body == b"partial",
         "missing partial committed response",

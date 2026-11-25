@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use edgezero_core::app::{App, StoreMetadata, StoresMetadata};
 use edgezero_core::body::Body;
 use edgezero_core::config_store::ConfigStoreHandle;
+use edgezero_core::delivery_compression::DeliveryCompressionSupport;
 use edgezero_core::error::EdgeError;
 use edgezero_core::http::header::HOST;
 use edgezero_core::http::{Extensions, HeaderValue, Request, Uri, request_builder};
@@ -676,6 +677,9 @@ fn convert_request(mut req: FastlyRequest) -> Result<Request, EdgeError> {
         client_ip: req.get_client_ip_addr(),
     };
     FastlyRequestContext::insert(&mut request, context);
+    request
+        .extensions_mut()
+        .insert(DeliveryCompressionSupport::GzipBrotli);
     request
         .extensions_mut()
         .insert(ProxyHandle::with_client(FastlyProxyClient));

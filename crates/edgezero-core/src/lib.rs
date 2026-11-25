@@ -22,6 +22,7 @@ pub mod canonical_form;
 pub mod compression;
 pub mod config_store;
 pub mod context;
+pub mod delivery_compression;
 pub mod env_config;
 pub mod error;
 pub mod extractor;
