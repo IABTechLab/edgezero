@@ -2073,6 +2073,159 @@ mod tests {
     }
 
     #[test]
+    fn sigterm_waits_for_after_response_task_within_the_grace() {
+        let roots = Roots::new();
+        let addr = address();
+        let mut cmd = command("bare", &roots, addr);
+        cmd.env("EDGEZERO__ADAPTER__SHUTDOWN_GRACE_SECONDS", "3")
+            .env("FIXTURE_TASK_MILLIS", "1500");
+        let mut server = Server::spawn(cmd, addr);
+        server.ready();
+        let response = server.request("/after-task").expect("after-task response");
+        assert!(response.contains("after-task-queued"), "{response}");
+        assert!(
+            !server.log().contains("AFTER_TASK_DONE"),
+            "the task must still be running when SIGTERM arrives"
+        );
+        let signalled = Instant::now();
+        server.signal("TERM");
+        server.wait_line("AFTER_TASK_DONE");
+        assert!(server.wait().success(), "{}", server.log());
+        assert!(signalled.elapsed() >= Duration::from_millis(1000));
+        assert!(
+            !server.log().contains("grace exhausted"),
+            "{}",
+            server.log()
+        );
+    }
+
+    #[test]
+    fn sigterm_during_a_request_completes_its_after_response_kv_write() {
+        let roots = Roots::new();
+        let addr = address();
+        let mut server = Server::spawn(command("initialized", &roots, addr), addr);
+        server.ready();
+        let mut client = server.socket().expect("draining-write socket");
+        client
+            .write_all(
+                b"GET /draining-write HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n",
+            )
+            .expect("draining-write request");
+        server.wait_line("DISPATCH");
+        server.signal("TERM");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("draining-write response");
+        assert!(response.contains("draining-write-queued"), "{response}");
+        server.wait_line("AFTER_WRITE_DONE");
+        assert!(server.wait().success(), "{}", server.log());
+        assert!(
+            !server.log().contains("grace exhausted"),
+            "{}",
+            server.log()
+        );
+        let mut restarted = Server::spawn(command("initialized", &roots, addr), addr);
+        restarted.ready();
+        assert!(
+            restarted
+                .request("/read")
+                .expect("persisted")
+                .ends_with("after-response-value"),
+            "{}",
+            restarted.log()
+        );
+        restarted.signal("TERM");
+        assert!(restarted.wait().success());
+    }
+
+    #[test]
+    fn grace_exhaustion_cancels_after_response_task() {
+        let roots = Roots::new();
+        let addr = address();
+        let mut cmd = command("bare", &roots, addr);
+        cmd.env("FIXTURE_TASK_MILLIS", "10000");
+        let mut server = Server::spawn(cmd, addr);
+        server.ready();
+        let response = server.request("/after-task").expect("after-task response");
+        assert!(response.contains("after-task-queued"), "{response}");
+        let signalled = Instant::now();
+        server.signal("TERM");
+        assert!(!server.wait().success(), "{}", server.log());
+        assert!(signalled.elapsed() >= Duration::from_millis(900));
+        assert!(signalled.elapsed() < Duration::from_secs(4));
+        let log = server.log();
+        assert!(log.contains("grace exhausted"), "{log}");
+        assert!(!log.contains("AFTER_TASK_DONE"), "{log}");
+        assert_eq!(log.matches("AFTER_TASK_DROPPED").count(), 1, "{log}");
+    }
+
+    #[test]
+    fn connections_and_after_response_tasks_share_one_grace() {
+        let roots = Roots::new();
+        let addr = address();
+        let mut cmd = command("bare", &roots, addr);
+        // Draining the connection uses most of the 1 s grace; a restarted deadline would not.
+        cmd.env("FIXTURE_TASK_MILLIS", "10000")
+            .env("FIXTURE_FINITE_MILLIS", "800");
+        let mut server = Server::spawn(cmd, addr);
+        server.ready();
+        let queued = server.request("/after-task").expect("after-task response");
+        assert!(queued.contains("after-task-queued"), "{queued}");
+        let mut client = server.socket().expect("finite socket");
+        client
+            .write_all(b"GET /finite HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n")
+            .expect("finite request");
+        server.wait_line("DISPATCH");
+        let signalled = Instant::now();
+        server.signal("TERM");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("finite response");
+        assert!(response.contains("finite-complete"), "{response}");
+        assert!(!server.wait().success(), "{}", server.log());
+        let elapsed = signalled.elapsed();
+        assert!(elapsed >= Duration::from_millis(900), "{elapsed:?}");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "tasks must not get a fresh grace after connections drain: {elapsed:?}"
+        );
+        let log = server.log();
+        assert!(log.contains("grace exhausted"), "{log}");
+        assert!(!log.contains("AFTER_TASK_DONE"), "{log}");
+    }
+
+    #[test]
+    fn second_signal_during_after_response_wait_forces_stop() {
+        let roots = Roots::new();
+        let addr = address();
+        let mut cmd = command("bare", &roots, addr);
+        cmd.env("EDGEZERO__ADAPTER__SHUTDOWN_GRACE_SECONDS", "5")
+            .env("FIXTURE_TASK_MILLIS", "10000");
+        let mut server = Server::spawn(cmd, addr);
+        server.ready();
+        let queued = server.request("/after-task").expect("after-task response");
+        assert!(queued.contains("after-task-queued"), "{queued}");
+        server.signal("TERM");
+        // No connections remain, so shutdown is now waiting for the task.
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            server.child.try_wait().expect("process status").is_none(),
+            "{}",
+            server.log()
+        );
+        let forced = Instant::now();
+        server.signal("INT");
+        assert!(!server.wait().success(), "{}", server.log());
+        assert!(forced.elapsed() < Duration::from_millis(700));
+        let log = server.log();
+        assert!(log.contains("forced stop"), "{log}");
+        assert!(!log.contains("AFTER_TASK_DONE"), "{log}");
+        assert_eq!(log.matches("AFTER_TASK_DROPPED").count(), 1, "{log}");
+    }
+
+    #[test]
     fn second_signal_forces_before_budget_exhaustion() {
         let roots = Roots::new();
         let addr = address();

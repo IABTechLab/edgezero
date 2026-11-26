@@ -33,7 +33,12 @@ mod tests {
     use edgezero_adapter_fastly::delivery::{
         FastlyRequestDelivery, FastlyResponseCommitState, testing::response_delivery,
     };
-    use edgezero_adapter_fastly::request::{FastlyService, into_core_request};
+    use edgezero_adapter_fastly::key_value_store::FastlyKvStore;
+    use edgezero_adapter_fastly::request::{
+        FastlyService, into_core_request, run_request_with_registries_and_hooks_for_test,
+    };
+    use edgezero_core::after_response::{AfterResponseHandle, AfterResponseScheduler};
+    use edgezero_core::app::StoresMetadata;
     use edgezero_core::app::{App, Hooks};
     use edgezero_core::body::Body;
     use edgezero_core::client_info::{Capture, ClientInfo, UnavailableReason};
@@ -43,11 +48,17 @@ mod tests {
     };
     use edgezero_core::context::{BodyKind, RequestContext};
     use edgezero_core::error::EdgeError;
+    use edgezero_core::error_detail::ProviderFailureAdapter;
     use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoSource, GeoStatus};
     use edgezero_core::http::{HeaderMap, Method, Response, StatusCode, response_builder};
     use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
+    use edgezero_core::key_value_store::{KvError, KvHandle};
     use edgezero_core::outbound::{
         OutboundRequest, OutboundSendMode, OutboundTime, validate_for_dispatch,
+    };
+    use edgezero_core::record_store::{
+        RecordHandle, RecordKeyLayout, RecordLayout, RecordWrite, RecordWriteMode,
+        RecordWriteOutcome,
     };
     use edgezero_core::response_egress::ResponseEgressCompletion;
     use edgezero_core::response_egress::{ResponseEgressEnvelope, ResponseEgressReport};
@@ -56,6 +67,7 @@ mod tests {
     use fastly::Request as FastlyRequest;
     use fastly::http::Method as FastlyMethod;
     use futures::{executor::block_on, stream};
+    use futures_util::future::LocalBoxFuture;
 
     fn complete_envelope(envelope: ResponseEgressEnvelope) -> Response {
         complete_envelope_with_report(envelope).0
@@ -893,6 +905,301 @@ mod tests {
     }
 
     #[cfg(feature = "test-utils")]
+    fn after_response_router(
+        events: &Arc<Mutex<Vec<&'static str>>>,
+        budget: Duration,
+        started: &Arc<AtomicUsize>,
+        dropped: &Arc<AtomicUsize>,
+    ) -> RouterService {
+        struct TaskDropProbe(Arc<AtomicUsize>);
+
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "`Drop::pin_drop` is unstable (`pin_ergonomics`) and conflicts with `drop`"
+        )]
+        impl Drop for TaskDropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let handler_events = Arc::clone(events);
+        let handler_started = Arc::clone(started);
+        let handler_dropped = Arc::clone(dropped);
+        RouterService::builder()
+            .get("/after", move |ctx: RequestContext| {
+                let task_events = Arc::clone(&handler_events);
+                let task_started = Arc::clone(&handler_started);
+                let probe = TaskDropProbe(Arc::clone(&handler_dropped));
+                async move {
+                    let handle = ctx
+                        .extensions()
+                        .get::<AfterResponseHandle>()
+                        .cloned()
+                        .expect("an armed Fastly lifecycle installs the handle");
+                    let time = ctx.http_client().expect("outbound client").time();
+                    ctx.after_response(budget, async move {
+                        let _probe = probe;
+                        task_started.fetch_add(1, Ordering::SeqCst);
+                        time.wait_until(Deadline::after(Duration::from_millis(10)))
+                            .await
+                            .expect("timers work inside the callback scope");
+                        let nested = handle.schedule(Duration::from_secs(1), async {});
+                        task_events
+                            .lock()
+                            .expect("events")
+                            .push(if nested.is_err() {
+                                "task"
+                            } else {
+                                "nested-accepted"
+                            });
+                    })?;
+                    Ok::<_, EdgeError>("queued")
+                }
+            })
+            .build()
+    }
+
+    struct HijackingScheduler;
+
+    impl AfterResponseScheduler for HijackingScheduler {
+        fn schedule(
+            &self,
+            _budget: Duration,
+            _task: LocalBoxFuture<'static, ()>,
+        ) -> Result<(), EdgeError> {
+            Err(EdgeError::internal(anyhow::anyhow!(
+                "a prepare hook replaced the adapter scheduler"
+            )))
+        }
+    }
+
+    fn run_after_response(
+        router: RouterService,
+        events: &Arc<Mutex<Vec<&'static str>>>,
+        commitment: FastlyResponseCommitState,
+    ) -> FastlyRequestDelivery<()> {
+        let app = App::new(router);
+        let delivery_events = Arc::clone(events);
+        let delivered = FastlyService::new(&app).run_request_with_hooks_for_test(
+            fastly_request(FastlyMethod::GET, "/after", None),
+            |_raw, extensions| {
+                // The adapter installs its own handle after the hook's extensions.
+                extensions.insert(AfterResponseHandle::new(HijackingScheduler));
+            },
+            |_response| (),
+            move |envelope| {
+                let (response, report) = complete_envelope_with_report(envelope);
+                assert_eq!(response.status(), StatusCode::OK);
+                delivery_events.lock().expect("events").push("deliver");
+                response_delivery(commitment, report, Ok(()))
+            },
+        );
+        assert!(matches!(delivered, FastlyRequestDelivery::Routed { .. }));
+        delivered
+    }
+
+    #[test]
+    fn after_response_task_runs_after_delivery_with_timers_and_closed_registration() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let router = after_response_router(&events, Duration::from_secs(2), &started, &dropped);
+        let _delivered = run_after_response(router, &events, FastlyResponseCommitState::Committed);
+        assert_eq!(*events.lock().expect("events"), ["deliver", "task"]);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn after_response_task_runs_when_delivery_did_not_commit() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let router = after_response_router(&events, Duration::from_secs(2), &started, &dropped);
+        let delivered =
+            run_after_response(router, &events, FastlyResponseCommitState::NotCommitted);
+        // The caller may still send a native replacement, after the tasks already ran.
+        assert!(delivered.may_send_native_response());
+        assert_eq!(*events.lock().expect("events"), ["deliver", "task"]);
+    }
+
+    #[test]
+    fn after_response_task_runs_through_the_registry_lifecycle_used_by_run_app() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let app = App::new(after_response_router(
+            &events,
+            Duration::from_secs(2),
+            &started,
+            &dropped,
+        ));
+        let delivery_events = Arc::clone(&events);
+        let delivered = run_request_with_registries_and_hooks_for_test(
+            &app,
+            StoresMetadata::default(),
+            fastly_request(FastlyMethod::GET, "/after", None),
+            |_raw, extensions| {
+                extensions.insert(AfterResponseHandle::new(HijackingScheduler));
+            },
+            |_response| (),
+            move |envelope| {
+                let (response, report) = complete_envelope_with_report(envelope);
+                assert_eq!(response.status(), StatusCode::OK);
+                delivery_events.lock().expect("events").push("deliver");
+                response_delivery(FastlyResponseCommitState::Committed, report, Ok(()))
+            },
+        );
+        assert!(matches!(delivered, FastlyRequestDelivery::Routed { .. }));
+        assert_eq!(*events.lock().expect("events"), ["deliver", "task"]);
+    }
+
+    #[test]
+    fn after_response_task_can_start_outbound_requests_after_delivery() {
+        let outcome = Arc::new(Mutex::new(None));
+        let handler_outcome = Arc::clone(&outcome);
+        let router = RouterService::builder()
+            .get("/after", move |ctx: RequestContext| {
+                let task_outcome = Arc::clone(&handler_outcome);
+                async move {
+                    let client = ctx.http_client().expect("outbound client");
+                    ctx.after_response(Duration::from_secs(2), async move {
+                        let request = OutboundRequest::get("http://127.0.0.1:9/after-response")
+                            .expect("request")
+                            .timeout(Duration::from_secs(1));
+                        // A closed outbound scope fails before any exchange and carries no
+                        // provider detail; reaching Fastly's transport (a refused backend
+                        // here) yields a Fastly provider failure.
+                        let reached_transport = match client.send(request).await {
+                            Ok(_response) => true,
+                            Err(error) => error.provider_failure_detail().is_some_and(|detail| {
+                                detail.adapter() == ProviderFailureAdapter::Fastly
+                            }),
+                        };
+                        *task_outcome.lock().expect("outcome") = Some(reached_transport);
+                    })?;
+                    Ok::<_, EdgeError>("queued")
+                }
+            })
+            .build();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _delivered = run_after_response(router, &events, FastlyResponseCommitState::Committed);
+        let reached_transport = outcome
+            .lock()
+            .expect("outcome")
+            .expect("the task's outbound request completed");
+        assert!(
+            reached_transport,
+            "the task's request reached Fastly's transport after delivery"
+        );
+    }
+
+    struct FollowUpLayout;
+
+    impl RecordKeyLayout for FollowUpLayout {
+        fn id(&self) -> &'static str {
+            "after-response-contract"
+        }
+
+        fn partition_prefix<'key>(&self, key: &'key str) -> Result<&'key str, KvError> {
+            key.find('/')
+                .and_then(|split| key.get(..=split))
+                .ok_or_else(|| KvError::Validation("missing group".to_owned()))
+        }
+
+        fn validate(&self) -> Result<(), KvError> {
+            Ok(())
+        }
+
+        fn validate_partition(&self, prefix: &str) -> Result<(), KvError> {
+            match prefix.strip_suffix('/') {
+                Some(group) if !group.is_empty() && !group.contains('/') => Ok(()),
+                _ => Err(KvError::Validation("invalid group".to_owned())),
+            }
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+    }
+
+    fn follow_up_records() -> RecordHandle {
+        let layout = RecordLayout::new(FollowUpLayout).expect("layout");
+        KvHandle::new(Arc::new(
+            FastlyKvStore::open_records("cache", layout).expect("Viceroy cache store"),
+        ))
+        .require_records()
+        .expect("record handle")
+    }
+
+    // CI runs this binary under a bare `viceroy run`, which has no KV stores. Run it from
+    // `crates/edgezero-adapter-fastly`, whose runner loads the demo `fastly.toml` and its
+    // `cache` store: `cargo test --features fastly,test-utils --test contract -- --ignored`.
+    #[test]
+    #[ignore = "needs a Viceroy config that declares the `cache` KV store"]
+    fn after_response_task_guarded_record_write_lands_after_delivery() {
+        const KEY: &str = "after-response/follow-up";
+        block_on(follow_up_records().delete(KEY)).expect("reset follow-up");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let outcome = Arc::new(Mutex::new(None));
+        let handler_events = Arc::clone(&events);
+        let handler_outcome = Arc::clone(&outcome);
+        let router = RouterService::builder()
+            .get("/after", move |ctx: RequestContext| {
+                let task_events = Arc::clone(&handler_events);
+                let task_outcome = Arc::clone(&handler_outcome);
+                async move {
+                    let records = follow_up_records();
+                    ctx.after_response(Duration::from_secs(2), async move {
+                        let write = RecordWrite {
+                            body: b"synced",
+                            metadata: None,
+                            ttl: None,
+                            mode: RecordWriteMode::Add,
+                        };
+                        let result = records.insert(KEY, write).await;
+                        task_events.lock().expect("events").push("write");
+                        *task_outcome.lock().expect("outcome") =
+                            Some(result.map_err(|error| error.to_string()));
+                    })?;
+                    Ok::<_, EdgeError>("queued")
+                }
+            })
+            .build();
+        let _delivered = run_after_response(router, &events, FastlyResponseCommitState::Committed);
+        assert_eq!(*events.lock().expect("events"), ["deliver", "write"]);
+        assert_eq!(
+            *outcome.lock().expect("outcome"),
+            Some(Ok(RecordWriteOutcome::Written)),
+            "the guarded Add inside the task was acknowledged"
+        );
+        let stored = block_on(follow_up_records().lookup(KEY))
+            .expect("lookup")
+            .expect("the follow-up record is visible after the lifecycle");
+        assert_eq!(stored.body.as_ref(), b"synced");
+    }
+
+    #[test]
+    fn after_response_budget_cancels_a_started_task() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let started = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicUsize::new(0));
+        // The task needs 10 ms for its timer; a 1 ms budget cancels it after it started.
+        let router = after_response_router(&events, Duration::from_millis(1), &started, &dropped);
+        let _delivered = run_after_response(router, &events, FastlyResponseCommitState::Committed);
+        assert_eq!(started.load(Ordering::SeqCst), 1, "the task started");
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "the budget dropped the task"
+        );
+        assert_eq!(
+            *events.lock().expect("events"),
+            ["deliver"],
+            "the task never finished"
+        );
+    }
+
     mod ingress_contract {
         use std::collections::VecDeque;
         use std::io::{self, Read};

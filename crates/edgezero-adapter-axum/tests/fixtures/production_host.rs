@@ -344,6 +344,8 @@ impl Hooks for FixtureApp {
             .get("/stream", endless_stream)
             .get("/flood", flood)
             .get("/after", after)
+            .get("/after-task", after_task)
+            .get("/draining-write", draining_write)
             .get("/write", write)
             .get("/read", read)
             .get("/alias", alias)
@@ -830,6 +832,38 @@ async fn after() -> Result<&'static str, EdgeError> {
 }
 
 #[action]
+async fn after_task(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+    let millis = env::var("FIXTURE_TASK_MILLIS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(500);
+    ctx.after_response(Duration::from_secs(30), async move {
+        let _guard = WorkGuard("AFTER_TASK_DROPPED");
+        sleep(Duration::from_millis(millis)).await;
+        println!("AFTER_TASK_DONE");
+    })?;
+    Ok("after-task-queued")
+}
+
+/// Registers a KV write after SIGTERM has started draining, while the request is in flight.
+#[action]
+async fn draining_write(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+    let observed = reader(&ctx)?;
+    println!("DISPATCH");
+    while observed.phase() == Some(LifecyclePhase::Ready) {
+        sleep(Duration::from_millis(5)).await;
+    }
+    let store = kv(&ctx, "first")?;
+    ctx.after_response(Duration::from_secs(30), async move {
+        match store.put("persisted", &"after-response-value").await {
+            Ok(()) => println!("AFTER_WRITE_DONE"),
+            Err(error) => println!("AFTER_WRITE_FAILED {error}"),
+        }
+    })?;
+    Ok("draining-write-queued")
+}
+
+#[action]
 async fn finite(ctx: RequestContext) -> Result<&'static str, EdgeError> {
     let observed = reader(&ctx)?;
     let _guard = WorkGuard("FINITE_DROPPED");
@@ -838,7 +872,11 @@ async fn finite(ctx: RequestContext) -> Result<&'static str, EdgeError> {
         sleep(Duration::from_millis(5)).await;
     }
     println!("DRAINING");
-    sleep(Duration::from_millis(80)).await;
+    let millis = env::var("FIXTURE_FINITE_MILLIS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(80);
+    sleep(Duration::from_millis(millis)).await;
     Ok("finite-complete")
 }
 

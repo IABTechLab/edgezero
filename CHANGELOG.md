@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### After-Response Tasks (#476)
+
+- Add `RequestContext::after_response(budget, task)` and the adapter-facing
+  `edgezero_core::after_response::{AfterResponseScheduler, AfterResponseHandle}`. A task starts
+  after the response attempt ends and is cancelled at its budget. Adapters without support return
+  `501 Not Implemented` at registration.
+- Add the `after-response-tasks` capability: Axum and Fastly `BoundedCooperative`,
+  Cloudflare and Spin `Unsupported` (tracked in #478 and #483).
+- Axum production, `run_app` and `AxumDevServer::run` shutdown now waits for registered after-response tasks within the
+  existing shutdown grace, after connections drain. Tasks still pending at the grace make the
+  process exit non-zero with `grace exhausted`.
+
 ### Axum buffered JSON limits and body API
 
 Axum now defaults framework-managed JSON buffering to 2 MiB, exactly 2,097,152 bytes.

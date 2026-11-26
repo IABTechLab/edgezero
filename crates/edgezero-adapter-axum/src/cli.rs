@@ -140,6 +140,7 @@ struct EdgezeroAxumConfig {
 impl Adapter for AxumCliAdapter {
     fn capability(&self, capability: Capability) -> CapabilitySupport {
         match capability {
+            Capability::AfterResponseTasks => CapabilitySupport::BoundedCooperative,
             Capability::ConfigReadDeadlines
             | Capability::OutboundConnectTimeout
             | Capability::OutboundFailureDiagnostics
@@ -919,10 +920,18 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the complete capability data table together"
+    )]
     fn adapter_capability_matrix_matches_contracts() {
         let connect = AXUM_ADAPTER.capability(Capability::OutboundConnectTimeout);
         assert_eq!(connect, CapabilitySupport::BestEffort);
         for (capability, support) in [
+            (
+                Capability::AfterResponseTasks,
+                CapabilitySupport::BoundedCooperative,
+            ),
             (
                 Capability::ConfigReadAllocationBounds,
                 CapabilitySupport::Unsupported,
