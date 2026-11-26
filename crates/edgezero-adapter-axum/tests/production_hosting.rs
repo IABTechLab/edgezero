@@ -1,6 +1,10 @@
 //! Real local processes, public entrypoints and ordinary main termination output.
 #![cfg(all(feature = "axum", feature = "test-utils", unix))]
 
+#[cfg(all(test, feature = "geo-kv"))]
+#[path = "fixtures/geo_artifact.rs"]
+mod geo_artifact;
+
 #[cfg(test)]
 #[path = "fixtures/native_proxy.rs"]
 mod native_proxy;
@@ -2410,6 +2414,121 @@ mod tests {
         value
     }
 
+    #[cfg(feature = "geo-kv")]
+    fn kv_geo_command(cwd: &TempDir, addr: SocketAddr, pin: &str, mode: &str) -> Command {
+        let mut command = geo_command("geo-kv", cwd, addr);
+        command
+            .env("EDGEZERO__ADAPTER__HOST", addr.ip().to_string())
+            .env("EDGEZERO__ADAPTER__PORT", addr.port().to_string())
+            .env("EDGEZERO__ADAPTER__GEO__PROVIDER", "kv")
+            .env("EDGEZERO__ADAPTER__GEO__STORE_ID", "fixture_geo")
+            .env("EDGEZERO__ADAPTER__GEO__READER_IP", mode)
+            .env("EDGEZERO__ADAPTER__GEO__PIN", pin)
+            .env("EDGEZERO__ADAPTER__GEO__LOOKUP_TIMEOUT_MS", "200")
+            .env("EDGEZERO__ADAPTER__GEO__MAX_IN_FLIGHT", "4")
+            .env("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
+            .env("EDGEZERO__ADAPTER__FORWARDING_HEADER_FAMILY", "forwarded");
+        command
+    }
+
+    #[test]
+    #[cfg(feature = "geo-kv")]
+    fn kv_geo_listener_checks_reader_provenance_and_pinned_objects() {
+        use super::geo_artifact::Artifact;
+        use edgezero_core::geo::kv::{Location, Range, Source, build, hex, node_key};
+        use edgezero_core::key_value_store::KvHandle;
+        use futures::executor::block_on;
+        use std::net::Ipv6Addr;
+
+        let artifact_dir = tempfile::tempdir().expect("artifact");
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let artifact = Arc::new(Artifact(artifact_dir.path().to_owned()));
+        let handle = KvHandle::new(Arc::<Artifact>::clone(&artifact));
+        let start = u128::from(u32::from(Ipv4Addr::new(192, 0, 2, 0)));
+        let v4: Vec<_> = (0..120)
+            .map(|i| Range {
+                start: start + i * 2,
+                end: start + i * 2,
+                location: if i == 1 {
+                    Location::new("XK", "").expect("source country")
+                } else {
+                    Location::new("US", "CA").expect("source country and subdivision")
+                },
+            })
+            .collect();
+        let ip6: Ipv6Addr = "2001:db8::".parse().expect("IPv6");
+        let v6 = [Range {
+            start: u128::from(ip6),
+            end: u128::from(ip6) + 1,
+            location: Location::new("GB", "").expect("country only"),
+        }];
+        let (receipt, manifest, inventory) = block_on(build(
+            &handle,
+            Source {
+                edition: "fixture".into(),
+                files: vec![],
+            },
+            &v4,
+            &v6,
+            1024,
+        ))
+        .expect("fixture dataset");
+        let pin = format!("{}@{}", manifest.generation, hex(&receipt.manifest_hash));
+        let addr = address();
+        let mut command = kv_geo_command(&cwd, addr, &pin, "forwarded-required");
+        command.env("FIXTURE_GEO_ARTIFACT", artifact_dir.path());
+        let mut server = Server::spawn(command, addr);
+        server.ready();
+
+        let missing = geo_response(&server, "CloudFront-Viewer-Country: US\r\n");
+        assert_eq!(missing["geo"]["status"], "missing_reader_ip");
+        assert_eq!(missing["kv_reads"], 3_u64);
+        // A trusted forwarded client needs no forwarded host or scheme.
+        let ipv4 = geo_response(&server, "Forwarded: for=192.0.2.0\r\n");
+        assert_eq!(ipv4["geo"]["subdivision"], "CA");
+        assert_eq!(ipv4["geo"]["trust_basis"], "CheckedForwardedClient");
+        let mapped = geo_response(&server, "Forwarded: for=\"[::ffff:192.0.2.2]\"\r\n");
+        assert_eq!(mapped["geo"]["status"], "unsupported_geography");
+        let gap = geo_response(&server, "Forwarded: for=192.0.2.1\r\n");
+        assert_eq!(gap["geo"]["status"], "no_match");
+        let country_only = geo_response(&server, "Forwarded: for=\"[2001:db8::1]\"\r\n");
+        assert_eq!(country_only["geo"]["country"], "GB");
+        assert!(country_only["geo"]["subdivision"].is_null());
+        let rejected = raw_request(
+            server.addr(),
+            "GET /geo-abort HTTP/1.1\r\nHost: fixture\r\nForwarded: for=192.0.2.238\r\nConnection: close\r\n\r\n",
+        );
+        assert!(rejected.is_empty());
+        let untrusted = geo_response(&server, "Forwarded: for=unknown\r\n");
+        assert_eq!(untrusted["geo"]["status"], "missing_reader_ip");
+        assert_eq!(untrusted["kv_reads"], country_only["kv_reads"]);
+
+        let v4_root = node_key(&manifest.generation, 4, &manifest.ipv4.expect("root").hash);
+        // Last IPv4 object before its root is the second leaf, not read by earlier requests.
+        let mut v4_entries = inventory
+            .iter()
+            .filter(|entry| entry.key.contains("/v4/"))
+            .rev();
+        assert_eq!(v4_entries.next().expect("root").key, v4_root);
+        fs::remove_file(artifact.path(&v4_entries.next().expect("second leaf").key))
+            .expect("remove leaf");
+        let failed = geo_response(&server, "Forwarded: for=192.0.2.238\r\n");
+        assert_eq!(failed["geo"]["status"], "provider_failure");
+        finish_geo(&mut server, &cwd);
+
+        fs::remove_file(artifact.path(&v4_root)).expect("remove root");
+        let failed_addr = address();
+        let mut failed_command = kv_geo_command(&cwd, failed_addr, &pin, "direct-peer");
+        failed_command.env("FIXTURE_GEO_ARTIFACT", artifact_dir.path());
+        let mut failed_startup = Server::spawn(failed_command, failed_addr);
+        assert!(!failed_startup.wait().success());
+        let log = failed_startup.log();
+        assert!(log.contains("pinned KV data could not be prepared"));
+        assert!(!log.contains("INITIALIZED"));
+        TcpStream::connect_timeout(&failed_addr, Duration::from_millis(50))
+            .expect_err("invalid root never binds");
+    }
+
     fn finish_geo(server: &mut Server, cwd: &TempDir) {
         assert!(
             server
@@ -2427,6 +2546,73 @@ mod tests {
             0,
             "Geo-only startup must not create store roots or local databases"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "geo-cloudfront")]
+    fn geo_hosting_binds_cloudfront_from_manifest_and_settings() {
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let addr = address();
+        let mut command = geo_command("geo-manifest", &cwd, addr);
+        command
+            .env("EDGEZERO__ADAPTER__HOST", addr.ip().to_string())
+            .env("EDGEZERO__ADAPTER__PORT", addr.port().to_string())
+            .env("EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS", "127.0.0.1/32");
+        let mut server = Server::spawn(command, addr);
+        server.ready();
+        let value = geo_response(
+            &server,
+            "CloudFront-Viewer-Country: us\r\nCloudFront-Viewer-Country-Region: ca\r\nx-origin-verify-fixture: ORIGIN_CREDENTIAL_SENTINEL\r\n",
+        );
+        assert_eq!(value["geo"]["status"], "located");
+        assert_eq!(value["geo"]["provider"], "cloudfront");
+        assert_eq!(value["geo"]["country"], "US");
+        assert_eq!(value["geo"]["subdivision"], "CA");
+        assert_eq!(value["geo"]["trust_basis"], "DeclaredProtectedAlb");
+        finish_geo(&mut server, &cwd);
+    }
+
+    #[test]
+    fn geo_dev_runner_ignores_manifest_and_reads_settings() {
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let dev = |settings: &[(&str, &str)]| {
+            let addr = address();
+            let mut command = geo_command("geo-manifest-dev", &cwd, addr);
+            command
+                .env("EDGEZERO__ADAPTER__HOST", addr.ip().to_string())
+                .env("EDGEZERO__ADAPTER__PORT", addr.port().to_string());
+            for (key, value) in settings {
+                command.env(key, value);
+            }
+            let mut server = Server::spawn(command, addr);
+            server.ready();
+            server
+        };
+        let request = "CloudFront-Viewer-Country: US\r\nCloudFront-Viewer-Country-Region: CA\r\n";
+
+        // The baked table lacks networks; the dev server still starts, with geo off.
+        let unselected = dev(&[]);
+        let value = geo_response(&unselected, request);
+        assert_eq!(value["geo"]["status"], "no_selection");
+        drop(unselected);
+
+        // Settings alone opt a dev run in. Without the built-in this fails startup instead.
+        #[cfg(feature = "geo-cloudfront")]
+        {
+            let selected = dev(&[
+                ("EDGEZERO__ADAPTER__GEO__PROVIDER", "cloudfront"),
+                ("EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS", "127.0.0.1/32"),
+                (
+                    "EDGEZERO__ADAPTER__GEO__ORIGIN_CREDENTIAL_HEADER_NAME",
+                    "x-origin-verify-fixture",
+                ),
+            ]);
+            let located = geo_response(&selected, request);
+            assert_eq!(located["geo"]["status"], "located");
+            assert_eq!(located["geo"]["provider"], "cloudfront");
+            assert_eq!(located["geo"]["country"], "US");
+            assert_eq!(located["geo"]["subdivision"], "CA");
+        }
     }
 
     #[test]

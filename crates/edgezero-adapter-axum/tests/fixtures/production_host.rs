@@ -3,6 +3,8 @@
 
 #[path = "../../../edgezero-core/tests/fixtures/production_handlers.rs"]
 mod fixture;
+#[cfg(feature = "geo-kv")]
+mod geo_artifact;
 
 use std::cell::Cell;
 use std::env;
@@ -38,6 +40,7 @@ use edgezero_core::ingress::{
     AdmissionDecision, CheckedEffectiveHost, CheckedHostSource, IngressGrant,
 };
 use edgezero_core::key_value_store::KvHandle;
+use edgezero_core::manifest::{BakedManifest, Manifest};
 use edgezero_core::middleware::{Middleware, Next};
 use edgezero_core::params::PathParams;
 use edgezero_core::probe::{self, LifecyclePhase, LifecycleReader};
@@ -270,6 +273,9 @@ impl Hooks for FixtureApp {
         println!("HOOK_ENTERED");
         if mode().starts_with("geo-") {
             app.set_ingress_admission_policy(|head| {
+                if head.target().path() == "/geo-abort" {
+                    return AdmissionDecision::Abort;
+                }
                 assert!(
                     !head.headers().contains_key("x-origin-verify-fixture"),
                     "origin credential removed before admission"
@@ -293,6 +299,17 @@ impl Hooks for FixtureApp {
             app.set_monotonic_clock(MonotonicClock::new(move || frozen));
         }
         Ok(())
+    }
+
+    /// `geo-manifest` bakes `CloudFront` geo with the credential header; the ALB
+    /// networks come from `EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS`.
+    fn manifest() -> BakedManifest {
+        if mode().starts_with("geo-manifest") {
+            return Manifest::from_baked_json(
+                r#"{"adapters":{"axum":{"geo":{"provider":"cloudfront","origin_credential_header_name":"x-origin-verify-fixture"}}}}"#,
+            );
+        }
+        BakedManifest::Absent
     }
 
     fn owns_logging() -> bool {
@@ -355,6 +372,15 @@ impl Hooks for FixtureApp {
     }
 
     fn stores() -> StoresMetadata {
+        if mode() == "geo-kv" {
+            return StoresMetadata {
+                kv: Some(StoreMetadata {
+                    ids: &["fixture_geo"],
+                    default: "fixture_geo",
+                }),
+                ..StoresMetadata::default()
+            };
+        }
         if mode().starts_with("geo-") {
             return StoresMetadata::default();
         }
@@ -937,6 +963,9 @@ fn geo_json(outcome: &GeoOutcome) -> Value {
                 json!({"provider": provider.as_str(), "status": match reason {
                     GeoUnavailableReason::MissingMetadata => "missing_metadata",
                     GeoUnavailableReason::UntrustedIngress => "untrusted_ingress",
+                    GeoUnavailableReason::MissingReaderIp => "missing_reader_ip",
+                    GeoUnavailableReason::NoMatch => "no_match",
+                    GeoUnavailableReason::UnsupportedGeography => "unsupported_geography",
                 }})
             }
             GeoStatus::Error(error) => {
@@ -989,8 +1018,13 @@ async fn geo_observation(mut ctx: RequestContext) -> Result<Response, EdgeError>
         .headers()
         .get("cloudfront-viewer-country")
         .and_then(|value| value.to_str().ok());
+    #[cfg(feature = "geo-kv")]
+    let kv_reads = geo_artifact::READS.load(Ordering::Relaxed);
+    #[cfg(not(feature = "geo-kv"))]
+    let kv_reads = 0_usize;
     json_response(&json!({
         "geo": geo_json(ctx.geo()),
+        "kv_reads": kv_reads,
         "credential_absent": credential_absent,
         "immutable": ctx.geo() == &original,
         "mutated_country": mutated_country,
@@ -1004,6 +1038,10 @@ async fn geo_observation(mut ctx: RequestContext) -> Result<Response, EdgeError>
     reason = "test-only initializer asserts root-free startup, capability capture and known-valid forged state"
 )]
 fn run_geo_fixture(selected: &str) -> anyhow::Result<()> {
+    if selected == "geo-manifest-dev" {
+        // The dev runner ignores the manifest table; only settings select geo.
+        return run_app::<FixtureApp>();
+    }
     let address: SocketAddr = env::var("FIXTURE_BIND")?.parse()?;
     let peer_network = if selected.ends_with("untrusted") {
         "192.0.2.1/32"
@@ -1029,9 +1067,17 @@ fn run_geo_fixture(selected: &str) -> anyhow::Result<()> {
     } else {
         NativeGeoSelection::CloudFront { policy }
     };
-    let options = AxumRunOptions::new(address)?.with_geo(selection);
-    // Capture from the same finalized options, without bypassing the runner's validation.
-    let capability = options.geo_capability();
+    let (options, capability) = if selected == "geo-manifest" {
+        // No `with_geo`: the baked manifest and EDGEZERO__ settings select geo.
+        let options = AxumRunOptions::from_env()?;
+        let capability = options.geo_capability_for::<FixtureApp>();
+        (options, capability)
+    } else {
+        let options = AxumRunOptions::new(address)?.with_geo(selection);
+        // Capture from the same finalized options, without bypassing the runner's validation.
+        let capability = options.geo_capability();
+        (options, capability)
+    };
     let is_off = selected == "geo-off";
     let (sender, receiver) = oneshot::channel();
     run_app_with_options_and_initializer::<FixtureApp, _, _>(
@@ -1060,6 +1106,35 @@ fn run_geo_fixture(selected: &str) -> anyhow::Result<()> {
                     provider: GeoProviderId::new("forged-app-state").expect("fixture provider ID"),
                     status: GeoStatus::Error(GeoError::ProviderFailure),
                 });
+                app.insert_state(Arc::new(StopState(Mutex::new(Some(sender)))));
+                println!("INITIALIZED");
+                Ok(())
+            })
+        },
+    )
+}
+
+#[cfg(feature = "geo-kv")]
+fn run_kv_geo_fixture() -> anyhow::Result<()> {
+    use edgezero_adapter_axum::dev_server::run_app_with_native_stores;
+    use edgezero_adapter_axum::native_stores::NativeStoreOverrides;
+    let options = AxumRunOptions::from_env()?;
+    let mut overrides = NativeStoreOverrides::default();
+    if let Some(root) = env::var_os("FIXTURE_GEO_ARTIFACT") {
+        overrides.insert_kv(
+            "fixture_geo",
+            KvHandle::new(Arc::new(geo_artifact::Artifact(root.into()))),
+        )?;
+    }
+    let (sender, receiver) = oneshot::channel();
+    run_app_with_native_stores::<FixtureApp, _, _>(
+        options,
+        overrides,
+        async move {
+            let _closed = receiver.await;
+        },
+        move |app, _stores| {
+            Box::pin(async move {
                 app.insert_state(Arc::new(StopState(Mutex::new(Some(sender)))));
                 println!("INITIALIZED");
                 Ok(())
@@ -1101,12 +1176,18 @@ fn run_explicit_initializer_fixture() -> anyhow::Result<()> {
     clippy::panic_in_result_fn,
     reason = "test-only executable asserts initializer ownership and call counts"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "entrypoint dispatches independent fixture scenarios"
+)]
 fn main() -> anyhow::Result<()> {
     let selected = mode();
     if selected.starts_with("diagnostics") {
         return run_native_fixture(&selected);
     }
     match selected.as_str() {
+        #[cfg(feature = "geo-kv")]
+        "geo-kv" => return run_kv_geo_fixture(),
         geo_mode if geo_mode.starts_with("geo-") => return run_geo_fixture(geo_mode),
         "development" | "bare-dev" => return run_app::<FixtureApp>(),
         "framework" | "bare" | "hook-error" => return run_production_app::<FixtureApp>(),
