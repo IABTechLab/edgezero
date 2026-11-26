@@ -7,12 +7,14 @@ Viceroy silently or describe a patched executable as unmodified 0.22.0 evidence.
 Base: official Fastly Viceroy commit `cbc9c97813769f44a7e12fff7745fbb33287adcf`, tag `v0.22.0`.
 The upstream Cargo.lock SHA-256 is
 `665efc3a2c9f2d221869fbb2cbefbedf422b9957405ef05302d90f4888a10af2`.
-The patch was written against tag `v0.21.0` (`a69d982d1d95e13c0fc9f92683b9118639bb4b04`) and
-applies to `v0.22.0` unchanged, so its SHA-256 is unchanged. The files it touches differ between
-the two tags only in lint and rustls certificate-type edits.
+The readiness and timeout-readback repairs were written against tag `v0.21.0`
+(`a69d982d1d95e13c0fc9f92683b9118639bb4b04`) and apply to `v0.22.0` unchanged; the files they
+touch differ between the two tags only in lint and rustls certificate-type edits. The conditional
+KV insert repair was written against `v0.22.0`.
 Upstream source is licensed under Apache-2.0 WITH LLVM-exception; its license files remain
-authoritative. The patch repairs body readiness and dynamic-backend timeout readback, with
-co-located regression tests. Both repairs are local-runtime evidence, not hosted qualification.
+authoritative. The patch repairs body readiness, dynamic-backend timeout readback and conditional
+KV inserts, with co-located regression tests. All three repairs are local-runtime evidence, not
+hosted qualification.
 
 ## Repair
 
@@ -35,6 +37,13 @@ remain distinct; absent settings remain unavailable and overflow is rejected. Th
 actual SDK setter/getter control rather than inferring registered settings from EdgeZero's
 helpers. It does **not** add connect-timeout enforcement to Viceroy's network stack, change
 backend policy, or establish hosted connect behavior.
+
+Unmodified `ObjectStore::insert` in `src/object_store.rs` is a non-atomic conditional insert:
+it reads the existing entry through `lookup` and stores the new value under a separate write
+lock, so two concurrent `Add` or if-generation-match inserts can both pass the precondition and
+both write. The repair checks the TTL-aware existing entry, the precondition and the write under
+one write lock. Its test races two writers 1,000 times per mode and requires exactly one winner;
+EdgeZero's native record race in the Fastly record contract relies on that guarantee.
 
 ## Apply and Build
 
@@ -66,9 +75,9 @@ cargo test --offline --locked --manifest-path "$VICEROY_SOURCE/Cargo.toml" -p vi
 cargo build --offline --locked --manifest-path "$VICEROY_SOURCE/Cargo.toml" -p viceroy
 ```
 
-Require all 138 library tests, including the ten readiness regressions and the timeout-readback
-boundary test, with zero failures. CI additionally checks that the named readiness and timeout
-guards actually executed; an empty selection cannot pass. These counts are not hosted cases.
+Require all 139 library tests, including the ten readiness regressions, the timeout-readback
+boundary test and the conditional-insert race, with zero failures. CI additionally checks that
+the named readiness, timeout and conditional-insert guards actually executed; an empty selection cannot pass. These counts are not hosted cases.
 The development profile has no debug symbols/incremental state; record actual compiler,
 profile, source, lockfile, patch and binary hashes rather than inferring identity from version text.
 
