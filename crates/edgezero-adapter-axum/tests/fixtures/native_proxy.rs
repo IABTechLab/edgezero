@@ -1,4 +1,9 @@
-//! Test-only source-bound proxy and verified TLS ingress. No response is collected here.
+//! Test-only loopback proxy and verified TLS ingress. No response is collected here.
+//!
+//! Every proxy socket is on 127.0.0.1, the IPv4 loopback address every platform has, so the
+//! server's direct peer is always a real 127.0.0.1 socket. An appending proxy writes the
+//! predecessor it is given rather than its own socket peer: the server only sees that hop as
+//! header text, and a real 127.0.0.1 predecessor would collide with the trusted peer.
 #![expect(
     clippy::arbitrary_source_item_ordering,
     reason = "fixture ownership precedes bounded relay helpers"
@@ -15,7 +20,7 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio::io::{
     AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, copy_bidirectional_with_sizes,
 };
-use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Builder;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -30,10 +35,12 @@ pub(crate) enum Assertions {
     /// Keep deliberate malformed/gap inputs unchanged while preserving a real owned peer.
     Preserve,
     AppendForwarded {
+        predecessor: IpAddr,
         host: &'static str,
         scheme: &'static str,
     },
     AppendXForwarded {
+        predecessor: IpAddr,
         host: &'static str,
         scheme: &'static str,
     },
@@ -59,12 +66,7 @@ impl LocalProxy {
 
     #[must_use]
     #[inline]
-    pub(crate) fn start(
-        upstream: SocketAddr,
-        source: Ipv4Addr,
-        assertions: Assertions,
-        tls: bool,
-    ) -> Self {
+    pub(crate) fn start(upstream: SocketAddr, assertions: Assertions, tls: bool) -> Self {
         let std_listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy listener");
         let addr = std_listener.local_addr().expect("proxy address");
         std_listener
@@ -86,17 +88,17 @@ impl LocalProxy {
                         () = async { let _closed = (&mut stopped).await; } => break,
                         _finished = tasks.join_next(), if !tasks.is_empty() => {},
                         accepted = listener.accept(), if tasks.len() < 64 => {
-                            let (socket, peer) = accepted.expect("proxy accept");
+                            let (socket, _peer) = accepted.expect("proxy accept");
                             let task_acceptor = tls_acceptor.clone();
                             tasks.spawn(async move {
                                 let operation = async {
                                     if let Some(acceptor) = task_acceptor {
                                         if let Ok(mut client) = acceptor.accept(socket).await {
-                                            let _relayed = relay(&mut client, peer, upstream, source, assertions).await;
+                                            let _relayed = relay(&mut client, upstream, assertions).await;
                                         }
                                     } else {
                                         let mut client = socket;
-                                        let _relayed = relay(&mut client, peer, upstream, source, assertions).await;
+                                        let _relayed = relay(&mut client, upstream, assertions).await;
                                     }
                                 };
                                 let _bounded = timeout(Duration::from_secs(5), operation).await;
@@ -165,7 +167,14 @@ where
     }
 }
 
-fn rewrite(head: &str, peer: SocketAddr, assertions: Assertions) -> io::Result<String> {
+fn forwarded_node(address: IpAddr) -> String {
+    match address {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("\"[{ip}]\""),
+    }
+}
+
+fn rewrite(head: &str, assertions: Assertions) -> io::Result<String> {
     let mut lines = head.split("\r\n");
     let request = lines
         .next()
@@ -176,13 +185,13 @@ fn rewrite(head: &str, peer: SocketAddr, assertions: Assertions) -> io::Result<S
         let (name, value) = line.split_once(':').ok_or_else(invalid)?;
         headers.push((name.to_owned(), value.trim().to_owned()));
     }
-    let predecessor = match peer.ip() {
-        IpAddr::V4(ip) => ip.to_string(),
-        IpAddr::V6(ip) => format!("\"[{ip}]\""),
-    };
     match assertions {
         Assertions::Preserve => {}
-        Assertions::AppendForwarded { host, scheme } => {
+        Assertions::AppendForwarded {
+            predecessor,
+            host,
+            scheme,
+        } => {
             let previous = headers
                 .iter()
                 .filter(|(name, _)| name.eq_ignore_ascii_case("forwarded"))
@@ -190,7 +199,8 @@ fn rewrite(head: &str, peer: SocketAddr, assertions: Assertions) -> io::Result<S
                 .collect::<Vec<_>>()
                 .join(",");
             headers.retain(|(name, _)| !name.eq_ignore_ascii_case("forwarded"));
-            let assertion = format!("for={predecessor};host=\"{host}\";proto={scheme}");
+            let node = forwarded_node(predecessor);
+            let assertion = format!("for={node};host=\"{host}\";proto={scheme}");
             headers.push((
                 "Forwarded".into(),
                 if previous.is_empty() {
@@ -200,7 +210,11 @@ fn rewrite(head: &str, peer: SocketAddr, assertions: Assertions) -> io::Result<S
                 },
             ));
         }
-        Assertions::AppendXForwarded { host, scheme } => {
+        Assertions::AppendXForwarded {
+            predecessor,
+            host,
+            scheme,
+        } => {
             let previous = headers
                 .iter()
                 .filter(|(name, _)| name.eq_ignore_ascii_case("x-forwarded-for"))
@@ -208,7 +222,7 @@ fn rewrite(head: &str, peer: SocketAddr, assertions: Assertions) -> io::Result<S
                 .collect::<Vec<_>>()
                 .join(",");
             headers.retain(|(name, _)| !name.to_ascii_lowercase().starts_with("x-forwarded-"));
-            let node = peer.ip().to_string();
+            let node = predecessor.to_string();
             headers.push((
                 "X-Forwarded-For".into(),
                 if previous.is_empty() {
@@ -231,10 +245,7 @@ fn rewrite(head: &str, peer: SocketAddr, assertions: Assertions) -> io::Result<S
             });
             // The test gateway's client assertion is explicitly supplied by its trusted producer,
             // never taken from the visitor's fields. This is not a provider-discovery mechanism.
-            let node = match client {
-                IpAddr::V4(ip) => ip.to_string(),
-                IpAddr::V6(ip) => format!("\"[{ip}]\""),
-            };
+            let node = forwarded_node(client);
             headers.push((
                 "Forwarded".into(),
                 format!("for={node};host=\"{host}\";proto={scheme}"),
@@ -255,19 +266,15 @@ fn rewrite(head: &str, peer: SocketAddr, assertions: Assertions) -> io::Result<S
 
 async fn relay<Client>(
     client: &mut Client,
-    peer: SocketAddr,
     upstream: SocketAddr,
-    source: Ipv4Addr,
     assertions: Assertions,
 ) -> io::Result<()>
 where
     Client: AsyncRead + AsyncWrite + Unpin,
 {
     let (head, body_prefix) = read_head(client).await?;
-    let rewritten = rewrite(&head, peer, assertions)?;
-    let socket = TcpSocket::new_v4()?;
-    socket.bind(SocketAddr::new(IpAddr::V4(source), 0))?;
-    let mut origin = socket.connect(upstream).await?;
+    let rewritten = rewrite(&head, assertions)?;
+    let mut origin = TcpStream::connect(upstream).await?;
     origin.write_all(rewritten.as_bytes()).await?;
     origin.write_all(&body_prefix).await?;
     // Finite, per-direction relay buffers. Never collect a response or body for proxying.

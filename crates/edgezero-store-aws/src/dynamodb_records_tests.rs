@@ -9,6 +9,7 @@
 use super::*;
 use crate::dynamodb_kv::sdk_tests::{active_table, loopback_client, read_request};
 use crate::settings::{AwsPreparationLimits, DynamoDbKvLimits};
+use crate::test_net::accept_blocking;
 use edgezero_core::record_store::{RecordKeyLayout, contract};
 use edgezero_core::time::MonotonicClock;
 use serde_json::{Value, json};
@@ -77,7 +78,7 @@ impl Fixture {
         let worker_stopped = Arc::clone(&stopped);
         let worker = thread::spawn(move || {
             while !worker_stopped.load(Ordering::Acquire) {
-                match listener.accept() {
+                match accept_blocking(&listener) {
                     Ok((mut stream, _)) => {
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))

@@ -323,6 +323,7 @@ fn classify_sdk_error(
 mod tests {
     use super::{classify_operation_error, materialize_payload};
     use crate::PreparationError;
+    use crate::test_net::accept_blocking;
     use aws_sdk_secretsmanager::error::{ConnectorError, SdkError};
     use aws_sdk_secretsmanager::operation::get_secret_value::GetSecretValueOutput;
     use aws_sdk_secretsmanager::primitives::Blob;
@@ -331,12 +332,26 @@ mod tests {
     use std::io::{Read as _, Write as _};
     use std::net::{TcpListener, TcpStream};
     use std::process::{Command, Stdio};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
+    /// How long the holding fixture waits for the client to abandon an unanswered attempt.
+    /// The timeout child's attempt deadline is 100 ms and its operation budget is 10 s, so only
+    /// the attempt deadline can close a held connection inside this bound.
+    const HOLD_BOUND: Duration = Duration::from_secs(5);
+
     const TEST_ARN: &str = "arn:aws:secretsmanager:us-east-1:111122223333:secret:fixture-AbCdEf";
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    /// One connection the SDK opened against `holding_fixture`.
+    struct HeldConnection {
+        /// The client closed the connection within `HOLD_BOUND`.
+        closed_by_client: bool,
+        /// Lowercased request head and body, when the complete request arrived first.
+        request: Option<(String, String)>,
+    }
 
     struct LoopbackFixture {
         listener: TcpListener,
@@ -358,7 +373,6 @@ mod tests {
     #[derive(Clone)]
     enum FixtureResponse {
         Decryption,
-        Delay(Duration),
         Denied,
         InternalError,
         Json(String),
@@ -420,21 +434,9 @@ mod tests {
             body.contains(TEST_ARN),
             "request must contain only the fictional fixture ARN"
         );
-        if let FixtureResponse::Delay(delay) = response {
-            thread::sleep(delay);
-            let payload = b"{\"SecretString\":\"VALUE_SENTINEL\"}";
-            let _header_write = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/x-amz-json-1.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                payload.len()
-            );
-            let _body_write = stream.write_all(payload);
-            return (headers, body);
-        }
         let (status, code, payload) = match response {
             FixtureResponse::Decryption => (400_u16, "Bad Request", r#"{"__type":"DecryptionFailure","message":"VALUE_SENTINEL"}"#.to_owned()),
             FixtureResponse::Denied => (400_u16, "Bad Request", r#"{"__type":"AccessDeniedException","message":"ARN_SENTINEL CREDENTIAL_SENTINEL"}"#.to_owned()),
-            FixtureResponse::Delay(_) => return (headers, body),
             FixtureResponse::InternalError => (500_u16, "Internal Server Error", r#"{"__type":"InternalServiceError","message":"SDK_ERROR_SENTINEL"}"#.to_owned()),
             FixtureResponse::Json(payload) => (200_u16, "OK", payload),
             FixtureResponse::Missing => (400_u16, "Bad Request", r#"{"__type":"ResourceNotFoundException","message":"ARN_SENTINEL"}"#.to_owned()),
@@ -447,6 +449,95 @@ mod tests {
             .write_all(response_body)
             .expect("write response body");
         (headers, body)
+    }
+
+    /// Accepts every connection the SDK opens and never answers, so the client's attempt
+    /// deadline is the only thing that ends each attempt. The deadline runs from the start of
+    /// the attempt, so a descheduled child can abandon a connection before writing its request;
+    /// that is recorded as a client-side close, not treated as a fixture failure.
+    fn holding_fixture() -> (
+        String,
+        Arc<AtomicBool>,
+        thread::JoinHandle<Vec<HeldConnection>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind literal loopback only");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("loopback address")
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            let deadline = Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .expect("fixture deadline fits the monotonic clock");
+            let mut held = Vec::new();
+            loop {
+                // Read the flag before accepting: once the child has exited, every connection it
+                // opened is already queued, so draining until `WouldBlock` counts all of them.
+                let stopping = worker_stop.load(Ordering::Acquire);
+                match accept_blocking(&listener) {
+                    Ok((stream, peer)) => {
+                        assert!(peer.ip().is_loopback(), "fixture peer must be loopback");
+                        held.push(hold(stream));
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        if stopping {
+                            break;
+                        }
+                        assert!(Instant::now() < deadline, "SDK child did not finish");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                }
+            }
+            held
+        });
+        (endpoint, stop, worker)
+    }
+
+    fn hold(mut stream: TcpStream) -> HeldConnection {
+        stream
+            .set_read_timeout(Some(HOLD_BOUND))
+            .expect("held connection bound");
+        let mut received = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let closed_by_client = loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break true,
+                Ok(read) => {
+                    received.extend_from_slice(&chunk[..read]);
+                    assert!(received.len() < 64 * 1024, "bounded held request");
+                }
+                Err(error) if error.kind() == ErrorKind::ConnectionReset => break true,
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    break false;
+                }
+                Err(error) => panic!("held connection read failed: {error}"),
+            }
+        };
+        let request = received
+            .windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+            .and_then(|end| {
+                let head = String::from_utf8_lossy(&received[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:").map(str::trim))
+                    .and_then(|value| value.parse::<usize>().ok())?;
+                let body = received.get(end.checked_add(4)?..)?;
+                (body.len() >= length)
+                    .then(|| (head, String::from_utf8_lossy(&body[..length]).into_owned()))
+            });
+        HeldConnection {
+            closed_by_client,
+            request,
+        }
     }
 
     fn loopback_fixture(responses: Vec<FixtureResponse>) -> (String, LoopbackFixture) {
@@ -465,7 +556,7 @@ mod tests {
             let mut bodies = Vec::new();
             for response in responses {
                 let stream = loop {
-                    match worker_listener.accept() {
+                    match accept_blocking(&worker_listener) {
                         Ok((stream, peer)) => {
                             assert!(peer.ip().is_loopback(), "fixture peer must be loopback");
                             break stream;
@@ -772,20 +863,34 @@ mod tests {
 
     #[test]
     fn real_sdk_attempt_timeout_is_observed_without_an_outer_retry_loop() {
-        let (endpoint, fixture) =
-            loopback_fixture(vec![FixtureResponse::Delay(Duration::from_millis(350))]);
+        let (endpoint, stop, fixture) = holding_fixture();
         let child = isolated_sdk_child(&endpoint, "timeout");
-        let requests = fixture.join().expect("fixture thread");
+        stop.store(true, Ordering::Release);
+        let held = fixture.join().expect("fixture thread");
         assert!(
             child.status.success(),
             "timeout child failed: {}",
             String::from_utf8_lossy(&child.stderr)
         );
-        assert_eq!(
-            requests.len(),
-            1,
-            "SDK timeout behavior is inside the one provider operation"
+        assert!(
+            (1..=3).contains(&held.len()),
+            "only the SDK's own attempts (at most 3) reach the fixture: {} connections",
+            held.len()
         );
+        assert!(
+            held.iter().all(|connection| connection.closed_by_client),
+            "the attempt deadline, not the 10 s operation budget, ends every unanswered attempt"
+        );
+        for (head, body) in held
+            .iter()
+            .filter_map(|connection| connection.request.as_ref())
+        {
+            assert!(head.contains("x-amz-target: secretsmanager.getsecretvalue"));
+            assert!(
+                body.contains(TEST_ARN),
+                "request must name only the fixture ARN"
+            );
+        }
     }
 
     /// Invoked only by an env-cleared child process launched by the parent fixture.
@@ -820,8 +925,10 @@ mod tests {
             crate::settings::AwsPreparationLimits {
                 connect_timeout_ms: 50,
                 attempt_timeout_ms: 100,
-                operation_timeout_ms: 500,
-                preparation_timeout_ms: 2_000,
+                // Far beyond the attempt deadline, so only the attempt deadline can end an
+                // unanswered attempt.
+                operation_timeout_ms: 10_000,
+                preparation_timeout_ms: 12_000,
                 ..crate::settings::AwsPreparationLimits::default()
             }
         } else {

@@ -12,6 +12,7 @@
 use super::*;
 use crate::preparation::AwsPreparation;
 use crate::settings::{AwsPreparationLimits, DynamoDbKvLimits, DynamoDbKvSettings};
+use crate::test_net::accept_blocking;
 use edgezero_core::time::MonotonicClock;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{ErrorKind, Read as _, Write as _};
@@ -144,7 +145,7 @@ impl DynamoFixture {
         let worker_accepted = Arc::clone(&accepted);
         let worker = thread::spawn(move || {
             while !worker_stopped.load(Ordering::Acquire) {
-                match listener.accept() {
+                match accept_blocking(&listener) {
                     Ok((mut stream, _)) => {
                         worker_accepted.fetch_add(1, Ordering::Relaxed);
                         stream

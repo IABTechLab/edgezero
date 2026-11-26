@@ -9,7 +9,12 @@
 )]
 
 #[cfg(test)]
+#[path = "fixtures/blocking_accept.rs"]
+mod blocking_accept;
+
+#[cfg(test)]
 mod tests {
+    use crate::blocking_accept::accept_blocking;
     use std::fs;
     use std::io::{ErrorKind, Read, Write as _};
     use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -47,7 +52,7 @@ mod tests {
                 thread::spawn(move || {
                     let deadline = Instant::now().checked_add(WAIT).expect("fixture deadline");
                     while !worker_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
-                        match listener.accept() {
+                        match accept_blocking(&listener) {
                             Ok((mut stream, peer)) => {
                                 assert!(peer.ip().is_loopback());
                                 stream
