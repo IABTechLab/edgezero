@@ -3432,10 +3432,12 @@ mod fastly_impl {
 
         #[test]
         fn batch_cutoff_clamping_preserves_cause_and_observation_boundary() {
+            use super::super::progress::wait_current;
             use super::super::scope;
             use edgezero_core::outbound::{
                 OutboundBatchTermination, OutboundCollectedSlot, OutboundScopeOwner,
             };
+            use std::sync::atomic::{AtomicBool, Ordering};
 
             for selected in [
                 BudgetSource::BatchCutoff,
@@ -3460,15 +3462,6 @@ mod fastly_impl {
                         .checked_add(Duration::from_nanos(1))
                         .expect("after cutoff"),
                 ] {
-                    let now = Arc::new(Mutex::new(start));
-                    let sampled = Arc::clone(&now);
-                    let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
-                    let callback = OutboundScopeOwner::callback();
-                    let time = native_time(clock);
-                    let progress =
-                        scope::native_progress(&callback.with(scope::capture), &time, start)
-                            .unwrap();
-                    let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
                     let mut request = OutboundRequest::post("http://127.0.0.1:9/clamped-cutoff")
                         .expect("request")
                         .body("pending")
@@ -3486,11 +3479,38 @@ mod fastly_impl {
                     let budget = dispatch_budget(&request, start, Some(cutoff)).expect("budget");
                     assert_eq!(budget.cause, selected);
                     assert!(budget.deadline.instant() < cutoff.instant());
+                    let now = Arc::new(Mutex::new(start));
+                    let sampled = Arc::clone(&now);
+                    let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
+                    // The slot completes at `completed_at`: the clock reaches it when the request
+                    // arms its own deadline timer, on its first poll. Advancing the clock only after
+                    // start_batch_until let that call's eager dispatch observe the refused connect
+                    // at `start`, an unreachable failure instead of the selected timeout.
+                    let armed = Arc::new(AtomicBool::new(false));
+                    let advanced = Arc::clone(&now);
+                    let arming = Arc::clone(&armed);
+                    let own_deadline = budget.deadline.instant();
+                    let time = OutboundTime::new(clock, move |deadline, current| {
+                        if deadline.instant() == own_deadline
+                            && !arming.swap(true, Ordering::SeqCst)
+                        {
+                            *advanced.lock().expect("clock") = completed_at;
+                        }
+                        wait_current(deadline, current)
+                    });
+                    let callback = OutboundScopeOwner::callback();
+                    let progress =
+                        scope::native_progress(&callback.with(scope::capture), &time, start)
+                            .unwrap();
+                    let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
                     let batch = callback.with(|| client.start_batch_until(vec![request], cutoff));
-                    *now.lock().expect("clock") = completed_at;
                     let result = block_on(callback.run(progress.drive(batch.collect())))
                         .expect("callback progress")
                         .expect("clamped cutoff is not premature EOF");
+                    assert!(
+                        armed.load(Ordering::SeqCst),
+                        "the request armed its own deadline timer"
+                    );
 
                     if selected == BudgetSource::BatchCutoff && cutoff.is_expired_at(completed_at) {
                         assert_eq!(result.termination(), OutboundBatchTermination::Cutoff);
