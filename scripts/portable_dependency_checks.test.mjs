@@ -104,6 +104,11 @@ for (const [script, dependency, diagnostic] of [
     "tokio v1.52.3|",
     /Tokio dependency leaked into portable core/,
   ],
+  [
+    "check_geo_dependency_contract.sh",
+    "edgezero-store-aws v0.1.0|",
+    /store crate leaked into portable core/,
+  ],
 ]) {
   test(`${script} still rejects ${dependency} in core`, (t) => {
     const directory = mkdtempSync(join(tmpdir(), "edgezero-portable-graph-"));
