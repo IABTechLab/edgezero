@@ -17,13 +17,14 @@ use edgezero_adapter::cli_support::{
     find_manifest_upwards, find_workspace_root, path_distance, read_package_name, run_native_cli,
 };
 use edgezero_adapter::registry::{
-    Adapter, AdapterAction, AdapterPushContext, ProvisionStores, ReadConfigEntry, ResolvedStoreId,
-    TypedSecretEntry, register_adapter,
+    Adapter, AdapterAction, AdapterExecutionTarget, AdapterPushContext, ProvisionStores,
+    ReadConfigEntry, ResolvedStoreId, TypedSecretEntry, register_adapter,
 };
 use edgezero_adapter::scaffold::{
     AdapterBlueprint, AdapterFileSpec, CommandTemplates, DependencySpec, LoggingDefaults,
     ManifestSpec, ReadmeInfo, TemplateRegistration, register_adapter_blueprint,
 };
+use edgezero_core::{Capability, CapabilitySupport, PlatformMetadata};
 use walkdir::WalkDir;
 
 mod push_cloud;
@@ -136,6 +137,39 @@ struct SpinCliAdapter;
     reason = "KV-backed config dropped Spin's `^[a-z][a-z0-9_]*$` key rule and the config-vs-secret collision check, so `validate_app_config_keys` falls back to the trait default `Ok(())`. `validate_typed_secrets` IS overridden below (secret-value canonicalisation + within-secrets uniqueness still apply). `validate_adapter_manifest` IS overridden below (Spin's multi-component disambiguation). `read_config_entry` and `read_config_entry_local` are both overridden below (four-branch SQLite-direct / Fermyon Cloud / non-Spin-backend dispatch)."
 )]
 impl Adapter for SpinCliAdapter {
+    fn capability(&self, capability: Capability) -> CapabilitySupport {
+        match capability {
+            Capability::IngressAdmission
+            | Capability::OutboundBatchCompletionOrder
+            | Capability::OutboundBatchSlotIsolation
+            | Capability::OutboundCacheBypass
+            | Capability::OutboundFailureDiagnostics
+            | Capability::OutboundHttp
+            | Capability::OutboundRedirectFollowing => CapabilitySupport::Native,
+            Capability::BufferedResponseContentLength
+            | Capability::ConfigReadDeadlines
+            | Capability::InboundReadDeadlines
+            | Capability::IngressAdmissionAbort
+            | Capability::LazyStreamedResponsePassthrough
+            | Capability::OutboundBatchCancellation
+            | Capability::OutboundConnectTimeout
+            | Capability::OutboundDeadlines
+            | Capability::OutboundFlexiblePhaseBudget
+            | Capability::OutboundHeaderFidelity
+            | Capability::ResponseEgressAbort
+            | Capability::ResponseEgressBackpressure
+            | Capability::ResponseEgressCompletion
+            | Capability::ResponseWriteDeadlines
+            | Capability::StreamedUploadDeadlines => CapabilitySupport::BestEffort,
+            Capability::ConfigReadAllocationBounds
+            | Capability::OutboundAuthorityOverride
+            | Capability::OutboundCompleteResourceAccounting
+            | Capability::RawIngressFramingValidation
+            | Capability::RawIngressHeadLimits
+            | _ => CapabilitySupport::Unsupported,
+        }
+    }
+
     fn execute(&self, action: AdapterAction, args: &[String]) -> Result<(), String> {
         match action {
             // `spin cloud {login|logout|info}` is the native sign-in
@@ -168,6 +202,34 @@ impl Adapter for SpinCliAdapter {
         }
     }
 
+    fn execute_target(
+        &self,
+        action: AdapterAction,
+        target: &AdapterExecutionTarget,
+        args: &[String],
+    ) -> Result<(), String> {
+        let manifest = target_manifest(target)?;
+        match action {
+            AdapterAction::Build => {
+                let artifact = build_from_manifest(&manifest, args)?;
+                log::info!("[edgezero] Spin build complete -> {}", artifact.display());
+                Ok(())
+            }
+            AdapterAction::Deploy => deploy_from_manifest(&manifest, args),
+            AdapterAction::Serve => serve_from_manifest(&manifest, args),
+            AdapterAction::AuthLogin
+            | AdapterAction::AuthLogout
+            | AdapterAction::AuthStatus
+            | AdapterAction::DeployStaging
+            | AdapterAction::EmitVersion
+            | AdapterAction::Healthcheck
+            | AdapterAction::Rollback
+            | _ => Err(format!(
+                "spin adapter cannot execute operational action {action:?} against a pinned runtime target"
+            )),
+        }
+    }
+
     fn merged_id_kinds(&self) -> &'static [&'static str] {
         // Both KV and Config back to `spin_sdk::key_value::Store` via
         // the same `provision` path; declaring the same logical id
@@ -178,6 +240,10 @@ impl Adapter for SpinCliAdapter {
 
     fn name(&self) -> &'static str {
         "spin"
+    }
+
+    fn platform_metadata(&self) -> PlatformMetadata {
+        crate::SPIN_PLATFORM
     }
 
     fn provision(
@@ -1053,6 +1119,10 @@ fn ensure_kv_label_in_component(
 pub fn build(extra_args: &[String]) -> Result<PathBuf, String> {
     let manifest =
         find_spin_manifest(env::current_dir().map_err(|err| err.to_string())?.as_path())?;
+    build_from_manifest(&manifest, extra_args)
+}
+
+fn build_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<PathBuf, String> {
     let manifest_dir = manifest
         .parent()
         .ok_or_else(|| "spin manifest has no parent directory".to_owned())?;
@@ -1095,18 +1165,43 @@ pub fn build(extra_args: &[String]) -> Result<PathBuf, String> {
 pub fn deploy(extra_args: &[String]) -> Result<(), String> {
     let manifest =
         find_spin_manifest(env::current_dir().map_err(|err| err.to_string())?.as_path())?;
+    deploy_from_manifest(&manifest, extra_args)
+}
+
+fn deploy_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), String> {
+    run_manifest_command("deploy", manifest, extra_args)
+}
+
+fn run_manifest_command(verb: &str, manifest: &Path, extra_args: &[String]) -> Result<(), String> {
+    if extra_args.iter().any(|arg| {
+        ["--from", "--from-file", "--file", "--from-registry"]
+            .iter()
+            .any(|selector| {
+                arg == selector
+                    || arg
+                        .strip_prefix(selector)
+                        .is_some_and(|suffix| suffix.starts_with('='))
+            })
+            || arg == "-f"
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2)
+    }) {
+        return Err(
+            "pinned Spin execution forbids source overrides and combined short options".to_owned(),
+        );
+    }
     let manifest_dir = manifest
         .parent()
         .ok_or_else(|| "spin manifest has no parent directory".to_owned())?;
 
     let status = Command::new("spin")
-        .args(["deploy"])
+        .args([verb, "--from"])
+        .arg(manifest)
         .args(extra_args)
         .current_dir(manifest_dir)
         .status()
         .map_err(|err| format!("failed to run spin CLI: {err}"))?;
     if !status.success() {
-        return Err(format!("spin deploy failed with status {status}"));
+        return Err(format!("spin {verb} failed with status {status}"));
     }
 
     Ok(())
@@ -1142,6 +1237,19 @@ fn find_spin_manifest(start: &Path) -> Result<PathBuf, String> {
     });
 
     Ok(candidates.remove(0))
+}
+
+fn target_manifest(target: &AdapterExecutionTarget) -> Result<PathBuf, String> {
+    let manifest = target
+        .platform_manifest()
+        .map_or_else(|| target.app_root().join("spin.toml"), Path::to_path_buf);
+    if !manifest.is_file() {
+        return Err(format!(
+            "pinned spin manifest {} is not a regular file",
+            manifest.display()
+        ));
+    }
+    Ok(manifest)
 }
 
 fn locate_artifact(
@@ -1202,27 +1310,85 @@ fn register_ctor() {
 pub fn serve(extra_args: &[String]) -> Result<(), String> {
     let manifest =
         find_spin_manifest(env::current_dir().map_err(|err| err.to_string())?.as_path())?;
-    let manifest_dir = manifest
-        .parent()
-        .ok_or_else(|| "spin manifest has no parent directory".to_owned())?;
+    serve_from_manifest(&manifest, extra_args)
+}
 
-    let status = Command::new("spin")
-        .args(["up"])
-        .args(extra_args)
-        .current_dir(manifest_dir)
-        .status()
-        .map_err(|err| format!("failed to run spin CLI: {err}"))?;
-    if !status.success() {
-        return Err(format!("spin up failed with status {status}"));
-    }
-
-    Ok(())
+fn serve_from_manifest(manifest: &Path, extra_args: &[String]) -> Result<(), String> {
+    run_manifest_command("up", manifest, extra_args)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU32;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_commands_preserve_selected_manifest_and_reject_source_override() {
+        use edgezero_core::test_env::{PathPrepend, env_lock};
+        use std::os::unix::fs::PermissionsExt as _;
+        let _lock = env_lock().lock().unwrap();
+        let fake = tempdir().unwrap();
+        let record = fake.path().join("argv.log");
+        let program = fake.path().join("spin");
+        fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > '{}'\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let _path = PathPrepend::new(fake.path());
+        let app = tempdir().unwrap();
+        let root = app.path().canonicalize().unwrap();
+        let manifest = root.join("selected-spin.toml");
+        fs::write(&manifest, "spin_manifest_version = 2\n").unwrap();
+        fs::write(root.join("spin.toml"), "wrong manifest\n").unwrap();
+        let target = AdapterExecutionTarget::new(root.clone(), None, Some(manifest.clone()));
+        for (action, verb) in [
+            (AdapterAction::Serve, "up"),
+            (AdapterAction::Deploy, "deploy"),
+        ] {
+            SpinCliAdapter.execute_target(action, &target, &[]).unwrap();
+            let argv = fs::read_to_string(&record).unwrap();
+            assert_eq!(
+                argv.lines().collect::<Vec<_>>(),
+                [
+                    root.to_str().unwrap(),
+                    verb,
+                    "--from",
+                    manifest.to_str().unwrap()
+                ]
+            );
+            for selector in [
+                "--from",
+                "--from=other.toml",
+                "--from-file",
+                "--from-file=other.toml",
+                "--file",
+                "--file=other.toml",
+                "--from-registry",
+                "--from-registry=registry.invalid/app",
+                "-f",
+                "-fother.toml",
+            ] {
+                fs::remove_file(&record).unwrap();
+                assert!(
+                    SpinCliAdapter
+                        .execute_target(action, &target, &[selector.into()])
+                        .is_err()
+                );
+                assert!(
+                    !record.exists(),
+                    "conflicting target must not launch provider"
+                );
+                fs::write(&record, "").unwrap();
+            }
+        }
+    }
 
     // Shared fixture names. Pinning these as consts (instead of
     // inline `"sessions"` / `"app_config"` / `"demo"` per call site)
@@ -1236,6 +1402,184 @@ mod tests {
     const TEST_CONFIG_ID: &str = "app_config";
     const TEST_SECRET_ID: &str = "default";
     const TEST_COMPONENT_ID: &str = "demo";
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the complete capability data table together"
+    )]
+    fn adapter_capability_matrix_matches_contracts() {
+        for (capability, support) in [
+            (
+                Capability::ConfigReadAllocationBounds,
+                CapabilitySupport::Unsupported,
+            ),
+            (
+                Capability::ConfigReadDeadlines,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::InboundReadDeadlines,
+                CapabilitySupport::BestEffort,
+            ),
+            (Capability::IngressAdmission, CapabilitySupport::Native),
+            (
+                Capability::IngressAdmissionAbort,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::RawIngressFramingValidation,
+                CapabilitySupport::Unsupported,
+            ),
+            (
+                Capability::RawIngressHeadLimits,
+                CapabilitySupport::Unsupported,
+            ),
+            (
+                Capability::ResponseEgressAbort,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::ResponseEgressBackpressure,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::ResponseEgressCompletion,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::ResponseWriteDeadlines,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::BufferedResponseContentLength,
+                CapabilitySupport::BestEffort,
+            ),
+            (Capability::OutboundHttp, CapabilitySupport::Native),
+            (
+                Capability::OutboundRedirectFollowing,
+                CapabilitySupport::Native,
+            ),
+            (
+                Capability::OutboundCompleteResourceAccounting,
+                CapabilitySupport::Unsupported,
+            ),
+            (
+                Capability::OutboundHeaderFidelity,
+                CapabilitySupport::BestEffort,
+            ),
+            (Capability::OutboundDeadlines, CapabilitySupport::BestEffort),
+            (
+                Capability::OutboundConnectTimeout,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::OutboundFailureDiagnostics,
+                CapabilitySupport::Native,
+            ),
+            (
+                Capability::OutboundFlexiblePhaseBudget,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::OutboundAuthorityOverride,
+                CapabilitySupport::Unsupported,
+            ),
+            (
+                Capability::OutboundBatchCancellation,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::OutboundBatchCompletionOrder,
+                CapabilitySupport::Native,
+            ),
+            (
+                Capability::OutboundBatchSlotIsolation,
+                CapabilitySupport::Native,
+            ),
+            (Capability::OutboundCacheBypass, CapabilitySupport::Native),
+            (
+                Capability::OutboundImageOptimizer,
+                CapabilitySupport::Unsupported,
+            ),
+            (
+                Capability::StreamedUploadDeadlines,
+                CapabilitySupport::BestEffort,
+            ),
+            (
+                Capability::LazyStreamedResponsePassthrough,
+                CapabilitySupport::BestEffort,
+            ),
+        ] {
+            assert_eq!(
+                SPIN_ADAPTER.capability(capability),
+                support,
+                "{capability:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adapter_platform_metadata_distinguishes_generic_and_hosted_profiles() {
+        let generic = SPIN_ADAPTER.platform_metadata();
+
+        assert_eq!(generic, crate::SPIN_PLATFORM);
+        assert_eq!(
+            generic.memory_ceiling(),
+            edgezero_core::PlatformFact::unknown(
+                edgezero_core::PlatformUnknownReason::RuntimeConfigured
+            )
+        );
+        assert_eq!(
+            generic.inbound_request_population_bound(),
+            edgezero_core::PlatformFact::unknown(
+                edgezero_core::PlatformUnknownReason::RuntimeConfigured
+            )
+        );
+        assert_eq!(
+            generic.host_ingress_memory_accounting(),
+            edgezero_core::PlatformFact::unknown(
+                edgezero_core::PlatformUnknownReason::RuntimeConfigured
+            )
+        );
+
+        let hosted = crate::AKAMAI_FUNCTIONS_PLATFORM;
+        let source = edgezero_core::PlatformResourceSource::HostedDefault {
+            provider: "Akamai Functions",
+        };
+        assert_eq!(
+            hosted.memory_ceiling(),
+            edgezero_core::PlatformFact::known(
+                edgezero_core::MemoryCeiling::new(
+                    128 * 1024 * 1024,
+                    edgezero_core::MemoryCeilingScope::PerExecution,
+                    None,
+                ),
+                source,
+            )
+        );
+        assert_eq!(
+            hosted.inbound_request_population_bound(),
+            edgezero_core::PlatformFact::known(
+                edgezero_core::InboundRequestPopulationBound::new(NonZeroU32::MIN),
+                source,
+            )
+        );
+        assert_eq!(
+            hosted
+                .inbound_request_population_bound()
+                .value()
+                .expect("the hosted profile publishes the per-execution population")
+                .max_live_requests(),
+            NonZeroU32::MIN
+        );
+        assert_eq!(
+            hosted.host_ingress_memory_accounting(),
+            edgezero_core::PlatformFact::unknown(
+                edgezero_core::PlatformUnknownReason::ProviderUnpublished
+            )
+        );
+    }
 
     #[test]
     fn is_valid_spin_key_accepts_lowercase_with_digits_and_underscores() {

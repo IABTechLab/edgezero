@@ -1,0 +1,557 @@
+{
+  "schema": 1,
+  "execution_date": "2026-10-23",
+  "status": "Failed local timing acceptance; repaired runtime preserves source errors",
+  "qualification": false,
+  "edgezero_base_revision": "d12730fda2704ba4c95e878dccd50aef8c4ec22b",
+  "source_state": "working-tree characterization; not a frozen qualification record",
+  "command": "VICEROY_BIN=<explicit stock or repaired executable> scripts/smoke_test_reusable_app.sh --adapter fastly --suite outbound-readiness --output <new empty directory>",
+  "matrix": {
+    "cases": 11,
+    "consumption": ["buffered", "streamed"],
+    "read_capacities": [1, 16384],
+    "repetitions": 3,
+    "finite_direct_controls": 3,
+    "probes_per_run": 135,
+    "origin_requests_per_run": 147,
+    "deadline_us": 500000,
+    "maximum_completion_us": 505000,
+    "backend_phase_timeout_ms": 2000,
+    "backend_registration_in_timing_window": false,
+    "production_read_maximum_approved": false
+  },
+  "runtime": {
+    "sdk": "fastly 0.13.1",
+    "upstream_tag": "v0.21.0",
+    "upstream_revision": "a69d982d1d95e13c0fc9f92683b9118639bb4b04",
+    "stock_binary_sha256": "751ff2c1a83063b109bc212b95be5f52e5ab6284b9027fa03aa229087eba3f30",
+    "repaired_binary_sha256": "98ea0536478ce2e641f093b2619b7ac7c6c237402f140e5792d854575abc7100",
+    "patch_sha256": "8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759",
+    "build_details": "2026-10-23-viceroy-readiness-repair.json",
+    "pins_changed": false,
+    "installed_runtime_replaced": false
+  },
+  "containment": {
+    "origin_maximum_workers": 2,
+    "origin_request_head_bytes": 4096,
+    "origin_watchdog_ms": 3000,
+    "client_timeout_ms": 12000,
+    "guest_trace_samples_maximum": 512,
+    "guest_consumed_bytes_per_slot_maximum": 65536,
+    "forced_cleanup_is_cancellation_evidence": false
+  },
+  "interpretation": [
+    "The pre-hardening pair uses identical guest bytes; the current pair uses identical revised guest bytes.",
+    "Guest revisions identify the base only; source hashes describe the current uncommitted fixture inputs.",
+    "The current fixture persists completed samples incrementally and rechecks expiry immediately before body reads.",
+    "First repaired matrix: pending-body/selected/streamed/1/0 completed at 507794 us; select returned at 507153 us.",
+    "Current repaired matrix: siblings/selected/streamed/1/1 completed at 507233 us, outside the unchanged 505000 us boundary.",
+    "Traces observe lateness at the host-call boundary; they do not isolate the OS/runtime scheduling cause.",
+    "Stock loses errors in all 24 selected truncation/malformed-body probes. Repaired runs retain those source errors.",
+    "No retry result erases the earlier failures. No timing tolerance, policy approval or capability is changed.",
+    "Raw guest/origin probes are retained separately; full event/log files and binaries are identified by hash, not retained release assets.",
+    "B, H(K), production-path migration, exact-version review, hosted evidence, candidate freeze and all qualification legs remain open."
+  ],
+  "source_files": [
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-fastly/src/bin/outbound_readiness.rs",
+      "sha256": "04fd787c3046d8867093915d43043037dbe95f229b5d45286426162e10df5c49"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence.rs",
+      "sha256": "4f635687f6cbefc458c90acda71e03378825e94bb5d8fa47435df5c55eaeddb8"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/evidence/readiness.rs",
+      "sha256": "1e81a86aedf33d624b1c4b417e2be77d1ec9ec7473eee1fd65645e887dfe3113"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/net.rs",
+      "sha256": "26a64dd6a2814031fed30cbd77d57e75f2cdc00540a5de1e0fac707390a4cf5d"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/net/readiness.rs",
+      "sha256": "c4a3cbe13e0bfb1fc0134c920cb78792e2e3bb4b352bbdc68cf18c4c0995fd67"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/runners.rs",
+      "sha256": "54e4c2974dd0233419875a8c9d8c90a6b8a573552b20786d1cff0c432355260f"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/crates/fixture-harness/src/runners/readiness.rs",
+      "sha256": "91b90dc9933a48a92567df79aca08937e637d2a96525fbdb5e0f81f7e1d3815f"
+    },
+    {
+      "path": "tests/fixtures/reusable-app/Cargo.lock",
+      "sha256": "7770119d7879e96c50cdf87be7dc9b72f5626a43b63c6b15da1f425179fab2ee"
+    },
+    {
+      "path": "patches/viceroy/0.21.0-body-readiness.patch",
+      "sha256": "8693ce34f82cc98dc272bf39379007b17a40dfc19138c55b445378fd9a163759"
+    }
+  ],
+  "runs": [
+    {
+      "id": "repaired-before-trace-hardening",
+      "exit_code": 1,
+      "directory": "/private/tmp/edgezero-fastly-readiness-matrix-20261023-02",
+      "events_sha256": "6346fed93b8dd4a4746ca14609a067198e56c9c4e5a3167a14b2df8d2062e32c",
+      "log_sha256": "17638b9f2800526fb2d1105c97795e03f1b8e9a507c90cd5b29ae37a0c6f90e4",
+      "guest_sha256": "b7ac011327c2335bfff83d0ac3c369bf075497277f9162e73f39bd8206d516c6",
+      "probes": 135,
+      "origin_requests": 147,
+      "max_completion_us": 507794,
+      "all_workers_joined": true,
+      "origin_errors": [],
+      "watchdogs": 0,
+      "source_error_losses": [],
+      "late_probes": [
+        {
+          "leg": "pending-body/selected/streamed/1/0",
+          "completed_us": 507794,
+          "late_operations": [
+            {
+              "end_us": 507153,
+              "operation": "select",
+              "phases": ["body"],
+              "selected": null,
+              "slots": [0],
+              "start_us": 5332,
+              "status": "FastlyStatus::OK",
+              "timeout_ms": 494
+            },
+            {
+              "end_us": 507596,
+              "operation": "finish",
+              "outcome": "timeout",
+              "phase": "body",
+              "slot": 0,
+              "start_us": 507362
+            }
+          ]
+        }
+      ],
+      "known_failed_legs": ["pending-body/selected/streamed/1/0"],
+      "error_comparisons": [
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 0,
+          "selected": "UnexpectedEof",
+          "status": "pass"
+        },
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 1,
+          "selected": "UnexpectedEof",
+          "status": "pass"
+        },
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 2,
+          "selected": "UnexpectedEof",
+          "status": "pass"
+        }
+      ],
+      "validation_failures": ["reordered or late operation"]
+    },
+    {
+      "id": "stock-before-trace-hardening",
+      "exit_code": 1,
+      "directory": "/private/tmp/edgezero-fastly-readiness-matrix-stock-20261023-01",
+      "events_sha256": "1a41cc6b24494915a79715f20fdf1c5c2a9443257cf7a8592d4074d9e6fb027f",
+      "log_sha256": "57d330bc7783cfdf7f8a313581fa103f31e6a057faba3fecf30622e929a295f6",
+      "guest_sha256": "b7ac011327c2335bfff83d0ac3c369bf075497277f9162e73f39bd8206d516c6",
+      "probes": 135,
+      "origin_requests": 147,
+      "max_completion_us": 533355,
+      "all_workers_joined": true,
+      "origin_errors": [],
+      "watchdogs": 0,
+      "source_error_losses": [
+        "truncated/selected/buffered/1/0",
+        "truncated/selected/buffered/16384/0",
+        "truncated/selected/streamed/1/0",
+        "truncated/selected/streamed/16384/0",
+        "malformed-body/selected/buffered/1/0",
+        "malformed-body/selected/buffered/16384/0",
+        "malformed-body/selected/streamed/1/0",
+        "malformed-body/selected/streamed/16384/0",
+        "truncated/selected/buffered/1/1",
+        "truncated/selected/buffered/16384/1",
+        "truncated/selected/streamed/1/1",
+        "truncated/selected/streamed/16384/1",
+        "malformed-body/selected/buffered/1/1",
+        "malformed-body/selected/buffered/16384/1",
+        "malformed-body/selected/streamed/1/1",
+        "malformed-body/selected/streamed/16384/1",
+        "truncated/selected/buffered/1/2",
+        "truncated/selected/buffered/16384/2",
+        "truncated/selected/streamed/1/2",
+        "truncated/selected/streamed/16384/2",
+        "malformed-body/selected/buffered/1/2",
+        "malformed-body/selected/buffered/16384/2",
+        "malformed-body/selected/streamed/1/2",
+        "malformed-body/selected/streamed/16384/2"
+      ],
+      "late_probes": [
+        {
+          "leg": "pending-body/selected/buffered/16384/1",
+          "completed_us": 515212,
+          "late_operations": [
+            {
+              "end_us": 515190,
+              "operation": "select",
+              "phases": ["body"],
+              "selected": null,
+              "slots": [0],
+              "start_us": 6179,
+              "status": "FastlyStatus::OK",
+              "timeout_ms": 493
+            },
+            {
+              "end_us": 515206,
+              "operation": "finish",
+              "outcome": "timeout",
+              "phase": "body",
+              "slot": 0,
+              "start_us": 515195
+            }
+          ]
+        },
+        {
+          "leg": "trickle/selected/streamed/16384/1",
+          "completed_us": 505014,
+          "late_operations": [
+            {
+              "end_us": 505008,
+              "operation": "finish",
+              "outcome": "timeout",
+              "phase": "body",
+              "slot": 0,
+              "start_us": 505000
+            }
+          ]
+        },
+        {
+          "leg": "exhausted/selected/streamed/1/1",
+          "completed_us": 533355,
+          "late_operations": [
+            {
+              "end_us": 529716,
+              "operation": "select",
+              "phases": ["body"],
+              "selected": null,
+              "slots": [0],
+              "start_us": 6095,
+              "status": "FastlyStatus::OK",
+              "timeout_ms": 493
+            },
+            {
+              "end_us": 533344,
+              "operation": "finish",
+              "outcome": "timeout",
+              "phase": "body",
+              "slot": 0,
+              "start_us": 529754
+            }
+          ]
+        },
+        {
+          "leg": "exhausted/selected/streamed/16384/1",
+          "completed_us": 507039,
+          "late_operations": [
+            {
+              "end_us": 506010,
+              "operation": "select",
+              "phases": ["body"],
+              "selected": null,
+              "slots": [0],
+              "start_us": 9789,
+              "status": "FastlyStatus::OK",
+              "timeout_ms": 490
+            },
+            {
+              "end_us": 506921,
+              "operation": "finish",
+              "outcome": "timeout",
+              "phase": "body",
+              "slot": 0,
+              "start_us": 506177
+            }
+          ]
+        }
+      ],
+      "known_failed_legs": [
+        "pending-body/selected/buffered/16384/1",
+        "trickle/selected/streamed/16384/1",
+        "exhausted/selected/streamed/1/1",
+        "exhausted/selected/streamed/16384/1",
+        "truncated/selected/buffered/1/0",
+        "truncated/selected/buffered/16384/0",
+        "truncated/selected/streamed/1/0",
+        "truncated/selected/streamed/16384/0",
+        "malformed-body/selected/buffered/1/0",
+        "malformed-body/selected/buffered/16384/0",
+        "malformed-body/selected/streamed/1/0",
+        "malformed-body/selected/streamed/16384/0",
+        "truncated/selected/buffered/1/1",
+        "truncated/selected/buffered/16384/1",
+        "truncated/selected/streamed/1/1",
+        "truncated/selected/streamed/16384/1",
+        "malformed-body/selected/buffered/1/1",
+        "malformed-body/selected/buffered/16384/1",
+        "malformed-body/selected/streamed/1/1",
+        "malformed-body/selected/streamed/16384/1",
+        "truncated/selected/buffered/1/2",
+        "truncated/selected/buffered/16384/2",
+        "truncated/selected/streamed/1/2",
+        "truncated/selected/streamed/16384/2",
+        "malformed-body/selected/buffered/1/2",
+        "malformed-body/selected/buffered/16384/2",
+        "malformed-body/selected/streamed/1/2",
+        "malformed-body/selected/streamed/16384/2"
+      ],
+      "error_comparisons": [
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 0,
+          "selected": null,
+          "status": "fail"
+        },
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 1,
+          "selected": null,
+          "status": "fail"
+        },
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 2,
+          "selected": null,
+          "status": "fail"
+        }
+      ],
+      "validation_failures": ["wrong case terminal"]
+    },
+    {
+      "id": "repaired-current",
+      "exit_code": 1,
+      "directory": "/private/tmp/edgezero-fastly-readiness-matrix-20261023-03",
+      "events_sha256": "5a59175ec845a02d0e2fe9669c6859bd9c1024fe865d1a10212fef4a3bae4495",
+      "log_sha256": "e5434780fb66267ac0a879907fb7e6f4a3860cdc012a55a3e1aa61bb1f140142",
+      "guest_sha256": "1495a3bd629481f81d3adc5709347e3bd672ae92049e13d3de134b0f2f01a3c5",
+      "probes": 135,
+      "origin_requests": 147,
+      "max_completion_us": 507233,
+      "all_workers_joined": true,
+      "origin_errors": [],
+      "watchdogs": 0,
+      "source_error_losses": [],
+      "late_probes": [
+        {
+          "leg": "siblings/selected/streamed/1/1",
+          "completed_us": 507233,
+          "late_operations": [
+            {
+              "end_us": 506716,
+              "operation": "select",
+              "phases": ["body"],
+              "selected": null,
+              "slots": [0],
+              "start_us": 6419,
+              "status": "FastlyStatus::OK",
+              "timeout_ms": 493
+            },
+            {
+              "end_us": 507211,
+              "operation": "finish",
+              "outcome": "timeout",
+              "phase": "body",
+              "slot": 0,
+              "start_us": 507203
+            }
+          ]
+        }
+      ],
+      "known_failed_legs": ["siblings/selected/streamed/1/1"],
+      "error_comparisons": [
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 0,
+          "selected": "UnexpectedEof",
+          "status": "pass"
+        },
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 1,
+          "selected": "UnexpectedEof",
+          "status": "pass"
+        },
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 2,
+          "selected": "UnexpectedEof",
+          "status": "pass"
+        }
+      ],
+      "validation_failures": [
+        "1 readiness leg(s) failed:\nsiblings/selected/streamed/1/1: reordered or late operation"
+      ]
+    },
+    {
+      "id": "stock-current",
+      "exit_code": 1,
+      "directory": "/private/tmp/edgezero-fastly-readiness-matrix-stock-20261023-02",
+      "events_sha256": "fc0efd5096a8cea8cc664484e765887d7c93a5566348031e1556edd229be2398",
+      "log_sha256": "c4b31684d2d4cacb329989be09249b614e986b2ffd396fa5048c2575a0797565",
+      "guest_sha256": "1495a3bd629481f81d3adc5709347e3bd672ae92049e13d3de134b0f2f01a3c5",
+      "probes": 135,
+      "origin_requests": 147,
+      "max_completion_us": 502580,
+      "all_workers_joined": true,
+      "origin_errors": [],
+      "watchdogs": 0,
+      "source_error_losses": [
+        "truncated/selected/buffered/1/0",
+        "truncated/selected/buffered/16384/0",
+        "truncated/selected/streamed/1/0",
+        "truncated/selected/streamed/16384/0",
+        "malformed-body/selected/buffered/1/0",
+        "malformed-body/selected/buffered/16384/0",
+        "malformed-body/selected/streamed/1/0",
+        "malformed-body/selected/streamed/16384/0",
+        "truncated/selected/buffered/1/1",
+        "truncated/selected/buffered/16384/1",
+        "truncated/selected/streamed/1/1",
+        "truncated/selected/streamed/16384/1",
+        "malformed-body/selected/buffered/1/1",
+        "malformed-body/selected/buffered/16384/1",
+        "malformed-body/selected/streamed/1/1",
+        "malformed-body/selected/streamed/16384/1",
+        "truncated/selected/buffered/1/2",
+        "truncated/selected/buffered/16384/2",
+        "truncated/selected/streamed/1/2",
+        "truncated/selected/streamed/16384/2",
+        "malformed-body/selected/buffered/1/2",
+        "malformed-body/selected/buffered/16384/2",
+        "malformed-body/selected/streamed/1/2",
+        "malformed-body/selected/streamed/16384/2"
+      ],
+      "late_probes": [],
+      "known_failed_legs": [
+        "truncated/selected/buffered/1/0",
+        "truncated/selected/buffered/16384/0",
+        "truncated/selected/streamed/1/0",
+        "truncated/selected/streamed/16384/0",
+        "malformed-body/selected/buffered/1/0",
+        "malformed-body/selected/buffered/16384/0",
+        "malformed-body/selected/streamed/1/0",
+        "malformed-body/selected/streamed/16384/0",
+        "truncated/selected/buffered/1/1",
+        "truncated/selected/buffered/16384/1",
+        "truncated/selected/streamed/1/1",
+        "truncated/selected/streamed/16384/1",
+        "malformed-body/selected/buffered/1/1",
+        "malformed-body/selected/buffered/16384/1",
+        "malformed-body/selected/streamed/1/1",
+        "malformed-body/selected/streamed/16384/1",
+        "truncated/selected/buffered/1/2",
+        "truncated/selected/buffered/16384/2",
+        "truncated/selected/streamed/1/2",
+        "truncated/selected/streamed/16384/2",
+        "malformed-body/selected/buffered/1/2",
+        "malformed-body/selected/buffered/16384/2",
+        "malformed-body/selected/streamed/1/2",
+        "malformed-body/selected/streamed/16384/2"
+      ],
+      "error_comparisons": [
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 0,
+          "selected": null,
+          "status": "fail"
+        },
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 1,
+          "selected": null,
+          "status": "fail"
+        },
+        {
+          "direct": "UnexpectedEof",
+          "event": "readiness-error-preservation",
+          "qualification": false,
+          "repetition": 2,
+          "selected": null,
+          "status": "fail"
+        }
+      ],
+      "validation_failures": [
+        "24 readiness leg(s) failed:\ntruncated/selected/buffered/1/0: wrong case terminal\ntruncated/selected/buffered/16384/0: wrong case terminal\ntruncated/selected/streamed/1/0: wrong case terminal\ntruncated/selected/streamed/16384/0: wrong case terminal\nmalformed-body/selected/buffered/1/0: wrong case terminal\nmalformed-body/selected/buffered/16384/0: wrong case terminal\nmalformed-body/selected/streamed/1/0: wrong case terminal\nmalformed-body/selected/streamed/16384/0: wrong case terminal\ntruncated/selected/buffered/1/1: wrong case terminal\ntruncated/selected/buffered/16384/1: wrong case terminal\ntruncated/selected/streamed/1/1: wrong case terminal\ntruncated/selected/streamed/16384/1: wrong case terminal\nmalformed-body/selected/buffered/1/1: wrong case terminal\nmalformed-body/selected/buffered/16384/1: wrong case terminal\nmalformed-body/selected/streamed/1/1: wrong case terminal\nmalformed-body/selected/streamed/16384/1: wrong case terminal\ntruncated/selected/buffered/1/2: wrong case terminal\ntruncated/selected/buffered/16384/2: wrong case terminal\ntruncated/selected/streamed/1/2: wrong case terminal\ntruncated/selected/streamed/16384/2: wrong case terminal\nmalformed-body/selected/buffered/1/2: wrong case terminal\nmalformed-body/selected/buffered/16384/2: wrong case terminal\nmalformed-body/selected/streamed/1/2: wrong case terminal\nmalformed-body/selected/streamed/16384/2: wrong case terminal"
+      ]
+    }
+  ],
+  "retained_probes": {
+    "path": "docs/audits/evidence/2026-10-23-fastly-readiness-matrix-probes.jsonl",
+    "sha256": "7499118d2754abfbfdd92676867c53f5d850d2f89f8f6220f498b0bdc11664b6",
+    "records": 540
+  },
+  "verification": {
+    "fixture_core_tests": 6,
+    "fixture_harness_tests": 103,
+    "retained_probe_replay_tests": 1,
+    "readiness_tests": 19,
+    "strict_fixture_clippy": "passed for native harness and wasm32-wasip1 diagnostic guest",
+    "fixture_format": "passed",
+    "qualification_inventory": {
+      "criteria": 255,
+      "legs": 511,
+      "planned": 511,
+      "qualified": false
+    },
+    "root_gates": {
+      "format": "passed",
+      "strict_workspace_clippy": "passed",
+      "workspace_tests": {
+        "result_suites": 28,
+        "nonempty_suites": 21,
+        "passed": 2193,
+        "failed": 0,
+        "ignored": 1,
+        "measured": 0,
+        "filtered_out": 0,
+        "ui_compile_cases": 22
+      },
+      "feature_check": "passed",
+      "spin_wasip2_check": "passed",
+      "test_execution": "loopback-authorized rerun; initial sandbox permission failure retained",
+      "status_log_sha256": "d61b8895a879bf36f597e0ca11666a8c4c2a30a2e9cc18a56f434ce90613da63"
+    },
+    "timeout_wait_review_regressions": {
+      "red_missing_wait_mutations": 3,
+      "green": "all mutations rejected; 540 actual probes replayed with unchanged failed dispositions"
+    }
+  }
+}

@@ -13,18 +13,19 @@ workspace = true
 [features]
 default = []
 spin = ["dep:spin-sdk"]
+test-utils = ["edgezero-core/test-utils"]
 cli = ["dep:edgezero-adapter", "edgezero-adapter/cli", "dep:ctor", "dep:rusqlite", "dep:toml", "dep:toml_edit", "dep:walkdir"]
 
 [dependencies]
 edgezero-core = { path = "../edgezero-core" }
 edgezero-adapter = { path = "../edgezero-adapter", optional = true, features = ["cli"] }
 anyhow = { workspace = true }
+async-stream = { workspace = true }
 async-trait = { workspace = true }
-brotli = { workspace = true }
 bytes = { workspace = true }
-flate2 = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
+fern = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

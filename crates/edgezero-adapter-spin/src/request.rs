@@ -1,30 +1,55 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
+#![cfg_attr(
+    any(test, feature = "test-utils"),
+    expect(
+        clippy::self_named_module_files,
+        reason = "retain the existing request module file while separating the gated test bridge"
+    )
+)]
 
-use anyhow::Context as _;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) mod test_support;
 
-use crate::SpinFullResponse;
+use crate::SpinResponse;
 use crate::config_store::SpinConfigStore;
 use crate::context::{SpinRequestContext, parse_client_addr};
 use crate::ingress::capture_request_ingress;
 use crate::key_value_store::{DEFAULT_MAX_LIST_KEYS, SpinKvStore};
-use crate::proxy::SpinProxyClient;
-use crate::response::from_core_response;
+use crate::response::from_egress_response;
 use crate::secret_store::SpinSecretStore;
 use edgezero_core::app::{App, StoreMetadata};
 use edgezero_core::body::Body;
 use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
-use edgezero_core::http::{Request, request_builder};
+#[cfg(test)]
+use edgezero_core::http::request_builder;
+use edgezero_core::http::{HeaderMap, Method, Request, RequestParts};
+use edgezero_core::ingress::{
+    IngressBeginOutcome, IngressDispatchOutcome, IngressFraming, IngressHeadAccounting,
+    IngressHeadParts, PreparedIngress,
+};
 use edgezero_core::key_value_store::KvHandle;
-use edgezero_core::proxy::ProxyHandle;
+use edgezero_core::outbound::HttpClient;
+use edgezero_core::response_egress::ResponseEgressEnvelope;
 use edgezero_core::secret_store::SecretHandle;
 use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
 };
+use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
+#[cfg(test)]
+use futures::executor::block_on;
+use futures_util::future::{Either, select};
+use futures_util::stream::unfold;
+use futures_util::{StreamExt as _, TryStreamExt as _};
 use spin_sdk::http::Request as SpinRequest;
 use spin_sdk::http::body::IncomingBodyExt as _;
+use spin_sdk::time::sleep;
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::outbound::{SpinOutboundClient, native_time};
 
 /// Per-dispatch store wiring assembled before the request enters the router.
 /// The struct itself is `pub(crate)` because `dispatch_with_handles` takes it
@@ -40,19 +65,79 @@ pub(crate) struct Stores {
     secrets: Option<SecretHandle>,
 }
 
+fn detached_error_envelope(
+    app: &App,
+    error: EdgeError,
+    request_method: Method,
+    request_start: MonotonicInstant,
+) -> anyhow::Result<ResponseEgressEnvelope> {
+    match app.detached_ingress_error_egress(error, request_method, request_start) {
+        IngressDispatchOutcome::Response(envelope) => Ok(*envelope),
+        IngressDispatchOutcome::Aborted | _ => Err(anyhow::anyhow!("ingress admission aborted")),
+    }
+}
+
 /// Convert a Spin `Request` into an `EdgeZero` core `Request`.
 ///
-/// Reads the full body into a buffered `Body::Once`, inserts
-/// `SpinRequestContext` and a `ProxyHandle` into extensions.
+/// Preserves the body as a lazy stream, inserts `SpinRequestContext`, and adds
+/// an outbound [`HttpClient`] to extensions.
 ///
 /// # Errors
 /// Returns [`EdgeError::bad_request`] if the request body cannot be read or
 /// the core `Request` cannot be built from the resulting parts.
 #[inline]
+#[expect(
+    clippy::unused_async,
+    reason = "the public converter retains its established async API while request bodies remain lazy"
+)]
 pub async fn into_core_request(req: SpinRequest) -> Result<Request, EdgeError> {
     let (parts, body) = req.into_parts();
-    let ingress = capture_request_ingress(&parts.uri);
+    let mut request = into_core_request_head(parts, MonotonicClock::default());
+    if !explicit_empty_body(request.headers()) {
+        *request.body_mut() = Body::from_external_stream(body.stream());
+    }
+    Ok(request)
+}
 
+fn explicit_empty_body(headers: &HeaderMap) -> bool {
+    use edgezero_core::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
+    let mut lengths = headers.get_all(CONTENT_LENGTH).iter();
+    !headers.contains_key(TRANSFER_ENCODING)
+        && lengths.next().is_some_and(|field| {
+            field.to_str().is_ok_and(|text| {
+                let trimmed = text.trim();
+                !trimmed.is_empty() && trimmed.bytes().all(|byte| byte == b'0')
+            })
+        })
+        && lengths.next().is_none()
+}
+
+/// Begins canonical detached delivery of an assembly error without a configured app.
+///
+/// Releases the unread request. The supplied start and clock must share a domain; the finite
+/// default write deadline starts before assembly. No configured app callbacks or headers apply.
+///
+/// # Errors
+/// Returns a category-safe delivery error if conversion and its bounded fallback both fail.
+#[inline]
+pub fn send_assembly_error(
+    req: SpinRequest,
+    error: EdgeError,
+    request_start: MonotonicInstant,
+    clock: MonotonicClock,
+) -> Result<SpinResponse, EdgeError> {
+    let method = req.method().clone();
+    drop(req);
+    from_egress_response(App::assembly_error_egress(
+        error,
+        method,
+        request_start,
+        clock,
+    ))
+}
+
+fn into_core_request_head(parts: RequestParts, outbound_clock: MonotonicClock) -> Request {
+    let ingress = capture_request_ingress(&parts.uri);
     let client_addr = parts
         .headers
         .get("spin-client-addr")
@@ -64,23 +149,7 @@ pub async fn into_core_request(req: SpinRequest) -> Result<Request, EdgeError> {
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
 
-    let mut builder = request_builder().method(parts.method).uri(parts.uri);
-    for (name, value) in &parts.headers {
-        builder = builder.header(name, value);
-    }
-
-    // Inbound body size is not capped at the adapter level. The Spin runtime
-    // enforces its own request body limit (configurable via `spin.toml`), which
-    // is consistent with how the Fastly and Cloudflare adapters delegate inbound
-    // size enforcement to their respective platform runtimes.
-    let body_bytes = body
-        .bytes()
-        .await
-        .map_err(|err| EdgeError::bad_request(format!("failed to read request body: {err}")))?;
-
-    let mut request = builder
-        .body(Body::from(body_bytes.to_vec()))
-        .map_err(|err| EdgeError::bad_request(format!("failed to build request: {err}")))?;
+    let mut request = Request::from_parts(parts, Body::empty());
 
     request.extensions_mut().insert(ingress);
     SpinRequestContext::insert(
@@ -92,9 +161,75 @@ pub async fn into_core_request(req: SpinRequest) -> Result<Request, EdgeError> {
     );
     request
         .extensions_mut()
-        .insert(ProxyHandle::with_client(SpinProxyClient));
+        .insert(outbound_client(outbound_clock));
 
-    Ok(request)
+    request
+}
+
+fn into_core_request_head_for_app(parts: RequestParts, app: &App) -> Request {
+    into_core_request_head(parts, app.monotonic_clock())
+}
+
+fn outbound_client(clock: MonotonicClock) -> HttpClient {
+    HttpClient::with_client(SpinOutboundClient::with_time(native_time(clock)))
+}
+
+fn deadline_body_with_timer<Source, SourceError, Timer, MakeTimer>(
+    source: Source,
+    deadline: Deadline,
+    monotonic_clock: MonotonicClock,
+    make_timer: MakeTimer,
+) -> Body
+where
+    Source: futures_util::Stream<Item = Result<bytes::Bytes, SourceError>> + 'static,
+    SourceError: Into<anyhow::Error> + 'static,
+    Timer: Future<Output = ()> + 'static,
+    MakeTimer: Fn(Duration) -> Timer + Clone + 'static,
+{
+    let boxed_stream = source.map_err(Into::into).boxed_local();
+    let stream = unfold(Some(boxed_stream), move |stream_state| {
+        let clock = monotonic_clock.clone();
+        let timer_factory = make_timer.clone();
+        async move {
+            let mut body_stream = stream_state?;
+            let Some(remaining) = deadline.remaining_at(clock.now()) else {
+                return Some((
+                    Err(EdgeError::request_timeout(
+                        "inbound body read deadline exceeded",
+                    )),
+                    None,
+                ));
+            };
+            let timer = timer_factory(remaining);
+            let next_item = body_stream.next();
+            futures_util::pin_mut!(timer, next_item);
+            let item = match select(timer, next_item).await {
+                Either::Left(((), _next_item)) => {
+                    return Some((
+                        Err(EdgeError::request_timeout(
+                            "inbound body read deadline exceeded",
+                        )),
+                        None,
+                    ));
+                }
+                Either::Right((item, _timer)) => item,
+            };
+            if deadline.is_expired_at(clock.now()) {
+                return Some((
+                    Err(EdgeError::request_timeout(
+                        "inbound body read deadline exceeded",
+                    )),
+                    None,
+                ));
+            }
+            match item {
+                Some(Ok(bytes)) => Some((Ok(bytes), Some(body_stream))),
+                Some(Err(error)) => Some((Err(EdgeError::internal(error)), None)),
+                None => None,
+            }
+        }
+    });
+    Body::from_stream(stream)
 }
 
 /// Dispatch a Spin request through the `EdgeZero` router using the `"default"`
@@ -109,15 +244,16 @@ pub async fn into_core_request(req: SpinRequest) -> Result<Request, EdgeError> {
 /// cannot be converted, the router dispatch fails, or response translation
 /// fails.
 #[inline]
-pub async fn dispatch(app: &App, req: SpinRequest) -> anyhow::Result<SpinFullResponse> {
-    dispatch_with_kv_label(app, req, "default").await
+pub async fn dispatch(app: &App, req: SpinRequest) -> anyhow::Result<SpinResponse> {
+    let request_start = app.monotonic_now();
+    dispatch_with_kv_label_at(app, req, "default", request_start).await
 }
 
 /// Dispatch a Spin request through the `EdgeZero` router and return
 /// a Spin-compatible response, opening the KV store under `kv_label`.
 ///
 /// Injects all available stores into request extensions:
-/// - `ConfigStoreHandle` backed by `SpinConfigStore` opened on `kv_label`
+/// - `ConfigStoreHandle` backed by `SpinConfigStore` bound to `kv_label`
 ///   (KV-backed since 2026-Q3; was variables-backed before that). The
 ///   same label opens the config-store backend as the KV store on this
 ///   low-level path — registry-aware callers should use [`run_app`]
@@ -131,29 +267,189 @@ pub async fn dispatch(app: &App, req: SpinRequest) -> anyhow::Result<SpinFullRes
 ///
 /// # Errors
 /// Returns [`anyhow::Error`] if KV open fails when the store is required,
-/// if the config-store open fails, if the request cannot be converted, if
-/// the router dispatch fails, or if response translation fails.
+/// if the request cannot be converted, if the router dispatch fails, or if
+/// response translation fails. Config opening occurs during extraction.
 #[inline]
 pub async fn dispatch_with_kv_label(
     app: &App,
     req: SpinRequest,
     kv_label: &str,
-) -> anyhow::Result<SpinFullResponse> {
-    let stores = Stores {
-        config_store: resolve_config_handle(kv_label).await?,
-        kv: resolve_kv_handle(kv_label, false).await?,
-        secrets: resolve_secret_handle(true),
-        ..Default::default()
-    };
-    dispatch_with_handles(app, req, stores).await
+) -> anyhow::Result<SpinResponse> {
+    let request_start = app.monotonic_now();
+    dispatch_with_kv_label_at(app, req, kv_label, request_start).await
+}
+
+async fn dispatch_with_kv_label_at(
+    app: &App,
+    req: SpinRequest,
+    kv_label: &str,
+    request_start: MonotonicInstant,
+) -> anyhow::Result<SpinResponse> {
+    crate::in_outbound_callback(async move {
+        let stores = Stores {
+            config_store: Some(config_handle(kv_label.to_owned())),
+            kv: resolve_kv_handle(kv_label, false).await?,
+            secrets: resolve_secret_handle(true),
+            ..Default::default()
+        };
+        dispatch_with_handles(app, req, stores, request_start).await
+    })
+    .await
 }
 
 pub(crate) async fn dispatch_with_handles(
     app: &App,
     req: SpinRequest,
     stores: Stores,
-) -> anyhow::Result<SpinFullResponse> {
-    let mut core_request = into_core_request(req).await?;
+    request_start: MonotonicInstant,
+) -> anyhow::Result<SpinResponse> {
+    dispatch_with_handles_and(app, req, stores, request_start, from_egress_response).await
+}
+
+async fn dispatch_with_handles_and<Output, Deliver>(
+    app: &App,
+    req: SpinRequest,
+    stores: Stores,
+    request_start: MonotonicInstant,
+    deliver: Deliver,
+) -> anyhow::Result<Output>
+where
+    Deliver: FnOnce(ResponseEgressEnvelope) -> Result<Output, EdgeError>,
+{
+    crate::in_outbound_callback(async move {
+        let (parts, native_body) = req.into_parts();
+        let core_request = into_core_request_head_for_app(parts, app);
+        dispatch_ingress_stream_and(
+            app,
+            core_request,
+            stores,
+            request_start,
+            move || Ok(native_body.stream()),
+            deliver,
+        )
+        .await
+    })
+    .await
+}
+
+async fn dispatch_ingress_stream_and<Source, SourceError, MakeSource, Output, Deliver>(
+    app: &App,
+    head_request: Request,
+    stores: Stores,
+    request_start: MonotonicInstant,
+    make_source: MakeSource,
+    deliver: Deliver,
+) -> anyhow::Result<Output>
+where
+    Source: futures_util::Stream<Item = Result<bytes::Bytes, SourceError>> + 'static,
+    SourceError: Into<anyhow::Error> + 'static,
+    MakeSource: FnOnce() -> Result<Source, EdgeError>,
+    Deliver: FnOnce(ResponseEgressEnvelope) -> Result<Output, EdgeError>,
+{
+    dispatch_ingress_stream_with_timer_and(
+        app,
+        head_request,
+        stores,
+        request_start,
+        make_source,
+        sleep,
+        deliver,
+    )
+    .await
+}
+
+async fn dispatch_ingress_stream_with_timer_and<
+    Source,
+    SourceError,
+    MakeSource,
+    Timer,
+    MakeTimer,
+    Output,
+    Deliver,
+>(
+    app: &App,
+    mut head_request: Request,
+    stores: Stores,
+    request_start: MonotonicInstant,
+    make_source: MakeSource,
+    make_timer: MakeTimer,
+    deliver: Deliver,
+) -> anyhow::Result<Output>
+where
+    Source: futures_util::Stream<Item = Result<bytes::Bytes, SourceError>> + 'static,
+    SourceError: Into<anyhow::Error> + 'static,
+    MakeSource: FnOnce() -> Result<Source, EdgeError>,
+    Timer: Future<Output = ()> + 'static,
+    MakeTimer: Fn(Duration) -> Timer + Clone + 'static,
+    Deliver: FnOnce(ResponseEgressEnvelope) -> Result<Output, EdgeError>,
+{
+    crate::in_outbound_callback(async move {
+        head_request
+            .extensions_mut()
+            .insert(outbound_client(app.monotonic_clock()));
+        let request_method = head_request.method().clone();
+        let head_parts = IngressHeadParts::from_request(
+            &head_request,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+        if let Err(error) = head_parts.validate_normalized(app.ingress_head_limits()) {
+            let egress = detached_error_envelope(app, error, request_method, request_start)?;
+            return Ok(deliver(egress)?);
+        }
+        let prepared = match app.begin_ingress(head_parts, request_start) {
+            Ok(outcome) => match outcome {
+                IngressBeginOutcome::Admitted(prepared) => prepared,
+                IngressBeginOutcome::Refused(response) => {
+                    return Ok(deliver(response)?);
+                }
+                IngressBeginOutcome::Aborted => {
+                    return Err(anyhow::anyhow!("ingress admission aborted"));
+                }
+                _ => {
+                    let egress = detached_error_envelope(
+                        app,
+                        EdgeError::internal(anyhow::anyhow!(
+                            "unsupported ingress admission outcome"
+                        )),
+                        request_method,
+                        request_start,
+                    )?;
+                    return Ok(deliver(egress)?);
+                }
+            },
+            Err(error) => {
+                let egress = detached_error_envelope(app, error, request_method, request_start)?;
+                return Ok(deliver(egress)?);
+            }
+        };
+        if !explicit_empty_body(head_request.headers()) {
+            let source = match make_source() {
+                Ok(source) => source,
+                Err(error) => return Ok(deliver(app.admitted_error_egress(prepared, error))?),
+            };
+            *head_request.body_mut() = deadline_body_with_timer(
+                source,
+                prepared.read_deadline(),
+                prepared.monotonic_clock(),
+                make_timer,
+            );
+        }
+        dispatch_core_request(app, head_request, stores, prepared, deliver).await
+    })
+    .await
+}
+
+async fn dispatch_core_request<Output, Deliver>(
+    app: &App,
+    mut core_request: Request,
+    stores: Stores,
+    prepared: PreparedIngress,
+    deliver: Deliver,
+) -> anyhow::Result<Output>
+where
+    Deliver: FnOnce(ResponseEgressEnvelope) -> Result<Output, EdgeError>,
+{
     // Hard-cutoff: see fastly's `dispatch_core_request`
     // for the rationale. Only registries go into extensions —
     // legacy bare handles are synthesised into a one-id registry
@@ -168,17 +464,18 @@ pub(crate) async fn dispatch_with_handles(
     if let Some(registry) = secret_registry {
         core_request.extensions_mut().insert(registry);
     }
-    let response = app.router().oneshot(core_request).await?;
-    Ok(from_core_response(response).await?)
+    let response = app.dispatch_admitted(prepared, core_request).await;
+    Ok(deliver(response)?)
 }
 
 /// Dispatch with per-id store registries built from baked metadata.
 ///
 /// Spin capability map:
-/// - KV: **Multi** — each declared id opens its own [`SpinKvStore`] under the
+/// - KV: **Multi** — each declared id lazily opens its [`SpinKvStore`] on use under the
 ///   label resolved from `EDGEZERO__STORES__KV__<ID>__NAME`. Optional
 ///   `EDGEZERO__STORES__KV__<ID>__MAX_LIST_KEYS` overrides the paging cap.
-/// - Config: **Multi** — each declared id opens its own [`SpinConfigStore`]
+///   A settled open failure is typed and retained for that request only.
+/// - Config: **Multi** — each declared id binds its own [`SpinConfigStore`]
 ///   under the label resolved from `EDGEZERO__STORES__CONFIG__<ID>__NAME`.
 ///   KV-backed under the hood (was variables-backed up through 2026-Q2).
 /// - Secrets: **Single** — every declared id maps to the one shared
@@ -190,9 +487,10 @@ pub(crate) async fn dispatch_with_registries(
     kv_meta: Option<StoreMetadata>,
     secret_meta: Option<StoreMetadata>,
     env: &EnvConfig,
-) -> anyhow::Result<SpinFullResponse> {
-    let kv_registry = build_kv_registry(kv_meta, env).await?;
-    let config_registry = build_config_registry(config_meta, env).await?;
+) -> anyhow::Result<SpinResponse> {
+    let request_start = app.monotonic_now();
+    let kv_registry = build_kv_registry(kv_meta, env);
+    let config_registry = build_config_registry(config_meta, env);
     let secret_registry = build_secret_registry(secret_meta, env);
     dispatch_with_handles(
         app,
@@ -203,6 +501,7 @@ pub(crate) async fn dispatch_with_registries(
             secret_registry,
             ..Default::default()
         },
+        request_start,
     )
     .await
 }
@@ -249,13 +548,8 @@ fn synthesise_store_registries(
     (config_registry, kv_registry, secret_registry)
 }
 
-async fn build_kv_registry(
-    kv_meta: Option<StoreMetadata>,
-    env: &EnvConfig,
-) -> anyhow::Result<Option<KvRegistry>> {
-    let Some(meta) = kv_meta else {
-        return Ok(None);
-    };
+fn build_kv_registry(kv_meta: Option<StoreMetadata>, env: &EnvConfig) -> Option<KvRegistry> {
+    let meta = kv_meta?;
     let mut by_id: BTreeMap<String, KvHandle> = BTreeMap::new();
     for id in meta.ids {
         let label = env.store_name("kv", id);
@@ -263,59 +557,33 @@ async fn build_kv_registry(
             .store_setting("kv", id, "MAX_LIST_KEYS")
             .and_then(|raw| raw.parse::<usize>().ok())
             .unwrap_or(DEFAULT_MAX_LIST_KEYS);
-        match SpinKvStore::open_with_max_list_keys(&label, max_list_keys).await {
-            Ok(store) => {
-                by_id.insert((*id).to_owned(), KvHandle::new(Arc::new(store)));
-            }
-            Err(err) => {
-                // Required: `[stores.kv]` is declared, so a missing label is a
-                // configuration error rather than a silent degradation.
-                return Err(anyhow::anyhow!(
-                    "Spin KV store '{label}' (id `{id}`) is explicitly configured but could not be opened: {err}"
-                ));
-            }
-        }
+        by_id.insert(
+            (*id).to_owned(),
+            KvHandle::new(Arc::new(SpinKvStore::declared(id, label, max_list_keys))),
+        );
     }
-    // For Spin, KV open is required — any failure already returns Err
-    // above, so the default id is guaranteed to be in `by_id` here.
-    // `from_parts` keeps the API symmetric with the other adapters.
-    Ok(StoreRegistry::from_parts(by_id, meta.default.to_owned()))
+    StoreRegistry::from_parts(by_id, meta.default.to_owned())
 }
 
-async fn build_config_registry(
+fn build_config_registry(
     config_meta: Option<StoreMetadata>,
     env: &EnvConfig,
-) -> anyhow::Result<Option<ConfigRegistry>> {
-    let Some(meta) = config_meta else {
-        return Ok(None);
-    };
-    // Spin is `Multi` for config (KV-backed): each declared id opens its
-    // own `key_value::Store` under the label resolved from
-    // `EDGEZERO__STORES__CONFIG__<ID>__NAME`. Mirrors `build_kv_registry`
-    // so missing `key_value_stores = [...]` declarations surface at
-    // dispatch setup, not on first config read.
-    // Preserve the `ConfigStoreError` as the anyhow source so the
-    // caller can downcast to distinguish `Internal` (structural —
-    // label not declared / registered) from `Unavailable` (transient
-    // hostcall failure). `with_context` chains rather than
-    // stringifying.
+) -> Option<ConfigRegistry> {
+    let meta = config_meta?;
+    // Bind every declared id without host calls. Opening inside `get_bounded`
+    // lets admission run first and subjects the open to extraction's deadline.
     let mut by_id: BTreeMap<String, ConfigStoreBinding> = BTreeMap::new();
     for id in meta.ids {
         let label = env.store_name("config", id);
-        let store = SpinConfigStore::open(label.clone())
-            .await
-            .with_context(|| format!("config store id `{id}` (label `{label}`) failed to open"))?;
         by_id.insert(
             (*id).to_owned(),
             ConfigStoreBinding {
-                handle: ConfigStoreHandle::new(Arc::new(store)),
+                handle: config_handle(label),
                 default_key: env.store_key("config", id),
             },
         );
     }
-    // Every id is required to open (any failure returns Err above), so
-    // `from_parts` is guaranteed to have the default id present.
-    Ok(StoreRegistry::from_parts(by_id, meta.default.to_owned()))
+    StoreRegistry::from_parts(by_id, meta.default.to_owned())
 }
 
 fn build_secret_registry(
@@ -340,15 +608,8 @@ fn build_secret_registry(
     StoreRegistry::from_parts(by_id, meta.default.to_owned())
 }
 
-async fn resolve_config_handle(label: &str) -> anyhow::Result<Option<ConfigStoreHandle>> {
-    // Low-level path (`dispatch` / `dispatch_with_kv_label`): open the
-    // KV-backed config store under the same label used for KV. Registry
-    // callers (`dispatch_with_registries`) use `build_config_registry`
-    // instead, which resolves per-id labels via env.
-    let store = SpinConfigStore::open(label.to_owned())
-        .await
-        .with_context(|| format!("low-level dispatch: open config store `{label}`"))?;
-    Ok(Some(ConfigStoreHandle::new(Arc::new(store))))
+fn config_handle(label: String) -> ConfigStoreHandle {
+    ConfigStoreHandle::new(Arc::new(SpinConfigStore::for_label(label)))
 }
 
 async fn resolve_kv_handle(kv_label: &str, kv_required: bool) -> anyhow::Result<Option<KvHandle>> {
@@ -379,17 +640,56 @@ fn resolve_secret_handle(secrets_enabled: bool) -> Option<SecretHandle> {
 #[cfg(test)]
 mod synthesis_tests {
     use super::*;
-    use edgezero_core::config_store::{ConfigStore, ConfigStoreError, ConfigStoreHandle};
+    use bytes::Bytes;
+    use edgezero_core::ResponseEgressCompletion;
+    use edgezero_core::config_store::{
+        BoundedStoreRead, ConfigStore, ConfigStoreError, ConfigStoreHandle,
+        finish_bounded_config_read,
+    };
+    use edgezero_core::context::RequestContext;
+    use edgezero_core::http::Response;
+    use edgezero_core::ingress::{AdmissionDecision, IngressGrant};
     use edgezero_core::key_value_store::{KvStore, NoopKvStore};
+    use edgezero_core::router::RouterService;
     use edgezero_core::secret_store::{NoopSecretStore, SecretHandle};
+    use futures_util::stream::pending;
+    use std::cell::Cell;
     use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::collections::VecDeque;
+    use std::future::Pending;
+    use std::io::Error as IoError;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     struct StubConfig;
     #[async_trait::async_trait(?Send)]
     impl ConfigStore for StubConfig {
-        async fn get(&self, _key: &str) -> Result<Option<String>, ConfigStoreError> {
+        async fn get(
+            &self,
+            _key: &str,
+        ) -> Result<Option<edgezero_core::ConfigValue>, ConfigStoreError> {
             Ok(None)
+        }
+
+        async fn get_bounded(
+            &self,
+            key: &str,
+            clock: &MonotonicClock,
+            deadline: Deadline,
+            max_backend_bytes: u64,
+            max_value_bytes: u64,
+        ) -> Result<BoundedStoreRead<edgezero_core::ConfigValue>, ConfigStoreError> {
+            if deadline.is_expired_at(clock.now()) {
+                return Err(ConfigStoreError::DeadlineExceeded);
+            }
+            finish_bounded_config_read(
+                self.get(key).await,
+                clock,
+                deadline,
+                max_backend_bytes,
+                max_value_bytes,
+            )
         }
     }
 
@@ -404,6 +704,67 @@ mod synthesis_tests {
 
     fn secret_handle() -> SecretHandle {
         SecretHandle::new(Arc::new(NoopSecretStore))
+    }
+
+    #[test]
+    fn explicit_zero_length_skips_source_after_read_deadline() {
+        #[edgezero_core::action]
+        async fn forwarded(ctx: RequestContext) -> Result<Response, EdgeError> {
+            let request = ctx.into_request()?;
+            let buffered = !request.body().is_stream();
+            assert!(request.into_body().into_bytes_bounded(8).await?.is_empty());
+            assert!(buffered, "certified empty body must stay buffered");
+            Ok(Response::new(Body::empty()))
+        }
+
+        for (headers, status, constructions) in [
+            (vec![("content-length", "0")], 200, 0),
+            (vec![], 408, 1),
+            (
+                vec![("content-length", "0"), ("transfer-encoding", "chunked")],
+                400,
+                0,
+            ),
+            (
+                vec![("content-length", "0"), ("content-length", "0")],
+                400,
+                0,
+            ),
+            (vec![("content-length", "invalid")], 400, 0),
+        ] {
+            let now = MonotonicInstant::now();
+            let mut app = App::new(RouterService::builder().get("/forward", forwarded).build());
+            app.set_monotonic_clock(MonotonicClock::new(move || now));
+            app.set_ingress_admission_policy(|head| {
+                assert_eq!(head.framing(), IngressFraming::HostManaged);
+                AdmissionDecision::Admit {
+                    completion: ResponseEgressCompletion::empty(),
+                    grant: IngressGrant::empty(),
+                    read_deadline: head.read_deadline_after(Duration::ZERO),
+                }
+            });
+            let mut request = request_builder().uri("/forward");
+            for (name, value) in headers {
+                request = request.header(name, value);
+            }
+            let constructed = Rc::new(Cell::new(0_u8));
+            let count = Rc::clone(&constructed);
+            let mut envelope = block_on(dispatch_ingress_stream_with_timer_and(
+                &app,
+                request.body(Body::empty()).expect("head"),
+                Stores::default(),
+                now,
+                move || {
+                    count.set(count.get() + 1);
+                    Ok(pending::<Result<Bytes, IoError>>())
+                },
+                |_| -> Pending<()> { panic!("expired read must not construct a timer") },
+                Ok,
+            ))
+            .expect("response");
+            assert_eq!(envelope.response_mut().status().as_u16(), status);
+            assert_eq!(constructed.get(), constructions);
+        }
     }
 
     #[test]
@@ -424,6 +785,55 @@ mod synthesis_tests {
         assert!(
             kv_registry.named("other").is_none(),
             "no other id synthesised"
+        );
+    }
+
+    #[test]
+    fn production_head_conversion_installs_the_exact_application_outbound_clock() {
+        let start = MonotonicInstant::now();
+        let completed = start
+            .checked_add(Duration::from_millis(7))
+            .expect("completed instant");
+        let observations = Arc::new(Mutex::new(VecDeque::from([start, completed])));
+        let clock_observations = Arc::clone(&observations);
+        let mut app = App::new(RouterService::builder().build());
+        app.set_monotonic_clock(MonotonicClock::new(move || {
+            clock_observations
+                .lock()
+                .expect("clock observations")
+                .pop_front()
+                .expect("clock observation")
+        }));
+        let request = request_builder()
+            .method(Method::GET)
+            .uri("http://example.test/clock")
+            .body(Body::empty())
+            .expect("request");
+        let (parts, _body) = request.into_parts();
+        let core_request = into_core_request_head_for_app(parts, &app);
+        let client = core_request
+            .extensions()
+            .get::<HttpClient>()
+            .cloned()
+            .expect("HTTP client");
+        let outbound_request = edgezero_core::OutboundRequest::get("https://example.com/")
+            .expect("request")
+            .stream_response();
+
+        let results = block_on(client.send_all_until(
+            vec![outbound_request],
+            Deadline::after(Duration::from_secs(1)),
+        ))
+        .expect("valid batch driver");
+
+        assert_eq!(
+            match &results.slots()[0] {
+                edgezero_core::OutboundCollectedSlot::Resolved(result) => result.elapsed,
+                edgezero_core::OutboundCollectedSlot::AlreadyDelivered
+                | edgezero_core::OutboundCollectedSlot::Unresolved =>
+                    panic!("expected resolved outbound slot"),
+            },
+            Duration::from_millis(7)
         );
     }
 
@@ -491,9 +901,8 @@ mod synthesis_tests {
     /// Spec 12.7 / plan line 1526: `EDGEZERO__STORES__CONFIG__<ID>__KEY`
     /// must surface as `ConfigStoreBinding.default_key`.
     ///
-    /// `build_config_registry` calls `SpinConfigStore::open` which requires
-    /// the Spin executor and cannot be unit-tested here; this test exercises
-    /// the env-resolution layer that `build_config_registry` reads from.
+    /// `build_config_registry` binds labels without opening the host store;
+    /// this test exercises the env-resolution layer used by that builder.
     /// Platform-integration coverage relies on the E2 smoke scripts.
     #[test]
     fn config_default_key_env_override_resolved() {

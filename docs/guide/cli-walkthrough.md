@@ -91,7 +91,7 @@ myapp-cli provision --adapter cloudflare
 
 Per-adapter behaviour:
 
-- **axum** — local-only. Prints one note per declared store id (KV is in-memory; config
+- **axum** — local-only. Prints one note per declared store id (KV persists in `.edgezero/kv-<slug>-<hash>.redb`; config
   reads `.edgezero/local-config-<id>.json`; secrets read env vars).
 - **cloudflare** — for each KV / config id, shells out to:
 
