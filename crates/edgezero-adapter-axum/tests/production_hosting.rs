@@ -2433,7 +2433,7 @@ mod tests {
     #[cfg(not(feature = "geo-cloudfront"))]
     fn geo_hosting_rejects_unavailable_cloudfront() {
         let cwd = tempfile::tempdir().expect("unrelated cwd");
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         let mut server = Server::spawn(geo_command("geo-cloudfront", &cwd, addr), addr);
         assert!(!server.wait().success());
         let log = server.log();
@@ -2441,6 +2441,10 @@ mod tests {
         assert!(!log.contains("INITIALIZED"));
         assert!(!log.contains("HOOK_ENTERED"));
         assert!(!log.contains("ready"));
+        assert!(
+            !log.contains("startup bind"),
+            "unavailable implementation reached bind"
+        );
         TcpStream::connect_timeout(&addr, Duration::from_millis(50))
             .expect_err("unavailable implementation never binds");
         assert_eq!(fs::read_dir(cwd.path()).expect("unrelated cwd").count(), 0);
@@ -2509,12 +2513,16 @@ mod tests {
     #[test]
     fn geo_hosting_invalid_policy_never_initializes_or_listens() {
         let cwd = tempfile::tempdir().expect("unrelated cwd");
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         let mut server = Server::spawn(geo_command("geo-invalid-policy", &cwd, addr), addr);
         assert!(!server.wait().success());
         assert!(!server.log().contains("INITIALIZED"));
         assert!(!server.log().contains("HOOK_ENTERED"));
         assert!(!server.log().contains("x-origin-verify-fixture"));
+        assert!(
+            !server.log().contains("startup bind"),
+            "invalid policy reached bind"
+        );
         TcpStream::connect_timeout(&addr, Duration::from_millis(50))
             .expect_err("invalid policy never binds");
         assert_eq!(fs::read_dir(cwd.path()).expect("unrelated cwd").count(), 0);
