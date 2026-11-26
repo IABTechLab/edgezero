@@ -236,7 +236,7 @@ const expectedAfterResponseRows = [
   [
     'after-response-tasks',
     'BoundedCooperative',
-    'Unsupported',
+    'BoundedCooperative',
     'BoundedCooperative',
     'Unsupported',
   ],

@@ -160,8 +160,8 @@ impl Adapter for CloudflareCliAdapter {
             | Capability::OutboundFlexiblePhaseBudget
             | Capability::OutboundHttp
             | Capability::OutboundRedirectFollowing => CapabilitySupport::Native,
-            Capability::AfterResponseTasks
-            | Capability::ConfigReadAllocationBounds
+            Capability::AfterResponseTasks => CapabilitySupport::BoundedCooperative,
+            Capability::ConfigReadAllocationBounds
             | Capability::OutboundCompleteResourceAccounting
             | Capability::RawIngressFramingValidation
             | Capability::RawIngressHeadLimits
@@ -1528,7 +1528,7 @@ mod tests {
         for (capability, support) in [
             (
                 Capability::AfterResponseTasks,
-                CapabilitySupport::Unsupported,
+                CapabilitySupport::BoundedCooperative,
             ),
             (
                 Capability::ConfigReadAllocationBounds,
