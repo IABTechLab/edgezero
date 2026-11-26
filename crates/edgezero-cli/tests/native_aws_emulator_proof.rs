@@ -586,8 +586,11 @@ fn main() -> anyhow::Result<()> {
             let config = AppConfig::<NativeAwsProbeConfig>::from_binding(
                 binding, None, stores.secrets(), app.config_extraction_limits(), app.monotonic_clock(),
             ).await?;
-            let entered = std::env::var("PROOF_ENTERED").map_err(EdgeError::internal)?;
-            std::fs::write(entered, &config.nested.token).map_err(EdgeError::internal)?;
+            let entered = std::path::PathBuf::from(std::env::var("PROOF_ENTERED").map_err(EdgeError::internal)?);
+            // Publish the marker whole: the test reads it as soon as the path exists.
+            let staged = entered.with_extension("staged");
+            std::fs::write(&staged, &config.nested.token).map_err(EdgeError::internal)?;
+            std::fs::rename(&staged, &entered).map_err(EdgeError::internal)?;
             let release = std::path::PathBuf::from(std::env::var("PROOF_RELEASE").map_err(EdgeError::internal)?);
             let deadline = Instant::now() + Duration::from_secs(45);
             while !release.is_file() {
