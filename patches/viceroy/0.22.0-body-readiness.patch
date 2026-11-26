@@ -427,6 +427,126 @@ index e7b1b66..a69a4c3 100644
                  first_byte_timeout,
                  between_bytes_timeout,
                  ca_certs,
+diff --git a/src/object_store.rs b/src/object_store.rs
+index 80e4720..4112e2e 100644
+--- a/src/object_store.rs
++++ b/src/object_store.rs
+@@ -95,10 +95,22 @@ impl ObjectStores {
+         metadata: Option<String>,
+         ttl: Option<std::time::Duration>,
+     ) -> Result<(), KvStoreError> {
+-        // manages ttl
+-        let existing = self
+-            .lookup(obj_store_key.clone(), obj_key.clone())
++        // Check the precondition and write under one lock, so concurrent conditional inserts
++        // cannot both observe the same prior state and both succeed.
++        let mut stores = self
++            .stores
++            .write()
+             .map_err(|_| KvStoreError::InternalError)?;
++        let store = stores.entry(obj_store_key).or_default();
++        // manages ttl
++        let existing = match store.get(&obj_key) {
++            Some(val) if val.expiration.is_some_and(|exp| SystemTime::now() >= exp) => {
++                store.remove(&obj_key);
++                None
++            }
++            Some(val) => Some(val.clone()),
++            None => None,
++        };
+ 
+         if let Some(g) = generation
+             && let Some(val) = &existing
+@@ -167,18 +179,7 @@ impl ObjectStores {
+             obj_val.metadata = m;
+         }
+ 
+-        self.stores
+-            .write()
+-            .map_err(|_| KvStoreError::InternalError)?
+-            .entry(obj_store_key)
+-            .and_modify(|store| {
+-                store.insert(obj_key.clone(), obj_val.clone());
+-            })
+-            .or_insert_with(|| {
+-                let mut store = BTreeMap::new();
+-                store.insert(obj_key, obj_val);
+-                store
+-            });
++        store.insert(obj_key, obj_val);
+ 
+         Ok(())
+     }
+@@ -941,4 +942,69 @@ mod tests {
+             Err(e) => panic!("should not have been Err({:?})", e),
+         }
+     }
++
++    #[test]
++    fn test_kv_store_concurrent_conditional_inserts_have_one_winner() {
++        use std::sync::{Arc, Barrier};
++
++        // Two writers race one Add, then one if-generation-match on the stored generation.
++        fn race(
++            stores: &ObjectStores,
++            key: &str,
++            mode: KvInsertMode,
++            generation: Option<u64>,
++        ) -> usize {
++            let barrier = Arc::new(Barrier::new(2));
++            let writers: Vec<_> = (0..2_u8)
++                .map(|writer| {
++                    let (stores, barrier, key) =
++                        (stores.clone(), Arc::clone(&barrier), key.to_string());
++                    std::thread::spawn(move || {
++                        barrier.wait();
++                        stores
++                            .insert(
++                                ObjectStoreKey(STORE_NAME.to_string()),
++                                ObjectKey(key),
++                                vec![writer],
++                                mode,
++                                generation,
++                                None,
++                                None,
++                            )
++                            .is_ok()
++                    })
++                })
++                .collect();
++            writers
++                .into_iter()
++                .map(|writer| writer.join().unwrap())
++                .filter(|written| *written)
++                .count()
++        }
++
++        let stores = ObjectStores::default();
++        stores
++            .insert_empty_store(ObjectStoreKey(STORE_NAME.to_string()))
++            .unwrap();
++        for round in 0..1000 {
++            let key = format!("race_{round}");
++            assert_eq!(
++                race(&stores, &key, KvInsertMode::Add, None),
++                1,
++                "add round {round}"
++            );
++            let generation = stores
++                .lookup(
++                    ObjectStoreKey(STORE_NAME.to_string()),
++                    ObjectKey(key.clone()),
++                )
++                .unwrap()
++                .map(|value| value.generation);
++            assert_eq!(
++                race(&stores, &key, KvInsertMode::Overwrite, generation),
++                1,
++                "generation round {round}"
++            );
++        }
++    }
+ }
 diff --git a/src/wiggle_abi/backend_impl.rs b/src/wiggle_abi/backend_impl.rs
 index dc791ec..824df87 100644
 --- a/src/wiggle_abi/backend_impl.rs
