@@ -8,6 +8,11 @@
 //! `EDGEZERO_GENERATED_TEST_TARGET_DIR`.
 
 #[cfg(test)]
+#[cfg(unix)]
+#[path = "support/blocking_accept.rs"]
+mod blocking_accept;
+
+#[cfg(test)]
 mod tests {
     #[cfg(unix)]
     mod generated_dynamodb_proof {
@@ -16,6 +21,7 @@ mod tests {
             reason = "group test fixture types and their protocol helpers by responsibility"
         )]
 
+        use crate::blocking_accept::accept_blocking;
         use std::collections::BTreeMap;
         use std::env;
         use std::fs;
@@ -64,7 +70,7 @@ mod tests {
                 let worker = thread::spawn(move || {
                     let deadline = deadline_after(Duration::from_mins(3));
                     while !worker_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
-                        match listener.accept() {
+                        match accept_blocking(&listener) {
                             Ok((mut stream, peer)) => {
                                 assert!(peer.ip().is_loopback(), "fixture accepts loopback only");
                                 stream

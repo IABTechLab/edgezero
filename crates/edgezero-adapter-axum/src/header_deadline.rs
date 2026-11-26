@@ -2,10 +2,13 @@ use std::error::Error as StdError;
 use std::future::Future;
 use std::io::{self, IoSlice};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
+use edgezero_core::context::DEFAULT_INBOUND_JSON_BYTES;
+use edgezero_core::http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use edgezero_core::http::{HeaderMap, HeaderName, HeaderValue};
 use hyper::Request;
 use hyper::body::Incoming;
@@ -16,16 +19,41 @@ use hyper_util::rt::TokioTimer;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
-use tokio::time::Instant as TokioInstant;
+use tokio::time::{Instant as TokioInstant, Sleep as TokioSleep, sleep_until};
 
 use crate::ingress_config::AxumIngressConfig;
 use crate::response::EgressConnection;
+
+/// Largest declared request body a closing HTTP/1 connection drains after an early response.
+///
+/// A response sent before its request body is read, such as a 413 for a declared
+/// `Content-Length` over a reader's cap, closes the connection with the upload unread. The
+/// kernel then answers the client's remaining bytes with a reset, which can fail the client's
+/// upload before it reads the response. Half-closing and draining first lets a client that writes
+/// its whole body before reading still receive the response (RFC 9112 section 9.6). The drain runs
+/// only while the upload is active, with bytes waiting or read within [`LINGERING_CLOSE_IDLE`],
+/// so an idle or stalled client releases its connection at once. The bound equals the core's default JSON extractor limit,
+/// [`DEFAULT_INBOUND_JSON_BYTES`]. A larger declared body, a chunked upload of unknown length and
+/// a request without a body close at once as before.
+const LINGERING_CLOSE_MAX_BYTES: usize = DEFAULT_INBOUND_JSON_BYTES;
+/// Longest time a closing connection spends draining a declared upload.
+///
+/// This bounds how long a rejected upload keeps its connection task alive. Draining the full
+/// [`LINGERING_CLOSE_MAX_BYTES`] within it needs about 34 Mbit/s; a slower client is cut off and
+/// closes as before.
+const LINGERING_CLOSE_MAX_DURATION: Duration = Duration::from_secs(2);
+/// The drain ends once the client sends nothing for this long.
+const LINGERING_CLOSE_IDLE: Duration = Duration::from_millis(250);
+/// Scratch space for each drained read; drained bytes are discarded.
+const LINGERING_CLOSE_READ_BYTES: usize = 8 * 1024;
 /// Shares Hyper's head-read phase with the connection's independent timer race.
 /// A successful service call disarms it; parser-error writes retain the deadline.
 #[derive(Clone)]
 pub(crate) struct HeaderDeadline {
     changed: Arc<Notify>,
     deadline: Arc<Mutex<Option<TokioInstant>>>,
+    /// Declared body length of the latest request that a closing connection drains, or zero.
+    upload: Arc<AtomicUsize>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -34,7 +62,21 @@ pub(crate) struct HeaderDeadlineExceeded;
 
 pub(crate) struct HeaderIo {
     deadline: HeaderDeadline,
+    /// When Hyper last read request bytes, which shows whether an upload is still active.
+    last_read: Option<TokioInstant>,
+    linger: Linger,
     stream: TcpStream,
+}
+
+/// Shutdown progress of [`HeaderIo`]: half-close, then drain a declared upload under its bounds.
+enum Linger {
+    Closed,
+    Draining {
+        idle: Pin<Box<TokioSleep>>,
+        remaining: usize,
+        until: TokioInstant,
+    },
+    Open,
 }
 
 pub(crate) struct HeaderService<S> {
@@ -85,7 +127,13 @@ impl HeaderDeadline {
         Self {
             changed: Arc::new(Notify::new()),
             deadline: Arc::new(Mutex::new(Some(now.checked_add(timeout).unwrap_or(now)))),
+            upload: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn record_upload(&self, headers: &HeaderMap) {
+        self.upload
+            .store(lingering_upload(headers), Ordering::Relaxed);
     }
 }
 
@@ -115,7 +163,12 @@ impl Timer for HeaderDeadline {
 
 impl HeaderIo {
     pub(crate) fn new(stream: TcpStream, deadline: HeaderDeadline) -> Self {
-        Self { deadline, stream }
+        Self {
+            deadline,
+            last_read: None,
+            linger: Linger::Open,
+            stream,
+        }
     }
 }
 
@@ -127,7 +180,12 @@ impl AsyncRead for HeaderIo {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.deadline.check_io()?;
-        Pin::new(&mut this.stream).poll_read(cx, buf)
+        let before = buf.filled().len();
+        let read = Pin::new(&mut this.stream).poll_read(cx, buf);
+        if matches!(read, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            this.last_read = Some(TokioInstant::now());
+        }
+        read
     }
 }
 
@@ -143,7 +201,72 @@ impl AsyncWrite for HeaderIo {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
+        let this = self.get_mut();
+        loop {
+            match &mut this.linger {
+                Linger::Open => {
+                    ready!(Pin::new(&mut this.stream).poll_shutdown(cx))?;
+                    this.linger = Linger::Closed;
+                    let declared = this.deadline.upload.load(Ordering::Relaxed);
+                    if declared == 0 {
+                        continue;
+                    }
+                    // Drain only an active upload: bytes already waiting, or a read within the
+                    // idle window. A stalled client releases the connection without a timer.
+                    let mut scratch = [0_u8; LINGERING_CLOSE_READ_BYTES];
+                    let mut drained = ReadBuf::new(&mut scratch);
+                    let probe = Pin::new(&mut this.stream).poll_read(cx, &mut drained);
+                    let now = TokioInstant::now();
+                    let active_since = match probe {
+                        Poll::Ready(Ok(())) if !drained.filled().is_empty() => Some(now),
+                        Poll::Pending => this.last_read.filter(|&read| {
+                            read.checked_add(LINGERING_CLOSE_IDLE)
+                                .is_some_and(|idle| idle > now)
+                        }),
+                        Poll::Ready(_) => None,
+                    };
+                    let remaining = declared.saturating_sub(drained.filled().len());
+                    if let Some(since) = active_since
+                        && remaining > 0
+                    {
+                        let until = now.checked_add(LINGERING_CLOSE_MAX_DURATION).unwrap_or(now);
+                        this.linger = Linger::Draining {
+                            idle: Box::pin(sleep_until(lingering_idle_deadline(since, until))),
+                            remaining,
+                            until,
+                        };
+                    }
+                }
+                Linger::Draining {
+                    idle,
+                    remaining,
+                    until,
+                } => {
+                    let mut scratch = [0_u8; LINGERING_CLOSE_READ_BYTES];
+                    let mut drained = ReadBuf::new(&mut scratch);
+                    match Pin::new(&mut this.stream).poll_read(cx, &mut drained) {
+                        Poll::Ready(Ok(())) if !drained.filled().is_empty() => {
+                            *remaining = remaining.saturating_sub(drained.filled().len());
+                            let now = TokioInstant::now();
+                            if *remaining == 0 || now >= *until {
+                                this.linger = Linger::Closed;
+                            } else {
+                                idle.as_mut().reset(lingering_idle_deadline(now, *until));
+                            }
+                        }
+                        // EOF or a read error ends the drain.
+                        Poll::Ready(_) => this.linger = Linger::Closed,
+                        Poll::Pending => {
+                            if idle.as_mut().poll(cx).is_pending() {
+                                return Poll::Pending;
+                            }
+                            this.linger = Linger::Closed;
+                        }
+                    }
+                }
+                Linger::Closed => return Poll::Ready(Ok(())),
+            }
+        }
     }
 
     fn poll_write(
@@ -199,6 +322,7 @@ where
             let boxed_error: Self::Error = Box::new(error);
             return Box::pin(async move { Err(boxed_error) });
         }
+        self.deadline.record_upload(req.headers());
         let future = self.service.call(req);
         let limits = self.limits;
         let responses = self.responses.clone();
@@ -249,6 +373,29 @@ fn bound_response_head<B>(
     Ok(())
 }
 
+fn lingering_idle_deadline(now: TokioInstant, until: TokioInstant) -> TokioInstant {
+    now.checked_add(LINGERING_CLOSE_IDLE)
+        .map_or(until, |idle| idle.min(until))
+}
+/// Returns the declared body length a closing connection drains, or zero to close at once.
+///
+/// Only a single `Content-Length` from 1 byte to [`LINGERING_CLOSE_MAX_BYTES`] qualifies.
+fn lingering_upload(headers: &HeaderMap) -> usize {
+    if headers.contains_key(TRANSFER_ENCODING) {
+        return 0;
+    }
+    let mut lengths = headers.get_all(CONTENT_LENGTH).iter();
+    let (Some(length), None) = (lengths.next(), lengths.next()) else {
+        return 0;
+    };
+    length
+        .to_str()
+        .ok()
+        .and_then(|text| text.trim().parse::<usize>().ok())
+        .filter(|declared| (1..=LINGERING_CLOSE_MAX_BYTES).contains(declared))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -258,7 +405,7 @@ mod tests {
     use hyper::rt::Timer as _;
     use tokio::time::{Instant, advance};
 
-    use super::{HeaderDeadline, bound_response_head};
+    use super::{HeaderDeadline, LINGERING_CLOSE_MAX_BYTES, bound_response_head, lingering_upload};
     use crate::ingress_config::AxumIngressConfig;
 
     #[test]
@@ -329,5 +476,97 @@ mod tests {
         let _next_sleep = timer.sleep_until(next.into_std());
         assert_eq!(timer.deadline(), Some(next));
         assert!(timer.finish_head(next).is_err());
+    }
+
+    #[test]
+    fn lingering_close_drains_only_single_declared_lengths_within_the_bound() {
+        let at_bound = LINGERING_CLOSE_MAX_BYTES.to_string();
+        let over_bound = LINGERING_CLOSE_MAX_BYTES
+            .checked_add(1)
+            .expect("bound fits usize")
+            .to_string();
+        let cases: [(&[(&str, &str)], usize); 8] = [
+            (&[], 0),
+            (&[("content-length", "0")], 0),
+            (&[("content-length", "1")], 1),
+            (
+                &[("content-length", at_bound.as_str())],
+                LINGERING_CLOSE_MAX_BYTES,
+            ),
+            (&[("content-length", over_bound.as_str())], 0),
+            (&[("transfer-encoding", "chunked")], 0),
+            (&[("content-length", "4"), ("content-length", "4")], 0),
+            (
+                &[("content-length", "4"), ("transfer-encoding", "chunked")],
+                0,
+            ),
+        ];
+        for (fields, expected) in cases {
+            let mut headers = HeaderMap::new();
+            for &(name, value) in fields {
+                headers.append(name, HeaderValue::from_str(value).expect("valid field"));
+            }
+            assert_eq!(lingering_upload(&headers), expected, "{fields:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn early_response_lets_a_client_finish_its_declared_upload_and_read_it() {
+        use std::convert::Infallible;
+
+        use axum::body::Body;
+        use futures::future::join;
+        use hyper::service::service_fn;
+        use hyper::{Response, StatusCode};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::{TcpListener, TcpStream};
+        use tokio::time::timeout;
+
+        use crate::connection::{ConnectionExit, serve_http1};
+        use crate::response::EgressConnection;
+
+        // Larger than the loopback socket buffers, so the client blocks mid-upload.
+        let declared = 4 * 1024 * 1024;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            // Answers before polling the body, as a declared-length 413 does.
+            let service = service_fn(|_request| async {
+                let mut response = Response::new(Body::from("payload too large"));
+                *response.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+                Ok::<_, Infallible>(response)
+            });
+            serve_http1(
+                socket,
+                service,
+                EgressConnection::default(),
+                AxumIngressConfig::default(),
+            )
+            .await
+        };
+        let client = async {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            let head =
+                format!("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {declared}\r\n\r\n");
+            stream.write_all(head.as_bytes()).await.unwrap();
+            // Write the whole declared body before reading anything.
+            stream
+                .write_all(&vec![b'x'; declared])
+                .await
+                .expect("upload completes instead of a reset");
+            let mut response = Vec::new();
+            stream
+                .read_to_end(&mut response)
+                .await
+                .expect("response is readable after the upload");
+            String::from_utf8(response).unwrap()
+        };
+        let (exit, response) = timeout(Duration::from_secs(5), join(server, client))
+            .await
+            .expect("bounded exchange");
+        assert!(response.starts_with("HTTP/1.1 413 "), "{response}");
+        assert!(response.ends_with("payload too large"), "{response}");
+        assert_eq!(exit.unwrap(), ConnectionExit::Completed);
     }
 }

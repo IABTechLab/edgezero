@@ -1084,6 +1084,10 @@ checkpoints and unverified qualification gates rather than presenting them as ne
   expired inbound deadlines still win with 408 and consumed overflow stays sticky.
   Suppress `Retry-After` on generated overflow after rendering and final egress preparation,
   while preserving upstream 413 and config-503 retry policies. Align demo/scaffold fallback status.
+- Half-close and drain a declared upload of at most 8 MiB on Axum HTTP/1 before closing a
+  connection whose response came before its body was read, for at most 2 s and until 250 ms pass
+  without a byte, so a client that writes its whole body first receives the 413 instead of a
+  reset. Larger declared or chunked uploads and clients that have stopped sending close at once.
 - Verify actual downstream encoded relay through all four local entrypoints: 24 cases per
   adapter across gzip/deflate/Brotli, buffered/streamed modes, Original/206 preservation and
   Decode controls. Capture binary wire payloads without decoding, retain representation metadata
