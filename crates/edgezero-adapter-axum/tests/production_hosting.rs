@@ -23,6 +23,8 @@ mod tests {
     use tokio::net::TcpSocket;
 
     const WAIT: Duration = Duration::from_secs(5);
+    /// Launch attempts before a host that keeps losing its released port fails the test.
+    const SPAWN_ATTEMPTS: usize = 3;
 
     struct Roots {
         config: TempDir,
@@ -120,47 +122,150 @@ mod tests {
     struct Server {
         addr: SocketAddr,
         child: Child,
+        command: Command,
+        events: mpsc::Receiver<String>,
+        output: Arc<Mutex<String>>,
+        readers: Vec<JoinHandle<()>>,
+        token: String,
+    }
+
+    /// One launched host process and the threads collecting its output.
+    struct Launched {
+        child: Child,
         events: mpsc::Receiver<String>,
         output: Arc<Mutex<String>>,
         readers: Vec<JoinHandle<()>>,
     }
 
+    /// A token unique to one launch, which the fixture echoes from `/fixture-ready`.
+    fn spawn_token() -> String {
+        use std::process::id as process_id;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static LAUNCHES: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "{}-{}",
+            process_id(),
+            LAUNCHES.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn launch(command: &mut Command, token: &str) -> Launched {
+        let spawning = reserve_or_spawn();
+        let mut child = command
+            .env("FIXTURE_SPAWN_TOKEN", token)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fixture process");
+        drop(spawning);
+        let output = Arc::new(Mutex::new(String::new()));
+        let (sender, events) = mpsc::channel();
+        let stdout = child.stdout.take().expect("stdout");
+        let stderr = child.stderr.take().expect("stderr");
+        let mut readers = Vec::new();
+        let streams: [Box<dyn Read + Send>; 2] = [Box::new(stdout), Box::new(stderr)];
+        for stream in streams {
+            let captured = Arc::clone(&output);
+            let stream_sender = sender.clone();
+            readers.push(thread::spawn(move || {
+                for result in BufReader::new(stream).lines() {
+                    let Ok(line) = result else { break };
+                    let mut captured_output = captured.lock().expect("output");
+                    captured_output.push_str(&line);
+                    captured_output.push('\n');
+                    drop(captured_output);
+                    let _sent = stream_sender.send(line);
+                }
+            }));
+        }
+        Launched {
+            child,
+            events,
+            output,
+            readers,
+        }
+    }
+
     impl Server {
         fn spawn(mut command: Command, addr: SocketAddr) -> Self {
-            let spawning = reserve_or_spawn();
-            let mut child = command
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("fixture process");
-            drop(spawning);
-            let output = Arc::new(Mutex::new(String::new()));
-            let (sender, events) = mpsc::channel();
-            let stdout = child.stdout.take().expect("stdout");
-            let stderr = child.stderr.take().expect("stderr");
-            let mut readers = Vec::new();
-            let streams: [Box<dyn Read + Send>; 2] = [Box::new(stdout), Box::new(stderr)];
-            for stream in streams {
-                let captured = Arc::clone(&output);
-                let stream_sender = sender.clone();
-                readers.push(thread::spawn(move || {
-                    for result in BufReader::new(stream).lines() {
-                        let Ok(line) = result else { break };
-                        let mut captured_output = captured.lock().expect("output");
-                        captured_output.push_str(&line);
-                        captured_output.push('\n');
-                        drop(captured_output);
-                        let _sent = stream_sender.send(line);
-                    }
-                }));
-            }
-            Self {
-                addr,
+            let token = spawn_token();
+            let Launched {
                 child,
                 events,
                 output,
                 readers,
+            } = launch(&mut command, &token);
+            Self {
+                addr,
+                child,
+                command,
+                events,
+                output,
+                readers,
+                token,
             }
+        }
+
+        /// The address the live host serves, which a respawn may have moved.
+        fn addr(&self) -> SocketAddr {
+            self.addr
+        }
+
+        /// Replaces a host that lost its released port with one on a fresh reservation.
+        fn respawn(&mut self, cause: &str, attempts: &mut usize) {
+            *attempts = attempts.checked_add(1).expect("attempt count");
+            assert!(
+                *attempts < SPAWN_ATTEMPTS,
+                "fixture host failed to keep a port after {SPAWN_ATTEMPTS} attempts ({cause}): {}",
+                self.log()
+            );
+            let _killed = self.child.kill();
+            let _status = self.child.wait();
+            for reader in self.readers.drain(..) {
+                let _joined = reader.join();
+            }
+            let previous = (self.addr().to_string(), self.addr().port().to_string());
+            let addr = address();
+            let replacements: Vec<_> = self
+                .command
+                .get_envs()
+                .filter_map(|(key, value)| {
+                    let current = value?.to_str()?;
+                    let replacement = if current == previous.0 {
+                        addr.to_string()
+                    } else if current == previous.1 {
+                        addr.port().to_string()
+                    } else {
+                        return None;
+                    };
+                    Some((key.to_owned(), replacement))
+                })
+                .collect();
+            for (key, value) in replacements {
+                self.command.env(key, value);
+            }
+            self.addr = addr;
+            self.token = spawn_token();
+            let Launched {
+                child,
+                events,
+                output,
+                readers,
+            } = launch(&mut self.command, &self.token);
+            self.child = child;
+            self.events = events;
+            self.output = output;
+            self.readers = readers;
+        }
+
+        fn serves_own_token(&self, response: &str) -> bool {
+            let (head, _body) = response.split_once("\r\n\r\n").unwrap_or((response, ""));
+            head.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("x-fixture-spawn") && value.trim() == self.token
+                })
+            })
         }
 
         fn log(&self) -> String {
@@ -168,22 +273,33 @@ mod tests {
         }
 
         fn ready(&mut self) {
-            let deadline = Instant::now().checked_add(WAIT).expect("startup timer");
+            let mut attempts = 0;
+            let mut deadline = Instant::now().checked_add(WAIT).expect("startup timer");
             loop {
                 assert!(
                     Instant::now() < deadline,
                     "startup deadline: {}",
                     self.log()
                 );
-                assert!(
-                    self.child.try_wait().expect("status").is_none(),
-                    "early process failure: {}",
-                    self.log()
-                );
-                if let Ok(response) = self.request("/ready")
+                if self.child.try_wait().expect("status").is_some() {
+                    for reader in self.readers.drain(..) {
+                        reader.join().expect("output reader");
+                    }
+                    let log = self.log();
+                    assert!(log.contains("startup bind"), "early process failure: {log}");
+                    self.respawn("bind lost", &mut attempts);
+                    deadline = Instant::now().checked_add(WAIT).expect("startup timer");
+                    continue;
+                }
+                if let Ok(response) = self.request("/fixture-ready")
                     && response.starts_with("HTTP/1.1 200")
                 {
-                    return;
+                    if self.serves_own_token(&response) {
+                        return;
+                    }
+                    self.respawn("port taken by another listener", &mut attempts);
+                    deadline = Instant::now().checked_add(WAIT).expect("startup timer");
+                    continue;
                 }
                 thread::sleep(Duration::from_millis(5));
             }

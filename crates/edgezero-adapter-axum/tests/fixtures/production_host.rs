@@ -54,6 +54,18 @@ impl Hooks for FixtureApp {
         Ok(RouterService::builder()
             .get("/ready", probe::readiness)
             .get("/live", probe::liveness)
+            .get("/fixture-ready", |ctx: RequestContext| async move {
+                // Readiness plus the launching test's per-spawn token, so the test can tell
+                // its own host from another listener that took the host's released port.
+                let mut response = probe::readiness(ctx).await?;
+                if let Ok(token) = env::var("FIXTURE_SPAWN_TOKEN") {
+                    let value = token.parse().map_err(|_invalid| {
+                        EdgeError::internal(anyhow::anyhow!("invalid spawn token"))
+                    })?;
+                    response.headers_mut().insert("x-fixture-spawn", value);
+                }
+                Ok::<_, EdgeError>(response)
+            })
             .get("/state", fixture::state)
             .get("/typed", fixture::typed)
             .get("/finite", finite)
