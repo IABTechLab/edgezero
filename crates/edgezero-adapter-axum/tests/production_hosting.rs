@@ -532,7 +532,7 @@ mod tests {
     }
 
     fn raw_request(addr: SocketAddr, request: &str) -> String {
-        let mut socket = TcpStream::connect_timeout(&addr, WAIT).expect("wire connection");
+        let mut socket = connect(addr, WAIT).expect("wire connection");
         socket.set_read_timeout(Some(WAIT)).expect("read timeout");
         socket.set_write_timeout(Some(WAIT)).expect("write timeout");
         socket.write_all(request.as_bytes()).expect("wire request");
@@ -1799,7 +1799,7 @@ mod tests {
             (None, None, Some("RECORDS_SENTINEL"), "REQUEST_RECORDS"),
             (None, None, Some("FALSE"), "REQUEST_RECORDS"),
         ] {
-            let addr = address();
+            let (addr, _addr_held) = reserved_address();
             let mut launch = command("diagnostics", &roots, addr);
             if let Some(value) = networks {
                 launch.env("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", value);
@@ -1840,7 +1840,7 @@ mod tests {
             ),
             ("EDGEZERO__LOGGING__REQUEST_RECORDS", "REQUEST_RECORDS"),
         ] {
-            let addr = address();
+            let (addr, _addr_held) = reserved_address();
             let mut launch = command("diagnostics", &roots, addr);
             let mut raw = b"NON_UNICODE_SENTINEL".to_vec();
             raw.push(0xff);
