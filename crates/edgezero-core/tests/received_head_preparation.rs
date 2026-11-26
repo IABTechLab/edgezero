@@ -3,6 +3,7 @@ mod tests {
     use edgezero_core::app::App;
     use edgezero_core::http::{Extensions, HeaderMap, HeaderValue};
     use edgezero_core::router::RouterService;
+    use edgezero_core::time::{MonotonicClock, MonotonicInstant};
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct AuthenticatedAuthority(String);
@@ -19,6 +20,38 @@ mod tests {
             extensions.get::<AuthenticatedAuthority>(),
             Some(&AuthenticatedAuthority("retained.example.com".to_owned())),
             "the default should preserve existing extensions"
+        );
+    }
+
+    #[test]
+    fn prepared_startup_router_keeps_application_clock_and_platform() {
+        let old_router = RouterService::builder().with_state(1_u32).build();
+        let mut app = App::new(old_router.clone());
+        let platform = app.platform();
+        let instant = MonotonicInstant::now();
+        app.set_monotonic_clock(MonotonicClock::new(move || instant));
+
+        app.set_router(RouterService::builder().with_state(2_u32).build());
+
+        assert_eq!(
+            app.platform(),
+            platform,
+            "startup should preserve target metadata"
+        );
+        assert_eq!(
+            app.monotonic_now(),
+            instant,
+            "startup should preserve the clock domain"
+        );
+        assert_eq!(
+            app.state::<u32>(),
+            Some(&2),
+            "startup should install prepared router state"
+        );
+        assert_eq!(
+            old_router.state::<u32>(),
+            Some(&1),
+            "startup should not mutate peer routers"
         );
     }
 
