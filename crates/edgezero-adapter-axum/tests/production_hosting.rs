@@ -676,7 +676,7 @@ mod tests {
         server.ready();
         let spoof = "Forwarded: for=198.51.100.9;host=FORWARDED_SENTINEL;proto=https\r\nX-Forwarded-For: 203.0.113.9\r\nX-Forwarded-Host: XFH_SENTINEL\r\nX-Forwarded-Proto: https\r\nX-Forwarded-Secret: HEADER_SENTINEL\r\nX-Request-ID: VISITOR_ID_SENTINEL\r\n";
         let request = metadata_request(spoof);
-        let response = raw_request(addr, &request);
+        let response = raw_request(server.addr(), &request);
         assert_no_diagnostic_headers(&response);
         let value = response_json(&response);
         assert_metadata(
@@ -737,7 +737,7 @@ mod tests {
             );
             server.ready();
             let proxy = LocalProxy::start(
-                addr,
+                server.addr(),
                 Ipv4Addr::new(127, 0, 0, 2),
                 Assertions::AppendForwarded {
                     host: "public.example",
@@ -795,7 +795,7 @@ mod tests {
             );
             server.ready();
             let ingress = LocalProxy::start(
-                addr,
+                server.addr(),
                 Ipv4Addr::new(127, 0, 0, 3),
                 Assertions::AppendForwarded {
                     host: "final.example",
@@ -838,7 +838,7 @@ mod tests {
         );
         server.ready();
         let gateway = LocalProxy::start(
-            addr,
+            server.addr(),
             Ipv4Addr::new(127, 0, 0, 3),
             Assertions::ReplaceForwarded {
                 client: "203.0.113.7".parse().expect("verified gateway client"),
@@ -948,7 +948,12 @@ mod tests {
                     scheme: "https",
                 }
             };
-            let proxy = LocalProxy::start(addr, Ipv4Addr::new(127, 0, 0, 2), assertions, false);
+            let proxy = LocalProxy::start(
+                server.addr(),
+                Ipv4Addr::new(127, 0, 0, 2),
+                assertions,
+                false,
+            );
             for (prefix, expected_result, client, host, scheme) in [
                 (
                     "Forwarded: for=198.51.100.1;host=wrong.example;proto=http\r\nX-Forwarded-For: 203.0.113.1\r\nX-Forwarded-Host: wrong.example\r\nX-Forwarded-Proto: http\r\n",
@@ -983,7 +988,7 @@ mod tests {
                 let value = response_json(&raw_request(proxy.addr(), &metadata_request(prefix)));
                 assert_metadata(&value, client, host, scheme, expected_result);
             }
-            assert_missing_unresolved_and_duplicate_family(addr, family);
+            assert_missing_unresolved_and_duplicate_family(server.addr(), family);
             server.signal("TERM");
             assert!(server.wait().success());
             assert_final_zero(&server);
@@ -1011,7 +1016,7 @@ mod tests {
         );
         server.ready();
         let proxy = LocalProxy::start(
-            addr,
+            server.addr(),
             Ipv4Addr::new(127, 0, 0, 2),
             Assertions::AppendForwarded {
                 host: "native-proxy.test",
@@ -1154,7 +1159,7 @@ mod tests {
             ("/native-status503", 503, "", "INFO"),
         ] {
             let response = raw_request(
-                addr,
+                server.addr(),
                 &format!(
                     "GET {path} HTTP/1.1\r\nHost: HOST_SENTINEL\r\nAuthorization: Bearer AUTH_SENTINEL\r\nCookie: COOKIE_SENTINEL\r\nX-Request-ID: ID_SENTINEL\r\nConnection: close\r\n\r\n"
                 ),
@@ -1176,7 +1181,7 @@ mod tests {
             assert_native_error_record(&server, path, status, failure, level);
         }
         let extension_response = raw_request(
-            addr,
+            server.addr(),
             "METHOD_SENTINEL /native-status503?token=QUERY_SENTINEL HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n",
         );
         assert!(extension_response.starts_with("HTTP/1.1 405"));
@@ -1271,7 +1276,7 @@ mod tests {
             "X-Forwarded-Secret: {}\r\n",
             "HEAD_SENTINEL".repeat(6000)
         ));
-        let response = raw_request(addr, &request);
+        let response = raw_request(server.addr(), &request);
         assert!(
             response.starts_with("HTTP/1.1 431"),
             "original normalized head limit: {response}"
@@ -1308,7 +1313,7 @@ mod tests {
         server.ready();
         other.ready();
         let response = raw_request(
-            addr,
+            server.addr(),
             "GET /native-mutated HTTP/1.1\r\nHost: fixture\r\nX-Request-ID: VISITOR_ID_SENTINEL\r\nConnection: close\r\n\r\n",
         );
         assert_no_diagnostic_headers(&response);
@@ -1318,7 +1323,7 @@ mod tests {
         let authoritative = route_record(&server, "/native-mutated");
         assert_eq!(authoritative["id"], mutated["removed_id"]);
         let mut clients = Vec::new();
-        for target in [addr, other_addr] {
+        for target in [server.addr(), other.addr()] {
             for _request in 0..4_u8 {
                 clients.push(thread::spawn(move || {
                     let concurrent_response = raw_request(target, "GET /native-status503 HTTP/1.1\r\nHost: fixture\r\nX-Request-ID: VISITOR_ID_SENTINEL\r\nConnection: close\r\n\r\n");
