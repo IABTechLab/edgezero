@@ -447,7 +447,7 @@ test("Viceroy caches are isolated, exact-keyed, and never gate readiness executi
   );
   assert.equal(
     adapters.env.VICEROY_PATCH_SHA256,
-    "42ff805147e003e0bec6ec190a5e72cab2ef445582940818c056f2718162663d",
+    "0e134da0736c3598f1c5c8b761d66b4f5fbb8e5384082c90fb08b0d1996aede4",
   );
   assert.equal(
     adapters.env.VICEROY_PATCH_SHA256,
@@ -561,14 +561,14 @@ if (args[0] === "install") {
   fs.mkdirSync(path.join(root, "bin"), { recursive: true });
   fs.writeFileSync(path.join(root, "bin/viceroy"), "#!/usr/bin/env bash\\necho 'viceroy " + (env.INSTALLED_VERSION || "0.22.0") + "'\\n", { mode: 0o755 });
 } else if (args[0] === "test") {
-  const names = ["body::tests::readiness_preserves_bytes_without_polling_the_source_again", "body::tests::readiness_preserves_between_bytes_timeout_without_repolling_source", "config::backends::timeout_tests::configured_timeout_readback_preserves_values_and_rejects_absence_or_overflow"];
+  const names = ["body::tests::readiness_preserves_bytes_without_polling_the_source_again", "body::tests::readiness_preserves_between_bytes_timeout_without_repolling_source", "config::backends::timeout_tests::configured_timeout_readback_preserves_values_and_rejects_absence_or_overflow", "object_store::tests::test_kv_store_concurrent_conditional_inserts_have_one_winner"];
   if (!env.ZERO_TESTS) {
     for (const name of names) console.log(name + (args.includes("--list") ? ": test" : ""));
     if (!args.includes("--list") && !env.MISSING_PASS) {
       for (const name of names) if (name !== env.MISSING_NAME) console.log("test " + name + " ... ok");
     }
   }
-  if (!args.includes("--list")) console.log("test result: ok. " + (env.ZERO_TESTS ? 0 : 3) + " passed; 0 failed; 0 ignored;");
+  if (!args.includes("--list")) console.log("test result: ok. " + (env.ZERO_TESTS ? 0 : 4) + " passed; 0 failed; 0 ignored;");
 } else if (args[0] === "build") {
   fs.mkdirSync(path.join(env.CARGO_TARGET_DIR, "debug"), { recursive: true });
   fs.writeFileSync(path.join(env.CARGO_TARGET_DIR, "debug/viceroy"), "repaired executable", { mode: 0o755 });
