@@ -34,6 +34,16 @@ The current `Body`/`BodyPayload` representation and exact egress ownership remai
 Ingress buffering policy and cache provenance survive context reconstruction independently of
 mutable headers and extensions, and are removed at raw payload transport boundaries.
 
+### Bounded record update (#535)
+
+`RecordHandle::update` reads a record, asks a caller's planner for its replacement and writes
+it with `IfGenerationMatch`, or `Add` after a miss. After a lost precondition it reads and
+plans again, up to a caller-supplied number of attempts, and reports `Written`, `Skipped`,
+`Conflict` or `StaleRead` with the number of conflicts. A re-read that returns the rejected
+generation or misses ends the update as `StaleRead`. Errors are not retried and
+`MutationUncertain` is never replayed. Providers without record operations report
+`Unsupported`.
+
 ### Portable HTTP And Request Lifecycles (PR #275)
 
 The changes below cover [PR #275](https://github.com/IABTechLab/edgezero/pull/275), including its

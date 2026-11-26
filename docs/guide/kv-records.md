@@ -126,11 +126,56 @@ if outcome == RecordWriteOutcome::Written {
 
 An acknowledged insert returns `Written`, not a fabricated post-write generation.
 `PreconditionFailed` means a definitive Add/CAS rejection. Reloading, merging,
-retrying or deferring is application policy.
+retrying or deferring is application policy; `update` below covers the bounded
+re-read and re-plan case.
 
 `KvError::MutationUncertain` means a mutation may have committed. EdgeZero does not
 replay it. Reconcile with storage before deciding what to do next; blindly retrying
 an overwrite or delete can erase another writer's work.
+
+## Re-plan after a lost precondition
+
+`update` reads a record, asks a planner for its replacement and writes it with
+`IfGenerationMatch` on the generation read, or `Add` when the lookup missed. When
+the write loses its precondition, nothing was written, so the record is read and
+planned again, up to the given number of attempts. At most one replacement lands.
+
+```rust
+use std::num::NonZeroU8;
+
+use bytes::Bytes;
+use edgezero_core::record_store::{RecordReplacement, RecordUpdateOutcome};
+
+let attempts = NonZeroU8::new(2).expect("should be nonzero");
+let update = records.update("session/42", attempts, |current| match current {
+    Some(record) => Ok(RecordReplacement {
+        body: Bytes::from(merge(&record.body)),
+        metadata: None,
+        ttl: None,
+    }),
+    None => Err("no session"),
+}).await;
+
+match update.result? {
+    RecordUpdateOutcome::Written => {}
+    RecordUpdateOutcome::Skipped(_reason) => { /* the planner declined */ }
+    RecordUpdateOutcome::Conflict | RecordUpdateOutcome::StaleRead => {
+        // Nothing was written.
+    }
+}
+// `update.conflicts` counts lost preconditions, even when the update failed.
+```
+
+- A lost precondition proves the record exists under another generation. A
+  re-read that returns the rejected generation or misses is stale, as an
+  eventually consistent lookup can be, and ends with `StaleRead` instead of
+  planning on it. A record deleted after the rejection reads the same way.
+- Generations are not ordered, so an older distinct generation cannot be
+  detected. A replacement planned on it loses its precondition.
+- Read and write errors end the update without a retry. A
+  `KvError::MutationUncertain` write is never replayed.
+- A provider without record operations reports `KvError::Unsupported`. Falling
+  back, for example to an ordinary last-write-wins put, is application policy.
 
 ## Ordinary access and TTL
 
