@@ -34,6 +34,8 @@ mod tests {
     use tokio::net::TcpSocket;
 
     const WAIT: Duration = Duration::from_secs(5);
+    /// Launch attempts before a host that keeps losing its released port fails the test.
+    const SPAWN_ATTEMPTS: usize = 3;
 
     /// The visitor address an appending test proxy reports as its predecessor. It lies outside
     /// every trusted range, so a chain walk that accepts it stopped at the proxy's assertion.
@@ -135,47 +137,150 @@ mod tests {
     struct Server {
         addr: SocketAddr,
         child: Child,
+        command: Command,
+        events: mpsc::Receiver<String>,
+        output: Arc<Mutex<String>>,
+        readers: Vec<JoinHandle<()>>,
+        token: String,
+    }
+
+    /// One launched host process and the threads collecting its output.
+    struct Launched {
+        child: Child,
         events: mpsc::Receiver<String>,
         output: Arc<Mutex<String>>,
         readers: Vec<JoinHandle<()>>,
     }
 
+    /// A token unique to one launch, which the fixture echoes from `/fixture-ready`.
+    fn spawn_token() -> String {
+        use std::process::id as process_id;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static LAUNCHES: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "{}-{}",
+            process_id(),
+            LAUNCHES.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn launch(command: &mut Command, token: &str) -> Launched {
+        let spawning = reserve_or_spawn();
+        let mut child = command
+            .env("FIXTURE_SPAWN_TOKEN", token)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fixture process");
+        drop(spawning);
+        let output = Arc::new(Mutex::new(String::new()));
+        let (sender, events) = mpsc::channel();
+        let stdout = child.stdout.take().expect("stdout");
+        let stderr = child.stderr.take().expect("stderr");
+        let mut readers = Vec::new();
+        let streams: [Box<dyn Read + Send>; 2] = [Box::new(stdout), Box::new(stderr)];
+        for stream in streams {
+            let captured = Arc::clone(&output);
+            let stream_sender = sender.clone();
+            readers.push(thread::spawn(move || {
+                for result in BufReader::new(stream).lines() {
+                    let Ok(line) = result else { break };
+                    let mut captured_output = captured.lock().expect("output");
+                    captured_output.push_str(&line);
+                    captured_output.push('\n');
+                    drop(captured_output);
+                    let _sent = stream_sender.send(line);
+                }
+            }));
+        }
+        Launched {
+            child,
+            events,
+            output,
+            readers,
+        }
+    }
+
     impl Server {
         fn spawn(mut command: Command, addr: SocketAddr) -> Self {
-            let spawning = reserve_or_spawn();
-            let mut child = command
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("fixture process");
-            drop(spawning);
-            let output = Arc::new(Mutex::new(String::new()));
-            let (sender, events) = mpsc::channel();
-            let stdout = child.stdout.take().expect("stdout");
-            let stderr = child.stderr.take().expect("stderr");
-            let mut readers = Vec::new();
-            let streams: [Box<dyn Read + Send>; 2] = [Box::new(stdout), Box::new(stderr)];
-            for stream in streams {
-                let captured = Arc::clone(&output);
-                let stream_sender = sender.clone();
-                readers.push(thread::spawn(move || {
-                    for result in BufReader::new(stream).lines() {
-                        let Ok(line) = result else { break };
-                        let mut captured_output = captured.lock().expect("output");
-                        captured_output.push_str(&line);
-                        captured_output.push('\n');
-                        drop(captured_output);
-                        let _sent = stream_sender.send(line);
-                    }
-                }));
-            }
-            Self {
-                addr,
+            let token = spawn_token();
+            let Launched {
                 child,
                 events,
                 output,
                 readers,
+            } = launch(&mut command, &token);
+            Self {
+                addr,
+                child,
+                command,
+                events,
+                output,
+                readers,
+                token,
             }
+        }
+
+        /// The address the live host serves, which a respawn may have moved.
+        fn addr(&self) -> SocketAddr {
+            self.addr
+        }
+
+        /// Replaces a host that lost its released port with one on a fresh reservation.
+        fn respawn(&mut self, cause: &str, attempts: &mut usize) {
+            *attempts = attempts.checked_add(1).expect("attempt count");
+            assert!(
+                *attempts < SPAWN_ATTEMPTS,
+                "fixture host failed to keep a port after {SPAWN_ATTEMPTS} attempts ({cause}): {}",
+                self.log()
+            );
+            let _killed = self.child.kill();
+            let _status = self.child.wait();
+            for reader in self.readers.drain(..) {
+                let _joined = reader.join();
+            }
+            let previous = (self.addr().to_string(), self.addr().port().to_string());
+            let addr = address();
+            let replacements: Vec<_> = self
+                .command
+                .get_envs()
+                .filter_map(|(key, value)| {
+                    let current = value?.to_str()?;
+                    let replacement = if current == previous.0 {
+                        addr.to_string()
+                    } else if current == previous.1 {
+                        addr.port().to_string()
+                    } else {
+                        return None;
+                    };
+                    Some((key.to_owned(), replacement))
+                })
+                .collect();
+            for (key, value) in replacements {
+                self.command.env(key, value);
+            }
+            self.addr = addr;
+            self.token = spawn_token();
+            let Launched {
+                child,
+                events,
+                output,
+                readers,
+            } = launch(&mut self.command, &self.token);
+            self.child = child;
+            self.events = events;
+            self.output = output;
+            self.readers = readers;
+        }
+
+        fn serves_own_token(&self, response: &str) -> bool {
+            let (head, _body) = response.split_once("\r\n\r\n").unwrap_or((response, ""));
+            head.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("x-fixture-spawn") && value.trim() == self.token
+                })
+            })
         }
 
         fn log(&self) -> String {
@@ -183,22 +288,33 @@ mod tests {
         }
 
         fn ready(&mut self) {
-            let deadline = Instant::now().checked_add(WAIT).expect("startup timer");
+            let mut attempts = 0;
+            let mut deadline = Instant::now().checked_add(WAIT).expect("startup timer");
             loop {
                 assert!(
                     Instant::now() < deadline,
                     "startup deadline: {}",
                     self.log()
                 );
-                assert!(
-                    self.child.try_wait().expect("status").is_none(),
-                    "early process failure: {}",
-                    self.log()
-                );
-                if let Ok(response) = self.request("/ready")
+                if self.child.try_wait().expect("status").is_some() {
+                    for reader in self.readers.drain(..) {
+                        reader.join().expect("output reader");
+                    }
+                    let log = self.log();
+                    assert!(log.contains("startup bind"), "early process failure: {log}");
+                    self.respawn("bind lost", &mut attempts);
+                    deadline = Instant::now().checked_add(WAIT).expect("startup timer");
+                    continue;
+                }
+                if let Ok(response) = self.request("/fixture-ready")
                     && response.starts_with("HTTP/1.1 200")
                 {
-                    return;
+                    if self.serves_own_token(&response) {
+                        return;
+                    }
+                    self.respawn("port taken by another listener", &mut attempts);
+                    deadline = Instant::now().checked_add(WAIT).expect("startup timer");
+                    continue;
                 }
                 thread::sleep(Duration::from_millis(5));
             }
@@ -568,7 +684,7 @@ mod tests {
         server.ready();
         let spoof = "Forwarded: for=198.51.100.9;host=FORWARDED_SENTINEL;proto=https\r\nX-Forwarded-For: 203.0.113.9\r\nX-Forwarded-Host: XFH_SENTINEL\r\nX-Forwarded-Proto: https\r\nX-Forwarded-Secret: HEADER_SENTINEL\r\nX-Request-ID: VISITOR_ID_SENTINEL\r\n";
         let request = metadata_request(spoof);
-        let response = raw_request(addr, &request);
+        let response = raw_request(server.addr(), &request);
         assert_no_diagnostic_headers(&response);
         let value = response_json(&response);
         assert_metadata(
@@ -631,7 +747,7 @@ mod tests {
             );
             server.ready();
             let proxy = LocalProxy::start(
-                addr,
+                server.addr(),
                 Assertions::AppendForwarded {
                     predecessor: VISITOR,
                     host: "public.example",
@@ -693,7 +809,7 @@ mod tests {
             );
             server.ready();
             let ingress = LocalProxy::start(
-                addr,
+                server.addr(),
                 Assertions::AppendForwarded {
                     predecessor: first_proxy,
                     host: "final.example",
@@ -736,7 +852,7 @@ mod tests {
         );
         server.ready();
         let gateway = LocalProxy::start(
-            addr,
+            server.addr(),
             Assertions::ReplaceForwarded {
                 client: "203.0.113.7".parse().expect("verified gateway client"),
                 host: "gateway.example",
@@ -843,7 +959,7 @@ mod tests {
                     scheme: "https",
                 }
             };
-            let proxy = LocalProxy::start(addr, assertions, false);
+            let proxy = LocalProxy::start(server.addr(), assertions, false);
             for (prefix, expected_result, client, host, scheme) in [
                 (
                     "Forwarded: for=198.51.100.1;host=wrong.example;proto=http\r\nX-Forwarded-For: 203.0.113.1\r\nX-Forwarded-Host: wrong.example\r\nX-Forwarded-Proto: http\r\n",
@@ -878,7 +994,7 @@ mod tests {
                 let value = response_json(&raw_request(proxy.addr(), &metadata_request(prefix)));
                 assert_metadata(&value, client, host, scheme, expected_result);
             }
-            assert_missing_unresolved_and_duplicate_family(addr, family);
+            assert_missing_unresolved_and_duplicate_family(server.addr(), family);
             server.signal("TERM");
             assert!(server.wait().success());
             assert_final_zero(&server);
@@ -906,7 +1022,7 @@ mod tests {
         );
         server.ready();
         let proxy = LocalProxy::start(
-            addr,
+            server.addr(),
             Assertions::AppendForwarded {
                 predecessor: VISITOR,
                 host: "native-proxy.test",
@@ -1049,7 +1165,7 @@ mod tests {
             ("/native-status503", 503, "", "INFO"),
         ] {
             let response = raw_request(
-                addr,
+                server.addr(),
                 &format!(
                     "GET {path} HTTP/1.1\r\nHost: HOST_SENTINEL\r\nAuthorization: Bearer AUTH_SENTINEL\r\nCookie: COOKIE_SENTINEL\r\nX-Request-ID: ID_SENTINEL\r\nConnection: close\r\n\r\n"
                 ),
@@ -1071,7 +1187,7 @@ mod tests {
             assert_native_error_record(&server, path, status, failure, level);
         }
         let extension_response = raw_request(
-            addr,
+            server.addr(),
             "METHOD_SENTINEL /native-status503?token=QUERY_SENTINEL HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n",
         );
         assert!(extension_response.starts_with("HTTP/1.1 405"));
@@ -1166,7 +1282,7 @@ mod tests {
             "X-Forwarded-Secret: {}\r\n",
             "HEAD_SENTINEL".repeat(6000)
         ));
-        let response = raw_request(addr, &request);
+        let response = raw_request(server.addr(), &request);
         assert!(
             response.starts_with("HTTP/1.1 431"),
             "original normalized head limit: {response}"
@@ -1203,7 +1319,7 @@ mod tests {
         server.ready();
         other.ready();
         let response = raw_request(
-            addr,
+            server.addr(),
             "GET /native-mutated HTTP/1.1\r\nHost: fixture\r\nX-Request-ID: VISITOR_ID_SENTINEL\r\nConnection: close\r\n\r\n",
         );
         assert_no_diagnostic_headers(&response);
@@ -1213,7 +1329,7 @@ mod tests {
         let authoritative = route_record(&server, "/native-mutated");
         assert_eq!(authoritative["id"], mutated["removed_id"]);
         let mut clients = Vec::new();
-        for target in [addr, other_addr] {
+        for target in [server.addr(), other.addr()] {
             for _request in 0..4_u8 {
                 clients.push(thread::spawn(move || {
                     let concurrent_response = raw_request(target, "GET /native-status503 HTTP/1.1\r\nHost: fixture\r\nX-Request-ID: VISITOR_ID_SENTINEL\r\nConnection: close\r\n\r\n");
@@ -2417,7 +2533,7 @@ mod tests {
         server.ready();
         assert!(
             raw_request(
-                addr,
+                server.addr(),
                 "GET /state HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
             )
             .contains("configured-greeting")
