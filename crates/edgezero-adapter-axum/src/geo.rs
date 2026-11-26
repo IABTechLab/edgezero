@@ -204,13 +204,17 @@ impl ProtectedCloudFrontAlb {
         })
     }
 
+    /// Whether the owned socket peer is inside the protected ALB networks.
+    pub(crate) fn admits(&self, peer: Option<SocketAddr>) -> bool {
+        peer.is_some_and(|actual_peer| self.networks.trusts(actual_peer.ip()))
+    }
+
     fn admit<'request>(
         &self,
         peer: Option<SocketAddr>,
         headers: &'request HeaderMap,
     ) -> Option<ProtectedAssertions<'request>> {
-        peer.filter(|actual_peer| self.networks.trusts(actual_peer.ip()))
-            .map(|_peer| ProtectedAssertions { headers })
+        self.admits(peer).then_some(ProtectedAssertions { headers })
     }
 }
 
@@ -305,6 +309,12 @@ fn configured_selection(
     env: &EnvConfig,
     defaults: Option<&ManifestAdapterGeo>,
 ) -> Result<NativeGeoSelection, NativeGeoConfigError> {
+    if env
+        .get(&["adapter", "geo", "credential_variable"])
+        .is_some()
+    {
+        return Err(NativeGeoConfigError::InvalidSelection);
+    }
     let env_provider = env.get(&["adapter", "geo", "provider"]);
     let env_networks = env.get(&["adapter", "geo", "alb_peer_cidrs"]);
     let env_header = env.get(&["adapter", "geo", "origin_credential_header_name"]);
@@ -427,6 +437,16 @@ pub(crate) enum NativeGeoPlan {
 }
 
 impl NativeGeoPlan {
+    /// The protected `CloudFront` path, when this selection carries one.
+    pub(crate) fn protected_path(&self) -> Option<ProtectedCloudFrontAlb> {
+        match self {
+            Self::Ready(NativeGeo::Selected { policy, .. }) => Some(policy.clone()),
+            Self::Ready(_) => None,
+            #[cfg(feature = "geo-kv")]
+            Self::Kv(_) => None,
+        }
+    }
+
     pub(crate) fn capability(&self) -> NativeGeoCapability {
         match self {
             Self::Ready(geo) => geo.capability(),
@@ -789,6 +809,29 @@ mod tests {
             #[cfg(not(feature = "geo-cloudfront"))]
             assert_eq!(result, Err(NativeGeoConfigError::UnavailableCloudFront));
         }
+    }
+
+    #[test]
+    fn axum_rejects_spin_credential_override() {
+        struct NoGeo;
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "fixture retains unused Hooks defaults"
+        )]
+        impl Hooks for NoGeo {
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().build())
+            }
+        }
+        let options = AxumRunOptions::from_vars([(
+            "EDGEZERO__ADAPTER__GEO__CREDENTIAL_VARIABLE",
+            "geo_token",
+        )])
+        .unwrap();
+        assert_eq!(
+            options.geo_capability_for::<NoGeo>(),
+            Err(NativeGeoConfigError::InvalidSelection)
+        );
     }
 
     #[test]

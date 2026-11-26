@@ -127,11 +127,13 @@ Use a serving role allowing only `dynamodb:DescribeTable` and `dynamodb:GetItem`
 ```json
 {
   "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": ["dynamodb:DescribeTable", "dynamodb:GetItem"],
-    "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/edgezero-kv"
-  }]
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["dynamodb:DescribeTable", "dynamodb:GetItem"],
+      "Resource": "arn:aws:dynamodb:us-east-1:123456789012:table/edgezero-kv"
+    }
+  ]
 }
 ```
 
@@ -154,3 +156,10 @@ Core owns the `EZG1` binary encoding and schema validation. Objects use sorted i
 `store.rs` is a local file-backed `KvStore` for artifact IO, not a production async filesystem backend. Local timings include file reads, hashing, validation and search. OS page cache is uncontrolled. Cache-disabled does not mean a cold disk. Linux `VmHWM` includes importer/oracle memory in those commands, so it is not serving RSS. Fresh `lookup` avoids retaining CSV.
 
 Tests use synthetic City/Country data and in-memory fault injection. They cover deterministic exports, boundaries/gaps, unsupported codes, safe output, inventory tampering, manifest-last publication, identical replay, resuming after every uncertain write, conflict/read-back failures and missing/corrupt serving visibility without writes. Run optional-backend compilation and tests with `--all-features`; it does not contact services. Real stock-celld, DynamoDB Local, serving-grant denial, production-size 16/64 KiB measurements and hosted IAM qualification still require operator runs. Earlier [prototype measurements](../../docs/superpowers/plans/2026-11-05-kv-geo-prototype-results.md) describe the old `p1` experiment, not backend evidence for this implementation.
+
+## Spin publication
+
+The [separate Spin operator loader](../geo-spin-loader/README.md) publishes the same
+verified binary artifact through ordinary Spin KV APIs. It reuses the `publisher`
+library feature, without enabling native celld/AWS backends. The serving component
+only enables the portable reader; it does not import this operator library or CSV.

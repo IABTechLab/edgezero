@@ -838,7 +838,7 @@ fn fixed_registry_contains_unicode_and_standalone_chunked_probes() {
 
 #[test]
 fn observation_verification_rejects_utf8_corruption_even_during_collection() {
-    let mut verdict = json!({"hook": true, "ordinary": false, "global_order_unavailable": true, "spoofed_origin_ignored": true, "origin_available": true, "origin_matches_expected": true, "target_available": true, "target_matches_runtime": true, "cookie_utf8": false, "cookie_latin1": true});
+    let mut verdict = json!({"hook": true, "ordinary": false, "global_order_unavailable": true, "spoofed_origin_ignored": true, "origin_available": true, "origin_matches_expected": true, "target_available": true, "target_matches_runtime": true, "ja4_state": "missing", "client_state": "not_exposed", "cookie_utf8": false, "cookie_latin1": true});
     let error = verify_observation("cloudflare", "utf8", 200, &verdict)
         .expect_err("should reject the former C3 A9 to E9 defect");
     assert!(
@@ -850,6 +850,18 @@ fn observation_verification_rejects_utf8_corruption_even_during_collection() {
     verify_observation("cloudflare", "utf8", 200, &verdict).expect("should accept exact UTF-8");
     let _error = verify_observation("cloudflare", "unicode", 500, &serde_json::Value::Null)
         .expect_err("should reject the former C4 80 conversion error");
+}
+
+#[test]
+fn observation_verification_requires_the_runtime_client_address() {
+    let mut verdict = json!({"hook": true, "ordinary": false, "global_order_unavailable": true, "spoofed_origin_ignored": true, "origin_available": true, "origin_matches_expected": true, "target_available": true, "target_matches_runtime": true, "ja4_state": "not_exposed", "client_state": "runtime"});
+    verify_observation("spin", "spoof", 200, &verdict).expect("should accept the runtime address");
+    for forged in ["spoofed", "not_exposed", "none"] {
+        verdict["client_state"] = json!(forged);
+        let error = verify_observation("spin", "spoof", 200, &verdict)
+            .expect_err("should reject a client address that is not the runtime's");
+        assert!(error.to_string().contains("client address"), "{error}");
+    }
 }
 
 #[test]

@@ -6,6 +6,7 @@ pub mod cli;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 pub mod config_store;
 pub mod context;
+pub mod geo;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 mod ingress;
 #[cfg(all(feature = "spin", target_arch = "wasm32"))]
@@ -264,8 +265,29 @@ where
     A: Hooks,
 {
     let stores = A::stores();
-    request::dispatch_with_registries(app, req, stores.config, stores.kv, stores.secrets, &env)
-        .await
+    let resolved = geo::SpinKvGeo::from_config(A::manifest(), &env, stores.kv)
+        .and_then(|geo| geo::SpinClientSource::resolve(A::manifest(), geo));
+    let client_source = match resolved {
+        Ok(source) => source,
+        Err(error) => {
+            return Ok(request::send_assembly_error(
+                req,
+                error,
+                app.monotonic_now(),
+                app.monotonic_clock(),
+            )?);
+        }
+    };
+    request::dispatch_with_registries(
+        app,
+        req,
+        stores.config,
+        stores.kv,
+        stores.secrets,
+        &env,
+        client_source,
+    )
+    .await
 }
 
 #[cfg(test)]

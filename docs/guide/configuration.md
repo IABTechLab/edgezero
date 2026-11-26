@@ -583,6 +583,43 @@ origin_credential_header_name = "x-origin-verify-randomsuffix"
 Each runtime setting overrides its manifest key. See the [native Geo guide](./native-geo.md#select-from-the-manifest-and-settings)
 for precedence and validation.
 
+### Client info (Cloudflare and Spin)
+
+`[adapters.cloudflare.client_info]` and `[adapters.spin.client_info]` declare direct ingress
+for [`ctx.client_info()`](./handlers.md#client-metadata). Other adapters reject the table.
+
+```toml
+[adapters.cloudflare.client_info]
+direct_ingress = true
+```
+
+| Field            | Default | Description                                                                                            |
+| ---------------- | ------- | ------------------------------------------------------------------------------------------------------ |
+| `direct_ingress` | `false` | Visitors reach the entrypoint directly. Cloudflare: client IP and viewer TLS. Spin: `spin-client-addr` |
+
+The setting is read from the baked manifest and has no runtime override. On Spin it cannot be
+combined with an authenticated-header Geo selection. See the
+[Cloudflare](./adapters/cloudflare.md#client-info) and [Spin](./adapters/spin.md#client-info)
+pages for what each declaration means.
+
+### JA4 (Axum only)
+
+`[adapters.axum.ja4]` selects protected CloudFront JA4. Without it, Axum keeps the
+`EDGEZERO__ADAPTER__JA4_*` trusted proxy settings.
+
+```toml
+[adapters.axum.ja4]
+source = "protected-cloudfront"
+```
+
+| Field    | Values                 | Description                                                                        |
+| -------- | ---------------------- | ---------------------------------------------------------------------------------- |
+| `source` | `protected-cloudfront` | Read `CloudFront-Viewer-JA4-Fingerprint` from peers the CloudFront Geo path admits |
+
+It requires a CloudFront or supplied `[adapters.axum.geo]` selection and cannot be combined
+with `EDGEZERO__ADAPTER__JA4_*`. See
+[JA4 from protected CloudFront](./adapters/axum.md#ja4-from-protected-cloudfront).
+
 ## Full Example
 
 ```toml

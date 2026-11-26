@@ -70,6 +70,7 @@ use crate::config_store_limits::ConfigStoreLimits;
 use crate::connection::{ConnectionExit, serve_http1_with_shutdown};
 use crate::geo::{self, NativeGeo};
 use crate::ingress_config::AxumIngressConfig;
+use crate::ja4::{Ja4Selection, TrustedJa4Header};
 use crate::key_value_store::PersistentKvStore;
 use crate::native_stores::{self, NativeSourcePlan, NativeStoreOverrides, NativeStoreSource};
 use crate::outbound::AxumOutboundClient;
@@ -200,6 +201,14 @@ impl AxumDevServer {
             future::pending::<()>(),
             async move { prepare_transport(app, stores.into(), json_body_limit, native) },
         )
+    }
+
+    /// Reads the client's JA4 from a trusted TLS-terminating proxy's header.
+    #[must_use]
+    #[inline]
+    pub fn with_trusted_ja4_header(mut self, config: TrustedJa4Header) -> Self {
+        self.native.ja4 = Some(Ja4Selection::Generic(config));
+        self
     }
 
     /// Uses an explicit incoming-proxy policy, ignoring ambient proxy settings.
@@ -532,6 +541,7 @@ fn serve_local(
 struct NativeHosting {
     diagnostics: NativeDiagnosticsHandle,
     geo: NativeGeo,
+    ja4: Option<Ja4Selection>,
     policy: TrustedProxyPolicy,
     request_records: bool,
 }
@@ -543,6 +553,7 @@ impl Default for NativeHosting {
             policy: TrustedProxyPolicy::no_trust(),
             request_records: true,
             geo: NativeGeo::default(),
+            ja4: None,
         }
     }
 }
@@ -779,6 +790,9 @@ where
         native.geo,
     )
     .with_phase(reader.clone());
+    if let Some(selection) = native.ja4 {
+        service = service.with_ja4_selection(selection);
+    }
     if let Some(registry) = stores.config {
         service = service.with_config_registry(registry);
     }
@@ -1142,6 +1156,7 @@ where
     let env = EnvConfig::from_vars(pairs);
     let limit = JsonBodyLimit::from_config(&env)?;
     let (policy, request_records) = native_settings(&env)?;
+    let ja4 = TrustedJa4Header::from_env(&env)?.map(Ja4Selection::Generic);
     Ok((
         env,
         limit,
@@ -1150,6 +1165,7 @@ where
             request_records,
             diagnostics: NativeDiagnosticsHandle::new(),
             geo: NativeGeo::default(),
+            ja4,
         },
     ))
 }
@@ -1332,6 +1348,11 @@ where
         policy: options.trusted_proxy_policy(),
         request_records: options.request_records(),
         geo: NativeGeo::default(),
+        ja4: Ja4Selection::resolve(
+            &A::manifest(),
+            geo.protected_path(),
+            TrustedJa4Header::from_env(options.env_config())?,
+        )?,
     };
     run_local(
         ListenerSource::Bind(options.addr()),
@@ -2492,6 +2513,30 @@ mod tests {
                 .with_json_body_limit_bytes(0)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn development_capture_reads_ja4_trusted_proxy_env() {
+        let header = (
+            OsString::from("EDGEZERO__ADAPTER__JA4_HEADER"),
+            OsString::from("x-ja4"),
+        );
+        let proxies = (
+            OsString::from("EDGEZERO__ADAPTER__JA4_TRUSTED_PROXY_CIDRS"),
+            OsString::from("127.0.0.0/8"),
+        );
+        let (_env, _limit, native) =
+            capture_dev_environment([header.clone(), proxies.clone()]).expect("both JA4 variables");
+        assert!(native.ja4.is_some(), "run_app must pick up the JA4 config");
+        let (_, _, unconfigured) =
+            capture_dev_environment(Vec::<(OsString, OsString)>::new()).expect("no JA4 config");
+        assert!(unconfigured.ja4.is_none());
+        for partial in [header, proxies] {
+            assert!(
+                capture_dev_environment([partial]).is_err(),
+                "a partial JA4 config must fail startup"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -3881,6 +3926,197 @@ mod integration_tests {
         assert_eq!(response.text().await.unwrap(), "hello from dev server");
 
         server.handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_reads_ja4_only_from_trusted_proxy_peers() {
+        use edgezero_core::ja4::{CapturedJa4, Ja4Source, Ja4Unavailable};
+
+        async fn ja4_state(ctx: RequestContext) -> Result<&'static str, EdgeError> {
+            Ok(match ctx.ja4() {
+                Some(CapturedJa4::Captured {
+                    fingerprint,
+                    source: Ja4Source::TrustedProxyHeader,
+                }) if fingerprint.as_str() == "t13d1516h2_8daaf6152771_e5627efa2ab1" => "captured",
+                Some(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed)) => "not_exposed",
+                _ => "unexpected",
+            })
+        }
+
+        // The test client connects from loopback, so only the first policy trusts it.
+        for (trusted_proxies, expected) in
+            [("127.0.0.0/8", "captured"), ("192.0.2.0/24", "not_exposed")]
+        {
+            let listener = TokioTcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test server");
+            let addr = listener.local_addr().expect("local addr");
+            let config = AxumDevServerConfig {
+                addr,
+                enable_ctrl_c: false,
+                ingress: AxumIngressConfig::default(),
+            };
+            let trusted = TrustedJa4Header::parse("x-ja4", trusted_proxies)
+                .expect("should parse trusted proxy config");
+            let server = AxumDevServer::with_config(
+                App::new(RouterService::builder().get("/ja4", ja4_state).build()),
+                config,
+            )
+            .with_trusted_ja4_header(trusted);
+            let handle = tokio::spawn(async move {
+                let _result = server.serve(listener, future::pending()).await;
+            });
+
+            let client = reqwest::Client::new();
+            let url = format!("http://{addr}/ja4");
+            let response = send_with_retry(&client, |http_client| {
+                http_client
+                    .get(url.as_str())
+                    .header("x-ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1")
+            })
+            .await;
+            assert_eq!(response.text().await.expect("body"), expected);
+            handle.abort();
+        }
+    }
+
+    // Test-only label: the snapshot's `Debug` deliberately hides addresses.
+    async fn client_info_state(ctx: RequestContext) -> Result<String, EdgeError> {
+        use edgezero_core::client_info::{Capture, PeerAddress, UnavailableReason};
+        let info = ctx.client_info().expect("managed listener snapshot");
+        let source = match info.effective_client() {
+            Capture::Captured(address) => format!("{:?}", address.source()),
+            Capture::Unavailable(reason) => format!("{reason:?}"),
+            _ => "unexpected".to_owned(),
+        };
+        let ip = info
+            .effective_client_ip()
+            .map_or_else(|| "none".to_owned(), |ip| ip.to_string());
+        let peer = info.direct_peer().captured().map_or_else(
+            || "none".to_owned(),
+            |peer| PeerAddress::ip(peer).to_string(),
+        );
+        assert_eq!(
+            info.tls_version().unavailable_reason(),
+            Some(UnavailableReason::NotExposed)
+        );
+        Ok(format!("{source}|{ip}|{peer}"))
+    }
+
+    async fn client_info_over_tcp(
+        bind: &str,
+        policy: TrustedProxyPolicy,
+        headers: &[(&str, &str)],
+    ) -> String {
+        let listener = TokioTcpListener::bind(bind)
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let config = AxumDevServerConfig {
+            addr,
+            enable_ctrl_c: false,
+            ingress: AxumIngressConfig::default(),
+        };
+        let server = AxumDevServer::with_config(
+            App::new(
+                RouterService::builder()
+                    .get("/client", client_info_state)
+                    .build(),
+            ),
+            config,
+        )
+        .with_trusted_proxy_policy(policy);
+        let handle = tokio::spawn(async move {
+            let _result = server.serve(listener, future::pending()).await;
+        });
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/client");
+        let response = send_with_retry(&client, |http_client| {
+            let mut request = http_client.get(url.as_str());
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            request
+        })
+        .await;
+        let body = response.text().await.expect("body");
+        handle.abort();
+        body
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn server_projects_checked_ingress_into_client_info() {
+        use crate::trusted_proxy::ForwardingHeaderFamily;
+        use edgezero_core::client_info::{ClientIpSource, UnavailableReason};
+        type Case<'case> = (
+            &'case str,
+            TrustedProxyPolicy,
+            &'case [(&'case str, &'case str)],
+            String,
+        );
+
+        let xff = |cidr: &str| {
+            TrustedProxyPolicy::new(ForwardingHeaderFamily::XForwarded, [cidr]).expect("policy")
+        };
+        let direct = format!("{:?}|127.0.0.1|127.0.0.1", ClientIpSource::DirectPeer);
+        let missing = format!(
+            "{:?}|none|127.0.0.1",
+            ClientIpSource::PeerFallback(UnavailableReason::Missing)
+        );
+        let spoofed = [
+            ("x-forwarded-for", "198.51.100.7"),
+            ("forwarded", "for=198.51.100.8"),
+        ];
+        let cases: [Case<'_>; 7] = [
+            (
+                "127.0.0.1:0",
+                TrustedProxyPolicy::no_trust(),
+                &spoofed,
+                direct.clone(),
+            ),
+            ("127.0.0.1:0", xff("192.0.2.0/24"), &spoofed[..1], direct),
+            (
+                "127.0.0.1:0",
+                xff("127.0.0.0/8"),
+                &spoofed[..1],
+                format!(
+                    "{:?}|198.51.100.7|127.0.0.1",
+                    ClientIpSource::TrustedXForwardedFor
+                ),
+            ),
+            ("127.0.0.1:0", xff("127.0.0.0/8"), &[], missing.clone()),
+            (
+                "127.0.0.1:0",
+                xff("127.0.0.0/8"),
+                &[
+                    ("x-forwarded-host", "public.example"),
+                    ("x-forwarded-proto", "https"),
+                ],
+                missing,
+            ),
+            (
+                "127.0.0.1:0",
+                xff("127.0.0.0/8"),
+                &[("x-forwarded-for", "not-an-ip")],
+                format!(
+                    "{:?}|none|127.0.0.1",
+                    ClientIpSource::PeerFallback(UnavailableReason::Rejected)
+                ),
+            ),
+            (
+                "[::1]:0",
+                xff("::1/128"),
+                &[("x-forwarded-for", "2001:db8::7")],
+                format!("{:?}|2001:db8::7|::1", ClientIpSource::TrustedXForwardedFor),
+            ),
+        ];
+        for (bind, policy, headers, expected) in cases {
+            assert_eq!(
+                client_info_over_tcp(bind, policy, headers).await,
+                expected,
+                "{headers:?}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
