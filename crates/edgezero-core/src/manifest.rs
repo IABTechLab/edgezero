@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::{env, fs, io};
 use validator::{Validate, ValidationError};
 
+/// Longest accepted client identity name.
+pub const MAX_CLIENT_IDENTITY_NAME_LEN: usize = 64;
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AtomicHost {
     pub host: HostPat,
@@ -19,6 +22,32 @@ pub struct AtomicHost {
 }
 
 impl AtomicHost {
+    /// Whether this canonical allowlist entry admits one concrete origin.
+    ///
+    /// `host` must already be canonical: lowercase ASCII, with IPv6 literals in
+    /// brackets as [`canonicalize_outbound_host`] renders them. A wildcard
+    /// subdomain admits subdomains only, never its apex.
+    #[inline]
+    #[must_use]
+    pub fn permits(&self, scheme: Scheme, host: &str, port: u16) -> bool {
+        if self.scheme != scheme {
+            return false;
+        }
+        let port_admitted = match self.port {
+            Port::Any => true,
+            Port::Exact(exact) => exact == port,
+        };
+        let host_admitted = match &self.host {
+            HostPat::Any => true,
+            HostPat::Exact(exact) => exact == host,
+            HostPat::WildcardSubdomain(suffix) => host
+                .strip_suffix(suffix.as_str())
+                .and_then(|prefix| prefix.strip_suffix('.'))
+                .is_some_and(|label| !label.is_empty()),
+        };
+        port_admitted && host_admitted
+    }
+
     fn render_host_and_port(&self, scheme: &str, host: &str) -> String {
         let mut rendered = format!("{scheme}://{host}");
         match self.port {
@@ -96,6 +125,8 @@ pub enum Capability {
     OutboundBatchCompletionOrder,
     OutboundBatchSlotIsolation,
     OutboundCacheBypass,
+    /// Presents a declared TLS client certificate on outbound requests that select it.
+    OutboundClientIdentity,
     OutboundCompleteResourceAccounting,
     OutboundConnectTimeout,
     OutboundDeadlines,
@@ -142,6 +173,7 @@ impl Capability {
             Self::OutboundBatchCompletionOrder => "outbound-batch-completion-order",
             Self::OutboundBatchSlotIsolation => "outbound-batch-slot-isolation",
             Self::OutboundCacheBypass => "outbound-cache-bypass",
+            Self::OutboundClientIdentity => "outbound-client-identity",
             Self::OutboundCompleteResourceAccounting => "outbound-complete-resource-accounting",
             Self::OutboundConnectTimeout => "outbound-connect-timeout",
             Self::OutboundDeadlines => "outbound-deadlines",
@@ -345,6 +377,7 @@ impl ManifestLoader {
 #[validate(schema(function = "validate_manifest_adapter_keys_case_unique"))]
 #[validate(schema(function = "validate_manifest_adapter_geo_placement"))]
 #[validate(schema(function = "validate_manifest_adapter_client_metadata_placement"))]
+#[validate(schema(function = "validate_manifest_client_identity_stores"))]
 #[validate(schema(
     function = "validate_manifest_fastly_logging",
     skip_on_field_errors = false
@@ -399,9 +432,63 @@ pub struct ManifestCapabilities {
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct ManifestOutboundCapability {
+    /// Named TLS client identities, keyed by identity name. Only logical store
+    /// IDs live here; hosts, certificates and keys are bound at runtime.
+    #[serde(
+        default,
+        rename = "client-identities",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    #[validate(custom(function = "validate_client_identity_names"))]
+    pub client_identities: BTreeMap<String, ClientIdentityDeclaration>,
     #[serde(default)]
     #[validate(length(min = 1_u64), custom(function = "validate_outbound_hosts"))]
     pub hosts: Option<Vec<String>>,
+}
+
+/// One `[capabilities.outbound.client-identities.<name>]` entry.
+///
+/// Both stores are optional. An omitted store resolves to that kind's declared
+/// default; adapters that read their binding from stores reject an identity
+/// whose store cannot be resolved.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ClientIdentityDeclaration {
+    #[serde(
+        default,
+        rename = "config-store",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub config_store: Option<String>,
+    #[serde(
+        default,
+        rename = "secret-store",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub secret_store: Option<String>,
+}
+
+impl ClientIdentityDeclaration {
+    /// The logical `[stores.config]` ID this identity reads from, if one resolves.
+    #[inline]
+    #[must_use]
+    pub fn resolved_config_store<'manifest>(
+        &'manifest self,
+        stores: &'manifest ManifestStores,
+    ) -> Option<&'manifest str> {
+        resolve_identity_store(self.config_store.as_deref(), stores.config.as_ref())
+    }
+
+    /// The logical `[stores.secrets]` ID this identity reads from, if one resolves.
+    #[inline]
+    #[must_use]
+    pub fn resolved_secret_store<'manifest>(
+        &'manifest self,
+        stores: &'manifest ManifestStores,
+    ) -> Option<&'manifest str> {
+        resolve_identity_store(self.secret_store.as_deref(), stores.secrets.as_ref())
+    }
 }
 
 impl Manifest {
@@ -1220,6 +1307,37 @@ impl serde::Serialize for LogLevel {
     }
 }
 
+fn resolve_identity_store<'manifest>(
+    explicit: Option<&'manifest str>,
+    declaration: Option<&'manifest StoreDeclaration>,
+) -> Option<&'manifest str> {
+    let stores = declaration?;
+    match explicit {
+        Some(id) => stores
+            .ids
+            .iter()
+            .any(|declared| declared == id)
+            .then_some(id),
+        None => Some(stores.default_id()).filter(|id| !id.is_empty()),
+    }
+}
+
+/// Whether `name` is a valid client identity name: 1 to 64 characters of
+/// `[a-z0-9-]`, not starting or ending with `-`.
+///
+/// Derived entry names such as `<name>.certificate` are then valid Fastly
+/// secret names and config keys.
+#[inline]
+#[must_use]
+pub fn is_valid_client_identity_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_CLIENT_IDENTITY_NAME_LEN
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
 /// Canonicalizes one outbound host declaration into atomic scheme/host/port entries.
 ///
 /// # Errors
@@ -1475,6 +1593,66 @@ fn validate_capabilities_disjoint(
         .any(|capability| optional.contains(capability))
     {
         return Err(ValidationError::new("capability_required_optional_overlap"));
+    }
+    Ok(())
+}
+
+fn validate_client_identity_names(
+    identities: &BTreeMap<String, ClientIdentityDeclaration>,
+) -> Result<(), ValidationError> {
+    if let Some(name) = identities
+        .keys()
+        .find(|name| !is_valid_client_identity_name(name))
+    {
+        let mut error = ValidationError::new("client_identity_name");
+        error.message = Some(
+            format!(
+                "client identity `{name}` must be 1 to {MAX_CLIENT_IDENTITY_NAME_LEN} characters of \
+                 [a-z0-9-], not starting or ending with `-`"
+            )
+            .into(),
+        );
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn validate_manifest_client_identity_stores(manifest: &Manifest) -> Result<(), ValidationError> {
+    let stores = &manifest.stores;
+    for (name, identity) in &manifest.capabilities.outbound.client_identities {
+        for (kind, explicit, declaration) in [
+            (
+                "secret-store",
+                identity.secret_store.as_deref(),
+                stores.secrets.as_ref(),
+            ),
+            (
+                "config-store",
+                identity.config_store.as_deref(),
+                stores.config.as_ref(),
+            ),
+        ] {
+            let Some(id) = explicit else { continue };
+            let declared = declaration.is_some_and(|declared_stores| {
+                declared_stores.ids.iter().any(|declared| declared == id)
+            });
+            if !declared {
+                let mut error = ValidationError::new("client_identity_unknown_store");
+                error.message = Some(
+                    format!(
+                        "client identity `{name}` names {kind} `{id}`, which is not declared in \
+                         [stores.{}]",
+                        if kind == "secret-store" {
+                            "secrets"
+                        } else {
+                            "config"
+                        }
+                    )
+                    .into(),
+                );
+                return Err(error);
+            }
+        }
     }
     Ok(())
 }
@@ -2047,6 +2225,7 @@ required = [
     "outbound-batch-completion-order",
     "outbound-batch-slot-isolation",
     "outbound-cache-bypass",
+    "outbound-client-identity",
     "outbound-complete-resource-accounting",
     "outbound-connect-timeout",
     "outbound-deadlines",
@@ -2083,6 +2262,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             Capability::OutboundBatchCompletionOrder,
             Capability::OutboundBatchSlotIsolation,
             Capability::OutboundCacheBypass,
+            Capability::OutboundClientIdentity,
             Capability::OutboundCompleteResourceAccounting,
             Capability::OutboundConnectTimeout,
             Capability::OutboundDeadlines,
@@ -2123,6 +2303,7 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
             "outbound-batch-completion-order",
             "outbound-batch-slot-isolation",
             "outbound-cache-bypass",
+            "outbound-client-identity",
             "outbound-complete-resource-accounting",
             "outbound-connect-timeout",
             "outbound-deadlines",
@@ -2169,6 +2350,142 @@ hosts = ["*", "HTTPS://Example.COM", "api.example.com:8443"]
                 "manifest unexpectedly accepted: {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn client_identities_parse_resolve_and_round_trip() {
+        let source = r#"
+[capabilities.outbound.client-identities.prebid-server]
+secret-store = "keys"
+config-store = "certs"
+
+[capabilities.outbound.client-identities.defaulted]
+
+[stores.secrets]
+ids = ["default", "keys"]
+default = "default"
+
+[stores.config]
+ids = ["app_config", "certs"]
+default = "app_config"
+"#;
+        let loader = ManifestLoader::try_load_from_str(source).expect("identity manifest");
+        let manifest = loader.manifest();
+        let identities = &manifest.capabilities.outbound.client_identities;
+        assert_eq!(identities.len(), 2);
+
+        let explicit = &identities["prebid-server"];
+        assert_eq!(
+            explicit.resolved_secret_store(&manifest.stores),
+            Some("keys")
+        );
+        assert_eq!(
+            explicit.resolved_config_store(&manifest.stores),
+            Some("certs")
+        );
+        let defaulted = &identities["defaulted"];
+        assert_eq!(
+            defaulted.resolved_secret_store(&manifest.stores),
+            Some("default")
+        );
+        assert_eq!(
+            defaulted.resolved_config_store(&manifest.stores),
+            Some("app_config")
+        );
+
+        let serialized = toml::to_string(manifest).expect("serialize identity manifest");
+        let reparsed = ManifestLoader::try_load_from_str(&serialized).expect("round trip");
+        assert_eq!(
+            &reparsed.manifest().capabilities.outbound.client_identities,
+            identities
+        );
+    }
+
+    #[test]
+    fn client_identities_need_no_stores_and_stay_out_of_empty_manifests() {
+        let loader =
+            ManifestLoader::try_load_from_str("[capabilities.outbound.client-identities.mtls]\n")
+                .expect("identity without stores");
+        let manifest = loader.manifest();
+        let identity = &manifest.capabilities.outbound.client_identities["mtls"];
+        assert_eq!(identity.resolved_secret_store(&manifest.stores), None);
+        assert_eq!(identity.resolved_config_store(&manifest.stores), None);
+
+        let without =
+            ManifestLoader::try_load_from_str("[capabilities.outbound]\nhosts = [\"*\"]\n")
+                .expect("manifest without identities");
+        let serialized = toml::to_string(without.manifest()).expect("serialize");
+        assert!(
+            !serialized.contains("client-identities"),
+            "an empty identity table must not change serialized manifests: {serialized}"
+        );
+    }
+
+    #[test]
+    fn client_identities_reject_invalid_names_stores_and_fields() {
+        let too_long = format!(
+            "[capabilities.outbound.client-identities.{}]\n",
+            "a".repeat(MAX_CLIENT_IDENTITY_NAME_LEN + 1)
+        );
+        let invalid = [
+            "[capabilities.outbound.client-identities.Upper]\n",
+            "[capabilities.outbound.client-identities.-lead]\n",
+            "[capabilities.outbound.client-identities.trail-]\n",
+            "[capabilities.outbound.client-identities.under_score]\n",
+            "[capabilities.outbound.client-identities.\"dot.ted\"]\n",
+            "[capabilities.outbound.client-identities.\"\"]\n",
+            too_long.as_str(),
+            "[capabilities.outbound.client-identities.mtls]\nsecret-store = \"missing\"\n\
+             [stores.secrets]\nids = [\"default\"]\n",
+            "[capabilities.outbound.client-identities.mtls]\nsecret-store = \"default\"\n",
+            "[capabilities.outbound.client-identities.mtls]\nconfig-store = \"missing\"\n\
+             [stores.config]\nids = [\"app_config\"]\n",
+            "[capabilities.outbound.client-identities.mtls]\ncertificate = \"pem\"\n",
+            "[capabilities.outbound.client-identities.mtls]\nhosts = [\"https://a.example\"]\n",
+        ];
+        for source in invalid {
+            assert!(
+                ManifestLoader::try_load_from_str(source).is_err(),
+                "manifest unexpectedly accepted: {source}"
+            );
+        }
+
+        let longest = "a".repeat(MAX_CLIENT_IDENTITY_NAME_LEN);
+        for valid in ["a", "prebid-server", "x9", longest.as_str()] {
+            assert!(is_valid_client_identity_name(valid), "{valid}");
+        }
+    }
+
+    #[test]
+    fn atomic_host_permits_concrete_origins() {
+        let entry = |source: &str| {
+            canonicalize_outbound_host(source)
+                .expect("allowlist entry")
+                .remove(0)
+        };
+
+        let exact = entry("https://pbs.example.com");
+        assert!(exact.permits(Scheme::Https, "pbs.example.com", 443));
+        assert!(!exact.permits(Scheme::Https, "pbs.example.com", 8443));
+        assert!(!exact.permits(Scheme::Http, "pbs.example.com", 443));
+        assert!(!exact.permits(Scheme::Https, "other.example.com", 443));
+
+        let any_port = entry("https://pbs.example.com:*");
+        assert!(any_port.permits(Scheme::Https, "pbs.example.com", 8443));
+
+        let wildcard = entry("https://*.example.com");
+        assert!(wildcard.permits(Scheme::Https, "pbs.example.com", 443));
+        assert!(wildcard.permits(Scheme::Https, "a.b.example.com", 443));
+        assert!(!wildcard.permits(Scheme::Https, "example.com", 443));
+        assert!(!wildcard.permits(Scheme::Https, "badexample.com", 443));
+
+        let any = entry("https://*:*");
+        assert!(any.permits(Scheme::Https, "anything.test", 1));
+        assert!(!any.permits(Scheme::Http, "anything.test", 1));
+
+        let ipv6 = entry("https://[::1]:8443");
+        assert!(ipv6.permits(Scheme::Https, "[::1]", 8443));
+        assert!(!ipv6.permits(Scheme::Https, "[::2]", 8443));
     }
 
     #[test]

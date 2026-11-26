@@ -23,10 +23,11 @@ use edgezero_core::outbound::test_support::{
     NativeBodyRecorder, native_body_recorder, observe_sdk_read, own_sdk_operation, own_sdk_source,
 };
 use edgezero_core::outbound::{
-    OutboundBatch, OutboundBatchDriverEvent, OutboundDispatchRequest, OutboundExchangeOwner,
-    OutboundFuture, OutboundHead, OutboundHeaderFidelity, OutboundHeaderInput, OutboundHttpClient,
-    OutboundPending, OutboundPreparedBatch, OutboundRequest, OutboundRequestParts,
-    OutboundResponse, OutboundResponseContext, OutboundSendMode, OutboundTask, OutboundTime,
+    ClientIdentityError, OutboundBatch, OutboundBatchDriverEvent, OutboundDispatchRequest,
+    OutboundExchangeOwner, OutboundFuture, OutboundHead, OutboundHeaderFidelity,
+    OutboundHeaderInput, OutboundHttpClient, OutboundPending, OutboundPreparedBatch,
+    OutboundRequest, OutboundRequestParts, OutboundResponse, OutboundResponseContext,
+    OutboundSendMode, OutboundTask, OutboundTime,
 };
 use edgezero_core::time::{Deadline, DispatchBudget, MonotonicClock, MonotonicInstant};
 use futures::channel::{mpsc, oneshot};
@@ -157,6 +158,12 @@ impl AxumOutboundClient {
     }
 
     fn validate_options(request: &OutboundRequest) -> Result<(), EdgeError> {
+        if let Some(name) = request.client_identity_name() {
+            return Err(EdgeError::client_identity(
+                name,
+                ClientIdentityError::Unsupported { adapter: "axum" },
+            ));
+        }
         if request.image_optimizer_options().is_some() {
             return Err(EdgeError::bad_request(
                 "image_optimizer is not supported by axum",
@@ -1265,6 +1272,28 @@ mod clock_tests {
             AxumOutboundClient::try_with_time(executor_handle.clone(), time).expect("client")
         }))
         .expect("zero connect timeout conformance");
+    }
+
+    #[test]
+    fn client_identity_is_unsupported_without_transport() {
+        use edgezero_core::outbound::ClientIdentityName;
+        use futures::FutureExt as _;
+        let executor_owner = AxumOutboundExecutor::new();
+        let client = edgezero_core::HttpClient::with_client(
+            AxumOutboundClient::try_new(executor_owner.handle()).expect("client"),
+        );
+        let request = OutboundRequest::get("https://127.0.0.1:9/mtls")
+            .expect("request")
+            .client_identity(ClientIdentityName::new("mtls").expect("name"));
+        let error = client
+            .send(request)
+            .now_or_never()
+            .expect("rejected before any transport")
+            .expect_err("axum cannot present client identities");
+        assert_eq!(
+            error.client_identity_error(),
+            Some(&ClientIdentityError::Unsupported { adapter: "axum" })
+        );
     }
 
     #[test]
