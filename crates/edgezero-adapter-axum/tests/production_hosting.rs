@@ -609,7 +609,7 @@ mod tests {
                 OsString::from_vec(vec![0xff]),
             ] {
                 let roots = Roots::new();
-                let addr = address();
+                let (addr, _addr_held) = reserved_address();
                 let mut launch = command(mode, &roots, addr);
                 launch.env("EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES", value);
                 let log = failed(launch, addr, "JSON_BODY_LIMIT_BYTES");
