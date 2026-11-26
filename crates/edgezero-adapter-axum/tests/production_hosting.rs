@@ -2374,7 +2374,7 @@ mod tests {
         server.ready();
         assert!(
             raw_request(
-                addr,
+                server.addr(),
                 "GET /state HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
             )
             .contains("configured-greeting")
