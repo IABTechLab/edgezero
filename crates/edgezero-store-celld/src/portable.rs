@@ -2,7 +2,7 @@
 //!
 //! Only authenticated HTTPS access is supported. The bearer token comes from a
 //! logical secrets store, the store instance from offline preflight. Request and
-//! response policy is the native client's, in [`crate::wire`]; no request is retried.
+//! response policy is the native client's, in the private `wire` module; no request is retried.
 
 #![expect(
     clippy::arbitrary_source_item_ordering,
