@@ -179,7 +179,11 @@ impl<'app> FastlyService<'app> {
             ConfigSource::None => None,
         };
         let kv = match self.kv {
-            Some(source) => resolve_kv_handle(&source.name, source.required)?,
+            Some(source) => resolve_kv_handle(
+                &source.name,
+                source.required,
+                self.app.record_store_requirements().get("default"),
+            )?,
             None => None,
         };
         let secrets = match self.secrets {
@@ -412,6 +416,17 @@ fn dispatch_core_request(
     // use `ctx.{config,kv,secret}_store_default()` or the
     // `Kv` / `Config` / `Secrets` extractors.
     let (config_registry, kv_registry, secret_registry) = synthesise_store_registries(stores);
+    if !app.record_store_requirements().is_empty() {
+        let validation = kv_registry
+            .as_ref()
+            .ok_or_else(|| KvError::Validation("required record registry missing".to_owned()))
+            .and_then(|registry| {
+                registry.validate_record_requirements(app.record_store_requirements())
+            });
+        if let Err(error) = validation {
+            return DispatchOutcome::Detached(app.admitted_error_egress(prepared, error.into()));
+        }
+    }
     if let Some(registry) = config_registry {
         core_request.extensions_mut().insert(registry);
     }
@@ -602,10 +617,47 @@ where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
     Finalize: FnOnce(&mut Response) -> State,
 {
+    request_with_registries_and_delivery(app, stores, req, prepare, finalize, send_egress_response)
+}
+
+/// Exercises production registry construction with an injected delivery boundary.
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+#[inline]
+pub fn run_request_with_registries_and_hooks_for_test<State, Prepare, Finalize, Deliver>(
+    app: &App,
+    stores: StoresMetadata,
+    req: FastlyRequest,
+    prepare: Prepare,
+    finalize: Finalize,
+    deliver: Deliver,
+) -> FastlyRequestDelivery<State>
+where
+    Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+    Finalize: FnOnce(&mut Response) -> State,
+    Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
+{
+    request_with_registries_and_delivery(app, stores, req, prepare, finalize, deliver)
+}
+
+fn request_with_registries_and_delivery<State, Prepare, Finalize, Deliver>(
+    app: &App,
+    stores: StoresMetadata,
+    req: FastlyRequest,
+    prepare: Prepare,
+    finalize: Finalize,
+    deliver: Deliver,
+) -> FastlyRequestDelivery<State>
+where
+    Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
+    Finalize: FnOnce(&mut Response) -> State,
+    Deliver: FnOnce(ResponseEgressEnvelope) -> FastlyResponseDelivery,
+{
     with_callback(|| {
         init_fastly_abi();
         let request_start = app.monotonic_now();
-        let kv_registry = build_kv_registry(stores.kv);
+        let kv_registry =
+            build_kv_registry_with_records(stores.kv, app.record_store_requirements());
         let config_registry = build_config_registry(stores.config);
         let secret_registry = build_secret_registry(stores.secrets);
         let outcome = dispatch_with_handles(
@@ -620,7 +672,7 @@ where
             request_start,
             prepare,
         );
-        finish_request(outcome, finalize, send_egress_response)
+        finish_request(outcome, finalize, deliver)
     })
 }
 
@@ -688,13 +740,24 @@ fn synthesise_store_registries(
     (config_registry, kv_registry, secret_registry)
 }
 
+#[cfg(test)]
 fn build_kv_registry(kv_meta: Option<StoreMetadata>) -> Option<KvRegistry> {
+    build_kv_registry_with_records(kv_meta, &edgezero_core::RecordStoreRequirements::new())
+}
+
+fn build_kv_registry_with_records(
+    kv_meta: Option<StoreMetadata>,
+    requirements: &edgezero_core::RecordStoreRequirements,
+) -> Option<KvRegistry> {
     let meta = kv_meta?;
     let mut by_id: BTreeMap<String, KvHandle> = BTreeMap::new();
     for id in meta.ids {
         by_id.insert(
             (*id).to_owned(),
-            KvHandle::new(Arc::new(FastlyKvStore::declared(id))),
+            KvHandle::new(Arc::new(match requirements.get(*id) {
+                Some(layout) => FastlyKvStore::declared_records(id, layout.clone()),
+                None => FastlyKvStore::declared(id),
+            })),
         );
     }
     let default_id = meta.default.to_owned();
@@ -1036,11 +1099,18 @@ fn map_edge_error(err: &EdgeError) -> FastlyError {
 fn resolve_kv_handle(
     kv_store_name: &str,
     kv_required: bool,
+    layout: Option<&edgezero_core::RecordLayout>,
 ) -> Result<Option<KvHandle>, FastlyNoAttempt> {
-    match FastlyKvStore::open(kv_store_name) {
+    let opened = match layout {
+        Some(declared_layout) => {
+            FastlyKvStore::open_records(kv_store_name, declared_layout.clone())
+        }
+        None => FastlyKvStore::open(kv_store_name),
+    };
+    match opened {
         Ok(store) => Ok(Some(KvHandle::new(Arc::new(store)))),
         Err(err) => {
-            if kv_required {
+            if kv_required || layout.is_some() {
                 let reason = if let KvError::OpenFailed { reason } = &err {
                     *reason
                 } else {
@@ -1166,6 +1236,58 @@ mod synthesis_tests {
 
     fn secret_handle() -> SecretHandle {
         SecretHandle::new(Arc::new(NoopSecretStore))
+    }
+
+    #[test]
+    fn declared_record_registry_keeps_the_configured_layout_without_provider_io() {
+        struct Layout;
+        impl edgezero_core::RecordKeyLayout for Layout {
+            fn id(&self) -> &'static str {
+                "fastly.record-registry"
+            }
+
+            fn partition_prefix<'key>(&self, _key: &'key str) -> Result<&'key str, KvError> {
+                Ok("group/")
+            }
+
+            fn validate(&self) -> Result<(), KvError> {
+                Ok(())
+            }
+
+            fn validate_partition(&self, prefix: &str) -> Result<(), KvError> {
+                if prefix == "group/" {
+                    Ok(())
+                } else {
+                    Err(KvError::Validation("incomplete partition".to_owned()))
+                }
+            }
+
+            fn version(&self) -> u32 {
+                3
+            }
+        }
+        let requirements = edgezero_core::RecordStoreRequirements::from([(
+            "record_binding_not_opened".to_owned(),
+            edgezero_core::RecordLayout::new(Layout).unwrap(),
+        )]);
+        let registry = build_kv_registry_with_records(
+            Some(StoreMetadata {
+                default: "record_binding_not_opened",
+                ids: &["record_binding_not_opened", "ordinary_binding_not_opened"],
+            }),
+            &requirements,
+        )
+        .unwrap();
+        registry
+            .validate_record_requirements(&requirements)
+            .unwrap();
+        let records = registry.default().unwrap().require_records().unwrap();
+        assert_eq!(records.binding().layout.version(), 3);
+        registry
+            .named("ordinary_binding_not_opened")
+            .unwrap()
+            .require_records()
+            .unwrap_err();
     }
 
     #[test]

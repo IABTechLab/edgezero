@@ -240,7 +240,7 @@ jobs:
       - name: Bundled demo logging and fallback TCP contracts
         if: matrix.suite == 'cli'
         run: |
-          node --test scripts/run_test_nonzero.test.mjs scripts/check_outbound_legacy_api.test.mjs
+          node --test scripts/run_test_nonzero.test.mjs scripts/check_outbound_legacy_api.test.mjs scripts/portable_dependency_checks.test.mjs
           scripts/run_test_nonzero.sh --include-ignored demo_fallbacks_enforce_body_cap_over_tcp cargo test --offline --locked -p edgezero-cli --features demo-example --test demo_logging
 
       - name: Run EdgeZero CLI tests
@@ -298,7 +298,7 @@ jobs:
 
       - name: Native provider integration runner tests
         if: matrix.suite == 'cli'
-        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs scripts/run_celld_store_fleet_proof.test.mjs services/celld-store/test/service.test.mjs
+        run: node --test scripts/native_aws_test_admin.test.mjs scripts/run_native_aws_integration.test.mjs scripts/run_native_celld_integration.test.mjs scripts/run_celld_store_fleet_proof.test.mjs services/celld-store/test/*.test.mjs
 
       - name: Generated native AWS independent service contracts
         if: matrix.suite == 'cli'

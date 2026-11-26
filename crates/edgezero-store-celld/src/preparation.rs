@@ -10,11 +10,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use edgezero_core::key_value_store::KvHandle;
+#[cfg(feature = "records")]
+use edgezero_core::record_store::RecordLayout;
 use edgezero_core::time::{Deadline, MonotonicClock};
 
 use crate::PreparationError;
 use crate::client::ScopedClient;
 use crate::kv::CelldKvStore;
+#[cfg(feature = "records")]
+use crate::records::CelldRecordKvStore;
 use crate::settings::{
     CelldAccess, CelldAccessToken, CelldKvSettings, CelldPreparationLimits, endpoint,
 };
@@ -96,6 +100,51 @@ impl CelldPreparation {
             self.poisoned = false;
         }
         result
+    }
+
+    /// Prepares a record handle using a read-only service capability exchange.
+    ///
+    /// # Errors
+    /// Rejects invalid input, unsupported service capabilities and unavailable
+    /// selected stores. A failed session stays poisoned; no fallback is prepared.
+    #[cfg(feature = "records")]
+    #[inline]
+    pub async fn prepare_record_store(
+        &mut self,
+        settings: &CelldKvSettings,
+        layout: &RecordLayout,
+        token: Option<&CelldAccessToken>,
+    ) -> Result<KvHandle, PreparationError> {
+        self.begin()?;
+        let result = self.records_inner(settings, layout, token).await;
+        if result.is_ok() {
+            self.poisoned = false;
+        }
+        result
+    }
+
+    #[cfg(feature = "records")]
+    async fn records_inner(
+        &mut self,
+        settings: &CelldKvSettings,
+        layout: &RecordLayout,
+        token: Option<&CelldAccessToken>,
+    ) -> Result<KvHandle, PreparationError> {
+        settings.validate()?;
+        self.charge_mapping(&[settings.endpoint.len(), settings.store.len()])?;
+        let (_, client) = self.client(&settings.endpoint, &settings.access, token)?;
+        let endpoint = endpoint(&settings.endpoint, &settings.access)?;
+        let store = CelldRecordKvStore::prepare(
+            client,
+            &endpoint,
+            settings.store.clone(),
+            self.limits,
+            layout,
+            self.deadline,
+        )
+        .await?;
+        self.check()?;
+        Ok(KvHandle::new(Arc::new(store)))
     }
 
     /// Safe aggregate counters; no resource or authorization identifiers.

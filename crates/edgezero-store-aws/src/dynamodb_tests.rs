@@ -233,7 +233,7 @@ fn serve_one(stream: &mut TcpStream, state: &Arc<Mutex<FixtureState>>) {
         .unwrap_or_default();
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
+pub(super) fn read_request(stream: &mut TcpStream) -> Option<(String, Vec<u8>)> {
     let mut data = Vec::with_capacity(4096);
     let mut chunk = [0_u8; 2048];
     let header_end = loop {
@@ -396,7 +396,11 @@ fn decode_base64_known(input: &str) -> Vec<u8> {
         .expect("SDK Binary uses standard base64")
 }
 
-fn loopback_client(runtime: &Runtime, endpoint: &str, limits: DynamoDbKvLimits) -> Client {
+pub(super) fn loopback_client(
+    runtime: &Runtime,
+    endpoint: &str,
+    limits: DynamoDbKvLimits,
+) -> Client {
     // Region and static credentials are explicitly injected before config load;
     // the service endpoint is explicit in the DynamoDB config. There is no
     // profile, web-identity, IMDS, environment-credential, or endpoint lookup.
@@ -431,7 +435,7 @@ fn loopback_client(runtime: &Runtime, endpoint: &str, limits: DynamoDbKvLimits) 
     Client::from_conf(config)
 }
 
-fn active_table() -> Value {
+pub(super) fn active_table() -> Value {
     json!({"Table": {
         "TableName": TABLE, "TableStatus": "ACTIVE",
         "KeySchema": [
@@ -482,6 +486,10 @@ fn settings() -> DynamoDbKvSettings {
     }
 }
 
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "ordinary provider wrapper deliberately retains Unsupported record defaults"
+)]
 #[async_trait(?Send)]
 impl KvStore for RuntimeStore {
     async fn delete(&self, key: &str) -> Result<(), KvError> {

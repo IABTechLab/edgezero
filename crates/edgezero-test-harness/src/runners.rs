@@ -7,6 +7,7 @@ mod lifetimes;
 mod overflow;
 mod progress;
 mod readiness;
+mod record_contract;
 mod response_headers;
 mod reuse;
 mod wire;
@@ -376,6 +377,9 @@ pub fn fastly(args: &Args, run: &Path, records: &mut Records) -> Result<()> {
     if version.split_whitespace().nth(1) != Some(pin) {
         // Keep going: an unpinned Viceroy still gets signal, and a failure still exits 1.
         records.push(json!({"status":"unverified","adapter":"fastly","reason":format!("Viceroy version {version} does not match pinned {pin}")}))?;
+    }
+    if args.suite == "record-contract" {
+        return record_contract::run(&exe, run, records);
     }
     if args.suite == "outbound-wire" {
         return wire::run("fastly", run, records);

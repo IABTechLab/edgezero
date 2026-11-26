@@ -226,6 +226,10 @@ impl CelldKvStore {
 }
 
 #[async_trait::async_trait(?Send)]
+#[expect(
+    clippy::missing_trait_methods,
+    reason = "ordinary-only raw KV inherits Unsupported record defaults; it must not advertise record capability"
+)]
 impl KvStore for CelldKvStore {
     async fn delete(&self, key: &str) -> Result<(), KvError> {
         let deadline = self.client.deadline().map_err(kv_error)?;
@@ -339,6 +343,10 @@ fn ttl_seconds(ttl: Duration) -> Result<u64, PreparationError> {
 
 fn kv_error(error: PreparationError) -> KvError {
     match error {
+        #[cfg(feature = "records")]
+        PreparationError::MutationUncertain => KvError::MutationUncertain,
+        #[cfg(feature = "records")]
+        PreparationError::PreconditionFailed => KvError::Unavailable,
         PreparationError::InvalidBinding
         | PreparationError::InvalidEndpoint
         | PreparationError::InvalidLimits

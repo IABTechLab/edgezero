@@ -217,7 +217,8 @@ impl AxumRunOptions {
                 }
             }
             for binding in document.kv().values() {
-                if let NativeKvBinding::Celld(settings) = binding
+                if let NativeKvBinding::Celld(settings) | NativeKvBinding::CelldRecords(settings) =
+                    binding
                     && let Some(name) = settings.access.token_env()
                 {
                     names.entry(name.to_owned()).or_default().1 = true;
@@ -827,9 +828,17 @@ mod tests {
     }
 
     #[test]
-    fn celld_capture_unions_kv_names_and_validates_shared_aws_use() {
+    fn celld_capture_unions_raw_and_record_names_and_validates_shared_aws_use() {
         for (input, expected) in [
             (CELLD.to_owned(), 1),
+            (
+                CELLD.replace("provider=\'celld-kv\'", "provider=\'celld-records\'"),
+                1,
+            ),
+            (
+                CELLD.replacen("provider=\'celld-kv\'", "provider=\'celld-records\'", 1),
+                1,
+            ),
             (
                 CELLD.replace(
                     "[kv.state.access]\nmode='authenticated'\ntoken_env='CELL_TOKEN'",

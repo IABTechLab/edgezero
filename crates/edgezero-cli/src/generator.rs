@@ -2015,7 +2015,9 @@ git = "https://example.invalid/spin-sdk-test"
             "aws-appconfig-agent",
             "aws-secrets-manager",
             "aws-dynamodb",
+            "aws-dynamodb-records",
             "celld-kv",
+            "celld-records",
         ] {
             assert!(
                 features.get("celld-config").is_none(),

@@ -24,6 +24,7 @@ kv = [
     "dep:sha2",
     "dep:getrandom",
 ]
+records = ["kv"]
 
 [dependencies]
 serde = { workspace = true }
@@ -46,4 +47,6 @@ tokio = { workspace = true, optional = true }
 serde_json = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+edgezero-core = { workspace = true, features = ["test-utils"] }
+tempfile = { workspace = true }
 tokio-rustls = { workspace = true }
