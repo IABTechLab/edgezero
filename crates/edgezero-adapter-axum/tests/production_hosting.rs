@@ -2650,7 +2650,7 @@ mod tests {
         assert_eq!(country_only["geo"]["country"], "GB");
         assert!(country_only["geo"]["subdivision"].is_null());
         let rejected = raw_request(
-            addr,
+            server.addr(),
             "GET /geo-abort HTTP/1.1\r\nHost: fixture\r\nForwarded: for=192.0.2.238\r\nConnection: close\r\n\r\n",
         );
         assert!(rejected.is_empty());
