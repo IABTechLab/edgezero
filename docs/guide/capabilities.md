@@ -379,7 +379,10 @@ so CPU-bound or blocking work overruns it.
   30 seconds after response completion or disconnect across all `waitUntil` calls; platform
   CPU/memory limits or earlier termination can shorten execution. Tasks have no persistence or
   automatic retry. See [Workers context limits](https://developers.cloudflare.com/workers/runtime-apis/context/#waituntil).
-- Spin installs no scheduler, so registration returns `501 Not Implemented`.
+- Spin rejects every registration with a positive budget with `501 Not Implemented` and the
+  message `after-response tasks are not supported by the Spin adapter`
+  (`edgezero_adapter_spin::AFTER_RESPONSE_UNSUPPORTED`). The task is dropped without being polled.
+  A zero budget returns `500`, as on Axum and Fastly.
 
 ## Outbound Matrix
 
