@@ -310,9 +310,10 @@ extensions, and caller-supplied `ConnectInfo` cannot create Geo source admission
 callbacks run before Geo exists. Header changes or extension insertion/removal by application
 code cannot replace the managed outcome. Response finalization never resolves it again.
 
-The unmanaged request converter, legacy dispatch, Fastly, Cloudflare, and Spin expose
-`NoSelection`. Returning a context to an ordinary request and constructing a new unmanaged
-context does not preserve its private Geo result.
+The unmanaged request converter, legacy dispatch, and unconfigured Spin applications expose
+`NoSelection`. Fastly and Cloudflare managed dispatch select their own platform geography
+automatically; absent platform geography yields `MissingMetadata`. Returning a context to an
+ordinary request and constructing a new unmanaged context does not preserve its private Geo result.
 
 ## CloudFront assertion rules
 

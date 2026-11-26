@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use bytes::Bytes;
 use edgezero_core::key_value_store::{KvError, KvHandle, KvPage, KvStore};
-#[cfg(any(test, feature = "celld", feature = "dynamodb"))]
+#[cfg(any(test, feature = "publisher", feature = "celld", feature = "dynamodb"))]
 use serde::Serialize;
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
 pub struct Artifact {
     pub receipt: Receipt,
     pub inventory: Vec<InventoryEntry>,
-    #[cfg(any(test, feature = "celld", feature = "dynamodb"))]
+    #[cfg(any(test, feature = "publisher", feature = "celld", feature = "dynamodb"))]
     kv: KvHandle,
 }
 
@@ -128,13 +128,13 @@ impl Artifact {
         Ok(Self {
             receipt,
             inventory,
-            #[cfg(any(test, feature = "celld", feature = "dynamodb"))]
+            #[cfg(any(test, feature = "publisher", feature = "celld", feature = "dynamodb"))]
             kv,
         })
     }
 }
 
-#[cfg(any(test, feature = "celld", feature = "dynamodb"))]
+#[cfg(any(test, feature = "publisher", feature = "celld", feature = "dynamodb"))]
 #[derive(Debug, Default, Serialize)]
 pub struct PublishReport {
     pub objects: usize,
@@ -142,7 +142,7 @@ pub struct PublishReport {
     pub identical: usize,
 }
 
-#[cfg(any(test, feature = "celld", feature = "dynamodb"))]
+#[cfg(any(test, feature = "publisher", feature = "celld", feature = "dynamodb"))]
 pub async fn publish(artifact: &Artifact, remote: &KvHandle) -> Result<PublishReport> {
     let mut report = PublishReport::default();
     // Inventory ordering is not trusted. Only the manifest is a publication marker.

@@ -683,8 +683,7 @@ pub struct ManifestAdapter {
     #[serde(default)]
     #[validate(nested)]
     pub commands: ManifestAdapterCommands,
-    /// `[adapters.axum.geo]`: native geo selection. Only Axum reads it; other
-    /// adapters use their platform's geo and reject the table.
+    /// Geo selection for native Axum or authenticated-IP Spin KV lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[validate(nested)]
     pub geo: Option<ManifestAdapterGeo>,
@@ -699,10 +698,10 @@ pub struct ManifestAdapter {
     pub logging: ManifestLoggingConfig,
 }
 
-/// `[adapters.axum.geo]`. Each key is a default that the matching
+/// `[adapters.axum.geo]` or `[adapters.spin.geo]`. Each key is a default that the matching
 /// `EDGEZERO__ADAPTER__GEO__*` variable overrides at startup, so deployment-only
 /// values such as ALB networks can stay out of the compiled manifest. The
-/// merged selection is validated before the server listens.
+/// merged selection is validated before native serving or Spin request dispatch.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, Validate)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -711,6 +710,9 @@ pub struct ManifestAdapterGeo {
     /// ALB peer networks admitted as the protected `CloudFront` source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alb_peer_cidrs: Option<Vec<String>>,
+    /// Spin variable containing the expected ingress credential, never the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_variable: Option<String>,
     /// Aggregate per-request KV lookup deadline in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lookup_timeout_ms: Option<u32>,
@@ -746,7 +748,7 @@ impl ManifestAdapterGeo {
     }
 }
 
-/// Geo provider an Axum deployment selects.
+/// Geo provider an Axum or Spin deployment selects.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -1515,7 +1517,7 @@ fn validate_manifest_adapter_definition(
 
 fn validate_manifest_adapter_geo(geo: &ManifestAdapterGeo) -> Result<(), ValidationError> {
     let assertion = geo.alb_peer_cidrs.is_some() || geo.origin_credential_header_name.is_some();
-    let kv = geo.has_kv_fields();
+    let kv = geo.has_kv_fields() || geo.credential_variable.is_some();
     if geo.provider == Some(ManifestGeoProvider::Off) && (assertion || kv) {
         let mut error = ValidationError::new("geo_off_with_policy");
         error.message = Some(
@@ -1534,11 +1536,24 @@ fn validate_manifest_adapter_geo(geo: &ManifestAdapterGeo) -> Result<(), Validat
 
 fn validate_manifest_adapter_geo_placement(manifest: &Manifest) -> Result<(), ValidationError> {
     for (name, adapter) in &manifest.adapters {
-        if adapter.geo.is_some() && !name.eq_ignore_ascii_case("axum") {
+        let Some(geo) = &adapter.geo else { continue };
+        if name.eq_ignore_ascii_case("axum") {
+            if geo.credential_variable.is_some() {
+                return Err(ValidationError::new("geo_spin_field_on_axum"));
+            }
+        } else if name.eq_ignore_ascii_case("spin") {
+            if geo.alb_peer_cidrs.is_some()
+                || geo.origin_credential_header_name.is_some()
+                || geo.max_in_flight.is_some()
+                || geo.provider == Some(ManifestGeoProvider::CloudFront)
+            {
+                return Err(ValidationError::new("geo_unsupported_spin_fields"));
+            }
+        } else {
             let mut error = ValidationError::new("geo_adapter_unsupported");
             error.message = Some(
                 format!(
-                    "`[adapters.{name}.geo]` is not supported; only Axum selects geo, \
+                    "`[adapters.{name}.geo]` is not supported; only Axum selects geo from CloudFront; Spin supports KV, \
                      other adapters use their platform's geo"
                 )
                 .into(),
@@ -3809,6 +3824,26 @@ component = "my-app"
         let manifest_data = loader.manifest();
         let adapter = &manifest_data.adapters["spin"];
         assert_eq!(adapter.adapter.component.as_deref(), Some("my-app"));
+    }
+
+    #[test]
+    fn spin_kv_geo_manifest_accepts_deployment_selection() {
+        let input = format!(
+            r#"
+[stores.kv]
+ids = ["geo"]
+[adapters.spin.geo]
+provider = "kv"
+store_id = "geo"
+pin = "{}@{}"
+reader_ip = "authenticated-header"
+credential_variable = "geo_token"
+"#,
+            "a".repeat(64),
+            "b".repeat(64)
+        );
+        let loaded = ManifestLoader::try_load_from_str(&input);
+        assert!(loaded.is_ok(), "Spin KV deployment selection must load");
     }
 
     #[test]

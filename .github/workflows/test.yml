@@ -71,6 +71,7 @@ jobs:
           cargo fetch --locked
           cargo fetch --locked --manifest-path examples/app-demo/Cargo.toml
           cargo fetch --locked --manifest-path examples/geo-kv-prototype/Cargo.toml
+          cargo fetch --locked --manifest-path examples/geo-spin-loader/Cargo.toml
           cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/reusable-app/Cargo.toml
           cargo fetch --locked --manifest-path crates/edgezero-test-harness/Cargo.toml
           cargo fetch --locked --manifest-path crates/edgezero-test-harness/fixtures/request-fidelity/Cargo.toml
@@ -227,6 +228,15 @@ jobs:
           cargo test --offline --locked -p edgezero-core --features geo-kv-build --lib geo::kv
           cargo check --offline --locked -p edgezero-core --no-default-features --features geo-kv --target wasm32-unknown-unknown
           scripts/run_test_nonzero.sh kv_geo_listener_checks_reader_provenance_and_pinned_objects cargo test --offline --locked -p edgezero-adapter-axum --features geo-kv,geo-cloudfront,test-utils --test production_hosting kv_geo
+
+      - name: Spin KV operator loader
+        if: matrix.suite == 'workspace'
+        run: |
+          cargo fmt --manifest-path examples/geo-spin-loader/Cargo.toml -- --check
+          cargo clippy --offline --locked --manifest-path examples/geo-spin-loader/Cargo.toml --all-targets -- -D warnings
+          cargo test --offline --locked --manifest-path examples/geo-spin-loader/Cargo.toml
+          cargo check --offline --locked --manifest-path examples/geo-spin-loader/Cargo.toml --target wasm32-wasip2
+          python3 -m unittest discover -s examples/geo-spin-loader -p test_load.py
 
       - name: Native Geo public examples
         run: cargo test --offline --locked -p edgezero-adapter-axum --features geo-cloudfront --doc
