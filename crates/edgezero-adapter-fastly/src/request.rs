@@ -3,15 +3,17 @@ use std::fmt::Display;
 #[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
 use std::io::Cursor;
 use std::io::Read;
+use std::net::IpAddr;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::Poll;
 
 use bytes::Bytes;
-use edgezero_core::app::{App, StoreMetadata, StoresMetadata};
+use edgezero_core::app::{App, FrameworkErrorDetail, StoreMetadata, StoresMetadata};
 use edgezero_core::body::Body;
 use edgezero_core::config_store::{ConfigStoreHandle, ConfigStoreOpenFailure};
 use edgezero_core::error::EdgeError;
+use edgezero_core::geo::{GeoOutcome, GeoSource};
 use edgezero_core::http::header::HOST;
 use edgezero_core::http::{
     Extensions, HeaderValue, Method, Request, Response, Uri, request_builder,
@@ -29,6 +31,7 @@ use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
 };
 use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
+use fastly::geo::{Geo, geo_lookup};
 use fastly::{Error as FastlyError, Request as FastlyRequest};
 use futures::executor;
 use futures_util::stream;
@@ -402,6 +405,7 @@ fn dispatch_core_request(
     mut core_request: Request,
     stores: Stores,
     prepared: PreparedIngress,
+    geo: GeoOutcome,
 ) -> DispatchOutcome {
     // Hard-cutoff: legacy bare handles are no longer
     // inserted into request extensions. `with_config_handle`
@@ -425,7 +429,12 @@ fn dispatch_core_request(
     let entered = prepared.request_start();
     let method = prepared.request_method().clone();
     match executor::block_on(drive_callback(
-        Box::pin(app.dispatch_admitted(prepared, core_request)),
+        Box::pin(app.dispatch_admitted_with_geo(
+            prepared,
+            core_request,
+            FrameworkErrorDetail::Default,
+            geo,
+        )),
         clock,
         entered,
     )) {
@@ -464,6 +473,7 @@ where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
 {
     let ingress = capture_request_ingress(&req);
+    let geo = request_geo(&req);
     let mut scratch = apply_request_prepare(&mut req, prepare);
     scratch.remove::<RequestIngress>();
     let synthesized_headers = scratch.remove::<edgezero_core::SynthesizedResponseHeaders>();
@@ -475,9 +485,10 @@ where
             )
         })?;
     head_request.extensions_mut().extend(scratch);
-    let outcome = dispatch_ingress_reader(app, head_request, stores, request_start, move || {
-        Ok(req.try_take_body())
-    });
+    let outcome =
+        dispatch_ingress_reader(app, head_request, stores, request_start, geo, move || {
+            Ok(req.try_take_body())
+        });
     Ok(match (outcome, synthesized_headers) {
         (DispatchOutcome::Detached(envelope), Some(headers)) => {
             DispatchOutcome::Detached(envelope.with_synthesized_response_headers(headers))
@@ -494,6 +505,7 @@ fn dispatch_ingress_reader<Source, MakeSource>(
     mut head_request: Request,
     stores: Stores,
     request_start: MonotonicInstant,
+    geo: GeoOutcome,
     make_source: MakeSource,
 ) -> DispatchOutcome
 where
@@ -539,7 +551,22 @@ where
         source,
         Some((prepared.read_deadline(), prepared.monotonic_clock())),
     );
-    dispatch_core_request(app, head_request, stores, prepared)
+    dispatch_core_request(app, head_request, stores, prepared, geo)
+}
+
+/// Fastly's own geolocation for the downstream client address. `Geo::region` is
+/// already the subdivision part of the ISO 3166-2 code (`CA`, not `US-CA`).
+fn request_geo(req: &FastlyRequest) -> GeoOutcome {
+    client_geo(req.get_client_ip_addr())
+}
+
+fn client_geo(client_ip: Option<IpAddr>) -> GeoOutcome {
+    let geo = client_ip.and_then(geo_lookup);
+    GeoOutcome::platform(
+        GeoSource::Fastly,
+        geo.as_ref().map(Geo::country_code),
+        geo.as_ref().and_then(Geo::region),
+    )
 }
 
 /// Dispatch with per-id store registries built from baked metadata and closed lifecycle hooks.
@@ -952,6 +979,7 @@ where
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
         move || Ok(Some(source)),
     )
     .into_envelope()
@@ -987,6 +1015,7 @@ where
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
         move || make_source().map(Some),
     );
     match outcome {
@@ -1020,6 +1049,7 @@ pub fn dispatch_ingress_source_error_for_test(
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
         || -> Result<Option<Cursor<Vec<u8>>>, EdgeError> {
             Err(EdgeError::internal(anyhow::anyhow!(
                 "fastly source construction failed"
@@ -1638,6 +1668,49 @@ mod synthesis_tests {
     #[test]
     fn resolve_secret_handle_builds_handle_when_required_true_matches_require_secrets() {
         let _handle = resolve_secret_handle(true);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn client_geo_reads_fastly_country_and_region() {
+        use edgezero_core::geo::{
+            GeoOutcome, GeoSource, GeoStatus, GeoUnavailableReason, SubdivisionCode,
+        };
+
+        // Viceroy answers loopback lookups with its default San Francisco record.
+        let loopback = client_geo(Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(
+            loopback,
+            GeoOutcome::platform(GeoSource::Fastly, Some("US"), Some("CA"))
+        );
+        let GeoOutcome::Selected {
+            provider,
+            status: GeoStatus::Located { location, .. },
+        } = loopback
+        else {
+            panic!("loopback must be located: {loopback:?}");
+        };
+        assert_eq!(provider.as_str(), "fastly");
+        assert_eq!(location.country().as_str(), "US");
+        assert_eq!(
+            location.subdivision().map(SubdivisionCode::as_str),
+            Some("CA")
+        );
+
+        let unavailable = GeoOutcome::platform(GeoSource::Fastly, None, None);
+        assert!(matches!(
+            &unavailable,
+            GeoOutcome::Selected {
+                status: GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata),
+                ..
+            }
+        ));
+        assert_eq!(client_geo(None), unavailable, "no client address");
+        assert_eq!(
+            client_geo(Some("192.0.2.1".parse().unwrap())),
+            unavailable,
+            "address without geolocation data"
+        );
     }
 }
 

@@ -59,7 +59,7 @@ mod tests {
     };
     use edgezero_core::context::RequestContext;
     use edgezero_core::error::EdgeError;
-    use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoStatus};
+    use edgezero_core::geo::{GeoError, GeoOutcome, GeoProviderId, GeoSource, GeoStatus};
     use edgezero_core::http::{Method, Response, StatusCode, response_builder};
     use edgezero_core::outbound::{
         HttpClient, OutboundCollectedSlot, OutboundRequest, OutboundSlotResult, OutboundTime,
@@ -216,9 +216,15 @@ mod tests {
         }
     }
 
+    /// Requests built in the test runtime carry no `cf` object, so Cloudflare geo is
+    /// selected but unavailable.
+    fn platform_geo() -> GeoOutcome {
+        GeoOutcome::platform(GeoSource::Cloudflare, None, None)
+    }
+
     fn build_test_app() -> App {
         async fn capture_uri(ctx: RequestContext) -> Result<Response, EdgeError> {
-            assert_eq!(ctx.geo(), &GeoOutcome::NoSelection);
+            assert_eq!(ctx.geo(), &platform_geo());
             assert_eq!(ctx.extensions().get::<GeoOutcome>(), Some(&forged_geo()));
             let body = Body::text(ctx.uri().to_string());
             let response = response_builder()
@@ -406,6 +412,46 @@ mod tests {
         assert_eq!(response.status_code(), StatusCode::OK.as_u16());
         let bytes = response.bytes().await.expect("bytes");
         assert_eq!(bytes.as_slice(), b"echo");
+    }
+
+    #[wasm_bindgen_test]
+    async fn dispatch_exposes_cf_metadata_through_ctx_geo() {
+        async fn geo(ctx: RequestContext) -> Result<Response, EdgeError> {
+            let body = Body::text(format!("{:?}", ctx.geo()));
+            response_builder()
+                .status(StatusCode::OK)
+                .body(body)
+                .map_err(EdgeError::internal)
+        }
+        let app = App::new(RouterService::builder().get("/geo", geo).build());
+        let inner = Clone::clone(cf_request(CfMethod::Get, "/geo", None).inner());
+        let cf = Object::new();
+        for (key, value) in [("country", "US"), ("regionCode", "CA")] {
+            Reflect::set(&cf, &JsValue::from_str(key), &JsValue::from_str(value))
+                .expect("cf field");
+        }
+        Reflect::set(&inner, &JsValue::from_str("cf"), &cf).expect("cf");
+        let (env, ctx, _timers) = test_env_ctx();
+
+        let mut response = CloudflareService::new(&app)
+            .dispatch(CfRequest::from(inner), env, ctx)
+            .await
+            .expect("cf response");
+
+        assert_eq!(response.status_code(), StatusCode::OK.as_u16());
+        let expected = GeoOutcome::platform(GeoSource::Cloudflare, Some("US"), Some("CA"));
+        assert!(matches!(
+            &expected,
+            GeoOutcome::Selected {
+                status: GeoStatus::Located { .. },
+                ..
+            }
+        ));
+        assert_eq!(
+            response.text().await.expect("text"),
+            format!("{expected:?}"),
+            "cf metadata wins over the request's CloudFront headers"
+        );
     }
 
     #[wasm_bindgen_test]
