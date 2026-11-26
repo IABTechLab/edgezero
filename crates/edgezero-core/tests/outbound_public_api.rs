@@ -1,7 +1,71 @@
+use edgezero_core::http::HeaderValue;
 use edgezero_core::{
-    OutboundCropFocus, OutboundImageFormat, OutboundImageOptimizerOptions,
+    OutboundCachePolicy, OutboundCropFocus, OutboundImageFormat, OutboundImageOptimizerOptions,
     OutboundImageOptimizerRegion, OutboundRequest, OutboundResizeFilter,
 };
+
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "external supplied-client API integration test"
+)]
+fn tagged_default_cache_policy_round_trips_and_replaces_bypass() {
+    let tagged = OutboundCachePolicy::PlatformDefaultWithSurrogateKey(HeaderValue::from_static(
+        "example-all example-reader-0123",
+    ));
+    let request = OutboundRequest::get("https://example.com/resource?signature=literal%2Fvalue")
+        .expect("request")
+        .cache_policy(OutboundCachePolicy::Bypass)
+        .cache_policy(tagged.clone());
+    let policy = request.cache_policy_setting();
+    assert_eq!(policy, &tagged);
+    assert!(!request.headers().contains_key("surrogate-key"));
+    let parts = request.into_parts();
+    assert_eq!(parts.cache_policy, tagged);
+    let restored = OutboundRequest::from_parts(parts).expect("parts");
+    assert_eq!(restored.cache_policy_setting(), &tagged);
+    assert_eq!(
+        restored.uri().to_string(),
+        "https://example.com/resource?signature=literal%2Fvalue"
+    );
+    let bypass = restored.cache_policy(OutboundCachePolicy::Bypass);
+    assert_eq!(bypass.cache_policy_setting(), &OutboundCachePolicy::Bypass);
+    let mut bypass_parts = bypass.into_parts();
+    bypass_parts.cache_policy = tagged.clone();
+    let tagged_again = OutboundRequest::from_parts(bypass_parts).expect("tagged parts");
+    assert_eq!(tagged_again.cache_policy_setting(), &tagged);
+    let cleared = tagged_again.cache_policy(OutboundCachePolicy::PlatformDefault);
+    assert_eq!(
+        cleared.cache_policy_setting(),
+        &OutboundCachePolicy::PlatformDefault
+    );
+}
+
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "external supplied-client API integration test"
+)]
+fn tag_metadata_adds_no_ascii_policy_beyond_header_value() {
+    use edgezero_core::OutboundSendMode;
+    use edgezero_core::outbound::validate_for_dispatch;
+
+    HeaderValue::from_bytes(b"bad\nkey").expect_err("caller must reject an invalid header");
+    let value = HeaderValue::from_bytes(b"example-all opaque-\xff").expect("valid opaque header");
+    let policy = OutboundCachePolicy::PlatformDefaultWithSurrogateKey(value);
+    let request = OutboundRequest::get("https://origin.example.com/resource")
+        .expect("request")
+        .cache_policy(policy.clone());
+    for mode in [
+        OutboundSendMode::Send,
+        OutboundSendMode::Begin,
+        OutboundSendMode::Batch,
+        OutboundSendMode::Follow,
+    ] {
+        validate_for_dispatch(&request, mode).expect("SDK owns individual key interpretation");
+    }
+    assert_eq!(request.cache_policy_setting(), &policy);
+}
 
 #[test]
 #[expect(
