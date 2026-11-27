@@ -29,10 +29,18 @@ The Wrangler manifest configures your Worker:
 name = "my-app"
 main = "build/worker/shim.mjs"
 compatibility_date = "2023-05-01"
+compatibility_flags = ["enable_request_signal", "enable_weak_ref"]
 
 [build]
 command = "worker-build --release"
 ```
+
+Keep both compatibility flags when migrating an existing application. `enable_request_signal`
+exposes incoming-request cancellation. Bounded config KV reads require `FinalizationRegistry`
+for wasm-bindgen cleanup callbacks and fail before dispatch if it is absent; `enable_weak_ref`
+enables that support even with an older compatibility date. GC timing is nondeterministic and
+does not provide a certified allocation or teardown bound. See
+[Cloudflare's compatibility contract](https://developers.cloudflare.com/workers/configuration/compatibility-flags/#enable-finalizationregistry-and-weakref).
 
 ### Entrypoint
 
@@ -55,6 +63,11 @@ derived from the baked store ids and queried individually). Per-id
 `KV` / `Config` / `Secret` registries are built and injected into
 request extensions automatically. No `edgezero.toml` is loaded by
 the runtime — see [the migration guide](../manifest-store-migration.md).
+If route/state assembly or `Hooks::configure` fails, `run_app` delivers the typed error's
+status and standard JSON body through canonical detached egress, without reading the request
+body or opening registries. Internal details stay off the wire and the full failure is logged
+once on `edgezero::boot`. No failed app's renderer, headers or callbacks apply. The finite default
+write deadline starts before assembly; see [application assembly](/guide/handlers#configuring-the-application-lifecycle).
 
 For fully manual wiring, `CloudflareService::new(&app)` builds a dispatcher one
 store at a time: `.with_config(binding)` (a KV binding name),
@@ -64,14 +77,22 @@ matching `.require_kv()` / `.require_secrets()` flags, and finally
 to open bindings:
 
 ```rust
-use edgezero_adapter_cloudflare::request::CloudflareService;
-use edgezero_core::app::Hooks as _;
+use edgezero_adapter_cloudflare::{CLOUDFLARE_PLATFORM, request::CloudflareService};
+use edgezero_core::app::App as EdgeZeroApp;
+use edgezero_core::MonotonicClock;
 use my_app_core::App;
 use worker::*;
 
 #[event(fetch)]
 pub async fn main(req: Request, env: Env, ctx: Context) -> Result<Response> {
-    let app = App::build_app();
+    let clock = MonotonicClock::default();
+    let start = clock.now();
+    let app = match EdgeZeroApp::build::<App>(CLOUDFLARE_PLATFORM) {
+        Ok(app) => app,
+        Err(error) => return edgezero_adapter_cloudflare::request::send_assembly_error(
+            req, error, ctx, start, clock,
+        ),
+    };
     CloudflareService::new(&app)
         .with_config("app_config")
         .with_kv("sessions")
@@ -85,6 +106,80 @@ selectors, so prefer `run_app` unless you are mocking a backend.
 `run_app` delegates to the public `dispatch_app::<A>` registry-aware path.
 Use [application retention](#retaining-an-application) with that function when the
 caller owns a prebuilt app and wants fresh per-request store bindings.
+
+## Geographic context
+
+Managed dispatch (`run_app`, `dispatch_app`, and `CloudflareService`) automatically exposes
+Cloudflare's request geography through `ctx.geo()`. No geo setting or store is required.
+For `GeoOutcome::Selected` with `GeoStatus::Located`, read `location.country().as_str()` and
+`location.subdivision().map(|code| code.as_str())` using the types in `edgezero_core::geo`.
+The provider is `cloudflare`, source is `GeoSource::Cloudflare`, and trust basis is
+`GeoTrustBasis::PlatformMetadata`.
+
+Country comes from `cf.country`; subdivision comes from `cf.regionCode` (for example `CA`),
+not the descriptive `cf.region` (`California`). A valid country with absent or unusable
+subdivision stays country-only. Missing or unusable country, including Cloudflare's `XX`
+and `T1` placeholders, yields selected `GeoUnavailableReason::MissingMetadata`.
+Neither `CF-IPCountry` nor CloudFront geographic headers provide a fallback. Public request
+extensions cannot replace the framework-owned outcome, and a retained application receives
+fresh geography on every dispatch.
+
+Geography is an estimate, not proof of residence, identity, or consent. Local Worker tests
+with host-controlled metadata verify adapter wiring; they do not qualify Cloudflare's live
+IP geolocation accuracy or an application's permission policy.
+
+## Client info
+
+[`ctx.client_info()`](../handlers.md#client-metadata) reports the visitor address and viewer
+TLS only after the operator declares direct ingress in the baked manifest:
+
+```toml
+[adapters.cloudflare.client_info]
+direct_ingress = true
+```
+
+The default is off, and every field is then `NotExposed`. The setting is a declaration the Worker
+cannot check: Cloudflare routes only direct visitor traffic to this entrypoint, and no service
+binding reaches it. Both facts can otherwise come from another Worker:
+
+- In same-zone Worker subrequests, `CF-Connecting-IP` takes the value of `x-real-ip`, which the
+  calling Worker can set ([Cloudflare HTTP headers](https://developers.cloudflare.com/fundamentals/reference/http-headers/)).
+- A Worker can construct a request with its own `cf` object and send it through a service
+  binding, where it becomes the receiving Worker's `request.cf`.
+
+Enforce the routing at the edge, for example with the
+[`cf.worker.upstream_zone`](https://developers.cloudflare.com/ruleset-engine/rules-language/fields/reference/cf.worker.upstream_zone/)
+firewall field. Leave Pseudo IPv4 **Overwrite Headers** disabled: recovering the original IPv6
+address in that mode is not supported.
+
+| Field            | With `direct_ingress`                                    | Unavailable                                                                                 |
+| ---------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Direct peer      | Not exposed                                              | Always `NotExposed`                                                                         |
+| Effective client | `CF-Connecting-IP` parsed as one IP, source `Cloudflare` | `Missing` without the header; `Rejected` for any other value                                |
+| TLS version      | `cf.tlsVersion`, for example `TLSv1.3`                   | `Missing` for `""` (plaintext), no `cf`, `undefined` or `null`; `Rejected` for a non-string |
+| TLS cipher       | `cf.tlsCipher`, for example `AEAD-AES128-GCM-SHA256`     | Same as TLS version                                                                         |
+
+The adapter reads `cf` through `Reflect`, not `worker::Cf::tls_version()`, which panics when the
+value is missing. `ctx.geo()` and `ctx.ja4()` keep reading `cf` in both modes. Manual
+`CloudflareService` dispatch has no manifest, so direct ingress stays off there. Local and test
+Workers carry synthetic or absent `cf` data, which proves adapter wiring, not live provenance.
+
+## Ingress Body Conversion
+
+The converter preserves a genuine native Fetch request's null `body` as buffered empty, without
+calling a reader. The standard dispatch path inspects this property only after admission, so
+refusal and abort do not acquire a source. A present body always stays on the lazy stream path,
+including zero-length ArrayBuffer/Uint8Array bodies and streams that will immediately end.
+Neither `Content-Length` nor SDK read-once bookkeeping is an absence signal; consumed present
+bodies retain their existing stream-construction error.
+
+This preserves a transport fact before the shared facade settles unknown GET/HEAD streams.
+The facade accepts only EOF, rejects the first nonempty byte before fetch, and races the paired
+outbound/inbound limits without restarting either deadline. Request-context state
+remains Initial and framing remains `HostManaged`. `into_request()` transfers buffered empty
+without draining, while the first `body_bytes()` read still checks the admitted deadline and
+returns sticky 408 after expiry. No capability is promoted. Demo and generated handlers inherit
+the converter without an API change; local runtime checks do not qualify hosted behavior.
 
 ## Building
 
@@ -120,28 +215,57 @@ wrangler deploy --cwd crates/my-app-adapter-cloudflare
 
 ## Fetch API
 
-Cloudflare Workers use the global `fetch` API for outbound requests:
+`CloudflareOutboundClient` uses the Workers global `fetch` API and is injected into core request
+extensions. Workers needs no backend registration, but application manifests still declare
+outbound hosts so the same portable contract validates on every target.
 
-```rust
-use edgezero_adapter_cloudflare::proxy::CloudflareProxyClient;
-use edgezero_core::proxy::ProxyService;
+The adapter requests raw encoded upstream bytes with manual fetch encoding, disables automatic
+redirect following, and owns an abort signal for the absolute request deadline. When an encoded
+body is passed through to the downstream response, the response converter separately selects
+manual response-body encoding so Workers does not encode it again. These are two distinct
+controls. The abort path is implemented, but outbound and streamed-upload deadlines remain
+BestEffort until a deployed host-observed cancellation fixture proves a finite bound. Cloudflare
+drives batch slots in completion order, maps cache bypass to `NoStore`, and applies a validated
+wire-authority override. The platform has not yet proved finite abort teardown or that its final
+wire request preserves authority independently from the connection target, so cancellation and
+authority override remain BestEffort. Cloudflare and Axum have Native lazy streamed response passthrough;
+raw header octets and original non-`set-cookie` field boundaries remain unavailable, so header
+fidelity is BestEffort. See [Capabilities](/guide/capabilities).
 
-let client = CloudflareProxyClient;
-let response = ProxyService::new(client).forward(request).await?;
-```
-
-Unlike Fastly, there's no backend configuration needed - Workers can fetch any URL directly.
+Downstream response delivery uses one JavaScript stream writer owned by a coordinator registered
+with `Context::wait_until`. It awaits writer backpressure and races the request abort signal and
+absolute write deadline. Writer acceptance and close are host-handoff observations; deployed
+disconnect and network-completion timing remain unproved, so response-egress capabilities are
+BestEffort.
 
 ## Logging
 
-EdgeZero does not install a Cloudflare logger by default. Use your preferred logger (for example
-`console_log` or your own `log` implementation), and view output in Wrangler or the Cloudflare
-dashboard.
+`run_app` installs a Rust `log` backend using Workers console methods before application assembly.
+It resolves `EDGEZERO__LOGGING__LEVEL` from Worker bindings with the shared resolver: absent or
+invalid means `Info`, and valid values are case-insensitive. View output in Wrangler or the
+Cloudflare dashboard. `edgezero::boot` retains Error/Warn independently of ordinary Error/Off.
 
-::: tip Logging status
-Cloudflare logging is opt-in; install a logger (such as `console_log`) in your entrypoint if you
-need structured output.
-:::
+Manual lifecycle owners call `init_logger(level)?` before assembly. Repeated same-level setup is
+idempotent; changed instance configuration or a foreign logger returns a typed error. The old
+parameterless no-op API is removed. Manifest logging defaults are not applied implicitly.
+
+For application-owned logging, install your backend and configure its filter and facade maximum
+before `run_app`, and set `owns_logging = true`. EdgeZero then leaves all logging state untouched.
+
+Inside a hand-written `Hooks` implementation, obtain the same compile-time logging
+metadata as `app!` without generating routes:
+
+```rust
+fn logging_for(adapter: &str) -> edgezero_core::manifest::ResolvedLoggingConfig {
+    edgezero_core::logging_config!("edgezero.toml", adapter)
+}
+```
+
+The path is relative to the consuming crate's `CARGO_MANIFEST_DIR` (for example,
+`"../../edgezero.toml"` in scaffolded core crates). This lookup performs no runtime
+manifest I/O or parsing. It does not initialize a logger, configure filters, read
+runtime overrides or change `owns_logging`. Existing runner and application-owned
+logging responsibilities remain unchanged.
 
 ## Context Access
 
@@ -152,7 +276,7 @@ use edgezero_core::context::RequestContext;
 use edgezero_adapter_cloudflare::context::CloudflareRequestContext;
 
 async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
-    if let Some(cf_ctx) = CloudflareRequestContext::get(ctx.request()) {
+    if let Some(cf_ctx) = ctx.extensions().get::<CloudflareRequestContext>() {
         // Access Cloudflare-specific data
         let env = cf_ctx.env();
         let ctx = cf_ctx.ctx();
@@ -162,6 +286,11 @@ async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
     // ...
 }
 ```
+
+`ctx.ja4()` returns the client's JA4 fingerprint only on zones with Enterprise
+Bot Management. Otherwise, and in local development and tests (no `cf`
+object), it reports `Unavailable(Missing)`. See
+[Client TLS fingerprint](./overview#client-tls-fingerprint-ja4).
 
 ## Environment Variables
 
@@ -199,7 +328,8 @@ id      = "abc123…"
 The binding name comes from `EDGEZERO__STORES__CONFIG__APP_CONFIG__NAME`
 (defaulting to the logical id `app_config` when unset). Populate the
 namespace via `wrangler kv key put`. Missing bindings log a one-time
-warning and the id is dropped from the registry. See
+warning; the declared id retains a failing handle whose reads return
+`ConfigStoreError::Unavailable`, rather than becoming an absent binding. See
 [the migration guide](../manifest-store-migration.md) if you are coming
 from the pre-rewrite `[vars]`-backed JSON-string form.
 
@@ -268,7 +398,9 @@ bindings = [
 
 ## Streaming
 
-Cloudflare Workers support streaming via `ReadableStream`. The adapter automatically converts `Body::Stream` to Cloudflare's streaming format.
+Cloudflare Workers support streaming via `ReadableStream`. Construct a core
+streaming body with `Body::stream(...)`; the adapter owns lazy conversion and
+delivery under the admitted response-egress policy.
 
 See the [Streaming guide](/guide/streaming) for examples and patterns.
 
@@ -316,18 +448,35 @@ For explicit retention, keep a cache owned by one concrete application and
 select its `Hooks` type with `dispatch_app::<MyApp>` on every fetch:
 
 ```rust
-use edgezero_core::app::{App, Hooks};
+use edgezero_adapter_cloudflare::CLOUDFLARE_PLATFORM;
+use edgezero_core::{app::App, EdgeError, MonotonicClock};
+use my_app_core::App as MyApp;
 use std::sync::OnceLock;
 
 static APP: OnceLock<App> = OnceLock::new();
+
+fn retained_app() -> Result<&'static App, EdgeError> {
+    if let Some(app) = APP.get() {
+        return Ok(app);
+    }
+    let app = App::build::<MyApp>(CLOUDFLARE_PLATFORM)?;
+    Ok(APP.get_or_init(|| app))
+}
 
 #[worker::event(fetch)]
 async fn fetch(req: worker::Request, env: worker::Env, ctx: worker::Context)
     -> worker::Result<worker::Response>
 {
-    edgezero_adapter_cloudflare::dispatch_app::<MyApp>(
-        APP.get_or_init(MyApp::build_app), req, env, ctx,
-    ).await
+    // Install application-owned logging before attempting assembly.
+    let clock = MonotonicClock::default();
+    let start = clock.now();
+    let app = match retained_app() {
+        Ok(app) => app,
+        Err(error) => return edgezero_adapter_cloudflare::request::send_assembly_error(
+            req, error, ctx, start, clock,
+        ),
+    };
+    edgezero_adapter_cloudflare::dispatch_app::<MyApp>(app, req, env, ctx).await
 }
 ```
 
@@ -336,12 +485,21 @@ the first application value replaces any body-generated default. This correction
 also applies to existing `run_app` users.
 
 `dispatch_app::<MyApp>` reads `MyApp::stores()` and does not initialize logging
-or construct an app. Pass an app built from the same `Hooks` type. The caller owns
-initialization before construction. It resolves configuration and bindings for
-each invocation; never retain `Env`, `Context`, request bodies, or registries in
-this cache. The initializer is synchronous and must not recursively access the
-cache or block waiting for async initialization. Apps needing fallible or async
-initialization own that state machine and publish only a complete snapshot.
+or construct an app. Its signature is
+`dispatch_app<A: Hooks>(&App, Request, Env, Context) -> Result<Response, worker::Error>`.
+Pass an app built from the same `Hooks` type with `CLOUDFLARE_PLATFORM`; the caller
+owns logging setup before construction. `App::build` returns `Result<App, EdgeError>`
+and invokes fallible `Hooks::configure` after installing platform metadata.
+Only a complete successful app enters the cache; an initialization error leaves it
+empty for a later attempt. Concurrent construction attempts may build separate
+successful candidates, but only one is retained.
+
+Each invocation resolves fresh configuration, runtime variables, and store
+registries, then runs fresh admission and response egress. Never retain `Env`,
+`Context`, request bodies, admission resources, or delivery coordinators in the
+app cache. Construction is synchronous and must not recursively access the cache
+or block waiting for async initialization. Apps needing async initialization or
+refresh own that state machine and publish only a complete successful snapshot.
 
 Fetch invocations may overlap. Verify isolation while two requests are actually
 in flight in the same instance. A serialized test or two separate instances does
@@ -360,8 +518,11 @@ segments and combined repeated fields; those changes cannot be reversed by
 EdgeZero. Header fidelity remains conservative.
 
 Browser converter tests cover custom methods, high bytes, metadata and service
-hook dispatch. Locked local workerd transport tests additionally distinguish
-pre-Worker rejections: its HTTP parser returns 501 for extension methods.
+hook dispatch in the separate `ingress_fidelity` target. Existing contracts and
+outbound runtime unit tests remain Node-based. The historical local workerd
+observations imported from main `87456c70` distinguish pre-Worker rejections:
+its HTTP parser returns 501 for extension methods. These are not results from
+the merged candidate; rerun the locked fixture before citing current evidence.
 Real Worker tests assert valid UTF-8 values C3 A9 and C4 80 survive conversion. Local wire FF becomes U+FFFD in Web Headers before Rust, so its runtime UTF-8 copy EF BF BD cannot prove original bytes. Common octet and multiplicity fidelity is `Unknown`: the observed transformations do not prove every particular field changed. Local absolute-form and duplicate Content-Length requests return 500 without a hook verdict. These transport/runtime limits remain separate from runtime-to-core conversion correctness.
 See [the capability matrix](./overview#inbound-request-fidelity).
 
@@ -385,3 +546,20 @@ captured separately before that conversion.
 
 - Learn about [Fastly Compute](/guide/adapters/fastly) as an alternative
 - Explore the [Axum adapter](/guide/adapters/axum) for local development
+
+## After-response tasks
+
+`ctx.after_response(budget, task)` uses Workers `waitUntil` and keeps the task unpolled
+until the adapter's response writer terminates, or a bodyless response is handed off.
+Errors, cancellation and bounded fallback also release the tasks. This is a terminal
+host handoff, not confirmation that the client received the response.
+
+The effective cooperative budget is `min(budget, 30 seconds)` and starts after release.
+Construct outbound requests inside the task so they use its fresh callback scope.
+Registration closes at release; retained handles and recursive registrations fail.
+
+Workers shares up to 30 seconds after response completion or disconnect across all
+`waitUntil` work, independently of these task budgets. CPU/memory limits and platform
+termination can shorten execution. Blocking code cannot be preempted within a poll.
+Tasks are not persistent and have no automatic retries. Use a durable queue for work
+that must survive invocation loss. See the [capability matrix](../capabilities.md#after-response-task-matrix).

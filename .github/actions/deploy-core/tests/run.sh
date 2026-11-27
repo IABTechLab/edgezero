@@ -897,6 +897,66 @@ test_workspace_isolation() {
   assert_succeeds "cleanup refuses a workspace outside RUNNER_TEMP" test -d "$outside"
 }
 
+# The standalone Spin operator's lifecycle suite uses Python, outside deployment
+# action tooling. Admit only its exact file-backed unittest command in test.yml;
+# inline programs, other workflows, installers and appended commands stay banned.
+filter_loader_unit_tests() {
+  local allowed_workflow="$1" embedded_language=py"thon"
+  local approved_command="${embedded_language}3 -m unittest discover -s examples/geo-spin-loader -p test_load.py"
+  local entry remainder candidate_command
+  while IFS= read -r entry; do
+    if [[ "$entry" == "$allowed_workflow":* ]]; then
+      remainder=${entry#"$allowed_workflow":}
+      candidate_command=${remainder#*:}
+      candidate_command=${candidate_command#"${candidate_command%%[![:space:]]*}"}
+      if [[ "$candidate_command" == "$approved_command" ]]; then
+        continue
+      fi
+    fi
+    printf '%s\n' "$entry"
+  done
+}
+
+unapproved_ci_commands() {
+  local allowed_workflow="$1" embedded_language=py"thon"
+  shift
+  local command_pattern="(^|[[:space:]|;&])(${embedded_language}3?|pip3?|pipx)([[:space:]]|$)"
+  grep -REn --include='*.sh' --include='*.yml' -E "$command_pattern" "$@" |
+    grep -vE ':[0-9]+:[[:space:]]*#' |
+    filter_loader_unit_tests "$allowed_workflow" || true
+}
+
+test_standalone_loader_ci_tool_exception() {
+  section "standalone loader unittest command exception"
+  local fixture="$WORK_DIR/ci-tool-policy" embedded_language=py"thon" installer=pi"p3" heredoc_marker=P"Y"
+  local approved_command="${embedded_language}3 -m unittest discover -s examples/geo-spin-loader -p test_load.py"
+  local variant actual
+  mkdir -p "$fixture"
+  printf '    %s\n' "$approved_command" > "$fixture/test.yml"
+  actual=$(unapproved_ci_commands "$fixture/test.yml" "$fixture")
+  assert_equals "exact standalone lifecycle command is admitted" "" "$actual"
+  for variant in \
+    "$approved_command --failfast" \
+    "$approved_command; true" \
+    "$approved_command && true" \
+    "$approved_command # appended comment" \
+    "${embedded_language}3 -c pass" \
+    "${embedded_language}3 - <<'${heredoc_marker}'" \
+    "$installer install package"; do
+    printf '    %s\n' "$variant" > "$fixture/test.yml"
+    actual=$(unapproved_ci_commands "$fixture/test.yml" "$fixture")
+    assert_equals "non-approved command remains rejected: $variant" "$fixture/test.yml:1:    $variant" "$actual"
+  done
+  printf '    %s\n' "$approved_command" > "$fixture/test.yml"
+  printf '    %s\n' "$approved_command" > "$fixture/other.yml"
+  actual=$(unapproved_ci_commands "$fixture/test.yml" "$fixture")
+  assert_equals "another workflow cannot use the exception" "$fixture/other.yml:1:    $approved_command" "$actual"
+  rm "$fixture/other.yml"
+  printf '    %s\n' "$approved_command" > "$fixture/action.sh"
+  actual=$(unapproved_ci_commands "$fixture/test.yml" "$fixture")
+  assert_equals "action scripts cannot use the exception" "$fixture/action.sh:1:    $approved_command" "$actual"
+}
+
 test_no_inline_action_scripts() {
   section "actions use script files, never inline run:"
   # Every composite `run:` must invoke a `.sh` file — no inline shell in YAML, which
@@ -913,12 +973,8 @@ test_no_inline_action_scripts() {
   bad=$(grep -REn --include='*.sh' -E "$embedded_python_pattern" "$ACTIONS_DIR" || true)
   assert_equals "action shell scripts contain no embedded Python programs" "" "$bad"
 
-  local command_pattern="(^|[[:space:]|;&])(${embedded_language}3?|pip3?|pipx)([[:space:]]|$)"
-  bad=$(
-    grep -REn --include='*.sh' --include='*.yml' -E "$command_pattern" \
-      "$ACTIONS_DIR" "$REPO_ROOT/.github/workflows" "$REPO_ROOT/scripts/run_coverage.sh" |
-      grep -vE ':[0-9]+:[[:space:]]*#' || true
-  )
+  bad=$(unapproved_ci_commands "$REPO_ROOT/.github/workflows/test.yml" \
+    "$ACTIONS_DIR" "$REPO_ROOT/.github/workflows" "$REPO_ROOT/scripts/run_coverage.sh")
   assert_equals "action and CI tooling use only approved shell tools" "" "$bad"
 }
 
@@ -2795,8 +2851,8 @@ test_fastly_logical_link_documentation() {
     grep -Fq -- '--service-id "$FASTLY_SERVICE_ID"' "$fastly_deployment"
   assert_fails "Fastly managed deployment does not recommend direct provider deployment" \
     grep -Fq 'fastly compute deploy' "$fastly_deployment"
-  assert_succeeds "bare Fastly deploy is explicitly store-free production compatibility" \
-    grep -Fq 'store-free production compatibility' "$fastly_deployment_flat"
+  assert_succeeds "bare Fastly deploy is explicitly limited to store-free production" \
+    grep -Fq 'supports store-free production deployments using a manifest command' "$fastly_deployment_flat"
 
   # shellcheck disable=SC2016 # GitHub expression is the literal documentation contract.
   assert_fails "lifecycle examples do not reference a cross-job archive path output" \
@@ -3802,6 +3858,7 @@ main() {
   test_workspace_isolation
   test_workspace_step_scrub
   test_no_inline_action_scripts
+  test_standalone_loader_ci_tool_exception
   test_deploy_args_prepend
   test_lifecycle_helpers
   test_capture_previous
