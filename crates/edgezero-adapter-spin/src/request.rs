@@ -11,16 +11,19 @@ pub(crate) mod test_support;
 
 use crate::SpinResponse;
 use crate::config_store::SpinConfigStore;
-use crate::context::{SpinRequestContext, parse_client_addr};
+use crate::context::{SpinRequestContext, context_from_headers, direct_ingress_client_info};
+use crate::geo::{SpinClientSource, ingress::capture_inputs};
 use crate::ingress::capture_request_ingress;
 use crate::key_value_store::{DEFAULT_MAX_LIST_KEYS, SpinKvStore};
 use crate::response::from_egress_response;
 use crate::secret_store::SpinSecretStore;
-use edgezero_core::app::{App, StoreMetadata};
+use edgezero_core::app::{App, FrameworkErrorDetail, StoreMetadata};
 use edgezero_core::body::Body;
+use edgezero_core::client_info::ClientInfo;
 use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::error::EdgeError;
+use edgezero_core::geo::GeoOutcome;
 #[cfg(test)]
 use edgezero_core::http::request_builder;
 use edgezero_core::http::{HeaderMap, Method, Request, RequestParts};
@@ -31,7 +34,7 @@ use edgezero_core::ingress::{
 use edgezero_core::key_value_store::{KvError, KvHandle};
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::response_egress::ResponseEgressEnvelope;
-use edgezero_core::secret_store::SecretHandle;
+use edgezero_core::secret_store::{SecretHandle, SecretStore};
 use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
 };
@@ -57,6 +60,7 @@ use crate::outbound::{SpinOutboundClient, native_time};
 /// private and the field-scoped-visibility lint does not fire.
 #[derive(Default)]
 pub(crate) struct Stores {
+    client_source: SpinClientSource,
     config_registry: Option<ConfigRegistry>,
     config_store: Option<ConfigStoreHandle>,
     kv: Option<KvHandle>,
@@ -138,27 +142,12 @@ pub fn send_assembly_error(
 
 fn into_core_request_head(parts: RequestParts, outbound_clock: MonotonicClock) -> Request {
     let ingress = capture_request_ingress(&parts.uri);
-    let client_addr = parts
-        .headers
-        .get("spin-client-addr")
-        .and_then(|value| value.to_str().ok())
-        .and_then(parse_client_addr);
-    let full_url = parts
-        .headers
-        .get("spin-full-url")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
+    let context = context_from_headers(&parts.headers);
 
     let mut request = Request::from_parts(parts, Body::empty());
 
     request.extensions_mut().insert(ingress);
-    SpinRequestContext::insert(
-        &mut request,
-        SpinRequestContext {
-            client_addr,
-            full_url,
-        },
-    );
+    SpinRequestContext::insert(&mut request, context);
     request
         .extensions_mut()
         .insert(outbound_client(outbound_clock));
@@ -354,10 +343,15 @@ where
         make_source,
         sleep,
         deliver,
+        &SpinSecretStore::new(),
     )
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "inject the credential backend independently of source construction, timing and delivery"
+)]
 async fn dispatch_ingress_stream_with_timer_and<
     Source,
     SourceError,
@@ -374,6 +368,7 @@ async fn dispatch_ingress_stream_with_timer_and<
     make_source: MakeSource,
     make_timer: MakeTimer,
     deliver: Deliver,
+    geo_secrets: &dyn SecretStore,
 ) -> anyhow::Result<Output>
 where
     Source: futures_util::Stream<Item = Result<bytes::Bytes, SourceError>> + 'static,
@@ -388,15 +383,24 @@ where
             .extensions_mut()
             .insert(outbound_client(app.monotonic_clock()));
         let request_method = head_request.method().clone();
+        // Account the original credential bytes, but never retain them in the
+        // cloned head that admission callbacks inspect.
+        let head_validation = IngressHeadParts::from_request(
+            &head_request,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        )
+        .validate_normalized(app.ingress_head_limits());
+        let geo_input = capture_inputs(head_request.headers_mut());
+        if let Err(error) = head_validation {
+            let egress = detached_error_envelope(app, error, request_method, request_start)?;
+            return Ok(deliver(egress)?);
+        }
         let head_parts = IngressHeadParts::from_request(
             &head_request,
             IngressHeadAccounting::HostManaged,
             IngressFraming::HostManaged,
         );
-        if let Err(error) = head_parts.validate_normalized(app.ingress_head_limits()) {
-            let egress = detached_error_envelope(app, error, request_method, request_start)?;
-            return Ok(deliver(egress)?);
-        }
         let prepared = match app.begin_ingress(head_parts, request_start) {
             Ok(outcome) => match outcome {
                 IngressBeginOutcome::Admitted(prepared) => prepared,
@@ -423,6 +427,25 @@ where
                 return Ok(deliver(egress)?);
             }
         };
+        let (geo, client_info) = match &stores.client_source {
+            SpinClientSource::AuthenticatedGeo(selection) => {
+                let clock = prepared.monotonic_clock();
+                let deadline = prepared.read_deadline();
+                let admission = selection
+                    .authenticate(geo_input, &clock, deadline, geo_secrets, make_timer.clone())
+                    .await;
+                let handle = selection.handle(stores.kv_registry.as_ref());
+                let geo = selection
+                    .lookup(admission, &clock, deadline, handle, make_timer.clone())
+                    .await;
+                (geo, admission.client_info())
+            }
+            SpinClientSource::DirectIngress => (
+                GeoOutcome::NoSelection,
+                direct_ingress_client_info(head_request.headers()),
+            ),
+            SpinClientSource::Off => (GeoOutcome::NoSelection, ClientInfo::not_exposed()),
+        };
         if !explicit_empty_body(head_request.headers()) {
             let source = match make_source() {
                 Ok(source) => source,
@@ -435,7 +458,15 @@ where
                 make_timer,
             );
         }
-        dispatch_core_request(app, head_request, stores, prepared, deliver).await
+        dispatch_core_request(
+            app,
+            head_request,
+            stores,
+            prepared,
+            (geo, client_info),
+            deliver,
+        )
+        .await
     })
     .await
 }
@@ -445,6 +476,7 @@ async fn dispatch_core_request<Output, Deliver>(
     mut core_request: Request,
     stores: Stores,
     prepared: PreparedIngress,
+    (geo, client_info): (GeoOutcome, ClientInfo),
     deliver: Deliver,
 ) -> anyhow::Result<Output>
 where
@@ -475,7 +507,14 @@ where
     if let Some(registry) = secret_registry {
         core_request.extensions_mut().insert(registry);
     }
-    let response = Box::pin(app.dispatch_admitted(prepared, core_request)).await;
+    let response = Box::pin(app.dispatch_admitted_with_client_info(
+        prepared,
+        core_request,
+        FrameworkErrorDetail::Default,
+        geo,
+        client_info,
+    ))
+    .await;
     Ok(deliver(response)?)
 }
 
@@ -498,6 +537,7 @@ pub(crate) async fn dispatch_with_registries(
     kv_meta: Option<StoreMetadata>,
     secret_meta: Option<StoreMetadata>,
     env: &EnvConfig,
+    client_source: SpinClientSource,
 ) -> anyhow::Result<SpinResponse> {
     let request_start = app.monotonic_now();
     let kv_registry = build_kv_registry(kv_meta, env);
@@ -507,6 +547,7 @@ pub(crate) async fn dispatch_with_registries(
         app,
         req,
         Stores {
+            client_source,
             config_registry,
             kv_registry,
             secret_registry,
@@ -771,6 +812,7 @@ mod synthesis_tests {
                 },
                 |_| -> Pending<()> { panic!("expired read must not construct a timer") },
                 Ok,
+                &test_support::GeoSecret::missing(),
             ))
             .expect("response");
             assert_eq!(envelope.response_mut().status().as_u16(), status);

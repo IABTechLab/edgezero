@@ -4,7 +4,9 @@
 //! is not proof of an ALB credential rule or a particular `CloudFront` distribution.
 //! See the native Geo guide for the required network, header and cache controls.
 //!
-//! Off is valid and is the default, with no ambient Geo selector:
+//! Off is valid and is the default. Without an explicit selection the runner reads
+//! `EDGEZERO__ADAPTER__GEO__*` settings, then the app's `[adapters.axum.geo]` manifest table.
+//! An explicit selection overrides both:
 //! ```
 //! use edgezero_adapter_axum::dev_server::AxumRunOptions;
 //! use edgezero_adapter_axum::geo::{NativeGeoCapability, NativeGeoSelection};
@@ -78,6 +80,9 @@
 //!         GeoOutcome::Selected { status, .. } => match status {
 //!             GeoStatus::Unavailable(GeoUnavailableReason::UntrustedIngress) => "source not admitted",
 //!             GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata) => "metadata missing",
+//!             GeoStatus::Unavailable(GeoUnavailableReason::MissingReaderIp) => "no checked reader",
+//!             GeoStatus::Unavailable(GeoUnavailableReason::NoMatch) => "no geographic coverage",
+//!             GeoStatus::Unavailable(GeoUnavailableReason::UnsupportedGeography) => "unknown country code",
 //!             GeoStatus::Error(GeoError::InvalidAssertion) => "assertion rejected",
 //!             GeoStatus::Error(GeoError::ProviderFailure) => "provider failed",
 //!             GeoStatus::Located { location, .. } if location.subdivision().is_none() => "country only",
@@ -92,7 +97,7 @@
     reason = "public composition types precede private request-bound resolution and tests"
 )]
 #![cfg_attr(
-    feature = "geo-cloudfront",
+    any(feature = "geo-cloudfront", feature = "geo-kv"),
     expect(
         clippy::self_named_module_files,
         reason = "repo convention uses geo.rs with submodules under geo/, not mod.rs"
@@ -106,13 +111,25 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use edgezero_core::env_config::EnvConfig;
 use edgezero_core::geo::{
     GeoAssertion, GeoInput, GeoOutcome, GeoProvider, GeoProviderId, GeoResolution, GeoSource,
     GeoStatus, GeoTrustBasis, GeoUnavailableReason,
 };
 use edgezero_core::http::{HeaderMap, HeaderName};
+use edgezero_core::manifest::{BakedManifest, ManifestAdapterGeo, ManifestGeoProvider};
+use edgezero_core::store_registry::KvRegistry;
+
+use crate::diagnostics::NativeIngressMetadata;
+use crate::native_stores::NativeSourcePlan;
 
 use crate::peer_networks::PeerNetworks;
+
+/// Native KV Geo selection and checked reader-IP policy.
+#[cfg(feature = "geo-kv")]
+pub mod kv;
+#[cfg(feature = "geo-kv")]
+use kv::{KvGeoReaderIp, KvGeoSelection};
 
 /// Bounded startup configuration categories. No policy inputs are retained.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -125,6 +142,16 @@ pub enum NativeGeoConfigError {
     UnavailableCloudFront,
     #[error("native_geo: reserved supplied provider identity")]
     ReservedProviderId,
+    #[error("native_geo: invalid provider selection")]
+    InvalidSelection,
+    #[error("native_geo: KV implementation unavailable")]
+    UnavailableKv,
+    #[error("native_geo: selected KV binding is undeclared or unavailable")]
+    MissingKvBinding,
+    #[error("native_geo: KV preparation deadline")]
+    KvPreparationDeadline,
+    #[error("native_geo: pinned KV data could not be prepared")]
+    KvPreparationFailed,
 }
 
 /// An operator declaration of a credential-gated, isolated CloudFront/ALB path.
@@ -177,13 +204,17 @@ impl ProtectedCloudFrontAlb {
         })
     }
 
+    /// Whether the owned socket peer is inside the protected ALB networks.
+    pub(crate) fn admits(&self, peer: Option<SocketAddr>) -> bool {
+        peer.is_some_and(|actual_peer| self.networks.trusts(actual_peer.ip()))
+    }
+
     fn admit<'request>(
         &self,
         peer: Option<SocketAddr>,
         headers: &'request HeaderMap,
     ) -> Option<ProtectedAssertions<'request>> {
-        peer.filter(|actual_peer| self.networks.trusts(actual_peer.ip()))
-            .map(|_peer| ProtectedAssertions { headers })
+        self.admits(peer).then_some(ProtectedAssertions { headers })
     }
 }
 
@@ -201,6 +232,8 @@ impl fmt::Debug for ProtectedCloudFrontAlb {
 pub enum NativeGeoSelection {
     #[default]
     Off,
+    #[cfg(feature = "geo-kv")]
+    Kv(KvGeoSelection),
     CloudFront {
         policy: ProtectedCloudFrontAlb,
     },
@@ -216,6 +249,8 @@ impl fmt::Debug for NativeGeoSelection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Off => f.write_str("Off"),
+            #[cfg(feature = "geo-kv")]
+            Self::Kv(selection) => fmt::Debug::fmt(selection, f),
             Self::CloudFront { policy } => f
                 .debug_struct("CloudFront")
                 .field("policy", policy)
@@ -240,11 +275,270 @@ pub enum NativeGeoCapability {
     },
 }
 
+/// Resolves the startup selection: an explicit [`AxumRunOptions::with_geo`] wins,
+/// then `EDGEZERO__ADAPTER__GEO__*` settings, then the baked `[adapters.axum.geo]`
+/// table. With none of them geo stays off.
+///
+/// [`AxumRunOptions::with_geo`]: crate::run_options::AxumRunOptions::with_geo
+pub(crate) fn resolve(
+    explicit: Option<&NativeGeoSelection>,
+    env: &EnvConfig,
+    manifest: &BakedManifest,
+) -> Result<NativeGeoPlan, NativeGeoConfigError> {
+    let configured = match explicit {
+        Some(selection) => selection.clone(),
+        None => configured_selection(env, manifest_geo(manifest))?,
+    };
+    #[cfg(feature = "geo-kv")]
+    if let NativeGeoSelection::Kv(selection) = configured {
+        return Ok(NativeGeoPlan::Kv(selection));
+    }
+    NativeGeo::validate(&configured).map(NativeGeoPlan::Ready)
+}
+
+fn manifest_geo(baked: &BakedManifest) -> Option<&ManifestAdapterGeo> {
+    // An absent or malformed manifest selects nothing; app building rejects malformed.
+    let BakedManifest::Present(manifest) = baked else {
+        return None;
+    };
+    let (_name, adapter) = manifest.adapter_entry("axum")?;
+    adapter.geo.as_ref()
+}
+
+fn configured_selection(
+    env: &EnvConfig,
+    defaults: Option<&ManifestAdapterGeo>,
+) -> Result<NativeGeoSelection, NativeGeoConfigError> {
+    if env
+        .get(&["adapter", "geo", "credential_variable"])
+        .is_some()
+    {
+        return Err(NativeGeoConfigError::InvalidSelection);
+    }
+    let env_provider = env.get(&["adapter", "geo", "provider"]);
+    let env_networks = env.get(&["adapter", "geo", "alb_peer_cidrs"]);
+    let env_header = env.get(&["adapter", "geo", "origin_credential_header_name"]);
+    let provider = match env_provider {
+        Some("cloudfront") => Some(ManifestGeoProvider::CloudFront),
+        Some("kv") => Some(ManifestGeoProvider::Kv),
+        Some("off") => Some(ManifestGeoProvider::Off),
+        Some(_) => return Err(NativeGeoConfigError::InvalidSelection),
+        None => defaults.and_then(|geo| geo.provider),
+    };
+    let kv_keys = [
+        "store_id",
+        "pin",
+        "reader_ip",
+        "lookup_timeout_ms",
+        "max_in_flight",
+    ];
+    let has_env_kv = kv_keys
+        .into_iter()
+        .any(|key| env.get(&["adapter", "geo", key]).is_some());
+    if (provider != Some(ManifestGeoProvider::Kv) && has_env_kv)
+        || (provider == Some(ManifestGeoProvider::Kv)
+            && (env_networks.is_some() || env_header.is_some()))
+    {
+        return Err(NativeGeoConfigError::InvalidSelection);
+    }
+    // When settings switch providers, only their own fields may carry over.
+    let manifest = defaults.filter(|geo| geo.provider.is_none() || geo.provider == provider);
+    match provider {
+        Some(ManifestGeoProvider::Kv) => configured_kv(env, manifest),
+        Some(ManifestGeoProvider::CloudFront) => {
+            if manifest.is_some_and(ManifestAdapterGeo::has_kv_fields) {
+                return Err(NativeGeoConfigError::InvalidSelection);
+            }
+            let networks: Vec<&str> = match env_networks {
+                Some(raw) => raw.split(',').map(str::trim).collect(),
+                None => manifest
+                    .and_then(|geo| geo.alb_peer_cidrs.as_deref())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(String::as_str)
+                    .collect(),
+            };
+            let header = env_header
+                .or_else(|| manifest?.origin_credential_header_name.as_deref())
+                .ok_or(NativeGeoConfigError::InvalidCredentialHeader)?;
+            let policy = ProtectedCloudFrontAlb::new(networks, header)?;
+            Ok(NativeGeoSelection::CloudFront { policy })
+        }
+        // Policy without a selected provider is a misconfiguration, not a silent
+        // off. A manifest CloudFront default may still be overridden to off.
+        _ if env_networks.is_some()
+            || env_header.is_some()
+            || (provider.is_none()
+                && manifest.is_some_and(|geo| {
+                    geo.alb_peer_cidrs.is_some()
+                        || geo.origin_credential_header_name.is_some()
+                        || geo.has_kv_fields()
+                })) =>
+        {
+            Err(NativeGeoConfigError::InvalidSelection)
+        }
+        _ => Ok(NativeGeoSelection::Off),
+    }
+}
+
+fn configured_kv(
+    env: &EnvConfig,
+    manifest: Option<&ManifestAdapterGeo>,
+) -> Result<NativeGeoSelection, NativeGeoConfigError> {
+    #[cfg(not(feature = "geo-kv"))]
+    {
+        let _: (&EnvConfig, Option<&ManifestAdapterGeo>) = (env, manifest);
+        Err(NativeGeoConfigError::UnavailableKv)
+    }
+    #[cfg(feature = "geo-kv")]
+    {
+        use NativeGeoConfigError::InvalidSelection;
+        if manifest.is_some_and(|geo| {
+            geo.alb_peer_cidrs.is_some() || geo.origin_credential_header_name.is_some()
+        }) {
+            return Err(InvalidSelection);
+        }
+        let get = |key| env.get(&["adapter", "geo", key]);
+        let reader_ip = match get("reader_ip").or_else(|| manifest?.reader_ip.as_deref()) {
+            Some("direct-peer") => KvGeoReaderIp::DirectPeer,
+            Some("forwarded-required") => KvGeoReaderIp::ForwardedRequired,
+            _ => return Err(InvalidSelection),
+        };
+        let timeout = match get("lookup_timeout_ms") {
+            Some(raw) => raw.parse().ok(),
+            None => manifest.and_then(|geo| geo.lookup_timeout_ms),
+        }
+        .ok_or(InvalidSelection)?;
+        let max_in_flight = match get("max_in_flight") {
+            Some(raw) => raw.parse().ok(),
+            None => manifest.and_then(|geo| geo.max_in_flight),
+        }
+        .ok_or(InvalidSelection)?;
+        let selection = KvGeoSelection::new(
+            get("store_id")
+                .or_else(|| manifest?.store_id.as_deref())
+                .ok_or(InvalidSelection)?,
+            get("pin")
+                .or_else(|| manifest?.pin.as_deref())
+                .ok_or(InvalidSelection)?,
+            reader_ip,
+            timeout,
+            max_in_flight,
+        )?;
+        Ok(NativeGeoSelection::Kv(selection))
+    }
+}
+
+/// A syntactically valid selection that still needs its serving binding.
+pub(crate) enum NativeGeoPlan {
+    Ready(NativeGeo),
+    #[cfg(feature = "geo-kv")]
+    Kv(KvGeoSelection),
+}
+
+impl NativeGeoPlan {
+    /// The protected `CloudFront` path, when this selection carries one.
+    pub(crate) fn protected_path(&self) -> Option<ProtectedCloudFrontAlb> {
+        match self {
+            Self::Ready(NativeGeo::Selected { policy, .. }) => Some(policy.clone()),
+            Self::Ready(_) => None,
+            #[cfg(feature = "geo-kv")]
+            Self::Kv(_) => None,
+        }
+    }
+
+    pub(crate) fn capability(&self) -> NativeGeoCapability {
+        match self {
+            Self::Ready(geo) => geo.capability(),
+            #[cfg(feature = "geo-kv")]
+            Self::Kv(selection) => NativeGeoCapability::Selected {
+                provider: GeoProviderId::kv(),
+                source: GeoSource::Kv,
+                trust_basis: selection.trust_basis(),
+            },
+        }
+    }
+
+    #[cfg_attr(
+        not(feature = "geo-kv"),
+        expect(
+            clippy::unnecessary_wraps,
+            clippy::unused_self,
+            reason = "share the runner's preparation path while compiled-out Geo needs no KV limit"
+        )
+    )]
+    pub(crate) fn max_object_bytes(
+        &self,
+        sources: Option<&NativeSourcePlan>,
+    ) -> Result<usize, NativeGeoConfigError> {
+        #[cfg(feature = "geo-kv")]
+        if let Self::Kv(selection) = self {
+            return match sources {
+                Some(plan) => {
+                    use crate::native_stores::{NativeKvSource, NativeStoreSource};
+                    let provider_cap = match plan.kv.get(selection.store_id()) {
+                        Some(NativeStoreSource::BuiltIn(NativeKvSource::DynamoDb(settings))) => {
+                            settings.limits.max_value_bytes
+                        }
+                        Some(NativeStoreSource::BuiltIn(NativeKvSource::Celld { .. })) => {
+                            usize::try_from(plan.policies.celld.max_value_bytes)
+                                .map_err(|_error| NativeGeoConfigError::InvalidSelection)?
+                        }
+                        Some(NativeStoreSource::BuiltIn(
+                            NativeKvSource::DynamoDbRecords(_)
+                            | NativeKvSource::CelldRecords { .. },
+                        )) => return Err(NativeGeoConfigError::InvalidSelection),
+                        Some(
+                            NativeStoreSource::Local
+                            | NativeStoreSource::Ready(_)
+                            | NativeStoreSource::Prepare(_),
+                        ) => kv::MAX_OBJECT_BYTES,
+                        None => return Err(NativeGeoConfigError::MissingKvBinding),
+                    };
+                    Ok(provider_cap.min(kv::MAX_OBJECT_BYTES))
+                }
+                // Dev mode uses the declared local KV. It still validates the selected pin.
+                None => Ok(kv::MAX_OBJECT_BYTES),
+            };
+        }
+        let _: Option<&NativeSourcePlan> = sources;
+        Ok(0)
+    }
+
+    #[cfg_attr(
+        not(feature = "geo-kv"),
+        expect(
+            clippy::unused_async,
+            clippy::unused_async_trait_impl,
+            reason = "only the optional KV provider awaits preparation"
+        )
+    )]
+    pub(crate) async fn prepare(
+        self,
+        stores: Option<&KvRegistry>,
+        max_object_bytes: usize,
+    ) -> Result<NativeGeo, NativeGeoConfigError> {
+        match self {
+            Self::Ready(geo) => {
+                let _: (Option<&KvRegistry>, usize) = (stores, max_object_bytes);
+                Ok(geo)
+            }
+            #[cfg(feature = "geo-kv")]
+            Self::Kv(selection) => selection
+                .prepare(stores, max_object_bytes)
+                .await
+                .map(|prepared| NativeGeo::Kv(Arc::new(prepared))),
+        }
+    }
+}
+
 /// Validated runner-owned composition, never installed in public extensions.
 #[derive(Clone, Default)]
 pub(crate) enum NativeGeo {
     #[default]
     Off,
+    #[cfg(feature = "geo-kv")]
+    Kv(Arc<kv::PreparedKvGeo>),
     Selected {
         policy: ProtectedCloudFrontAlb,
         id: GeoProviderId,
@@ -256,6 +550,8 @@ impl NativeGeo {
     pub(crate) fn validate(selection: &NativeGeoSelection) -> Result<Self, NativeGeoConfigError> {
         match selection {
             NativeGeoSelection::Off => Ok(Self::Off),
+            #[cfg(feature = "geo-kv")]
+            NativeGeoSelection::Kv(_) => Err(NativeGeoConfigError::InvalidSelection),
             #[cfg(feature = "geo-cloudfront")]
             NativeGeoSelection::CloudFront { policy } => Ok(Self::Selected {
                 policy: policy.clone(),
@@ -271,7 +567,7 @@ impl NativeGeo {
                 id,
                 provider,
             } => {
-                if id == &GeoProviderId::cloudfront() {
+                if id == &GeoProviderId::cloudfront() || id == &GeoProviderId::kv() {
                     return Err(NativeGeoConfigError::ReservedProviderId);
                 }
                 Ok(Self::Selected {
@@ -286,6 +582,12 @@ impl NativeGeo {
     pub(crate) fn capability(&self) -> NativeGeoCapability {
         match self {
             Self::Off => NativeGeoCapability::Off,
+            #[cfg(feature = "geo-kv")]
+            Self::Kv(prepared) => NativeGeoCapability::Selected {
+                provider: GeoProviderId::kv(),
+                source: GeoSource::Kv,
+                trust_basis: prepared.trust_basis(),
+            },
             Self::Selected { id, .. } => NativeGeoCapability::Selected {
                 provider: id.clone(),
                 source: GeoSource::CloudFront,
@@ -298,6 +600,31 @@ impl NativeGeo {
         if let Self::Selected { policy, .. } = self {
             let _removed = headers.remove(&policy.credential_header);
         }
+    }
+
+    #[cfg_attr(
+        not(feature = "geo-kv"),
+        expect(
+            clippy::unused_async,
+            clippy::unused_async_trait_impl,
+            reason = "only the optional KV provider awaits request I/O"
+        )
+    )]
+    pub(crate) async fn resolve_request(
+        &self,
+        peer: Option<SocketAddr>,
+        headers: &HeaderMap,
+        checked: Option<&NativeIngressMetadata>,
+    ) -> GeoOutcome {
+        #[cfg(feature = "geo-kv")]
+        if let Self::Kv(provider) = self {
+            return GeoOutcome::Selected {
+                provider: GeoProviderId::kv(),
+                status: provider.resolve(peer, checked).await,
+            };
+        }
+        let _: Option<&NativeIngressMetadata> = checked;
+        self.resolve(peer, headers)
     }
 
     pub(crate) fn resolve(&self, peer: Option<SocketAddr>, headers: &HeaderMap) -> GeoOutcome {
@@ -359,13 +686,194 @@ fn assertion<const N: usize>(headers: &HeaderMap, name: &'static str) -> GeoAsse
 mod tests {
     use super::*;
     use crate::run_options::AxumRunOptions;
+    use edgezero_core::app::Hooks;
+    use edgezero_core::error::EdgeError;
     use edgezero_core::geo::{CountryCode, GeoError, GeoLocation};
     use edgezero_core::http::HeaderValue;
+    use edgezero_core::manifest::Manifest;
+    use edgezero_core::router::RouterService;
     use std::iter::empty;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn policy() -> ProtectedCloudFrontAlb {
         ProtectedCloudFrontAlb::new(["127.0.0.1/32"], "x-origin-verify-fixture").unwrap()
+    }
+
+    fn resolved(
+        explicit: Option<&NativeGeoSelection>,
+        vars: &[(&str, &str)],
+        manifest: &BakedManifest,
+    ) -> Result<NativeGeoCapability, NativeGeoConfigError> {
+        let env = EnvConfig::from_vars(vars.iter().copied());
+        resolve(explicit, &env, manifest).map(|geo| geo.capability())
+    }
+
+    fn baked(geo: &'static str) -> BakedManifest {
+        let json: &'static str =
+            Box::leak(format!(r#"{{"adapters":{{"axum":{{"geo":{geo}}}}}}}"#).into_boxed_str());
+        let baked = Manifest::from_baked_json(json);
+        assert!(matches!(baked, BakedManifest::Present(_)), "{json}");
+        baked
+    }
+
+    #[test]
+    fn geo_settings_resolve_explicit_then_env_then_manifest() {
+        const CIDRS: &str = "EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS";
+        const HEADER: &str = "EDGEZERO__ADAPTER__GEO__ORIGIN_CREDENTIAL_HEADER_NAME";
+        const PROVIDER: &str = "EDGEZERO__ADAPTER__GEO__PROVIDER";
+        let none = BakedManifest::Absent;
+        let cloudfront = baked(
+            r#"{"provider":"cloudfront","alb_peer_cidrs":["10.0.0.0/24"],"origin_credential_header_name":"x-origin-verify"}"#,
+        );
+        let header_only =
+            baked(r#"{"provider":"cloudfront","origin_credential_header_name":"x-origin-verify"}"#);
+        let off = Ok(NativeGeoCapability::Off);
+
+        // Nothing selected stays off; an explicit selection beats settings and manifest.
+        assert_eq!(resolved(None, &[], &none), off);
+        assert_eq!(
+            resolved(
+                Some(&NativeGeoSelection::Off),
+                &[(PROVIDER, "cloudfront")],
+                &cloudfront
+            ),
+            off
+        );
+        // Settings override the manifest provider and fill deployment-only values.
+        assert_eq!(resolved(None, &[(PROVIDER, "off")], &cloudfront), off);
+        assert_eq!(
+            resolved(None, &[], &header_only),
+            Err(NativeGeoConfigError::InvalidProtectedPolicy),
+            "manifest without networks needs the setting"
+        );
+        assert_eq!(
+            resolved(
+                None,
+                &[(PROVIDER, "cloudfront"), (CIDRS, "10.0.0.0/24")],
+                &none
+            ),
+            Err(NativeGeoConfigError::InvalidCredentialHeader)
+        );
+        assert_eq!(
+            resolved(
+                None,
+                &[
+                    (CIDRS, "10.0.0.0/24, 10.0.1.0/24"),
+                    (HEADER, "x-forwarded-for")
+                ],
+                &header_only
+            ),
+            Err(NativeGeoConfigError::InvalidCredentialHeader),
+            "setting header replaces the manifest header and is validated"
+        );
+        // Misconfiguration never falls back to off.
+        for (vars, manifest) in [
+            (vec![(PROVIDER, "maxmind")], &none),
+            (vec![(CIDRS, "10.0.0.0/24")], &none),
+            (
+                vec![(PROVIDER, "off"), (HEADER, "x-origin-verify")],
+                &cloudfront,
+            ),
+        ] {
+            assert_eq!(
+                resolved(None, &vars, manifest),
+                Err(NativeGeoConfigError::InvalidSelection),
+                "{vars:?}"
+            );
+        }
+        assert_eq!(
+            resolved(None, &[], &baked(r#"{"alb_peer_cidrs":["10.0.0.0/24"]}"#)),
+            Err(NativeGeoConfigError::InvalidSelection)
+        );
+        assert_eq!(resolved(None, &[], &baked(r#"{"provider":"off"}"#)), off);
+
+        let selected = [
+            resolved(None, &[], &cloudfront),
+            resolved(None, &[(CIDRS, "10.0.0.0/24, 10.0.1.0/24")], &header_only),
+            resolved(
+                None,
+                &[
+                    (PROVIDER, "cloudfront"),
+                    (CIDRS, "10.0.0.0/24"),
+                    (HEADER, "x-origin-verify"),
+                ],
+                &none,
+            ),
+        ];
+        for result in selected {
+            #[cfg(feature = "geo-cloudfront")]
+            assert!(
+                matches!(&result, Ok(NativeGeoCapability::Selected { provider, .. }) if provider == &GeoProviderId::cloudfront()),
+                "{result:?}"
+            );
+            #[cfg(not(feature = "geo-cloudfront"))]
+            assert_eq!(result, Err(NativeGeoConfigError::UnavailableCloudFront));
+        }
+    }
+
+    #[test]
+    fn axum_rejects_spin_credential_override() {
+        struct NoGeo;
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "fixture retains unused Hooks defaults"
+        )]
+        impl Hooks for NoGeo {
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().build())
+            }
+        }
+        let options = AxumRunOptions::from_vars([(
+            "EDGEZERO__ADAPTER__GEO__CREDENTIAL_VARIABLE",
+            "geo_token",
+        )])
+        .unwrap();
+        assert_eq!(
+            options.geo_capability_for::<NoGeo>(),
+            Err(NativeGeoConfigError::InvalidSelection)
+        );
+    }
+
+    #[test]
+    fn geo_capability_for_applies_the_app_manifest() {
+        struct GeoApp;
+        #[expect(
+            clippy::missing_trait_methods,
+            reason = "fixture retains unused Hooks defaults"
+        )]
+        impl Hooks for GeoApp {
+            fn routes() -> Result<RouterService, EdgeError> {
+                Ok(RouterService::builder().build())
+            }
+            fn manifest() -> BakedManifest {
+                Manifest::from_baked_json(
+                    r#"{"adapters":{"axum":{"geo":{"provider":"cloudfront","alb_peer_cidrs":["10.0.0.0/24"],"origin_credential_header_name":"x-origin-verify"}}}}"#,
+                )
+            }
+        }
+        let options = AxumRunOptions::new("127.0.0.1:8080".parse().unwrap()).unwrap();
+        assert_eq!(options.geo_capability(), Ok(NativeGeoCapability::Off));
+        #[cfg(feature = "geo-cloudfront")]
+        assert!(matches!(
+            options.geo_capability_for::<GeoApp>(),
+            Ok(NativeGeoCapability::Selected { .. })
+        ));
+        #[cfg(not(feature = "geo-cloudfront"))]
+        assert_eq!(
+            options.geo_capability_for::<GeoApp>(),
+            Err(NativeGeoConfigError::UnavailableCloudFront)
+        );
+        // Settings feed only the runner view; the explicit-only view never errors on them.
+        let partial =
+            AxumRunOptions::from_vars([("EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS", "10.0.1.0/24")])
+                .unwrap();
+        assert_eq!(partial.geo_capability(), Ok(NativeGeoCapability::Off));
+        let disabled =
+            AxumRunOptions::from_vars([("EDGEZERO__ADAPTER__GEO__PROVIDER", "off")]).unwrap();
+        assert_eq!(
+            disabled.geo_capability_for::<GeoApp>(),
+            Ok(NativeGeoCapability::Off)
+        );
     }
 
     #[test]

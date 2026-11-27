@@ -3,15 +3,21 @@ use std::fmt::Display;
 #[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
 use std::io::Cursor;
 use std::io::Read;
+use std::net::IpAddr;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::Poll;
 
 use bytes::Bytes;
-use edgezero_core::app::{App, StoreMetadata, StoresMetadata};
+use edgezero_core::app::{App, FrameworkErrorDetail, StoreMetadata, StoresMetadata};
 use edgezero_core::body::Body;
+use edgezero_core::client_info::{
+    Capture, ClientAddress, ClientInfo, ClientIpSource, UnavailableReason, ViewerTlsSource,
+    ViewerTlsValue,
+};
 use edgezero_core::config_store::{ConfigStoreHandle, ConfigStoreOpenFailure};
 use edgezero_core::error::EdgeError;
+use edgezero_core::geo::{GeoOutcome, GeoSource};
 use edgezero_core::http::header::HOST;
 use edgezero_core::http::{
     Extensions, HeaderValue, Method, Request, Response, Uri, request_builder,
@@ -21,6 +27,7 @@ use edgezero_core::ingress::{
     IngressFraming, IngressHeadAccounting, IngressHeadParts, OriginSource, PreparedIngress,
     RequestIngress, TargetUnavailable,
 };
+use edgezero_core::ja4::CapturedJa4;
 use edgezero_core::key_value_store::{KvError, KvHandle, KvStoreOpenFailure};
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::response_egress::ResponseEgressEnvelope;
@@ -29,6 +36,7 @@ use edgezero_core::store_registry::{
     BoundSecretStore, ConfigRegistry, ConfigStoreBinding, KvRegistry, SecretRegistry, StoreRegistry,
 };
 use edgezero_core::time::{Deadline, MonotonicClock, MonotonicInstant};
+use fastly::geo::{Geo, geo_lookup};
 use fastly::{Error as FastlyError, Request as FastlyRequest};
 use futures::executor;
 use futures_util::stream;
@@ -406,6 +414,8 @@ fn dispatch_core_request(
     mut core_request: Request,
     stores: Stores,
     prepared: PreparedIngress,
+    geo: GeoOutcome,
+    client_info: ClientInfo,
 ) -> DispatchOutcome {
     // Hard-cutoff: legacy bare handles are no longer
     // inserted into request extensions. `with_config_handle`
@@ -440,7 +450,13 @@ fn dispatch_core_request(
     let entered = prepared.request_start();
     let method = prepared.request_method().clone();
     match executor::block_on(drive_callback(
-        Box::pin(app.dispatch_admitted(prepared, core_request)),
+        Box::pin(app.dispatch_admitted_with_client_info(
+            prepared,
+            core_request,
+            FrameworkErrorDetail::Default,
+            geo,
+            client_info,
+        )),
         clock,
         entered,
     )) {
@@ -479,6 +495,8 @@ where
     Prepare: FnOnce(&mut FastlyRequest, &mut Extensions),
 {
     let ingress = capture_request_ingress(&req);
+    let geo = request_geo(&req);
+    let client_info = request_client_info(&req);
     let mut scratch = apply_request_prepare(&mut req, prepare);
     scratch.remove::<RequestIngress>();
     let synthesized_headers = scratch.remove::<edgezero_core::SynthesizedResponseHeaders>();
@@ -490,9 +508,15 @@ where
             )
         })?;
     head_request.extensions_mut().extend(scratch);
-    let outcome = dispatch_ingress_reader(app, head_request, stores, request_start, move || {
-        Ok(req.try_take_body())
-    });
+    let outcome = dispatch_ingress_reader(
+        app,
+        head_request,
+        stores,
+        request_start,
+        geo,
+        client_info,
+        move || Ok(req.try_take_body()),
+    );
     Ok(match (outcome, synthesized_headers) {
         (DispatchOutcome::Detached(envelope), Some(headers)) => {
             DispatchOutcome::Detached(envelope.with_synthesized_response_headers(headers))
@@ -509,6 +533,8 @@ fn dispatch_ingress_reader<Source, MakeSource>(
     mut head_request: Request,
     stores: Stores,
     request_start: MonotonicInstant,
+    geo: GeoOutcome,
+    client_info: ClientInfo,
     make_source: MakeSource,
 ) -> DispatchOutcome
 where
@@ -554,7 +580,38 @@ where
         source,
         Some((prepared.read_deadline(), prepared.monotonic_clock())),
     );
-    dispatch_core_request(app, head_request, stores, prepared)
+    dispatch_core_request(app, head_request, stores, prepared, geo, client_info)
+}
+
+/// Client facts from Fastly's runtime, read from the original downstream request before
+/// any application hook. Fastly exposes no peer port, so the direct peer is not exposed.
+fn request_client_info(req: &FastlyRequest) -> ClientInfo {
+    let effective_client = req
+        .get_client_ip_addr()
+        .map_or(Capture::Unavailable(UnavailableReason::Missing), |ip| {
+            Capture::Captured(ClientAddress::new(ip, ClientIpSource::Fastly))
+        });
+    ClientInfo::new(
+        Capture::Unavailable(UnavailableReason::NotExposed),
+        effective_client,
+        ViewerTlsValue::capture_utf8(req.get_tls_protocol(), ViewerTlsSource::Fastly),
+        ViewerTlsValue::capture_utf8(req.get_tls_cipher_openssl_name(), ViewerTlsSource::Fastly),
+    )
+}
+
+/// Fastly's own geolocation for the downstream client address. `Geo::region` is
+/// already the subdivision part of the ISO 3166-2 code (`CA`, not `US-CA`).
+fn request_geo(req: &FastlyRequest) -> GeoOutcome {
+    client_geo(req.get_client_ip_addr())
+}
+
+fn client_geo(client_ip: Option<IpAddr>) -> GeoOutcome {
+    let geo = client_ip.and_then(geo_lookup);
+    GeoOutcome::platform(
+        GeoSource::Fastly,
+        geo.as_ref().map(Geo::country_code),
+        geo.as_ref().and_then(Geo::region),
+    )
 }
 
 /// Dispatch with per-id store registries built from baked metadata and closed lifecycle hooks.
@@ -811,7 +868,7 @@ fn build_secret_registry(secret_meta: Option<StoreMetadata>) -> Option<SecretReg
 
 /// Capture available ingress facts without consuming the native request.
 ///
-/// Fastly SDK 0.13.1 does not expose a safe borrowed raw target accessor.
+/// Fastly SDK 0.13.3 does not expose a safe borrowed raw target accessor.
 /// Record target unavailability before reading the SDK URL for the canonical
 /// origin. That URL may normalize the path and is never used as an original
 /// target. Client requests require exactly one validated Host matching the
@@ -842,6 +899,7 @@ pub fn capture_request_ingress(req: &FastlyRequest) -> RequestIngress {
         None
     };
     RequestIngress::new(target, origin, HeaderFidelity::default())
+        .with_ja4(CapturedJa4::from_runtime_tls(req.get_tls_ja4()))
 }
 
 fn origin_from_runtime_uri<'header>(
@@ -1015,6 +1073,8 @@ where
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
+        ClientInfo::not_exposed(),
         move || Ok(Some(source)),
     )
     .into_envelope()
@@ -1050,6 +1110,8 @@ where
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
+        ClientInfo::not_exposed(),
         move || make_source().map(Some),
     );
     match outcome {
@@ -1083,6 +1145,8 @@ pub fn dispatch_ingress_source_error_for_test(
         core_request,
         Stores::default(),
         request_start,
+        GeoOutcome::NoSelection,
+        ClientInfo::not_exposed(),
         || -> Result<Option<Cursor<Vec<u8>>>, EdgeError> {
             Err(EdgeError::internal(anyhow::anyhow!(
                 "fastly source construction failed"
@@ -1761,6 +1825,49 @@ mod synthesis_tests {
     fn resolve_secret_handle_builds_handle_when_required_true_matches_require_secrets() {
         let _handle = resolve_secret_handle(true);
     }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn client_geo_reads_fastly_country_and_region() {
+        use edgezero_core::geo::{
+            GeoOutcome, GeoSource, GeoStatus, GeoUnavailableReason, SubdivisionCode,
+        };
+
+        // Viceroy answers loopback lookups with its default San Francisco record.
+        let loopback = client_geo(Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(
+            loopback,
+            GeoOutcome::platform(GeoSource::Fastly, Some("US"), Some("CA"))
+        );
+        let GeoOutcome::Selected {
+            provider,
+            status: GeoStatus::Located { location, .. },
+        } = loopback
+        else {
+            panic!("loopback must be located: {loopback:?}");
+        };
+        assert_eq!(provider.as_str(), "fastly");
+        assert_eq!(location.country().as_str(), "US");
+        assert_eq!(
+            location.subdivision().map(SubdivisionCode::as_str),
+            Some("CA")
+        );
+
+        let unavailable = GeoOutcome::platform(GeoSource::Fastly, None, None);
+        assert!(matches!(
+            &unavailable,
+            GeoOutcome::Selected {
+                status: GeoStatus::Unavailable(GeoUnavailableReason::MissingMetadata),
+                ..
+            }
+        ));
+        assert_eq!(client_geo(None), unavailable, "no client address");
+        assert_eq!(
+            client_geo(Some("192.0.2.1".parse().unwrap())),
+            unavailable,
+            "address without geolocation data"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1918,6 +2025,17 @@ mod ingress_tests {
             CapturedTarget::Unavailable(TargetUnavailable::NotExposed)
         ));
         assert!(ingress.origin().is_none());
+    }
+
+    #[test]
+    fn ingress_ja4_is_missing_for_non_client_request_despite_header() {
+        use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
+        let mut native = FastlyRequest::get("https://example.com/");
+        native.set_header("ja4", "t13d1516h2_8daaf6152771_e5627efa2ab1");
+        assert_eq!(
+            capture_request_ingress(&native).ja4(),
+            Some(&CapturedJa4::Unavailable(Ja4Unavailable::Missing))
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "${GITHUB_WORKSPACE:?}"
 version="$(awk '$1 == "viceroy" {print $2}' .tool-versions)"
-test "$version" = 0.21.0
+test "$version" = 0.22.0
 RUSTUP_TOOLCHAIN="$(awk '$1 == "rust" {print $2}' .tool-versions)"
 export RUSTUP_TOOLCHAIN
 export ASDF_RUST_VERSION="$RUSTUP_TOOLCHAIN"
@@ -70,12 +70,16 @@ case "${1:-}" in
     test "$(sha256 "$source/Cargo.lock")" = "$VICEROY_LOCK_SHA256"
     git -C "$source" apply --check "$patch"
     git -C "$source" apply "$patch"
+    # Viceroy's build script compiles its component adapter for wasm32-unknown-unknown with the
+    # toolchain selected above, which jobs need not have installed. Add it from the checkout so
+    # rustup resolves the same toolchain as the build below; an installed target is a no-op.
+    (cd "$source" && rustup target add wasm32-unknown-unknown)
     export CARGO_HOME="$repair/cargo-home"
     export CARGO_TARGET_DIR="$repair/target"
     export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
     cargo fetch --locked --manifest-path "$source/Cargo.toml"
     # Never cache a passing result: discovery and execution run even on exact hits.
-    regressions=$'body::tests::readiness_preserves_bytes_without_polling_the_source_again\nbody::tests::readiness_preserves_between_bytes_timeout_without_repolling_source\nconfig::backends::timeout_tests::configured_timeout_readback_preserves_values_and_rejects_absence_or_overflow'
+    regressions=$'body::tests::readiness_preserves_bytes_without_polling_the_source_again\nbody::tests::readiness_preserves_between_bytes_timeout_without_repolling_source\nconfig::backends::timeout_tests::configured_timeout_readback_preserves_values_and_rejects_absence_or_overflow\nobject_store::tests::test_kv_store_concurrent_conditional_inserts_have_one_winner'
     bash scripts/run_test_nonzero.sh "$regressions" cargo test --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy-lib --lib
     cargo build --offline --locked --manifest-path "$source/Cargo.toml" -p viceroy
     executable="$CARGO_TARGET_DIR/debug/viceroy"

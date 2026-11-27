@@ -11,6 +11,7 @@ use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Request, Response};
 use edgezero_core::OutboundScopeOwner;
 use edgezero_core::app::{App, FrameworkErrorDetail};
+use edgezero_core::client_info::ClientInfo;
 use edgezero_core::config_store::ConfigStoreHandle;
 use edgezero_core::error::EdgeError;
 use edgezero_core::geo::GeoOutcome;
@@ -20,6 +21,7 @@ use edgezero_core::ingress::{
     IngressHeadParts, NormalizedIngressHeadSummary, PreparedIngress,
     validate_normalized_ingress_parts_with_summary,
 };
+use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
 use edgezero_core::key_value_store::KvHandle;
 use edgezero_core::outbound::HttpClient;
 use edgezero_core::probe::{LifecyclePhase, LifecycleReader};
@@ -48,6 +50,7 @@ use crate::diagnostics::{
 use crate::geo::NativeGeo;
 #[cfg(test)]
 use crate::ingress_config::AxumIngressConfig;
+use crate::ja4::{Ja4Selection, TrustedJa4Header};
 use crate::outbound::{AxumOutboundClient, native_time};
 use crate::outbound_executor::AxumOutboundExecutorHandle;
 use crate::request::{HttpTransport, into_core_request_parts};
@@ -69,6 +72,7 @@ pub(crate) struct AxumServiceState {
     config_store_handle: Option<ConfigStoreHandle>,
     executor: AxumOutboundExecutorHandle,
     geo: NativeGeo,
+    ja4: Option<Arc<Ja4Selection>>,
     json_body_limit: JsonBodyLimit,
     kv_handle: Option<KvHandle>,
     kv_registry: Option<KvRegistry>,
@@ -138,6 +142,7 @@ impl AxumServiceState {
             phase: None,
             secret_handle: None,
             secret_registry: None,
+            ja4: None,
             trusted_proxy_policy,
         }
     }
@@ -275,6 +280,13 @@ impl AxumServiceState {
         self
     }
 
+    /// Capture JA4 with this selection. Without one, `ctx.ja4()` reports `NotExposed` on Axum.
+    #[must_use]
+    pub(crate) fn with_ja4_selection(mut self, selection: Ja4Selection) -> Self {
+        self.ja4 = Some(Arc::new(selection));
+        self
+    }
+
     pub(crate) fn connection_activity(&self) -> (ConnectionActivity, ConnectionGuard) {
         self.native.connection()
     }
@@ -342,7 +354,7 @@ impl AxumServiceState {
         native_body: AxumBody,
         connection: &EgressConnection,
         guard: RequestGuard,
-        geo: GeoOutcome,
+        (geo, client_info, ja4): (GeoOutcome, ClientInfo, CapturedJa4),
     ) -> Response<AxumEgressBody> {
         let app = &self.app;
         let read_deadline = prepared.read_deadline();
@@ -362,6 +374,7 @@ impl AxumServiceState {
             Some((read_deadline, monotonic_clock)),
             outbound_client,
             self.json_body_limit,
+            Some(ja4),
         );
 
         if let Some(phase) = self.phase.clone() {
@@ -380,11 +393,12 @@ impl AxumServiceState {
             core_request.extensions_mut().insert(registry);
         }
         let egress = app
-            .dispatch_admitted_with_geo(
+            .dispatch_admitted_with_client_info(
                 prepared,
                 core_request,
                 FrameworkErrorDetail::CategoryOnly,
                 geo,
+                client_info,
             )
             .await;
         prepare_native_egress(egress, connection, guard).await
@@ -426,6 +440,8 @@ impl AxumServiceState {
         } else {
             request.extensions_mut().remove::<ConnectInfo<SocketAddr>>();
         }
+        // JA4 trust is captured below from `remote_addr`, never from request extensions.
+        request.extensions_mut().remove::<Arc<TrustedJa4Header>>();
         let app = Arc::clone(&self.app);
         let (mut parts, native_body) = request.into_parts();
         parts.extensions.insert(self.executor.clone());
@@ -447,8 +463,13 @@ impl AxumServiceState {
             }
         };
         let checked = normalize(&self.trusted_proxy_policy, remote_addr, &parts);
+        let client_info = checked.client_info();
         guard.set_forwarding_result(checked.forwarding_result());
         strip_forwarding_headers(&mut parts.headers);
+        let ja4 = self.ja4.as_ref().map_or(
+            CapturedJa4::Unavailable(Ja4Unavailable::NotExposed),
+            |selection| selection.capture(remote_addr, &parts.headers),
+        );
         parts.extensions.insert(checked.effective_host().clone());
         parts.extensions.insert(NativeIngressMetadata::new(
             guard.request_id(),
@@ -493,10 +514,28 @@ impl AxumServiceState {
                 .await;
             }
         };
-        let geo = self.geo.resolve(remote_addr, &parts.headers);
+        let facts = (
+            self.resolve_geo(remote_addr, &parts).await,
+            client_info,
+            ja4,
+        );
         Ok(self
-            .dispatch_prepared(prepared, parts, native_body, connection, guard, geo)
+            .dispatch_prepared(prepared, parts, native_body, connection, guard, facts)
             .await)
+    }
+
+    async fn resolve_geo(
+        &self,
+        remote_addr: Option<SocketAddr>,
+        parts: &RequestParts,
+    ) -> GeoOutcome {
+        self.geo
+            .resolve_request(
+                remote_addr,
+                &parts.headers,
+                parts.extensions.get::<NativeIngressMetadata>(),
+            )
+            .await
     }
 }
 
@@ -1215,6 +1254,168 @@ mod tests {
         assert_eq!(polls.load(Ordering::SeqCst), 0);
         assert_eq!(released_at_handoff, 1, "callback closes at native handoff");
         assert_eq!(drops.load(Ordering::SeqCst), 1, "source releases once");
+    }
+
+    async fn ja4_state(ctx: RequestContext) -> Result<String, EdgeError> {
+        use edgezero_core::ja4::{CapturedJa4, Ja4Source, Ja4Unavailable};
+        let credential = if ctx.headers().contains_key("x-origin-verify-fixture") {
+            "+credential"
+        } else {
+            ""
+        };
+        let label = match ctx.ja4() {
+            Some(CapturedJa4::Captured {
+                fingerprint,
+                source: Ja4Source::TrustedProxyHeader,
+            }) if fingerprint.as_str() == JA4_FIXTURE => "captured",
+            Some(CapturedJa4::Unavailable(Ja4Unavailable::Missing)) => "missing",
+            Some(CapturedJa4::Unavailable(Ja4Unavailable::Malformed)) => "malformed",
+            Some(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed)) => "not_exposed",
+            _ => "unexpected",
+        };
+        Ok(format!("{label}{credential}"))
+    }
+
+    const JA4_FIXTURE: &str = "t13d1516h2_8daaf6152771_e5627efa2ab1";
+
+    /// A service whose application preparer tries to rewrite the peer and the JA4 trust.
+    fn ja4_service(selection: Ja4Selection, geo: NativeGeo) -> AxumServiceState {
+        let trusted: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let router = RouterService::builder()
+            .received_head_preparer(move |_headers, extensions| {
+                extensions.insert(ConnectInfo(trusted));
+                extensions.insert(Arc::new(
+                    TrustedJa4Header::parse("x-ja4", "127.0.0.0/8").unwrap(),
+                ));
+            })
+            .get("/ja4", ja4_state)
+            .build();
+        let executor_owner = AxumOutboundExecutor::new();
+        let mut service = AxumServiceState::from_app(App::new(router), executor_owner.handle())
+            .with_ja4_selection(selection);
+        service.geo = geo;
+        service
+    }
+
+    async fn ja4_label(
+        service: &AxumServiceState,
+        peer: &str,
+        headers: &[(&'static str, &'static str)],
+    ) -> Bytes {
+        let mut request = Request::builder()
+            .uri("/ja4")
+            .body(AxumBody::empty())
+            .unwrap();
+        request.headers_mut().insert(
+            "x-origin-verify-fixture",
+            HeaderValue::from_static("secret"),
+        );
+        for (name, value) in headers {
+            request
+                .headers_mut()
+                .append(*name, HeaderValue::from_static(value));
+        }
+        let response = service
+            .dispatch_request(
+                request,
+                &EgressConnection::default(),
+                Some(peer.parse().unwrap()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        to_bytes(response.into_body(), 64).await.unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn managed_ja4_trusts_only_the_owned_socket_peer() {
+        use crate::geo::{NativeGeoSelection, ProtectedCloudFrontAlb};
+        use edgezero_core::geo::{GeoError, GeoInput, GeoProvider, GeoProviderId, GeoResolution};
+        struct Failing;
+        impl GeoProvider for Failing {
+            fn resolve(&self, _input: &GeoInput) -> GeoResolution {
+                GeoResolution::Error(GeoError::ProviderFailure)
+            }
+        }
+        let policy =
+            ProtectedCloudFrontAlb::new(["127.0.0.1/32"], "x-origin-verify-fixture").unwrap();
+        let geo = NativeGeo::validate(&NativeGeoSelection::Supplied {
+            policy: policy.clone(),
+            id: GeoProviderId::new("failing").unwrap(),
+            provider: Arc::new(Failing),
+        })
+        .unwrap();
+        let protected = ja4_service(Ja4Selection::ProtectedCloudFront(policy), geo);
+        let cloudfront = "cloudfront-viewer-ja4-fingerprint";
+        for (peer, headers, expected) in [
+            ("127.0.0.1:9", vec![(cloudfront, JA4_FIXTURE)], "captured"),
+            ("127.0.0.1:9", vec![], "missing"),
+            ("127.0.0.1:9", vec![(cloudfront, "not-a-ja4")], "malformed"),
+            (
+                "127.0.0.1:9",
+                vec![(cloudfront, JA4_FIXTURE), (cloudfront, JA4_FIXTURE)],
+                "malformed",
+            ),
+            // The generic header is not an alternate source in protected mode.
+            ("127.0.0.1:9", vec![("x-ja4", JA4_FIXTURE)], "missing"),
+            // The preparer's `ConnectInfo` and trust extension do not admit this peer.
+            (
+                "127.0.0.2:9",
+                vec![(cloudfront, JA4_FIXTURE)],
+                "not_exposed",
+            ),
+        ] {
+            assert_eq!(
+                ja4_label(&protected, peer, &headers).await,
+                expected,
+                "{peer} {headers:?}"
+            );
+        }
+        let generic = ja4_service(
+            Ja4Selection::Generic(TrustedJa4Header::parse("x-ja4", "127.0.0.1/32").unwrap()),
+            NativeGeo::default(),
+        );
+        for (peer, headers, expected) in [
+            // Without a protected Geo path nothing strips the credential header.
+            (
+                "127.0.0.1:9",
+                vec![("x-ja4", JA4_FIXTURE)],
+                "captured+credential",
+            ),
+            (
+                "127.0.0.1:9",
+                vec![(cloudfront, JA4_FIXTURE)],
+                "missing+credential",
+            ),
+            (
+                "127.0.0.2:9",
+                vec![("x-ja4", JA4_FIXTURE)],
+                "not_exposed+credential",
+            ),
+        ] {
+            assert_eq!(
+                ja4_label(&generic, peer, &headers).await,
+                expected,
+                "{peer} {headers:?}"
+            );
+        }
+        // Forwarding headers are stripped before capture, so a generic header name in that
+        // family is never read, even from a trusted proxy.
+        let forwarding_named = ja4_service(
+            Ja4Selection::Generic(
+                TrustedJa4Header::parse("x-forwarded-ja4", "127.0.0.1/32").unwrap(),
+            ),
+            NativeGeo::default(),
+        );
+        assert_eq!(
+            ja4_label(
+                &forwarding_named,
+                "127.0.0.1:9",
+                &[("x-forwarded-ja4", JA4_FIXTURE)]
+            )
+            .await,
+            "missing+credential"
+        );
     }
 
     #[expect(

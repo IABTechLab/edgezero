@@ -6,9 +6,9 @@ Deploy EdgeZero applications to Fastly's Compute@Edge platform using WebAssembly
 
 - [Fastly CLI](https://developer.fastly.com/learning/compute/#install-the-fastly-cli)
 - Rust `wasm32-wasip1` target: `rustup target add wasm32-wasip1`
-- [Viceroy](https://github.com/fastly/Viceroy) 0.21.0 for local execution and testing
+- [Viceroy](https://github.com/fastly/Viceroy) 0.22.0 for local execution and testing
 
-The adapter pins the Fastly SDK to 0.13.1. Older Viceroy releases may reject its
+The adapter pins the Fastly SDK to 0.13.3. Older Viceroy releases may reject its
 host imports before application code executes; use the repository's pinned runtime.
 
 ## Project Setup
@@ -91,27 +91,29 @@ entrypoint; use the canonical send-owning helper below. Logging endpoint and std
 behavior come from `Hooks::logging_for("fastly")`. Its level is the default;
 the logging-only override described below can change it without rebuilding.
 
-### Capturing raw-request signals (JA4, H2 fingerprint)
+### Capturing raw-request signals (H2 fingerprint and others)
 
 `run_app` receives and converts the `fastly::Request` into a neutral core request before
 dispatch. The client IP is carried across automatically; read it via
-`FastlyRequestContext` (see [Context Access](#context-access) below). Other
-Fastly-only signals that are readable only on the raw request
-(`get_tls_ja4()`, `get_client_h2_fingerprint()`) aren't reachable from handlers
-by default. Use `run_app_with_hooks`, which runs a request closure against a
-scratch `Extensions` **before** conversion and merges the values into the core
-request. Its response closure runs only for routed responses before egress
-policy and framing; EdgeZero retains delivery ownership:
+`FastlyRequestContext` (see [Context Access](#context-access) below). The JA4
+TLS fingerprint is also captured automatically: read it with `ctx.ja4()` (see
+[Client TLS fingerprint](./overview#client-tls-fingerprint-ja4)). Other
+Fastly-only signals that are readable only on the raw request (such as
+`get_client_h2_fingerprint()`) aren't reachable from handlers by default. Use
+`run_app_with_hooks`, which runs a request closure against a scratch
+`Extensions` **before** conversion and merges the values into the core request.
+Its response closure runs only for routed responses before egress policy and
+framing; EdgeZero retains delivery ownership:
 
 ```rust
 #[derive(Clone)]
-struct Ja4(String);
+struct H2Fingerprint(String);
 
 pub fn main() -> Result<(), fastly::Error> {
     edgezero_adapter_fastly::run_app_with_hooks::<App, _, _, ()>(
         |raw, ext| {
-            if let Some(ja4) = raw.get_tls_ja4() {
-                ext.insert(Ja4(ja4.to_owned()));
+            if let Some(fingerprint) = raw.get_client_h2_fingerprint() {
+                ext.insert(H2Fingerprint(fingerprint.to_owned()));
             }
         },
         |_response| (),
@@ -122,7 +124,7 @@ pub fn main() -> Result<(), fastly::Error> {
 
 The request closure runs once before admission for each request that reaches
 preparation; insert whatever typed values your handlers need, then read them via a custom extractor or
-`ctx.extensions().get::<Ja4>()`. The optional state returned by
+`ctx.extensions().get::<H2Fingerprint>()`. The optional state returned by
 `run_app_with_hooks` is available only after EdgeZero reaches its strongest
 terminal delivery boundary. Detached admission responses skip the response
 closure and return `None`.
@@ -468,6 +470,21 @@ async fn handler(ctx: RequestContext) -> Result<Response, EdgeError> {
 }
 ```
 
+The same address is available without a Fastly import through
+[`ctx.client_info()`](../handlers.md#client-metadata). Fastly captures it from the original
+downstream request before any raw-request hook runs:
+
+| Field            | Source                                           | Unavailable                                             |
+| ---------------- | ------------------------------------------------ | ------------------------------------------------------- |
+| Direct peer      | Not exposed; the SDK reports no peer port        | Always `NotExposed`                                     |
+| Effective client | `get_client_ip_addr()`, source `Fastly`          | `Missing` on non-client requests                        |
+| TLS version      | `get_tls_protocol()`, for example `TLSv1.3`      | `Missing` over plain HTTP; `Rejected` for invalid UTF-8 |
+| TLS cipher       | `get_tls_cipher_openssl_name()`, an OpenSSL name | `Missing` over plain HTTP; `Rejected` for invalid UTF-8 |
+
+Viceroy serves plain HTTP, so local TLS fields are always `Missing`. The address is the client
+that connected to Fastly. If another Fastly service or a proxy forwards to this one, it is that
+hop's address. No header replaces it.
+
 ## Streaming
 
 Fastly provides `stream_to_client`, but that API is incompatible with the standard
@@ -486,7 +503,7 @@ See the [Streaming guide](/guide/streaming) and
 Run contract tests for the Fastly adapter:
 
 ```bash
-cargo install viceroy --version 0.21.0 --locked
+cargo install viceroy --version 0.22.0 --locked
 export CARGO_TARGET_WASM32_WASIP1_RUNNER="viceroy run"
 
 # Run tests
@@ -497,8 +514,8 @@ This installs the stock reference runtime. The bounded-readiness, subsequent-rea
 backend timeout setter/getter readback legs instead
 require the explicitly selected, hash-verified [tracked Viceroy repair](https://github.com/IABTechLab/edgezero/blob/docs/outbound-http-spec/patches/viceroy/README.md).
 Select that binary through `CARGO_TARGET_WASM32_WASIP1_RUNNER` and the harness's `VICEROY_BIN`;
-do not cite stock 0.21.0 as bounded-read or timeout-readback evidence. The SDK readback assertions
-are intentional: the tracked repair implements those hostcalls, while stock 0.21.0 does not.
+do not cite stock 0.22.0 as bounded-read or timeout-readback evidence. The SDK readback assertions
+are intentional: the tracked repair implements those hostcalls, while stock 0.22.0 does not.
 The shared version string alone cannot identify the repaired binary. This local selection does not change installed
 runtime pins or establish hosted Fastly guarantees.
 
@@ -566,14 +583,14 @@ reconfigure filters on later callbacks. Use `setup_once` for other application-o
 not a second managed logger. Store-open diagnostics use the bounded
 boot channel after logger setup; an absent warning is not proof of a healthy binding.
 
-SDK 0.13.1 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
+SDK 0.13.3 exposes `with_max_requests`, `with_timeout`, `with_max_lifetime`, and
 `with_max_memory`. A value of zero disables the request-count or memory limit;
 it does not request zero callbacks or zero memory use. The lifetime limit is
 measured from `Serve` construction, including time before the first callback.
 `with_timeout` bounds only the idle wait for the next request; it does not bound
 handler or backend time. If your service is billed by memory × wall-clock time,
 idle waiting is billed too. Limits do not guarantee reuse; any request may start a
-fresh sandbox. The fixtures pin standalone Viceroy 0.21.0; any observed per-guest
+fresh sandbox. The fixtures pin standalone Viceroy 0.22.0; any observed per-guest
 request ceiling belongs to that runtime and run, not to the SDK request limit.
 `edgezero serve` runs `fastly compute serve`, whose bundled Viceroy can differ.
 Record the executable and observed reuse; recheck local ceilings when pins
@@ -837,7 +854,7 @@ entry point and removing retained state, not merely setting a request limit of o
 
 Call `request::capture_request_ingress(&req)` immediately after acquiring the
 native request and before URL-based shortcuts or native mutation. It borrows
-the same request without round-tripping handles. With Fastly SDK 0.13.1,
+the same request without round-tripping handles. With Fastly SDK 0.13.3,
 safe raw-target acquisition is unavailable: the snapshot records `NotExposed`
 first, then uses the SDK runtime URL only to recover the canonical origin.
 This URL access can normalize the path; it never establishes original-target

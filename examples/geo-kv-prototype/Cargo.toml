@@ -4,17 +4,27 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
-# A format experiment, not a new production workspace member.
+# Offline tooling stays outside the production workspace.
 [workspace]
+
+[features]
+default = []
+publisher = []
+celld = ["dep:edgezero-store-celld", "dep:tokio"]
+dynamodb = ["dep:edgezero-store-aws", "dep:tokio"]
 
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-bytes = "=1.12.1"
+bytes = "1"
 csv = "=1.4.0"
-edgezero-core = { path = "../../crates/edgezero-core", default-features = false }
+edgezero-core = { path = "../../crates/edgezero-core", default-features = false, features = ["geo-kv-build"] }
+edgezero-store-celld = { path = "../../crates/edgezero-store-celld", features = ["kv"], optional = true }
+edgezero-store-aws = { path = "../../crates/edgezero-store-aws", features = ["dynamodb-kv"], optional = true }
+tokio = { version = "1", features = ["rt", "time", "net"], optional = true }
 futures = "0.3"
-ipnet = { version = "=2.12.0", features = ["serde"] }
+ipnet = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "=1.0.150"
-sha2 = "0.10"
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"

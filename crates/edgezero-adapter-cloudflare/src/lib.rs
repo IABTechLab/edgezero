@@ -234,9 +234,11 @@ where
     A: Hooks,
 {
     let stores = A::stores();
+    let mut direct_ingress = false;
     let runtime_variables = match A::manifest() {
         BakedManifest::Absent => RuntimeVariables::default(),
         BakedManifest::Present(manifest) => {
+            direct_ingress = manifest.client_info_direct_ingress("cloudflare");
             let resolved = manifest.environment_for("cloudflare");
             collect_worker_variables(&resolved.variables, |key| {
                 env.var(key).ok().map(|value| value.to_string())
@@ -255,6 +257,7 @@ where
         ctx,
         request::RegistryInputs {
             config_meta: stores.config,
+            direct_ingress,
             kv_meta: stores.kv,
             secret_meta: stores.secrets,
             env_config: &env_config,

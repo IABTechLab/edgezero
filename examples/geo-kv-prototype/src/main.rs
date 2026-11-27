@@ -1,11 +1,13 @@
+#[cfg(any(feature = "celld", feature = "dynamodb"))]
+mod backend;
 mod import;
-mod index;
-mod store;
+use geo_kv_prototype::{index, publication, store};
 
 use std::{fs, net::IpAddr, path::Path, sync::Arc, time::Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use edgezero_core::key_value_store::KvHandle;
+#[cfg(not(any(feature = "celld", feature = "dynamodb")))]
 use futures::executor::block_on;
 use serde_json::json;
 
@@ -39,6 +41,10 @@ fn read_receipt(out: &Path) -> Result<Receipt> {
 }
 
 async fn build(source: &Path, out: &Path, object_bytes: usize) -> Result<()> {
+    ensure!(
+        object_bytes <= index::limits(0).max_object_bytes,
+        "object budget exceeds tool reader limit"
+    );
     let started = Instant::now();
     let imported = import::load(source)?;
     let import_seconds = started.elapsed().as_secs_f64();
@@ -48,16 +54,19 @@ async fn build(source: &Path, out: &Path, object_bytes: usize) -> Result<()> {
     fs::create_dir_all(out)?;
     let store = Arc::new(ArtifactStore::new(out));
     let kv = KvHandle::new(store.clone());
+    if out.join("receipt.json").try_exists()? {
+        let previous = read_receipt(out)?;
+        let selected = Resolver::open(kv.clone(), &previous, index::limits(0)).await?;
+        ensure!(
+            selected.manifest().source == imported.source
+                && selected.manifest().object_bytes == object_bytes,
+            "output already selects another generation; use a different output directory"
+        );
+    }
     let build_started = Instant::now();
     let (receipt, manifest, inventory) =
         index::build(&kv, imported.source, &v4, &v6, object_bytes).await?;
     let build_seconds = build_started.elapsed().as_secs_f64();
-    if out.join("receipt.json").exists() {
-        ensure!(
-            read_receipt(out)? == receipt,
-            "output already selects another generation; use a different output directory"
-        );
-    }
     let verify_started = Instant::now();
     for item in &inventory {
         let bytes = kv
@@ -70,7 +79,7 @@ async fn build(source: &Path, out: &Path, object_bytes: usize) -> Result<()> {
         );
     }
     let report = json!({
-        "prototype": "p1, not a production format",
+        "format": "geo/v1 production candidate",
         "transport": "local artifact files through KvHandle; no remote KV measurements",
         "source": manifest.source,
         "manifest_key": receipt.manifest_key,
@@ -95,13 +104,14 @@ async fn build(source: &Path, out: &Path, object_bytes: usize) -> Result<()> {
     write_json(&out.join("receipt.json"), &receipt)?;
     write_json(&out.join("inventory.json"), &inventory)?;
     write_json(&out.join("build-report.json"), &report)?;
+    publication::Artifact::open(out).await?;
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
 async fn measure(
     name: &str,
-    resolver: &mut Resolver,
+    resolver: &Resolver,
     store: &ArtifactStore,
     queries: &[(IpAddr, Option<index::Location>)],
 ) -> Result<serde_json::Value> {
@@ -125,7 +135,7 @@ async fn measure(
     let stats = store.stats();
     Ok(json!({
         "pass": name, "queries": queries.len(), "located": located,
-        "no_match": queries.len() - located, "oracle_mismatches": 0,
+        "no_match": queries.len() - located, "oracle_matches": queries.len(),
         "mean_microseconds": times.iter().sum::<f64>() / times.len() as f64,
         "p50_microseconds": times[times.len() / 2],
         "p95_microseconds": times[(times.len() - 1) * 95 / 100],
@@ -149,21 +159,22 @@ async fn verify(source: &Path, out: &Path, count: usize, cache_bytes: usize) -> 
     let mut queries = Vec::new();
     for (family, raw) in [(4, &imported.raw4), (6, &imported.raw6)] {
         for ip in import::samples(raw, family, count) {
-            queries.push((ip, import::oracle(raw, ip)));
+            queries.push((ip, imported.oracle(ip)));
         }
     }
     let receipt = read_receipt(out)?;
     let store = Arc::new(ArtifactStore::new(out));
     let kv = KvHandle::new(store.clone());
-    let mut disabled = Resolver::open(kv.clone(), &receipt, 0).await?;
+    let artifact = publication::Artifact::open(out).await?;
+    let disabled = publication::verify(&artifact, kv.clone()).await?;
     ensure!(
-        disabled.manifest.source == imported.source,
+        disabled.manifest().source == imported.source,
         "oracle source differs from indexed source"
     );
-    let mut reports = vec![measure("cache_disabled", &mut disabled, &store, &queries).await?];
-    let mut enabled = Resolver::open(kv, &receipt, cache_bytes).await?;
-    reports.push(measure("cache_enabled_first_pass", &mut enabled, &store, &queries).await?);
-    reports.push(measure("cache_enabled_repeat", &mut enabled, &store, &queries).await?);
+    let mut reports = vec![measure("cache_disabled", &disabled, &store, &queries).await?];
+    let enabled = Resolver::open(kv, &receipt, index::limits(cache_bytes)).await?;
+    reports.push(measure("cache_enabled_first_pass", &enabled, &store, &queries).await?);
+    reports.push(measure("cache_enabled_repeat", &enabled, &store, &queries).await?);
     let report = json!({
         "transport": "local file artifact KV; OS page cache uncontrolled; not network latency",
         "manifest_sha256": hex(&receipt.manifest_hash),
@@ -183,8 +194,12 @@ async fn lookup(out: &Path, ips: &[String]) -> Result<()> {
     ensure!(!ips.is_empty(), "provide at least one IP address");
     let receipt = read_receipt(out)?;
     let store = Arc::new(ArtifactStore::new(out));
-    let mut resolver =
-        Resolver::open(KvHandle::new(store.clone()), &receipt, 4 * 1024 * 1024).await?;
+    let resolver = Resolver::open(
+        KvHandle::new(store.clone()),
+        &receipt,
+        index::limits(4 * 1024 * 1024),
+    )
+    .await?;
     let mut results = Vec::new();
     for text in ips {
         let ip: IpAddr = text.parse()?;
@@ -201,37 +216,134 @@ async fn lookup(out: &Path, ips: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    block_on(async {
-        match args.first().map(String::as_str) {
-            Some("build") if (3..=4).contains(&args.len()) => {
-                build(
-                    Path::new(&args[1]),
-                    Path::new(&args[2]),
-                    args.get(3)
-                        .map(|s| s.parse())
-                        .transpose()?
-                        .unwrap_or(256 * 1024),
-                )
-                .await
-            }
-            Some("verify") if (3..=5).contains(&args.len()) => {
-                verify(
-                    Path::new(&args[1]),
-                    Path::new(&args[2]),
-                    args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(2048),
-                    args.get(4)
-                        .map(|s| s.parse())
-                        .transpose()?
-                        .unwrap_or(4 * 1024 * 1024),
-                )
-                .await
-            }
-            Some("lookup") if args.len() >= 3 => lookup(Path::new(&args[1]), &args[2..]).await,
-            _ => bail!(
-                "usage: geo-kv-prototype build <csv-directory> <artifact-directory> [object-bytes]\n       geo-kv-prototype verify <csv-directory> <artifact-directory> [samples-per-family] [cache-bytes]\n       geo-kv-prototype lookup <artifact-directory> <ip> [ip ...]"
-            ),
+async fn run(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("build") if (3..=4).contains(&args.len()) => {
+            build(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                args.get(3)
+                    .map(|s| s.parse())
+                    .transpose()?
+                    .unwrap_or(16 * 1024),
+            )
+            .await
         }
-    })
+        Some("verify") if (3..=5).contains(&args.len()) => {
+            verify(
+                Path::new(&args[1]),
+                Path::new(&args[2]),
+                args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(2048),
+                args.get(4)
+                    .map(|s| s.parse())
+                    .transpose()?
+                    .unwrap_or(4 * 1024 * 1024),
+            )
+            .await
+        }
+        Some("lookup") if args.len() >= 3 => lookup(Path::new(&args[1]), &args[2..]).await,
+        Some("publish") if args.len() == 3 => remote_command(args, false).await,
+        Some("verify-remote") if args.len() == 5 => remote_command(args, true).await,
+        _ => bail!(
+            "usage: geo-kv-prototype build <csv-directory> <artifact-directory> [object-bytes]\n       geo-kv-prototype verify <csv-directory> <artifact-directory> [samples-per-family] [cache-bytes]\n       geo-kv-prototype lookup <artifact-directory> <ip> [ip ...]\n       geo-kv-prototype publish <artifact-directory> <publisher-settings.json>\n       geo-kv-prototype verify-remote <artifact-directory> <serving-settings.json> <csv-directory> <samples-per-family>"
+        ),
+    }
+}
+
+#[cfg(any(feature = "celld", feature = "dynamodb"))]
+async fn remote_command(args: &[String], verify: bool) -> Result<()> {
+    // All local bytes are checked before preparing a backend or making remote writes.
+    let artifact = publication::Artifact::open(Path::new(&args[1])).await?;
+    let required_bytes = artifact
+        .inventory
+        .iter()
+        .map(|item| item.bytes)
+        .max()
+        .unwrap_or(0);
+    if verify {
+        // Do offline work before opening a live binding. In particular, don't
+        // leave the connection from DynamoDB's preflight idle during CSV import.
+        let imported = import::load(Path::new(&args[3]))?;
+        let count: usize = args[4].parse()?;
+        ensure!(count >= 2, "at least two samples per family required");
+        let kv = backend::prepare(Path::new(&args[2]), required_bytes).await?;
+        let resolver = publication::verify(&artifact, kv)
+            .await
+            .context("verify serving index tree")?;
+        ensure!(
+            resolver.manifest().source == imported.source,
+            "oracle source differs"
+        );
+        let mut checked = 0;
+        for (family, raw) in [(4, &imported.raw4), (6, &imported.raw6)] {
+            for ip in import::samples(raw, family, count) {
+                ensure!(
+                    resolver
+                        .lookup(ip)
+                        .await
+                        .context("read serving oracle sample")?
+                        == imported.oracle(ip),
+                    "CSV oracle mismatch"
+                );
+                checked += 1;
+            }
+        }
+        println!(
+            "{}",
+            json!({"status": "verified", "objects": artifact.inventory.len(), "oracle_samples": checked,
+            "manifest_key": artifact.receipt.manifest_key, "manifest_sha256": hex(&artifact.receipt.manifest_hash)})
+        );
+    } else {
+        let kv = backend::prepare(Path::new(&args[2]), required_bytes).await?;
+        println!(
+            "{}",
+            serde_json::to_string(&publication::publish(&artifact, &kv).await?)?
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(any(feature = "celld", feature = "dynamodb")))]
+async fn remote_command(_: &[String], _: bool) -> Result<()> {
+    bail!("remote commands need the celld or dynamodb feature")
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(any(feature = "celld", feature = "dynamodb"))]
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(anyhow::Error::from)
+        .and_then(|runtime| runtime.block_on(run(&args)));
+    #[cfg(not(any(feature = "celld", feature = "dynamodb")))]
+    let result = block_on(run(&args));
+    if let Err(error) = result {
+        // Print closed categories only; neither SDK errors nor source data are safe output.
+        let stage = error.to_string();
+        if matches!(
+            stage.as_str(),
+            "check existing object"
+                | "write absent object"
+                | "read back written object"
+                | "immutable remote object conflict"
+                | "remote read-back mismatch"
+                | "remote read-back missing"
+                | "verify serving index tree"
+                | "read serving oracle sample"
+                | "CSV oracle mismatch"
+                | "output already selects another generation; use a different output directory"
+                | "expected City or Country Locations-en CSV"
+                | "City and Country Locations-en CSV files are both present"
+        ) {
+            eprintln!("geo publication failed: {stage}");
+        }
+        eprintln!(
+            "geo command failed; check command syntax, settings, permissions and immutable artifact integrity"
+        );
+        eprintln!(
+            "commands: build <csv-dir> <artifact-dir> [object-bytes]; verify <csv-dir> <artifact-dir> [samples] [cache-bytes]; lookup <artifact-dir> <ip>...; publish <artifact-dir> <publisher-settings.json>; verify-remote <artifact-dir> <serving-settings.json> <csv-dir> <samples>"
+        );
+        std::process::exit(1);
+    }
 }

@@ -296,6 +296,7 @@ mod fastly_impl {
     #[cfg(test)]
     use fastly::Body as FastlyBody;
     use fastly::backend::BackendCreationError;
+    use fastly::compute_runtime::products;
     use fastly::handle::BodyHandle;
     use fastly::http::body::StreamingBody;
     use fastly::http::request::{PendingRequest, PollResult, SendErrorCause};
@@ -747,6 +748,20 @@ mod fastly_impl {
                         super::synchronous_send_until(budget, time.clock(), || {
                             #[cfg(test)]
                             observe_native_sdk("optimizer-send", backend.name());
+                            // SDK 0.13.3 sends an optimizer request as an ordinary
+                            // guest-cached request when the service lacks Image Optimizer.
+                            // Keep the typed unavailable outcome instead.
+                            if image_optimizer_disabled(
+                                products().ok().map(|enabled| enabled.image_optimizer),
+                            ) {
+                                return Err(map_configured_send_cause(
+                                    &SendErrorCause::ImageOptimizerUnsupported,
+                                    budget,
+                                    time.clock(),
+                                    configured,
+                                    ProviderFailurePhase::Send,
+                                ));
+                            }
                             let send = || request.send(backend);
                             #[cfg(feature = "test-utils")]
                             let result = match native_body_recorder(&context) {
@@ -1162,7 +1177,7 @@ mod fastly_impl {
         {
             return value;
         }
-        // SDK 0.13.1 converts the entire value to text, so one opaque token would
+        // SDK 0.13.3 converts the entire value to text, so one opaque token would
         // otherwise discard valid neighboring keys as well.
         let mut filtered = Vec::with_capacity(bytes.len());
         for key in bytes.split(|byte| *byte == b' ') {
@@ -1405,6 +1420,17 @@ mod fastly_impl {
             | SendErrorCause::Custom(_)
             | _ => super::SendFailure::Unknown,
         }
+    }
+
+    /// Reports whether SDK 0.13.3 would send an optimizer request as an ordinary request.
+    ///
+    /// The SDK takes that fallback only when `products()` succeeds and reports Image Optimizer
+    /// disabled. A `products()` error (`None`) keeps the SDK's optimizer hostcall, as does an
+    /// enabled product. Core validation already limits optimizer requests to GET or HEAD with
+    /// default caching and an absolute HTTP(S) URI, so the SDK's earlier pass, PURGE and URI
+    /// checks never take precedence on this path.
+    fn image_optimizer_disabled(enabled: Option<bool>) -> bool {
+        enabled == Some(false)
     }
 
     fn map_configured_send_cause(
@@ -1827,6 +1853,13 @@ mod fastly_impl {
         use futures_util::stream;
 
         use super::*;
+
+        #[test]
+        fn image_optimizer_guard_fires_only_when_the_product_is_reported_disabled() {
+            assert!(image_optimizer_disabled(Some(false)));
+            assert!(!image_optimizer_disabled(Some(true)));
+            assert!(!image_optimizer_disabled(None));
+        }
 
         #[test]
         fn retained_head_failure_precedes_later_deadline_without_polling_io() {
@@ -3571,10 +3604,12 @@ mod fastly_impl {
 
         #[test]
         fn batch_cutoff_clamping_preserves_cause_and_observation_boundary() {
+            use super::super::progress::wait_current;
             use super::super::scope;
             use edgezero_core::outbound::{
                 OutboundBatchTermination, OutboundCollectedSlot, OutboundScopeOwner,
             };
+            use std::sync::atomic::{AtomicBool, Ordering};
 
             for selected in [
                 BudgetSource::BatchCutoff,
@@ -3599,15 +3634,6 @@ mod fastly_impl {
                         .checked_add(Duration::from_nanos(1))
                         .expect("after cutoff"),
                 ] {
-                    let now = Arc::new(Mutex::new(start));
-                    let sampled = Arc::clone(&now);
-                    let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
-                    let callback = OutboundScopeOwner::callback();
-                    let time = native_time(clock);
-                    let progress =
-                        scope::native_progress(&callback.with(scope::capture), &time, start)
-                            .unwrap();
-                    let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
                     let mut request = OutboundRequest::post("http://127.0.0.1:9/clamped-cutoff")
                         .expect("request")
                         .body("pending")
@@ -3625,11 +3651,38 @@ mod fastly_impl {
                     let budget = dispatch_budget(&request, start, Some(cutoff)).expect("budget");
                     assert_eq!(budget.cause, selected);
                     assert!(budget.deadline.instant() < cutoff.instant());
+                    let now = Arc::new(Mutex::new(start));
+                    let sampled = Arc::clone(&now);
+                    let clock = MonotonicClock::new(move || *sampled.lock().expect("clock"));
+                    // The slot completes at `completed_at`: the clock reaches it when the request
+                    // arms its own deadline timer, on its first poll. Advancing the clock only after
+                    // start_batch_until let that call's eager dispatch observe the refused connect
+                    // at `start`, an unreachable failure instead of the selected timeout.
+                    let armed = Arc::new(AtomicBool::new(false));
+                    let advanced = Arc::clone(&now);
+                    let arming = Arc::clone(&armed);
+                    let own_deadline = budget.deadline.instant();
+                    let time = OutboundTime::new(clock, move |deadline, current| {
+                        if deadline.instant() == own_deadline
+                            && !arming.swap(true, Ordering::SeqCst)
+                        {
+                            *advanced.lock().expect("clock") = completed_at;
+                        }
+                        wait_current(deadline, current)
+                    });
+                    let callback = OutboundScopeOwner::callback();
+                    let progress =
+                        scope::native_progress(&callback.with(scope::capture), &time, start)
+                            .unwrap();
+                    let client = HttpClient::with_client(FastlyOutboundClient::with_time(time));
                     let batch = callback.with(|| client.start_batch_until(vec![request], cutoff));
-                    *now.lock().expect("clock") = completed_at;
                     let result = block_on(callback.run(progress.drive(batch.collect())))
                         .expect("callback progress")
                         .expect("clamped cutoff is not premature EOF");
+                    assert!(
+                        armed.load(Ordering::SeqCst),
+                        "the request armed its own deadline timer"
+                    );
 
                     if selected == BudgetSource::BatchCutoff && cutoff.is_expired_at(completed_at) {
                         assert_eq!(result.termination(), OutboundBatchTermination::Cutoff);

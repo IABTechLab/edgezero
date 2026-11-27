@@ -246,6 +246,73 @@ explicit validated-extractor limits. For unvalidated data, use
 | `take_body()`                 | `Result<Body, EdgeError>` - transfer body ownership          |
 | `into_request()`              | `Result<Request, EdgeError>` - consume context, take request |
 | `http_client()`               | `Option<HttpClient>` - adapter outbound HTTP client          |
+| `client_info()`               | `Option<&ClientInfo>` - client address and viewer TLS facts  |
+| `geo()`                       | `&GeoOutcome` - geography for this request                   |
+| `ja4()`                       | `Option<&CapturedJa4>` - client TLS fingerprint              |
+
+### Client metadata
+
+A handler reads three kinds of client facts without importing an adapter crate:
+
+- `ctx.client_info()`: the client address and the viewer's negotiated TLS protocol and cipher.
+- [`ctx.geo()`](./native-geo.md): estimated country and subdivision.
+- [`ctx.ja4()`](./adapters/overview.md#client-tls-fingerprint-ja4): the client's JA4 fingerprint.
+
+The managed adapter captures all three once at ingress. `client_info()` and `geo()` are a
+private snapshot: headers or extensions that middleware, pre-dispatch hooks or handlers
+change do not alter them. Pre-dispatch hooks read the same `ClientInfo` through
+`PreDispatchRequest::client_info()`. `ja4()` reads the public `RequestIngress` request
+extension, so application code that replaces or removes that extension changes what later
+code sees; see [Client TLS fingerprint (JA4)](./adapters/overview.md#client-tls-fingerprint-ja4).
+
+```rust
+use edgezero_core::client_info::{Capture, ClientIpSource};
+use edgezero_core::context::RequestContext;
+
+fn visitor_ip(ctx: &RequestContext) -> Option<std::net::IpAddr> {
+    // `None` for an unmanaged request, an unavailable address, or a trusted proxy's own address.
+    ctx.client_info()?.effective_client_ip()
+}
+
+fn describe(ctx: &RequestContext) -> &'static str {
+    let Some(info) = ctx.client_info() else {
+        return "no adapter snapshot";
+    };
+    match info.effective_client() {
+        Capture::Captured(address) if address.source() == ClientIpSource::DirectPeer => {
+            "socket peer"
+        }
+        Capture::Captured(_) => "provider or trusted proxy",
+        Capture::Unavailable(_) => "unavailable",
+        _ => "unknown",
+    }
+}
+```
+
+`client_info()` returns `None` only when no adapter attached a snapshot, for example on a
+request a test or custom adapter built by hand. Every managed Fastly, Axum, Cloudflare and Spin
+request has one. Each field is either captured with its source or unavailable with a reason:
+
+| Reason       | Meaning                                                                             |
+| ------------ | ----------------------------------------------------------------------------------- |
+| `NotExposed` | The adapter, or the way it is configured, cannot supply this field                  |
+| `Missing`    | A supported source supplied no value for this request                               |
+| `Rejected`   | A value was present but could not be accepted, for example because it was malformed |
+
+`direct_peer()` is the transport peer, when the adapter can see one. `effective_client()` is
+the address the adapter accepted as the client, with a `ClientIpSource`.
+`effective_client_ip()` returns it unless the source is `PeerFallback`, which means the peer is
+a trusted proxy and no client behind it could be resolved. `DirectPeer` still assumes that no
+unconfigured proxy sits in front of the peer; check the source when that matters.
+
+`tls_version()` and `tls_cipher()` keep provider strings exactly as reported. Fastly reports
+OpenSSL cipher names such as `ECDHE-RSA-AES128-GCM-SHA256`; Cloudflare reports names such as
+`AEAD-AES128-GCM-SHA256`, so the same cipher can have different names. They describe the
+viewer's connection, never the connection from a proxy to the origin.
+
+`Debug` output for the snapshot shows sources and reasons but never addresses or TLS values.
+The [capability matrix](./capabilities.md#client-metadata-matrix) lists what each adapter
+supplies.
 
 ### Store Extractors
 

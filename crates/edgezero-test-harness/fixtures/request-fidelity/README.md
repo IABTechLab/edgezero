@@ -64,7 +64,7 @@ Known gates:
   which normalizes these targets before Worker invocation. A no-hook
   application must match `/caf%C3%A9` and `/a/b` while ingress metadata
   independently retains the raw runtime URL with unknown wire preservation.
-- Fastly 0.13.1 lacks a safe borrowed original-target getter. Ingress reports
+- Fastly 0.13.3 lacks a safe borrowed original-target getter. Ingress reports
   `NotExposed`; a preceding native path shortcut can see a normalized target.
   Its canonical origin is recovered separately from the client runtime URI
   and one validated consistent Host, before native mutation.
@@ -83,6 +83,11 @@ Known gates:
 - Spin 4.1.0 rejects non-UTF-8 header values before component invocation.
   It consumes chunked framing and removes Transfer-Encoding before the hook in
   `chunked` and `te-cl` cases.
+- JA4: the hook reports only a fixed `ja4_state` label, never the value. The
+  local runtimes serve plain HTTP, so Fastly and Cloudflare report `missing`
+  and Spin reports `not_exposed`; the `spoof` case's `ja4` and
+  `cloudfront-viewer-ja4-fingerprint` headers must not change this. Captured
+  fingerprints need a live TLS deployment.
 - Global original field order is unavailable on Axum, Cloudflare and Spin.
   Fastly reports Unknown: original-name/count APIs provide partial evidence,
   without associating original fields with converted values. Local evidence

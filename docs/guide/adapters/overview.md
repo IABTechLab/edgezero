@@ -267,7 +267,7 @@ dependency sources and runtime identities before citing new evidence. Neither
 the historical record nor a local regression run establishes production-edge
 behavior.
 
-| Surface                             | Fastly 0.13.1 / Viceroy 0.21.0                                       | worker 0.8.5 / workerd 1.20260415.1                                                       | Axum / Hyper 1.11.1                                                  | Spin SDK 7.0.0 / Spin 4.1.0                                          |
+| Surface                             | Fastly 0.13.3 / Viceroy 0.22.0                                       | worker 0.8.5 / workerd 1.20260415.1                                                       | Axum / Hyper 1.11.1                                                  | Spin SDK 7.0.0 / Spin 4.1.0                                          |
 | ----------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------- |
 | Pre-dispatch hook                   | Executed                                                             | Executed for supported incoming methods                                                   | Executed                                                             | Executed                                                             |
 | Runtime extension method conversion | Byte method preserved                                                | Web Request converter preserves tokens; local wire parser returns 501 for unknown methods | Preserved in tested TCP fixture                                      | Preserved in tested HTTP fixture                                     |
@@ -292,6 +292,53 @@ the admitted limits and deadline, and terminal hook responses retain canonical
 response-egress ownership. Store/capability bootstrap remains adapter-owned.
 Direct router APIs instead perform route lookup after the hook; they do not
 perform canonical adapter admission.
+
+## Client TLS fingerprint (JA4)
+
+Handlers and middleware read the client's JA4 fingerprint through one
+provider-neutral accessor, `RequestContext::ja4()`. Adapters record it on
+`RequestIngress`; it is never derived from request headers.
+
+```rust
+use edgezero_core::ja4::{CapturedJa4, Ja4Unavailable};
+
+match ctx.ja4() {
+    Some(CapturedJa4::Captured { fingerprint, source }) => {
+        // fingerprint.as_str(), .summary(), .cipher_hash(), .extension_hash()
+    }
+    Some(CapturedJa4::Unavailable(Ja4Unavailable::NotExposed)) => { /* platform can't supply JA4 */ }
+    Some(CapturedJa4::Unavailable(_)) => { /* none for this request, or the provider value was rejected */ }
+    None => { /* the adapter made no claim (custom adapter, hand-built request) */ }
+}
+```
+
+Pre-dispatch hooks receive the `Request` and read the same value with
+`request.extensions().get::<RequestIngress>().and_then(RequestIngress::ja4)`.
+
+| Adapter                              | HTTPS client request                                                                                                                                                                  | Plain HTTP, local development, tests                                                                  | Provider value fails validation |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Fastly                               | `Captured { RuntimeTls }`                                                                                                                                                             | `Unavailable(Missing)`                                                                                | `Unavailable(Malformed)`        |
+| Cloudflare                           | `Captured { RuntimeTls }` with Enterprise Bot Management; otherwise `Unavailable(Missing)`                                                                                            | `Unavailable(Missing)`                                                                                | `Unavailable(Malformed)`        |
+| Spin                                 | `Unavailable(NotExposed)`                                                                                                                                                             | `Unavailable(NotExposed)`                                                                             | n/a                             |
+| Axum                                 | `Unavailable(NotExposed)`; with a [trusted proxy](./axum#ja4-from-a-trusted-proxy) or [protected CloudFront](./axum#ja4-from-protected-cloudfront), `Captured { TrustedProxyHeader }` | `Unavailable(NotExposed)`; from a configured trusted proxy without the header, `Unavailable(Missing)` | `Unavailable(Malformed)`        |
+| Custom adapter or hand-built request | `None`                                                                                                                                                                                | `None`                                                                                                | n/a                             |
+
+`Ja4Fingerprint::parse` accepts only the 36-character `a_b_c` shape, with
+lowercase hex in the hash sections. A provider value that fails validation is
+dropped and reported as `Malformed`; an empty value is reported as `Missing`. `Ja4Fingerprint`'s `Debug` output is
+redacted, and it has no `Display` or `Serialize`; a fingerprint is a
+quasi-identifier, so do not log it casually.
+
+Trust model: `Captured` values come only from the provider SDK accessor, or
+on Axum from a header sent by a proxy peer the operator explicitly trusts.
+The ingress snapshot is inserted after Fastly raw-request hook values are
+merged, so a hook cannot replace it. Application middleware and pre-dispatch
+hooks can still mutate request extensions; values are provider-computed and
+may differ between providers for the same client.
+
+JA4 is a TLS client fingerprinting method by FoxIO, licensed under
+BSD-3-Clause. JA4+ is a trademark of FoxIO. Other JA4+ methods are not
+provided.
 
 ## Opt-in application retention
 

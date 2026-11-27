@@ -2,6 +2,7 @@ use std::panic::catch_unwind;
 use std::sync::Arc;
 
 use crate::body::Body;
+use crate::client_info::ClientInfo;
 use crate::config_store::ConfigExtractionLimits;
 use crate::error::{
     EdgeError, RequestBodyOverflowResponse, mark_body_overflow_response,
@@ -312,6 +313,24 @@ impl App {
         .await
     }
 
+    /// Dispatches with adapter-owned Geo and client facts, independent of public request extensions.
+    ///
+    /// Pre-dispatch hooks, middleware and handlers read the snapshot through
+    /// [`RequestContext::client_info`](crate::context::RequestContext::client_info).
+    #[doc(hidden)]
+    #[inline]
+    pub async fn dispatch_admitted_with_client_info(
+        &self,
+        prepared: PreparedIngress,
+        request: Request,
+        detail: FrameworkErrorDetail,
+        geo: GeoOutcome,
+        client_info: ClientInfo,
+    ) -> ResponseEgressEnvelope {
+        self.dispatch_admitted_with_request_facts(prepared, request, detail, geo, Some(client_info))
+            .await
+    }
+
     /// Dispatches with native default routing-error presentation, preserving custom renderers.
     #[doc(hidden)]
     #[inline]
@@ -335,6 +354,18 @@ impl App {
         detail: FrameworkErrorDetail,
         geo: GeoOutcome,
     ) -> ResponseEgressEnvelope {
+        self.dispatch_admitted_with_request_facts(prepared, request, detail, geo, None)
+            .await
+    }
+
+    async fn dispatch_admitted_with_request_facts(
+        &self,
+        prepared: PreparedIngress,
+        request: Request,
+        detail: FrameworkErrorDetail,
+        geo: GeoOutcome,
+        client_info: Option<ClientInfo>,
+    ) -> ResponseEgressEnvelope {
         let request_method = request.method().clone();
         let request_start = prepared.request_start();
         let route = prepared.route_metadata().cloned();
@@ -345,7 +376,11 @@ impl App {
             .dispatch_resolved_outcome(
                 resolved,
                 request,
-                admitted.with_request_context(geo, detail == FrameworkErrorDetail::CategoryOnly),
+                admitted.with_request_context(
+                    geo,
+                    client_info,
+                    detail == FrameworkErrorDetail::CategoryOnly,
+                ),
             )
             .await
             .into_parts();
@@ -3124,6 +3159,146 @@ mod tests {
             legacy.dispatch_admitted(legacy_prepared, legacy_request),
         ));
         assert_eq!(legacy_response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn client_info_snapshot_survives_hook_middleware_and_handler_mutation() {
+        use crate::client_info::{
+            Capture, ClientAddress, ClientInfo, ClientIpSource, UnavailableReason,
+        };
+        use crate::params::PathParams;
+        use crate::pre_dispatch::PreDispatchRequest;
+        use crate::router::PreDispatchHook;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        fn owned() -> ClientInfo {
+            ClientInfo::new(
+                Capture::Unavailable(UnavailableReason::NotExposed),
+                Capture::Captured(ClientAddress::new(
+                    "203.0.113.9".parse().unwrap(),
+                    ClientIpSource::Fastly,
+                )),
+                Capture::Unavailable(UnavailableReason::Missing),
+                Capture::Unavailable(UnavailableReason::Missing),
+            )
+        }
+        struct Hook;
+        #[async_trait(?Send)]
+        impl PreDispatchHook for Hook {
+            async fn handle(
+                &self,
+                request: &mut PreDispatchRequest,
+            ) -> Result<Option<Response>, EdgeError> {
+                assert_eq!(request.client_info(), Some(&owned()));
+                request.extensions_mut().insert(ClientInfo::not_exposed());
+                request
+                    .headers_mut()
+                    .insert("x-forwarded-for", HeaderValue::from_static("192.0.2.1"));
+                assert_eq!(request.client_info(), Some(&owned()));
+                Ok(None)
+            }
+        }
+        struct MutatePublic;
+        #[async_trait(?Send)]
+        impl Middleware for MutatePublic {
+            async fn handle(
+                &self,
+                mut ctx: RequestContext,
+                next: Next<'_>,
+            ) -> Result<Response, EdgeError> {
+                assert_eq!(ctx.client_info(), Some(&owned()));
+                ctx.extensions_mut().remove::<ClientInfo>();
+                ctx.headers_mut()
+                    .insert("cf-connecting-ip", HeaderValue::from_static("192.0.2.2"));
+                assert_eq!(ctx.client_info(), Some(&owned()));
+                next.run(ctx).await
+            }
+        }
+        let handled = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&handled);
+        let router = RouterService::builder()
+            .pre_dispatch_hook(Hook)
+            .middleware(MutatePublic)
+            .get("/client", move |mut ctx: RequestContext| {
+                let handler_seen = Arc::clone(&seen);
+                async move {
+                    assert_eq!(ctx.client_info(), Some(&owned()));
+                    ctx.parts_mut().extensions.insert(ClientInfo::not_exposed());
+                    assert_eq!(ctx.client_info(), Some(&owned()));
+                    let reconstructed =
+                        RequestContext::new(ctx.into_request().unwrap(), PathParams::default());
+                    assert_eq!(reconstructed.client_info(), None);
+                    handler_seen.store(true, Ordering::SeqCst);
+                    Ok::<_, EdgeError>("client")
+                }
+            })
+            .build();
+        let app = App::new(router);
+        let mut request = request_builder()
+            .uri("/client")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(ClientInfo::not_exposed());
+        let head = IngressHeadParts::from_request(
+            &request,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+        let IngressBeginOutcome::Admitted(prepared) =
+            app.begin_ingress(head, app.monotonic_now()).unwrap()
+        else {
+            panic!("admission")
+        };
+        let response = complete_envelope(block_on(app.dispatch_admitted_with_client_info(
+            prepared,
+            request,
+            FrameworkErrorDetail::Default,
+            GeoOutcome::NoSelection,
+            owned(),
+        )));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(handled.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn client_info_is_absent_without_an_adapter_snapshot() {
+        use crate::client_info::ClientInfo;
+        use crate::params::PathParams;
+        let mut unmanaged = request_builder().body(Body::empty()).unwrap();
+        unmanaged.extensions_mut().insert(ClientInfo::not_exposed());
+        assert_eq!(
+            RequestContext::new(unmanaged, PathParams::default()).client_info(),
+            None
+        );
+        let app = App::new(
+            RouterService::builder()
+                .get("/geo-only", |ctx: RequestContext| async move {
+                    assert_eq!(ctx.client_info(), None);
+                    Ok::<_, EdgeError>("geo-only")
+                })
+                .build(),
+        );
+        let mut request = request_builder()
+            .uri("/geo-only")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(ClientInfo::not_exposed());
+        let head = IngressHeadParts::from_request(
+            &request,
+            IngressHeadAccounting::HostManaged,
+            IngressFraming::HostManaged,
+        );
+        let IngressBeginOutcome::Admitted(prepared) =
+            app.begin_ingress(head, app.monotonic_now()).unwrap()
+        else {
+            panic!("admission")
+        };
+        let response = complete_envelope(block_on(app.dispatch_admitted_with_geo(
+            prepared,
+            request,
+            FrameworkErrorDetail::Default,
+            GeoOutcome::NoSelection,
+        )));
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     fn managed_dispatch(

@@ -1,6 +1,10 @@
 //! Real local processes, public entrypoints and ordinary main termination output.
 #![cfg(all(feature = "axum", feature = "test-utils", unix))]
 
+#[cfg(all(test, feature = "geo-kv"))]
+#[path = "fixtures/geo_artifact.rs"]
+mod geo_artifact;
+
 #[cfg(test)]
 #[path = "fixtures/native_proxy.rs"]
 mod native_proxy;
@@ -20,15 +24,18 @@ mod tests {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::{Child, Command, ExitStatus, Stdio};
-    use std::sync::{Arc, Mutex, mpsc};
+    use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
     use edgezero_core::blob_envelope::BlobEnvelope;
     use serde_json::{Value, json};
     use tempfile::TempDir;
+    use tokio::net::TcpSocket;
 
     const WAIT: Duration = Duration::from_secs(5);
+    /// Launch attempts before a host that keeps losing its released port fails the test.
+    const SPAWN_ATTEMPTS: usize = 3;
 
     struct Roots {
         config: TempDir,
@@ -64,11 +71,43 @@ mod tests {
         .expect("envelope")
     }
 
+    /// macOS marks a new socket close-on-exec only after `socket()` returns, so a fixture
+    /// process spawned by a parallel test in that gap inherits it. An inherited reservation
+    /// stays bound in that process, so the fixture server that later binds the port fails with
+    /// `AddrInUse`, and an inherited client stream stays open after the test drops it. Port
+    /// reservations, client streams and spawns hold this lock so they never overlap.
+    static RESERVE_OR_SPAWN: Mutex<()> = Mutex::new(());
+
+    fn reserve_or_spawn() -> MutexGuard<'static, ()> {
+        RESERVE_OR_SPAWN
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Opens a client stream without letting a concurrently spawned fixture inherit it.
+    fn connect(addr: SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
+        let _connecting = reserve_or_spawn();
+        TcpStream::connect_timeout(&addr, timeout)
+    }
+
+    /// Reserves a loopback port for a fixture server that binds it itself.
     fn address() -> SocketAddr {
-        TcpListener::bind("127.0.0.1:0")
-            .expect("port reservation")
-            .local_addr()
-            .expect("address")
+        reserved_address().0
+    }
+
+    /// Reserves a loopback port and keeps it bound, but not listening, until the holder drops.
+    /// No parallel test can bind the port meanwhile and nothing accepts a connection to it, so
+    /// a "nothing answers" check cannot reach a server that reused a released reservation.
+    /// While held, the check cannot fail by itself: callers also assert that the server never
+    /// reached its listener bind.
+    fn reserved_address() -> (SocketAddr, TcpSocket) {
+        let _reserving = reserve_or_spawn();
+        let socket = TcpSocket::new_v4().expect("port reservation socket");
+        socket
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .expect("port reservation");
+        let addr = socket.local_addr().expect("reserved address");
+        (addr, socket)
     }
 
     fn command(mode: &str, roots: &Roots, addr: SocketAddr) -> Command {
@@ -94,45 +133,150 @@ mod tests {
     struct Server {
         addr: SocketAddr,
         child: Child,
+        command: Command,
+        events: mpsc::Receiver<String>,
+        output: Arc<Mutex<String>>,
+        readers: Vec<JoinHandle<()>>,
+        token: String,
+    }
+
+    /// One launched host process and the threads collecting its output.
+    struct Launched {
+        child: Child,
         events: mpsc::Receiver<String>,
         output: Arc<Mutex<String>>,
         readers: Vec<JoinHandle<()>>,
     }
 
+    /// A token unique to one launch, which the fixture echoes from `/fixture-ready`.
+    fn spawn_token() -> String {
+        use std::process::id as process_id;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static LAUNCHES: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "{}-{}",
+            process_id(),
+            LAUNCHES.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn launch(command: &mut Command, token: &str) -> Launched {
+        let spawning = reserve_or_spawn();
+        let mut child = command
+            .env("FIXTURE_SPAWN_TOKEN", token)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("fixture process");
+        drop(spawning);
+        let output = Arc::new(Mutex::new(String::new()));
+        let (sender, events) = mpsc::channel();
+        let stdout = child.stdout.take().expect("stdout");
+        let stderr = child.stderr.take().expect("stderr");
+        let mut readers = Vec::new();
+        let streams: [Box<dyn Read + Send>; 2] = [Box::new(stdout), Box::new(stderr)];
+        for stream in streams {
+            let captured = Arc::clone(&output);
+            let stream_sender = sender.clone();
+            readers.push(thread::spawn(move || {
+                for result in BufReader::new(stream).lines() {
+                    let Ok(line) = result else { break };
+                    let mut captured_output = captured.lock().expect("output");
+                    captured_output.push_str(&line);
+                    captured_output.push('\n');
+                    drop(captured_output);
+                    let _sent = stream_sender.send(line);
+                }
+            }));
+        }
+        Launched {
+            child,
+            events,
+            output,
+            readers,
+        }
+    }
+
     impl Server {
         fn spawn(mut command: Command, addr: SocketAddr) -> Self {
-            let mut child = command
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("fixture process");
-            let output = Arc::new(Mutex::new(String::new()));
-            let (sender, events) = mpsc::channel();
-            let stdout = child.stdout.take().expect("stdout");
-            let stderr = child.stderr.take().expect("stderr");
-            let mut readers = Vec::new();
-            let streams: [Box<dyn Read + Send>; 2] = [Box::new(stdout), Box::new(stderr)];
-            for stream in streams {
-                let captured = Arc::clone(&output);
-                let stream_sender = sender.clone();
-                readers.push(thread::spawn(move || {
-                    for result in BufReader::new(stream).lines() {
-                        let Ok(line) = result else { break };
-                        let mut captured_output = captured.lock().expect("output");
-                        captured_output.push_str(&line);
-                        captured_output.push('\n');
-                        drop(captured_output);
-                        let _sent = stream_sender.send(line);
-                    }
-                }));
-            }
-            Self {
-                addr,
+            let token = spawn_token();
+            let Launched {
                 child,
                 events,
                 output,
                 readers,
+            } = launch(&mut command, &token);
+            Self {
+                addr,
+                child,
+                command,
+                events,
+                output,
+                readers,
+                token,
             }
+        }
+
+        /// The address the live host serves, which a respawn may have moved.
+        fn addr(&self) -> SocketAddr {
+            self.addr
+        }
+
+        /// Replaces a host that lost its released port with one on a fresh reservation.
+        fn respawn(&mut self, cause: &str, attempts: &mut usize) {
+            *attempts = attempts.checked_add(1).expect("attempt count");
+            assert!(
+                *attempts < SPAWN_ATTEMPTS,
+                "fixture host failed to keep a port after {SPAWN_ATTEMPTS} attempts ({cause}): {}",
+                self.log()
+            );
+            let _killed = self.child.kill();
+            let _status = self.child.wait();
+            for reader in self.readers.drain(..) {
+                let _joined = reader.join();
+            }
+            let previous = (self.addr().to_string(), self.addr().port().to_string());
+            let addr = address();
+            let replacements: Vec<_> = self
+                .command
+                .get_envs()
+                .filter_map(|(key, value)| {
+                    let current = value?.to_str()?;
+                    let replacement = if current == previous.0 {
+                        addr.to_string()
+                    } else if current == previous.1 {
+                        addr.port().to_string()
+                    } else {
+                        return None;
+                    };
+                    Some((key.to_owned(), replacement))
+                })
+                .collect();
+            for (key, value) in replacements {
+                self.command.env(key, value);
+            }
+            self.addr = addr;
+            self.token = spawn_token();
+            let Launched {
+                child,
+                events,
+                output,
+                readers,
+            } = launch(&mut self.command, &self.token);
+            self.child = child;
+            self.events = events;
+            self.output = output;
+            self.readers = readers;
+        }
+
+        fn serves_own_token(&self, response: &str) -> bool {
+            let (head, _body) = response.split_once("\r\n\r\n").unwrap_or((response, ""));
+            head.lines().any(|line| {
+                line.split_once(':').is_some_and(|(name, value)| {
+                    name.eq_ignore_ascii_case("x-fixture-spawn") && value.trim() == self.token
+                })
+            })
         }
 
         fn log(&self) -> String {
@@ -140,22 +284,33 @@ mod tests {
         }
 
         fn ready(&mut self) {
-            let deadline = Instant::now().checked_add(WAIT).expect("startup timer");
+            let mut attempts = 0;
+            let mut deadline = Instant::now().checked_add(WAIT).expect("startup timer");
             loop {
                 assert!(
                     Instant::now() < deadline,
                     "startup deadline: {}",
                     self.log()
                 );
-                assert!(
-                    self.child.try_wait().expect("status").is_none(),
-                    "early process failure: {}",
-                    self.log()
-                );
-                if let Ok(response) = self.request("/ready")
+                if self.child.try_wait().expect("status").is_some() {
+                    for reader in self.readers.drain(..) {
+                        reader.join().expect("output reader");
+                    }
+                    let log = self.log();
+                    assert!(log.contains("startup bind"), "early process failure: {log}");
+                    self.respawn("bind lost", &mut attempts);
+                    deadline = Instant::now().checked_add(WAIT).expect("startup timer");
+                    continue;
+                }
+                if let Ok(response) = self.request("/fixture-ready")
                     && response.starts_with("HTTP/1.1 200")
                 {
-                    return;
+                    if self.serves_own_token(&response) {
+                        return;
+                    }
+                    self.respawn("port taken by another listener", &mut attempts);
+                    deadline = Instant::now().checked_add(WAIT).expect("startup timer");
+                    continue;
                 }
                 thread::sleep(Duration::from_millis(5));
             }
@@ -173,18 +328,18 @@ mod tests {
         }
 
         fn signal(&self, name: &str) {
-            assert!(
-                Command::new("kill")
-                    .arg(format!("-{name}"))
-                    .arg(self.child.id().to_string())
-                    .status()
-                    .expect("send signal")
-                    .success()
-            );
+            let spawning = reserve_or_spawn();
+            let status = Command::new("kill")
+                .arg(format!("-{name}"))
+                .arg(self.child.id().to_string())
+                .status()
+                .expect("send signal");
+            drop(spawning);
+            assert!(status.success());
         }
 
         fn socket(&self) -> io::Result<TcpStream> {
-            let socket = TcpStream::connect_timeout(&self.addr, Duration::from_millis(50))?;
+            let socket = connect(self.addr, Duration::from_millis(50))?;
             socket.set_read_timeout(Some(WAIT))?;
             socket.set_write_timeout(Some(WAIT))?;
             Ok(socket)
@@ -246,6 +401,10 @@ mod tests {
             "startup diagnostic leaked fixture contents: {log}"
         );
         assert!(!log.contains("INITIALIZED"));
+        assert!(
+            !log.contains("startup bind"),
+            "failed startup reached bind: {log}"
+        );
         TcpStream::connect_timeout(&addr, Duration::from_millis(50))
             .expect_err("failed startup never accepts connections");
         log
@@ -377,7 +536,7 @@ mod tests {
     }
 
     fn raw_request(addr: SocketAddr, request: &str) -> String {
-        let mut socket = TcpStream::connect_timeout(&addr, WAIT).expect("wire connection");
+        let mut socket = connect(addr, WAIT).expect("wire connection");
         socket.set_read_timeout(Some(WAIT)).expect("read timeout");
         socket.set_write_timeout(Some(WAIT)).expect("write timeout");
         socket.write_all(request.as_bytes()).expect("wire request");
@@ -521,7 +680,7 @@ mod tests {
         server.ready();
         let spoof = "Forwarded: for=198.51.100.9;host=FORWARDED_SENTINEL;proto=https\r\nX-Forwarded-For: 203.0.113.9\r\nX-Forwarded-Host: XFH_SENTINEL\r\nX-Forwarded-Proto: https\r\nX-Forwarded-Secret: HEADER_SENTINEL\r\nX-Request-ID: VISITOR_ID_SENTINEL\r\n";
         let request = metadata_request(spoof);
-        let response = raw_request(addr, &request);
+        let response = raw_request(server.addr(), &request);
         assert_no_diagnostic_headers(&response);
         let value = response_json(&response);
         assert_metadata(
@@ -582,7 +741,7 @@ mod tests {
             );
             server.ready();
             let proxy = LocalProxy::start(
-                addr,
+                server.addr(),
                 Ipv4Addr::new(127, 0, 0, 2),
                 Assertions::AppendForwarded {
                     host: "public.example",
@@ -640,7 +799,7 @@ mod tests {
             );
             server.ready();
             let ingress = LocalProxy::start(
-                addr,
+                server.addr(),
                 Ipv4Addr::new(127, 0, 0, 3),
                 Assertions::AppendForwarded {
                     host: "final.example",
@@ -683,7 +842,7 @@ mod tests {
         );
         server.ready();
         let gateway = LocalProxy::start(
-            addr,
+            server.addr(),
             Ipv4Addr::new(127, 0, 0, 3),
             Assertions::ReplaceForwarded {
                 client: "203.0.113.7".parse().expect("verified gateway client"),
@@ -793,7 +952,12 @@ mod tests {
                     scheme: "https",
                 }
             };
-            let proxy = LocalProxy::start(addr, Ipv4Addr::new(127, 0, 0, 2), assertions, false);
+            let proxy = LocalProxy::start(
+                server.addr(),
+                Ipv4Addr::new(127, 0, 0, 2),
+                assertions,
+                false,
+            );
             for (prefix, expected_result, client, host, scheme) in [
                 (
                     "Forwarded: for=198.51.100.1;host=wrong.example;proto=http\r\nX-Forwarded-For: 203.0.113.1\r\nX-Forwarded-Host: wrong.example\r\nX-Forwarded-Proto: http\r\n",
@@ -828,7 +992,7 @@ mod tests {
                 let value = response_json(&raw_request(proxy.addr(), &metadata_request(prefix)));
                 assert_metadata(&value, client, host, scheme, expected_result);
             }
-            assert_missing_unresolved_and_duplicate_family(addr, family);
+            assert_missing_unresolved_and_duplicate_family(server.addr(), family);
             server.signal("TERM");
             assert!(server.wait().success());
             assert_final_zero(&server);
@@ -856,7 +1020,7 @@ mod tests {
         );
         server.ready();
         let proxy = LocalProxy::start(
-            addr,
+            server.addr(),
             Ipv4Addr::new(127, 0, 0, 2),
             Assertions::AppendForwarded {
                 host: "native-proxy.test",
@@ -999,7 +1163,7 @@ mod tests {
             ("/native-status503", 503, "", "INFO"),
         ] {
             let response = raw_request(
-                addr,
+                server.addr(),
                 &format!(
                     "GET {path} HTTP/1.1\r\nHost: HOST_SENTINEL\r\nAuthorization: Bearer AUTH_SENTINEL\r\nCookie: COOKIE_SENTINEL\r\nX-Request-ID: ID_SENTINEL\r\nConnection: close\r\n\r\n"
                 ),
@@ -1021,7 +1185,7 @@ mod tests {
             assert_native_error_record(&server, path, status, failure, level);
         }
         let extension_response = raw_request(
-            addr,
+            server.addr(),
             "METHOD_SENTINEL /native-status503?token=QUERY_SENTINEL HTTP/1.1\r\nHost: fixture\r\nConnection: close\r\n\r\n",
         );
         assert!(extension_response.starts_with("HTTP/1.1 405"));
@@ -1116,7 +1280,7 @@ mod tests {
             "X-Forwarded-Secret: {}\r\n",
             "HEAD_SENTINEL".repeat(6000)
         ));
-        let response = raw_request(addr, &request);
+        let response = raw_request(server.addr(), &request);
         assert!(
             response.starts_with("HTTP/1.1 431"),
             "original normalized head limit: {response}"
@@ -1153,7 +1317,7 @@ mod tests {
         server.ready();
         other.ready();
         let response = raw_request(
-            addr,
+            server.addr(),
             "GET /native-mutated HTTP/1.1\r\nHost: fixture\r\nX-Request-ID: VISITOR_ID_SENTINEL\r\nConnection: close\r\n\r\n",
         );
         assert_no_diagnostic_headers(&response);
@@ -1163,7 +1327,7 @@ mod tests {
         let authoritative = route_record(&server, "/native-mutated");
         assert_eq!(authoritative["id"], mutated["removed_id"]);
         let mut clients = Vec::new();
-        for target in [addr, other_addr] {
+        for target in [server.addr(), other.addr()] {
             for _request in 0..4_u8 {
                 clients.push(thread::spawn(move || {
                     let concurrent_response = raw_request(target, "GET /native-status503 HTTP/1.1\r\nHost: fixture\r\nX-Request-ID: VISITOR_ID_SENTINEL\r\nConnection: close\r\n\r\n");
@@ -1644,7 +1808,7 @@ mod tests {
             (None, None, Some("RECORDS_SENTINEL"), "REQUEST_RECORDS"),
             (None, None, Some("FALSE"), "REQUEST_RECORDS"),
         ] {
-            let addr = address();
+            let (addr, _addr_held) = reserved_address();
             let mut launch = command("diagnostics", &roots, addr);
             if let Some(value) = networks {
                 launch.env("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", value);
@@ -1685,7 +1849,7 @@ mod tests {
             ),
             ("EDGEZERO__LOGGING__REQUEST_RECORDS", "REQUEST_RECORDS"),
         ] {
-            let addr = address();
+            let (addr, _addr_held) = reserved_address();
             let mut launch = command("diagnostics", &roots, addr);
             let mut raw = b"NON_UNICODE_SENTINEL".to_vec();
             raw.push(0xff);
@@ -1828,7 +1992,7 @@ mod tests {
                 OsString::from_vec(vec![0xff]),
             ] {
                 let roots = Roots::new();
-                let addr = address();
+                let (addr, _addr_held) = reserved_address();
                 let mut launch = command(mode, &roots, addr);
                 launch.env("EDGEZERO__ADAPTER__JSON_BODY_LIMIT_BYTES", value);
                 let log = failed(launch, addr, "JSON_BODY_LIMIT_BYTES");
@@ -1932,7 +2096,7 @@ mod tests {
     #[test]
     fn stop_during_startup_never_binds_or_becomes_ready() {
         let roots = Roots::new();
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         let mut server = Server::spawn(command("starting", &roots, addr), addr);
         server.wait_line("INITIALIZING");
         TcpStream::connect_timeout(&addr, Duration::from_millis(50))
@@ -1966,7 +2130,7 @@ mod tests {
                 "settings",
             ),
         ] {
-            let addr = address();
+            let (addr, _addr_held) = reserved_address();
             let mut cmd = command("initialized", &roots, addr);
             cmd.env(key, value);
             failed(cmd, addr, category);
@@ -1975,15 +2139,15 @@ mod tests {
             ("hook-error", "application configuration"),
             ("initializer-error", "initializer"),
         ] {
-            let addr = address();
+            let (addr, _addr_held) = reserved_address();
             failed(command(mode, &roots, addr), addr, category);
         }
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         let mut cmd = command("initialized", &roots, addr);
         cmd.env_remove("EDGEZERO__ADAPTER__CONFIG_DIR");
         failed(cmd, addr, "CONFIG_DIR");
         let missing = roots.cwd.path().join("missing-data-SENTINEL");
-        let missing_addr = address();
+        let (missing_addr, _missing_addr_held) = reserved_address();
         let mut missing_cmd = command("initialized", &roots, missing_addr);
         missing_cmd.env("EDGEZERO__ADAPTER__DATA_DIR", &missing);
         failed(missing_cmd, missing_addr, "DATA_DIR");
@@ -2006,10 +2170,10 @@ mod tests {
         let roots = Roots::new();
         let file = roots.config.path().join("local-config-settings.json");
         fs::remove_file(&file).expect("missing file fixture");
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         failed(command("initialized", &roots, addr), addr, "missing");
         fs::create_dir_all(&file).expect("non-regular fixture");
-        let directory_addr = address();
+        let (directory_addr, _directory_addr_held) = reserved_address();
         failed(
             command("initialized", &roots, directory_addr),
             directory_addr,
@@ -2017,7 +2181,7 @@ mod tests {
         );
         fs::remove_dir(&file).expect("remove fixture directory");
         roots.map(&json!({"settings": {"CONFIG_SENTINEL": true}}));
-        let malformed_addr = address();
+        let (malformed_addr, _malformed_addr_held) = reserved_address();
         failed(
             command("initialized", &roots, malformed_addr),
             malformed_addr,
@@ -2036,7 +2200,7 @@ mod tests {
             ),
         ] {
             roots.map(&map);
-            let typed_addr = address();
+            let (typed_addr, _typed_addr_held) = reserved_address();
             failed(
                 command("initialized", &roots, typed_addr),
                 typed_addr,
@@ -2047,7 +2211,7 @@ mod tests {
             serde_json::from_str(&blob("valid-greeting", "fixture_token")).expect("envelope");
         envelope["data"]["greeting"] = json!("CHANGED_CONFIG_SENTINEL");
         roots.map(&json!({"settings": serde_json::to_string(&envelope).expect("envelope")}));
-        let integrity_addr = address();
+        let (integrity_addr, _integrity_addr_held) = reserved_address();
         failed(
             command("initialized", &roots, integrity_addr),
             integrity_addr,
@@ -2121,7 +2285,7 @@ mod tests {
                 .expect("snapshot")
                 .ends_with("selected-greeting")
         );
-        let second_addr = address();
+        let (second_addr, _second_addr_held) = reserved_address();
         failed(
             command("initialized", &roots, second_addr),
             second_addr,
@@ -2214,7 +2378,7 @@ mod tests {
         server.ready();
         assert!(
             raw_request(
-                addr,
+                server.addr(),
                 "GET /state HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
             )
             .contains("configured-greeting")
@@ -2250,6 +2414,121 @@ mod tests {
         value
     }
 
+    #[cfg(feature = "geo-kv")]
+    fn kv_geo_command(cwd: &TempDir, addr: SocketAddr, pin: &str, mode: &str) -> Command {
+        let mut command = geo_command("geo-kv", cwd, addr);
+        command
+            .env("EDGEZERO__ADAPTER__HOST", addr.ip().to_string())
+            .env("EDGEZERO__ADAPTER__PORT", addr.port().to_string())
+            .env("EDGEZERO__ADAPTER__GEO__PROVIDER", "kv")
+            .env("EDGEZERO__ADAPTER__GEO__STORE_ID", "fixture_geo")
+            .env("EDGEZERO__ADAPTER__GEO__READER_IP", mode)
+            .env("EDGEZERO__ADAPTER__GEO__PIN", pin)
+            .env("EDGEZERO__ADAPTER__GEO__LOOKUP_TIMEOUT_MS", "200")
+            .env("EDGEZERO__ADAPTER__GEO__MAX_IN_FLIGHT", "4")
+            .env("EDGEZERO__ADAPTER__TRUSTED_PROXY_CIDRS", "127.0.0.1/32")
+            .env("EDGEZERO__ADAPTER__FORWARDING_HEADER_FAMILY", "forwarded");
+        command
+    }
+
+    #[test]
+    #[cfg(feature = "geo-kv")]
+    fn kv_geo_listener_checks_reader_provenance_and_pinned_objects() {
+        use super::geo_artifact::Artifact;
+        use edgezero_core::geo::kv::{Location, Range, Source, build, hex, node_key};
+        use edgezero_core::key_value_store::KvHandle;
+        use futures::executor::block_on;
+        use std::net::Ipv6Addr;
+
+        let artifact_dir = tempfile::tempdir().expect("artifact");
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let artifact = Arc::new(Artifact(artifact_dir.path().to_owned()));
+        let handle = KvHandle::new(Arc::<Artifact>::clone(&artifact));
+        let start = u128::from(u32::from(Ipv4Addr::new(192, 0, 2, 0)));
+        let v4: Vec<_> = (0..120)
+            .map(|i| Range {
+                start: start + i * 2,
+                end: start + i * 2,
+                location: if i == 1 {
+                    Location::new("XK", "").expect("source country")
+                } else {
+                    Location::new("US", "CA").expect("source country and subdivision")
+                },
+            })
+            .collect();
+        let ip6: Ipv6Addr = "2001:db8::".parse().expect("IPv6");
+        let v6 = [Range {
+            start: u128::from(ip6),
+            end: u128::from(ip6) + 1,
+            location: Location::new("GB", "").expect("country only"),
+        }];
+        let (receipt, manifest, inventory) = block_on(build(
+            &handle,
+            Source {
+                edition: "fixture".into(),
+                files: vec![],
+            },
+            &v4,
+            &v6,
+            1024,
+        ))
+        .expect("fixture dataset");
+        let pin = format!("{}@{}", manifest.generation, hex(&receipt.manifest_hash));
+        let addr = address();
+        let mut command = kv_geo_command(&cwd, addr, &pin, "forwarded-required");
+        command.env("FIXTURE_GEO_ARTIFACT", artifact_dir.path());
+        let mut server = Server::spawn(command, addr);
+        server.ready();
+
+        let missing = geo_response(&server, "CloudFront-Viewer-Country: US\r\n");
+        assert_eq!(missing["geo"]["status"], "missing_reader_ip");
+        assert_eq!(missing["kv_reads"], 3_u64);
+        // A trusted forwarded client needs no forwarded host or scheme.
+        let ipv4 = geo_response(&server, "Forwarded: for=192.0.2.0\r\n");
+        assert_eq!(ipv4["geo"]["subdivision"], "CA");
+        assert_eq!(ipv4["geo"]["trust_basis"], "CheckedForwardedClient");
+        let mapped = geo_response(&server, "Forwarded: for=\"[::ffff:192.0.2.2]\"\r\n");
+        assert_eq!(mapped["geo"]["status"], "unsupported_geography");
+        let gap = geo_response(&server, "Forwarded: for=192.0.2.1\r\n");
+        assert_eq!(gap["geo"]["status"], "no_match");
+        let country_only = geo_response(&server, "Forwarded: for=\"[2001:db8::1]\"\r\n");
+        assert_eq!(country_only["geo"]["country"], "GB");
+        assert!(country_only["geo"]["subdivision"].is_null());
+        let rejected = raw_request(
+            server.addr(),
+            "GET /geo-abort HTTP/1.1\r\nHost: fixture\r\nForwarded: for=192.0.2.238\r\nConnection: close\r\n\r\n",
+        );
+        assert!(rejected.is_empty());
+        let untrusted = geo_response(&server, "Forwarded: for=unknown\r\n");
+        assert_eq!(untrusted["geo"]["status"], "missing_reader_ip");
+        assert_eq!(untrusted["kv_reads"], country_only["kv_reads"]);
+
+        let v4_root = node_key(&manifest.generation, 4, &manifest.ipv4.expect("root").hash);
+        // Last IPv4 object before its root is the second leaf, not read by earlier requests.
+        let mut v4_entries = inventory
+            .iter()
+            .filter(|entry| entry.key.contains("/v4/"))
+            .rev();
+        assert_eq!(v4_entries.next().expect("root").key, v4_root);
+        fs::remove_file(artifact.path(&v4_entries.next().expect("second leaf").key))
+            .expect("remove leaf");
+        let failed = geo_response(&server, "Forwarded: for=192.0.2.238\r\n");
+        assert_eq!(failed["geo"]["status"], "provider_failure");
+        finish_geo(&mut server, &cwd);
+
+        fs::remove_file(artifact.path(&v4_root)).expect("remove root");
+        let failed_addr = address();
+        let mut failed_command = kv_geo_command(&cwd, failed_addr, &pin, "direct-peer");
+        failed_command.env("FIXTURE_GEO_ARTIFACT", artifact_dir.path());
+        let mut failed_startup = Server::spawn(failed_command, failed_addr);
+        assert!(!failed_startup.wait().success());
+        let log = failed_startup.log();
+        assert!(log.contains("pinned KV data could not be prepared"));
+        assert!(!log.contains("INITIALIZED"));
+        TcpStream::connect_timeout(&failed_addr, Duration::from_millis(50))
+            .expect_err("invalid root never binds");
+    }
+
     fn finish_geo(server: &mut Server, cwd: &TempDir) {
         assert!(
             server
@@ -2270,10 +2549,77 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "geo-cloudfront")]
+    fn geo_hosting_binds_cloudfront_from_manifest_and_settings() {
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let addr = address();
+        let mut command = geo_command("geo-manifest", &cwd, addr);
+        command
+            .env("EDGEZERO__ADAPTER__HOST", addr.ip().to_string())
+            .env("EDGEZERO__ADAPTER__PORT", addr.port().to_string())
+            .env("EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS", "127.0.0.1/32");
+        let mut server = Server::spawn(command, addr);
+        server.ready();
+        let value = geo_response(
+            &server,
+            "CloudFront-Viewer-Country: us\r\nCloudFront-Viewer-Country-Region: ca\r\nx-origin-verify-fixture: ORIGIN_CREDENTIAL_SENTINEL\r\n",
+        );
+        assert_eq!(value["geo"]["status"], "located");
+        assert_eq!(value["geo"]["provider"], "cloudfront");
+        assert_eq!(value["geo"]["country"], "US");
+        assert_eq!(value["geo"]["subdivision"], "CA");
+        assert_eq!(value["geo"]["trust_basis"], "DeclaredProtectedAlb");
+        finish_geo(&mut server, &cwd);
+    }
+
+    #[test]
+    fn geo_dev_runner_ignores_manifest_and_reads_settings() {
+        let cwd = tempfile::tempdir().expect("unrelated cwd");
+        let dev = |settings: &[(&str, &str)]| {
+            let addr = address();
+            let mut command = geo_command("geo-manifest-dev", &cwd, addr);
+            command
+                .env("EDGEZERO__ADAPTER__HOST", addr.ip().to_string())
+                .env("EDGEZERO__ADAPTER__PORT", addr.port().to_string());
+            for (key, value) in settings {
+                command.env(key, value);
+            }
+            let mut server = Server::spawn(command, addr);
+            server.ready();
+            server
+        };
+        let request = "CloudFront-Viewer-Country: US\r\nCloudFront-Viewer-Country-Region: CA\r\n";
+
+        // The baked table lacks networks; the dev server still starts, with geo off.
+        let unselected = dev(&[]);
+        let value = geo_response(&unselected, request);
+        assert_eq!(value["geo"]["status"], "no_selection");
+        drop(unselected);
+
+        // Settings alone opt a dev run in. Without the built-in this fails startup instead.
+        #[cfg(feature = "geo-cloudfront")]
+        {
+            let selected = dev(&[
+                ("EDGEZERO__ADAPTER__GEO__PROVIDER", "cloudfront"),
+                ("EDGEZERO__ADAPTER__GEO__ALB_PEER_CIDRS", "127.0.0.1/32"),
+                (
+                    "EDGEZERO__ADAPTER__GEO__ORIGIN_CREDENTIAL_HEADER_NAME",
+                    "x-origin-verify-fixture",
+                ),
+            ]);
+            let located = geo_response(&selected, request);
+            assert_eq!(located["geo"]["status"], "located");
+            assert_eq!(located["geo"]["provider"], "cloudfront");
+            assert_eq!(located["geo"]["country"], "US");
+            assert_eq!(located["geo"]["subdivision"], "CA");
+        }
+    }
+
+    #[test]
     #[cfg(not(feature = "geo-cloudfront"))]
     fn geo_hosting_rejects_unavailable_cloudfront() {
         let cwd = tempfile::tempdir().expect("unrelated cwd");
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         let mut server = Server::spawn(geo_command("geo-cloudfront", &cwd, addr), addr);
         assert!(!server.wait().success());
         let log = server.log();
@@ -2281,6 +2627,10 @@ mod tests {
         assert!(!log.contains("INITIALIZED"));
         assert!(!log.contains("HOOK_ENTERED"));
         assert!(!log.contains("ready"));
+        assert!(
+            !log.contains("startup bind"),
+            "unavailable implementation reached bind"
+        );
         TcpStream::connect_timeout(&addr, Duration::from_millis(50))
             .expect_err("unavailable implementation never binds");
         assert_eq!(fs::read_dir(cwd.path()).expect("unrelated cwd").count(), 0);
@@ -2349,12 +2699,16 @@ mod tests {
     #[test]
     fn geo_hosting_invalid_policy_never_initializes_or_listens() {
         let cwd = tempfile::tempdir().expect("unrelated cwd");
-        let addr = address();
+        let (addr, _addr_held) = reserved_address();
         let mut server = Server::spawn(geo_command("geo-invalid-policy", &cwd, addr), addr);
         assert!(!server.wait().success());
         assert!(!server.log().contains("INITIALIZED"));
         assert!(!server.log().contains("HOOK_ENTERED"));
         assert!(!server.log().contains("x-origin-verify-fixture"));
+        assert!(
+            !server.log().contains("startup bind"),
+            "invalid policy reached bind"
+        );
         TcpStream::connect_timeout(&addr, Duration::from_millis(50))
             .expect_err("invalid policy never binds");
         assert_eq!(fs::read_dir(cwd.path()).expect("unrelated cwd").count(), 0);
