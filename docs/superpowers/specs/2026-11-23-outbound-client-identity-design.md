@@ -300,7 +300,7 @@ The PR description says `Closes #523`.
 
 ## Branch and delivery boundary
 
-The branch `feat/523-outbound-client-identity` stacks on [#522](https://github.com/IABTechLab/edgezero/pull/522), `feat/474-portable-record-providers`. That is the top of a linear stack running from #275 through #499, #460, #406, #407, #409, #414, #422, #439, #510, #454 and #517. No RC branch is a base or merge target.
+The branch `feat/523-outbound-client-identity` stacks on [#464](https://github.com/IABTechLab/edgezero/pull/464), `review/admitted-error-finalization`, above #517. It uses the outbound contracts from #275 and the cache policy from #460. It does not depend on #522's portable record providers. No RC branch is a base or merge target.
 
 There is one PR, with commits in this order: this spec, the implementation plan in `docs/superpowers/plans/`, then the core and Fastly changes. When the PR opens:
 

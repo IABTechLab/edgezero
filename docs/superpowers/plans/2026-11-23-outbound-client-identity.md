@@ -4,7 +4,7 @@ Status, 2026-11-23: tasks 0 to 8 implemented through `d1d02171`; local gates and
 
 Worktree: `/home/pav/worktrees/feat-523-outbound-client-identity`, branch `feat/523-outbound-client-identity`, based on `origin/feat/474-portable-record-providers` at `6fb738491584d432516af9e0ec13281f0823ffdd`. The spec commit `2b08eac6` is the first commit on the branch.
 
-The [agreed design](../specs/2026-11-23-outbound-client-identity-design.md) owns behavior. This file owns implementation tasks and verification. Deliver one EdgeZero PR that closes [#523](https://github.com/IABTechLab/edgezero/issues/523), based on #522. Do not push, open the PR, merge or deploy without separate permission.
+The [agreed design](../specs/2026-11-23-outbound-client-identity-design.md) owns behavior. This file owns implementation tasks and verification. Deliver one EdgeZero PR that closes [#523](https://github.com/IABTechLab/edgezero/issues/523), based on #464, which stacks on #517. The original implementation was tested on #522; the historical evidence below refers to that baseline.
 
 ## Delivery contract
 
