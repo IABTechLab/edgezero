@@ -7,8 +7,8 @@ use url::Url;
 
 use super::dispatch::{self, DispatchBounds};
 use super::{
-    ClientIdentityError, HttpClient, OutboundDispatchRequest, OutboundHead, OutboundRequest,
-    OutboundResponse, OutboundScope, OutboundSendMode, OutboundTime, canonicalize_url, head, scope,
+    HttpClient, OutboundDispatchRequest, OutboundHead, OutboundRequest, OutboundResponse,
+    OutboundScope, OutboundSendMode, OutboundTime, canonicalize_url, head, scope,
 };
 use crate::body::Body;
 use crate::error::{BadGatewayReason, EdgeError};
@@ -107,10 +107,9 @@ impl FollowChain {
     }
 
     fn hop<E>(&self, error: EdgeError) -> OutboundFollowFailure<E> {
-        let index = self.index.get();
         OutboundFollowFailure::Hop {
-            index,
-            error: mark_redirect_host_refusal(error, index),
+            index: self.index.get(),
+            error,
         }
     }
 
@@ -386,32 +385,6 @@ where
     })
 }
 
-/// An upstream redirect, not the application, chose a hop's origin, so an
-/// unlisted redirect target is reported as a redirect failure.
-fn mark_redirect_host_refusal(error: EdgeError, index: usize) -> EdgeError {
-    if index == 0 {
-        return error;
-    }
-    if let EdgeError::ClientIdentity {
-        name,
-        reason:
-            ClientIdentityError::HostNotAllowed {
-                origin,
-                redirect: false,
-            },
-    } = error
-    {
-        return EdgeError::ClientIdentity {
-            name,
-            reason: ClientIdentityError::HostNotAllowed {
-                origin,
-                redirect: true,
-            },
-        };
-    }
-    error
-}
-
 fn followable(status: StatusCode) -> bool {
     matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
 }
@@ -445,7 +418,6 @@ fn replay_request(request: &OutboundRequest) -> (OutboundRequest, bool) {
     let OutboundRequest {
         body,
         cache_policy,
-        client_identity,
         connect_timeout,
         deadline,
         headers,
@@ -477,7 +449,6 @@ fn replay_request(request: &OutboundRequest) -> (OutboundRequest, bool) {
         OutboundRequest {
             body: replayed_body,
             cache_policy: cache_policy.clone(),
-            client_identity: client_identity.clone(),
             connect_timeout: *connect_timeout,
             deadline: *deadline,
             headers: headers.clone(),

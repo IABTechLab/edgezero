@@ -5,13 +5,8 @@ existence and strongly consistent partition pages. It uses the same value rows a
 ordinary `KvHandle` operations. It is not a second store or registry.
 
 Built-in implementations are Fastly KV and Axum's persistent redb, DynamoDB and
-celld record modes. Fastly can also select the portable DynamoDB and celld record
-providers described below. Their row formats match the native transports.
-Cloudflare and Spin built-ins still reject record requirements during application
-construction. The portable providers compile for `wasm32-unknown-unknown` and
-`wasm32-wasip2`; runtime wiring belongs to [#479](https://github.com/IABTechLab/edgezero/issues/479)
-and [#484](https://github.com/IABTechLab/edgezero/issues/484).
-Ordinary-only KV bindings keep their existing behavior.
+celld record modes. Cloudflare and Spin built-ins reject record requirements during
+application construction. Ordinary-only KV bindings keep their existing behavior.
 
 ## Declare grouping before preparation
 
@@ -255,8 +250,8 @@ and retained allocator SKs contain the unchanged full key under separate `r#` an
 then uses conditional or unconditional PutItem. Gaps and out-of-allocation-order
 commits are valid. No namespace-wide item is updated by every insert.
 
-The native runtime needs DescribeTable for preparation, then GetItem, UpdateItem,
-PutItem, DeleteItem, Query and Scan on the reviewed table. Scan's broad read access differs from a
+The runtime needs DescribeTable, GetItem, UpdateItem, PutItem, DeleteItem, Query
+and Scan on the reviewed table. Scan's broad read access differs from a
 partition-only policy. This is not hosted IAM or capacity qualification.
 
 For celld, select `celld-records` instead:
@@ -291,177 +286,6 @@ requires records. The standalone provider features are `dynamodb-records` and
 `records` for the stock celld service. The fork-only v1/v2 clients are not retained
 on this line. Settings-only,
 ordinary-only and WASM builds do not gain native SDK/runtime dependencies.
-
-## Portable providers on Fastly
-
-Declare the logical KV and secrets IDs, and enable the provider code in
-`edgezero.toml`:
-
-```toml
-[stores.kv]
-ids = ["identity", "sessions"]
-default = "identity"
-
-[stores.secrets]
-ids = ["stores"]
-
-[adapters.fastly.build]
-features = ["aws-dynamodb-records", "celld-records"]
-```
-
-`edgezero build`, `edgezero serve` and `edgezero deploy` pass these build features
-through `EDGEZERO_BUILD_FEATURES` to the generated `fastly.toml` build script.
-Running `fastly compute build` directly does not read `edgezero.toml` or forward
-its features. Use the EdgeZero commands, or set the generated script's build
-features yourself.
-
-Create and link a Fastly Config Store named `edgezero_store_bindings` to the
-service. Its `EDGEZERO__STORE_BINDINGS` entry holds a version 1 TOML document,
-not an app-config blob envelope. This example shows the document after pinning.
-The pin values are illustrative. Omit both `pinned` lines for the first preflight
-and let the pin command insert the observed identities.
-
-```toml
-version = 1
-
-[kv.identity]
-provider = "aws-dynamodb-records"
-region = "us-east-1"
-table = "ts-identity"
-namespace = "ts-prod/identity"
-pinned = { table_arn = "arn:aws:dynamodb:us-east-1:111122223333:table/ts-identity", table_id = "replace-with-preflight-table-id" }
-credentials = { secrets = "stores" }
-
-[kv.sessions]
-provider = "celld-records"
-endpoint = "https://celld.example.net"
-store = "sessions"
-pinned = { instance = "AAAAAAAAAAAAAAAAAAAAAA" }
-access = { mode = "authenticated", token_secret = { secrets = "stores" } }
-```
-
-The document selects a provider per logical KV ID. IDs without a binding stay on
-Fastly KV. A missing Config Store or entry also leaves those IDs on Fastly KV.
-A malformed document, unsupported provider, missing pin or provider feature absent
-from the binary fails application assembly. There is no fallback for an explicit
-binding, and read/open failures are not treated as missing configuration.
-
-Portable-provider KV IDs must be nonempty lowercase ASCII letters, digits or
-underscores, `[a-z0-9_]`. Every bound ID and logical secrets reference must be
-declared in the manifest. Native-only providers and `[config]`, `[secrets]` or
-`[limits]` bindings sections are not supported on Fastly. The complete entry must
-fit Fastly's 8,000-character limit; bindings are not chunked.
-
-```mermaid
-flowchart TB
-    Document[Config Store bindings document] --> Prepared[Validate and retain settings and pins]
-    Prepared --> Request[Bind the request's outbound HTTP client]
-    Secrets[Logical Secret Store] --> Credentials[Resolve credentials on first use]
-    Request --> Credentials
-    Credentials --> Provider[Portable provider core]
-    Provider --> HTTP[Signed DynamoDB or authenticated celld HTTP]
-```
-
-### Credentials and rotation
-
-The `credentials.secrets` and `token_secret.secrets` fields name a logical
-`[stores.secrets]` ID. On Fastly, bind that ID to the Secret Store holding these
-keys. Key names derive from the KV ID, not from arbitrary names in the document:
-
-| KV ID      | Secret keys                                                                                                          |
-| ---------- | -------------------------------------------------------------------------------------------------------------------- |
-| `identity` | `KV__IDENTITY__AWS_ACCESS_KEY_ID`, `KV__IDENTITY__AWS_SECRET_ACCESS_KEY`, optional `KV__IDENTITY__AWS_SESSION_TOKEN` |
-| `sessions` | `KV__SESSIONS__CELLD_TOKEN`                                                                                          |
-
-Each provider reads credentials on its first operation in a request and reuses
-that result only within that request. Prepared state never caches credentials
-across requests. Rotation or revocation takes effect on the next request, subject
-to the platform Secret Store exposing the update. An STS rotator can push
-short-lived access keys, secret keys and session tokens into the derived keys
-without changing provider code. Never put credential values in the TOML document.
-
-### Pin and validate before upload
-
-Save the document as `portable-stores.toml`. The bundled CLI and generated app CLI
-both support this untyped command:
-
-```sh
-edgezero config bindings pin --adapter fastly --store-bindings portable-stores.toml
-edgezero config validate --adapter fastly \
-  --store-bindings portable-stores.toml --manifest edgezero.toml
-```
-
-Pinning uses the AWS SDK credential chain to call DescribeTable through the
-binding's explicit or regional endpoint. It reads the celld preflight token from
-the environment variable named exactly like the derived key, here
-`KV__SESSIONS__CELLD_TOKEN`, and reads the service capabilities. These are read-only
-preflights, not write probes. They verify the same table/service shape as native
-preparation.
-
-All selected preflights must succeed before the file changes. The command writes
-only `pinned`, preserving endpoints, runtime credential references, comments and
-unrelated fields. It never writes token values, reads typed app config or uploads
-to Fastly. The CLI's default `bindings-pin` feature supplies native preflight;
-SDK-free builds retain the command but report that support is not compiled.
-Validation stays offline and checks declarations, portable settings, pins and the
-manifest's Fastly build features without reading secrets or invoking Cargo.
-
-DynamoDB pins contain the table ARN and optional TableId. They scope record
-bindings and cursors; the portable runtime addresses the table by name and does
-no identity discovery. Native startup rejects a mismatched pin. Do not recreate a
-bound table in place. Recreation discards allocator rows, so old generation tokens
-can collide just as they can after deleting allocator state. If recreation is
-unavoidable, re-pin and redeploy the bindings before serving, and treat every
-outstanding generation as invalid. Converting a pinned table to a global table
-is unsupported.
-
-celld pins contain the store instance. Every record request carries that expected
-instance. A reset or replacement store fails the check until you re-pin and
-redeploy the bindings. This does not detect rollback of a snapshot that retains
-the same instance.
-
-### Upload the bindings document
-
-Uploading remains an operator action. After creating and linking the Config Store,
-set `BINDINGS_STORE_ID` to its physical Fastly store ID. Create the entry once:
-
-```sh
-fastly config-store-entry create --store-id="$BINDINGS_STORE_ID" \
-  --key=EDGEZERO__STORE_BINDINGS --stdin < portable-stores.toml
-```
-
-For later updates, or an idempotent create/update:
-
-```sh
-fastly config-store-entry update --store-id="$BINDINGS_STORE_ID" \
-  --key=EDGEZERO__STORE_BINDINGS --upsert --stdin < portable-stores.toml
-```
-
-`config push` publishes typed app configuration, not this bindings document.
-
-### Deadlines and uncertain writes
-
-Portable providers default to a 1,000 ms whole-operation deadline and a 250 ms
-connect timeout. DynamoDB per-binding `[kv.<id>.limits]` may override those values;
-celld uses the defaults. Native defaults remain 5,000 ms and 1,000 ms.
-A DynamoDB insert allocates a generation with UpdateItem, then writes the value
-with PutItem. Both sequential calls share one deadline, including Add and CAS.
-A celld write makes one service call. Neither portable transport retries.
-
-| Outcome              | Meaning                                                                                                                                                                          |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PreconditionFailed` | Definitive Add/CAS rejection. Reload, merge or retry only according to application policy.                                                                                       |
-| `Unavailable`        | A read failed, a value mutation was not dispatched, or the service definitively rejected it. This is not a successful miss.                                                      |
-| `MutationUncertain`  | A dispatched value mutation may have committed, for example after a timeout, reset, 5xx or unreadable acknowledgement. Reconcile before deciding whether to issue another write. |
-
-Pending before merge: real Fastly conditional-write p50/p95 measurements for both
-providers against `us-east-1` have not been recorded. Add the named POP, sampling
-method and build/config identity under `docs/audits/evidence/`. Local and Viceroy
-results do not substitute for that latency evidence.
-
-See [DynamoDB KV](./dynamodb-kv#portable-dynamodb-records) for endpoint and IAM
-requirements, and [celld stores](./native-celld-stores#portable-celld-records-on-fastly)
-for authenticated HTTPS setup.
 
 ## Binding limits
 

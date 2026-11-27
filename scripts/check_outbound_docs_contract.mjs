@@ -149,13 +149,6 @@ const expectedOutboundRows = [
   ['outbound-batch-slot-isolation', 'Native', 'Native', 'BestEffort', 'Native'],
   ['outbound-cache-bypass', 'Native', 'Native', 'Native', 'Native'],
   [
-    'outbound-client-identity',
-    'Unsupported',
-    'Unsupported',
-    'Native',
-    'Unsupported',
-  ],
-  [
     'outbound-complete-resource-accounting',
     'Unsupported',
     'Unsupported',

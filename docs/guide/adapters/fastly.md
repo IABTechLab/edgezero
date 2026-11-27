@@ -259,69 +259,6 @@ response chunks without whole-body collection. Synchronous source polls and host
 preempted, so downstream streaming and response-egress guarantees remain BestEffort. See
 [Capabilities](/guide/capabilities) before marking a capability required.
 
-## Client Certificates
-
-Fastly presents a [client identity](/guide/proxying#client-certificates-mtls) on a dynamic
-backend with `provide_client_certificate`. Provision three entries per identity `<name>`:
-
-| Store                         | Entry                | Contents                                                                 |
-| ----------------------------- | -------------------- | ------------------------------------------------------------------------ |
-| Config Store (`config-store`) | `<name>.certificate` | PEM chain, leaf first, at most 8,000 characters                          |
-| Config Store (`config-store`) | `<name>.hosts`       | `https://host` or `https://host:port`, one per line, at most 4,000 bytes |
-| Secret Store (`secret-store`) | `<name>.private-key` | Unencrypted PEM private key                                              |
-
-The certificate is public and the hosts list is not secret, so only the key uses the Secret
-Store. EdgeZero opens the key as a `Secret` handle and never reads its plaintext. Fastly allows 5
-Secret Store reads per Compute request by default, shared with the application's own reads. The
-config entries are read once per inbound request; the key is opened only when a backend must be
-registered, so a request that reuses a registered backend spends no Secret Store read. Each
-identity backend registration costs one read.
-
-Hosts use the outbound host grammar without wildcards: ASCII only (write internationalized names
-in punycode), a missing port means 443, and every origin must be allowed by
-`[capabilities.outbound].hosts`. A chain longer than 8,000 characters fails as `MaterialInvalid`.
-EdgeZero checks only that the certificate entry contains PEM `CERTIFICATE` blocks; the origin's
-handshake decides expiry, extended key usage and whether the key matches.
-
-The backend name includes the identity name and a SHA-256 over the whole certificate chain under
-the `ez_b31v2_` prefix. Requests with and without an identity, different identities, and any change
-to the chain, intermediates included, never share a backend or a pooled connection. Debug logs
-show the leaf certificate's SHA-256, which matches `openssl x509 -fingerprint -sha256`.
-
-`edgezero build`, `serve` and `deploy` reject an identity whose config store or secret store
-cannot be resolved from its explicit field or the declared default.
-
-### Rotation
-
-Overwrite `<name>.certificate` in the Config Store and `<name>.private-key` in the Secret Store in
-quick succession, then confirm with a request. The two writes go to two stores and are not
-atomic: a request that reads one new entry and one old entry presents a mismatched pair and fails
-its handshake. The next inbound request reads both again, so the window closes once both writes
-have propagated. A changed chain registers a new backend, so no request reuses a connection made
-with the old certificate.
-
-### Local Development
-
-Viceroy reads the binding from `fastly.toml`. Viceroy reports a rejected handshake as a generic
-`InternalError` rather than a TLS cause, and trusts the system roots; point `SSL_CERT_FILE` at a
-test CA to trust a local origin's server certificate.
-
-```toml
-# [local_server.config_stores.app_config]
-# format = "inline-toml"
-# [local_server.config_stores.app_config.contents]
-# "prebid-server.certificate" = """
-# -----BEGIN CERTIFICATE-----
-# ...
-# -----END CERTIFICATE-----
-# """
-# "prebid-server.hosts" = "https://pbs.example.com"
-#
-# [[local_server.secret_stores.default]]
-# key = "prebid-server.private-key"
-# file = "certs/prebid-server.key"
-```
-
 ## Logging
 
 Fastly uses endpoint-based logging. Configure logging in `edgezero.toml`:

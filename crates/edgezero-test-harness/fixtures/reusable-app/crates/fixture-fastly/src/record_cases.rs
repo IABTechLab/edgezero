@@ -127,20 +127,9 @@ pub async fn run(kv: &KvHandle, path: &str) -> Result<Value, KvError> {
             )
         }
         ["record-cases", "clean"] => {
-            // Drain the whole global listing. Some providers keep internal rows, such
-            // as DynamoDB generation allocators, that yield empty pages with a cursor.
-            let mut cursor = None;
-            let mut cursors = HashSet::new();
-            let mut pages = 0_usize;
-            loop {
-                let page = kv.list_keys_page("", cursor.as_deref(), 1000).await?;
-                pages += 1;
-                assert!(page.keys.is_empty(), "logical keys remain after cleanup");
-                cursor = page.cursor;
-                let Some(next) = &cursor else { break };
-                assert!(cursors.insert(next.clone()), "repeated cleanup cursor");
-            }
-            Ok(json!({"record_cases":"clean","remaining_keys":0,"pages":pages}))
+            let page = kv.list_keys_page("", None, 1).await?;
+            assert!(page.keys.is_empty() && page.cursor.is_none());
+            Ok(json!({"record_cases":"clean","remaining_keys":0}))
         }
         _ => Err(invalid_route()),
     }

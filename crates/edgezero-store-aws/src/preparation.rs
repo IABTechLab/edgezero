@@ -57,8 +57,7 @@ pub struct AwsPreparation {
     pub(crate) clock: MonotonicClock,
     pub(crate) deadline: Deadline,
     #[cfg(feature = "dynamodb-kv")]
-    pub(crate) dynamodb_clients:
-        HashMap<(String, DynamoDbKvLimits, Option<String>), DynamoDbClient>,
+    pub(crate) dynamodb_clients: HashMap<(String, DynamoDbKvLimits), DynamoDbClient>,
     pub(crate) limits: AwsPreparationLimits,
     #[cfg(feature = "secrets-manager")]
     pub(crate) secret_cache: HashMap<SecretTargetKey, bytes::Bytes>,

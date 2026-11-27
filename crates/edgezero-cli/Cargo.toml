@@ -22,8 +22,6 @@ required-features = ["nested-app-config-check"]
 [dependencies]
 edgezero-core = { workspace = true }
 edgezero-adapter = { path = "../edgezero-adapter" }
-edgezero-store-aws = { workspace = true, optional = true }
-edgezero-store-celld = { workspace = true, optional = true }
 edgezero-adapter-axum = { workspace = true, features = ["cli", "native-bindings"], optional = true }
 edgezero-adapter-cloudflare = { workspace = true, features = ["cli"], optional = true }
 edgezero-adapter-fastly = { workspace = true, features = ["cli"], optional = true }
@@ -40,9 +38,6 @@ simple_logger = { workspace = true }
 serde_json = { workspace = true}
 thiserror = { workspace = true }
 toml = { workspace = true }
-toml_edit = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
 validator = { workspace = true }
 proc-macro2 = { workspace = true, features = ["span-locations"], optional = true }
 syn = { workspace = true, optional = true }
@@ -60,14 +55,12 @@ url = { workspace = true }
 
 [features]
 default = [
-    "bindings-pin",
     "cli",
     "edgezero-adapter-axum",
     "edgezero-adapter-fastly",
     "edgezero-adapter-cloudflare",
     "edgezero-adapter-spin",
 ]
-bindings-pin = ["cli", "dep:edgezero-store-aws", "edgezero-store-aws/dynamodb-records", "dep:edgezero-store-celld", "edgezero-store-celld/records", "dep:tokio", "dep:toml_edit", "dep:tempfile"]
-cli = ["dep:clap", "dep:handlebars", "edgezero-adapter/cli", "edgezero-adapter/store-bindings"]
+cli = ["dep:clap", "dep:handlebars", "edgezero-adapter/cli"]
 demo-example = ["dep:app-demo-core", "edgezero-adapter-axum", "edgezero-adapter-axum/axum"]
 nested-app-config-check = ["dep:proc-macro2", "dep:syn", "dep:walkdir"]

@@ -18,23 +18,13 @@ pub mod settings;
 mod client;
 #[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 mod kv;
-#[cfg(feature = "portable-records")]
-pub mod portable;
 #[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 mod preparation;
-#[cfg(any(
-    all(not(target_arch = "wasm32"), feature = "records"),
-    feature = "portable-records"
-))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "records"))]
 mod records;
 #[cfg(test)]
 #[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 mod test_support;
-#[cfg(any(
-    all(not(target_arch = "wasm32"), feature = "kv"),
-    feature = "portable-records"
-))]
-mod wire;
 #[cfg(all(not(target_arch = "wasm32"), feature = "kv"))]
 pub use preparation::{CelldPreparation, PreparationStats};
 
@@ -69,16 +59,14 @@ pub enum PreparationError {
     UnsupportedVersion,
     #[error("store instance changed")]
     InstanceChanged,
-    #[error("pinned identity mismatch")]
-    PinnedIdentityMismatch,
     #[error("provider unavailable")]
     Unavailable,
     #[error("deadline exceeded")]
     Deadline,
-    #[cfg(feature = "record-wire")]
+    #[cfg(feature = "records")]
     #[error("write precondition failed")]
     PreconditionFailed,
-    #[cfg(feature = "record-wire")]
+    #[cfg(feature = "records")]
     #[error("mutation may have committed")]
     MutationUncertain,
 }

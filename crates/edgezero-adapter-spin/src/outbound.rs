@@ -39,9 +39,7 @@ mod head;
 #[cfg(any(test, all(feature = "spin", target_arch = "wasm32")))]
 mod scheduling;
 #[cfg(any(feature = "test-utils", all(feature = "spin", target_arch = "wasm32")))]
-use edgezero_core::outbound::{
-    ClientIdentityError, OutboundRequest, OutboundSendMode, validate_for_dispatch,
-};
+use edgezero_core::outbound::{OutboundRequest, OutboundSendMode, validate_for_dispatch};
 
 #[cfg(all(feature = "spin", any(feature = "test-utils", target_arch = "wasm32")))]
 use edgezero_core::error::{BadGatewayReason, BudgetSource};
@@ -1533,12 +1531,6 @@ fn validate_batch_request(request: &OutboundRequest) -> Result<(), EdgeError> {
 
 #[cfg(any(feature = "test-utils", all(feature = "spin", target_arch = "wasm32")))]
 fn validate_request(request: &OutboundRequest, mode: OutboundSendMode) -> Result<(), EdgeError> {
-    if let Some(name) = request.client_identity_name() {
-        return Err(EdgeError::client_identity(
-            name,
-            ClientIdentityError::Unsupported { adapter: "spin" },
-        ));
-    }
     if request.image_optimizer_options().is_some() {
         return Err(EdgeError::bad_request(
             "image_optimizer is not supported by spin",
@@ -1575,25 +1567,6 @@ mod exchange_tests {
         cooperative_stream, cooperative_yield_once, deadline_stream, duration_nanos, race_deadline,
         request_timeouts, run_exchange, settle_reset_content, should_emit_response_chunk,
     };
-
-    #[cfg(feature = "test-utils")]
-    #[test]
-    fn client_identity_is_unsupported_in_every_mode() {
-        let request = edgezero_core::OutboundRequest::get("https://origin.example.com/mtls")
-            .expect("request")
-            .client_identity(edgezero_core::ClientIdentityName::new("mtls").expect("name"));
-        for mode in [
-            edgezero_core::OutboundSendMode::Send,
-            edgezero_core::OutboundSendMode::Begin,
-            edgezero_core::OutboundSendMode::Batch,
-        ] {
-            let error = super::validate_request(&request, mode).expect_err("unsupported");
-            assert_eq!(
-                error.client_identity_error(),
-                Some(&edgezero_core::ClientIdentityError::Unsupported { adapter: "spin" })
-            );
-        }
-    }
 
     #[cfg(feature = "test-utils")]
     #[test]

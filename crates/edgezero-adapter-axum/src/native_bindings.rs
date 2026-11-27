@@ -15,16 +15,15 @@ use std::io::Read as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
-use edgezero_adapter::store_bindings::{
-    BindingLimits, ConfigBinding, KvBinding, SecretBinding, StoreBindingsDocument,
-    StoreBindingsError,
-};
 use edgezero_core::app::{StoreMetadata, StoresMetadata};
 use edgezero_core::env_config::EnvConfig;
 use edgezero_core::manifest::{ManifestStores, StoreDeclaration};
 use edgezero_core::secret_store::MAX_NAME_LEN;
-use edgezero_store_aws::settings::{AwsPreparationLimits, DynamoDbKvLimits};
-use edgezero_store_celld::settings::CelldPreparationLimits;
+use edgezero_store_aws::settings::{
+    AppConfigAgentSettings, AwsPreparationLimits, DynamoDbKvSettings, SecretsManagerSettings,
+};
+use edgezero_store_celld::settings::{CelldKvSettings, CelldPreparationLimits};
+use serde::Deserialize;
 
 /// Closed bootstrap failures. File, TOML and provider inputs never become source chains.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -99,16 +98,35 @@ pub struct NativeProviderCapabilities {
     pub celld_records: bool,
 }
 
-/// Strict configuration dispatch, shared with every adapter's bindings document.
-pub type NativeConfigBinding = ConfigBinding;
+/// Strict configuration dispatch. Provider-specific fields are validated by AWS settings.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "provider", deny_unknown_fields)]
+pub enum NativeConfigBinding {
+    #[serde(rename = "aws-appconfig-agent")]
+    AppConfigAgent(AppConfigAgentSettings),
+}
 
-/// Strict KV dispatch, shared with every adapter's bindings document. Native record
-/// bindings keep the SDK credential chain and `token_env`; they reject `credentials`,
-/// `token_secret` and the `DynamoDB` `endpoint`, and verify any `pinned` identity.
-pub type NativeKvBinding = KvBinding;
+/// Strict KV dispatch. The physical namespace is independent of the declared ID.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "provider", deny_unknown_fields)]
+pub enum NativeKvBinding {
+    #[serde(rename = "aws-dynamodb")]
+    DynamoDb(DynamoDbKvSettings),
+    #[serde(rename = "aws-dynamodb-records")]
+    DynamoDbRecords(DynamoDbKvSettings),
+    #[serde(rename = "celld-records")]
+    CelldRecords(CelldKvSettings),
+    #[serde(rename = "celld-kv")]
+    Celld(CelldKvSettings),
+}
 
-/// Strict secret dispatch, shared with every adapter's bindings document.
-pub type NativeSecretBinding = SecretBinding;
+/// Strict secret dispatch. No arbitrary remote names or per-request discovery.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "provider", deny_unknown_fields)]
+pub enum NativeSecretBinding {
+    #[serde(rename = "aws-secrets-manager")]
+    SecretsManager(SecretsManagerSettings),
+}
 
 /// Independent explicit preparation policy sources. Same-provider sources cannot compete.
 #[derive(Clone, Copy, Debug, Default)]
@@ -124,10 +142,25 @@ pub struct NativePreparationPolicies {
     pub celld: CelldPreparationLimits,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LimitsTable {
+    aws: Option<AwsPreparationLimits>,
+    celld: Option<CelldPreparationLimits>,
+}
+
 /// Version 1 native document. Logical IDs and lookup keys remain case-sensitive.
-#[derive(Clone)]
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeStoreBindings {
-    document: StoreBindingsDocument,
+    version: u32,
+    #[serde(default)]
+    config: BTreeMap<String, NativeConfigBinding>,
+    #[serde(default)]
+    secrets: BTreeMap<String, NativeSecretBinding>,
+    #[serde(default)]
+    kv: BTreeMap<String, NativeKvBinding>,
+    limits: Option<LimitsTable>,
 }
 
 impl fmt::Debug for NativeStoreBindings {
@@ -147,13 +180,11 @@ impl NativeStoreBindings {
         secrets: BTreeMap<String, NativeSecretBinding>,
     ) -> Self {
         Self {
-            document: StoreBindingsDocument {
-                config,
-                kv: BTreeMap::new(),
-                limits: None,
-                secrets,
-                version: 1,
-            },
+            version: 1,
+            config,
+            secrets,
+            kv: BTreeMap::new(),
+            limits: None,
         }
     }
 
@@ -197,20 +228,8 @@ impl NativeStoreBindings {
         if input.len() > limits.max_file_bytes {
             return Err(NativeBindingsError::SizeLimit);
         }
-        let bindings = Self {
-            document: StoreBindingsDocument::parse(input, limits.max_file_bytes).map_err(
-                |category| match category {
-                    StoreBindingsError::SizeLimit => NativeBindingsError::SizeLimit,
-                    StoreBindingsError::Invalid
-                    | StoreBindingsError::Malformed
-                    | StoreBindingsError::MissingCredentials
-                    | StoreBindingsError::MissingPin
-                    | StoreBindingsError::NotCompiled
-                    | StoreBindingsError::Undeclared
-                    | StoreBindingsError::Unsupported => NativeBindingsError::Malformed,
-                },
-            )?,
-        };
+        let bindings: Self =
+            toml::from_str(input).map_err(|_error| NativeBindingsError::Malformed)?;
         bindings.validate_with_policies(limits, policies)?;
         Ok(bindings)
     }
@@ -317,22 +336,21 @@ impl NativeStoreBindings {
         explicit: NativePreparationPolicySources,
     ) -> Result<NativePreparationPolicies, NativeBindingsError> {
         limits.validate()?;
-        if self.document.version != 1 {
+        if self.version != 1 {
             return Err(NativeBindingsError::Invalid);
         }
         if self
-            .document
             .config
             .len()
-            .checked_add(self.document.secrets.len())
-            .and_then(|count| count.checked_add(self.document.kv.len()))
+            .checked_add(self.secrets.len())
+            .and_then(|count| count.checked_add(self.kv.len()))
             .ok_or(NativeBindingsError::SizeLimit)?
             > limits.max_explicit_ids
         {
             return Err(NativeBindingsError::SizeLimit);
         }
-        let file_aws = self.document.limits.as_ref().and_then(|table| table.aws);
-        let file_celld = self.document.limits.as_ref().and_then(|table| table.celld);
+        let file_aws = self.limits.as_ref().and_then(|table| table.aws);
+        let file_celld = self.limits.as_ref().and_then(|table| table.celld);
         if (file_aws.is_some() && explicit.aws.is_some())
             || (file_celld.is_some() && explicit.celld.is_some())
         {
@@ -352,48 +370,32 @@ impl NativeStoreBindings {
             .map_err(|_category| NativeBindingsError::Invalid)?;
         let mut aws_mappings = 0_u64;
         let mut celld_mappings = 0_u64;
-        for binding in self.document.kv.values() {
+        for binding in self.kv.values() {
             let counter = match binding {
-                NativeKvBinding::DynamoDb(settings) => {
+                NativeKvBinding::DynamoDb(settings)
+                | NativeKvBinding::DynamoDbRecords(settings) => {
                     settings
                         .validate()
                         .map_err(|_category| NativeBindingsError::Invalid)?;
                     &mut aws_mappings
                 }
-                // Native keeps the SDK credential chain and endpoint resolution.
-                NativeKvBinding::DynamoDbRecords(settings) => {
-                    if settings.credentials.is_some() || settings.endpoint.is_some() {
-                        return Err(NativeBindingsError::Invalid);
-                    }
-                    settings
-                        .validate(DynamoDbKvLimits::default())
-                        .map_err(|_category| NativeBindingsError::Invalid)?;
-                    &mut aws_mappings
-                }
-                NativeKvBinding::Celld(settings) => {
+                NativeKvBinding::Celld(settings) | NativeKvBinding::CelldRecords(settings) => {
                     settings
                         .validate()
-                        .map_err(|_category| NativeBindingsError::Invalid)?;
-                    &mut celld_mappings
-                }
-                // Native keeps `token_env`; `native_settings` rejects a `token_secret`.
-                NativeKvBinding::CelldRecords(settings) => {
-                    settings
-                        .native_settings()
                         .map_err(|_category| NativeBindingsError::Invalid)?;
                     &mut celld_mappings
                 }
             };
             charge_mappings(counter, 1)?;
         }
-        for binding in self.document.config.values() {
+        for binding in self.config.values() {
             let NativeConfigBinding::AppConfigAgent(settings) = binding;
             settings
                 .validate()
                 .map_err(|_category| NativeBindingsError::Invalid)?;
             charge_mappings(&mut aws_mappings, settings.documents.len())?;
         }
-        for binding in self.document.secrets.values() {
+        for binding in self.secrets.values() {
             let NativeSecretBinding::SecretsManager(settings) = binding;
             settings
                 .validate()
@@ -412,21 +414,21 @@ impl NativeStoreBindings {
     #[inline]
     #[must_use]
     pub fn config(&self) -> &BTreeMap<String, NativeConfigBinding> {
-        &self.document.config
+        &self.config
     }
 
     /// Explicit live KV bindings.
     #[inline]
     #[must_use]
     pub fn kv(&self) -> &BTreeMap<String, NativeKvBinding> {
-        &self.document.kv
+        &self.kv
     }
 
     /// Adds KV bindings without changing the original config/secrets constructor.
     #[inline]
     #[must_use]
     pub fn with_kv(mut self, kv: BTreeMap<String, NativeKvBinding>) -> Self {
-        self.document.kv = kv;
+        self.kv = kv;
         self
     }
 
@@ -434,17 +436,14 @@ impl NativeStoreBindings {
     #[inline]
     #[must_use]
     pub fn secrets(&self) -> &BTreeMap<String, NativeSecretBinding> {
-        &self.document.secrets
+        &self.secrets
     }
 
     /// Selects one typed remote limits policy; it does not merge policy sources.
     #[inline]
     #[must_use]
     pub fn with_aws_limits(mut self, limits: AwsPreparationLimits) -> Self {
-        self.document
-            .limits
-            .get_or_insert_with(BindingLimits::default)
-            .aws = Some(limits);
+        self.limits.get_or_insert_with(LimitsTable::default).aws = Some(limits);
         self
     }
 
@@ -452,10 +451,7 @@ impl NativeStoreBindings {
     #[inline]
     #[must_use]
     pub fn with_celld_limits(mut self, limits: CelldPreparationLimits) -> Self {
-        self.document
-            .limits
-            .get_or_insert_with(BindingLimits::default)
-            .celld = Some(limits);
+        self.limits.get_or_insert_with(LimitsTable::default).celld = Some(limits);
         self
     }
 }
@@ -657,28 +653,22 @@ impl<'declarations> NativeSourceSelection<'declarations> {
             config: resolve(
                 declarations.config,
                 &supplied.config,
-                bindings.document.config.keys(),
+                bindings.config.keys(),
                 env,
                 "config",
             )?,
-            kv: resolve(
-                declarations.kv,
-                &supplied.kv,
-                bindings.document.kv.keys(),
-                env,
-                "kv",
-            )?,
+            kv: resolve(declarations.kv, &supplied.kv, bindings.kv.keys(), env, "kv")?,
             secrets: resolve(
                 declarations.secrets,
                 &supplied.secrets,
-                bindings.document.secrets.keys(),
+                bindings.secrets.keys(),
                 env,
                 "secrets",
             )?,
         };
-        if (!bindings.document.config.is_empty() && !capabilities.appconfig_agent)
-            || (!bindings.document.secrets.is_empty() && !capabilities.secrets_manager)
-            || bindings.document.kv.values().any(|binding| match binding {
+        if (!bindings.config.is_empty() && !capabilities.appconfig_agent)
+            || (!bindings.secrets.is_empty() && !capabilities.secrets_manager)
+            || bindings.kv.values().any(|binding| match binding {
                 NativeKvBinding::DynamoDb(_) => !capabilities.dynamodb,
                 NativeKvBinding::DynamoDbRecords(_) => !capabilities.dynamodb_records,
                 NativeKvBinding::Celld(_) => !capabilities.celld_kv,
@@ -874,30 +864,6 @@ mod tests {
             assert!(
                 NativeStoreBindings::parse(&format!("{input}\nunknown_record_option=true"), limits)
                     .is_err()
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn native_record_bindings_keep_native_sources_and_accept_pins()
-    -> Result<(), NativeBindingsError> {
-        let limits = NativeBindingsLimits::default();
-        let dynamodb = "version=1\n[kv.state]\nprovider='aws-dynamodb-records'\nregion='us-east-1'\ntable='edgezero-kv'\nnamespace='records'\npinned={ table_arn='arn:aws:dynamodb:us-east-1:111122223333:table/edgezero-kv' }\n";
-        let celld = "version=1\n[kv.state]\nprovider='celld-records'\nendpoint='https://celld.example.net'\nstore='state'\npinned={ instance='AAAAAAAAAAAAAAAAAAAAAA' }\n[kv.state.access]\nmode='authenticated'\ntoken_env='CELLD_TOKEN'\n";
-        NativeStoreBindings::parse(dynamodb, limits)?;
-        NativeStoreBindings::parse(celld, limits)?;
-        for portable_only in [
-            format!("{dynamodb}credentials={{ secrets='stores' }}\n"),
-            format!("{dynamodb}endpoint='http://127.0.0.1:8000'\n"),
-            celld.replace(
-                "token_env='CELLD_TOKEN'",
-                "token_secret={ secrets='stores' }",
-            ),
-        ] {
-            assert_eq!(
-                NativeStoreBindings::parse(&portable_only, limits).err(),
-                Some(NativeBindingsError::Invalid)
             );
         }
         Ok(())

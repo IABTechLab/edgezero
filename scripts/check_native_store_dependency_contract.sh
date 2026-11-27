@@ -13,21 +13,6 @@ assert_no_sdk() {
   fi
 }
 
-assert_sigv4() {
-  local expected="$1" graph
-  shift
-  graph="$(cargo tree --offline --locked --edges normal --prefix none "$@")"
-  if grep -Eq '^aws-sigv4 v' <<< "$graph"; then
-    if [[ "$expected" == absent ]]; then
-      printf 'AWS signing dependency leaked into isolated graph: %s\n' "$*" >&2
-      exit 1
-    fi
-  elif [[ "$expected" == present ]]; then
-    printf 'Portable DynamoDB signing dependency is missing: %s\n' "$*" >&2
-    exit 1
-  fi
-}
-
 assert_no_native_runtime() {
   local scope="$1" graph forbidden
   shift
@@ -52,28 +37,6 @@ assert_no_native_runtime wasm -p edgezero-adapter-fastly --target wasm32-wasip1 
 assert_no_native_runtime wasm -p edgezero-adapter-spin --target wasm32-wasip2 --features spin
 assert_no_native_runtime wasm -p edgezero-store-aws --target wasm32-wasip1 --no-default-features --features dynamodb-records
 assert_no_native_runtime wasm -p edgezero-store-celld --target wasm32-wasip1 --no-default-features --features records
-
-for target in wasm32-wasip1 wasm32-unknown-unknown wasm32-wasip2; do
-  assert_no_native_runtime wasm -p edgezero-store-aws --target "$target" --no-default-features --features dynamodb-records-portable
-  assert_no_native_runtime wasm -p edgezero-store-celld --target "$target" --no-default-features --features portable-records
-  assert_sigv4 present -p edgezero-store-aws --target "$target" --no-default-features --features dynamodb-records-portable
-  assert_sigv4 absent -p edgezero-store-aws --target "$target" --no-default-features
-  assert_sigv4 absent -p edgezero-store-celld --target "$target" --no-default-features --features portable-records
-  assert_sigv4 absent -p edgezero-store-celld --target "$target" --no-default-features --features records
-done
-assert_sigv4 present -p edgezero-store-aws --no-default-features --features dynamodb-records-portable
-assert_sigv4 absent -p edgezero-store-aws --no-default-features
-assert_sigv4 absent -p edgezero-store-celld --no-default-features --features portable-records
-assert_sigv4 absent -p edgezero-store-celld --no-default-features --features records
-assert_sigv4 absent -p edgezero-adapter-cloudflare --target wasm32-unknown-unknown --features cloudflare
-assert_sigv4 absent -p edgezero-adapter-fastly --target wasm32-wasip1 --features fastly
-assert_sigv4 absent -p edgezero-adapter-spin --target wasm32-wasip2 --features spin
-# Native DynamoDB's AWS SDK also requires aws-sigv4; do not ban it there.
-for features in fastly,aws-dynamodb-records fastly,celld-records fastly,aws-dynamodb-records,celld-records; do
-  assert_no_native_runtime wasm -p edgezero-adapter-fastly --target wasm32-wasip1 --features "$features"
-done
-assert_sigv4 present -p edgezero-adapter-fastly --target wasm32-wasip1 --features fastly,aws-dynamodb-records
-assert_sigv4 absent -p edgezero-adapter-fastly --target wasm32-wasip1 --features fastly,celld-records
 
 assert_no_sdk -p edgezero-cli --no-default-features --features cli,edgezero-adapter-axum
 assert_no_sdk -p edgezero-store-aws --no-default-features

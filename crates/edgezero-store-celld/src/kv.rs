@@ -25,7 +25,6 @@ use url::Url;
 use crate::PreparationError;
 use crate::client::{Exchange, ResponseKind, ScopedClient};
 use crate::settings::{CelldPreparationLimits, valid_key};
-use crate::wire::Exchanger as _;
 
 const MAX_PROVIDER_CURSOR: usize = 8_192;
 const MAX_SERVICE_CURSOR: usize = 2_048;
@@ -364,7 +363,6 @@ fn kv_error(error: PreparationError) -> KvError {
         | PreparationError::Malformed
         | PreparationError::UnsupportedVersion
         | PreparationError::InstanceChanged
-        | PreparationError::PinnedIdentityMismatch
         | PreparationError::Unavailable
         | PreparationError::Deadline => KvError::Unavailable,
     }

@@ -13,20 +13,9 @@ workspace = true
 [features]
 default = []
 cli = ["dep:base16ct", "dep:serde", "dep:serde_json", "dep:sha2", "dep:toml", "dep:walkdir"]
-# The shared `version = 1` store bindings document. Settings only, every target.
-store-bindings = [
-    "dep:edgezero-store-aws",
-    "dep:edgezero-store-celld",
-    "dep:serde",
-    "dep:thiserror",
-    "dep:toml",
-]
 
 [dependencies]
 edgezero-core = { workspace = true }
-edgezero-store-aws = { workspace = true, optional = true }
-edgezero-store-celld = { workspace = true, optional = true }
-thiserror = { workspace = true, optional = true }
 toml = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

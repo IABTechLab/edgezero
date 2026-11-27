@@ -277,7 +277,6 @@ pub fn response_egress_source_error_category(error: &EdgeError) -> &'static str 
             BadGatewayReason::Unspecified => "bad_gateway_unspecified",
         },
         EdgeError::BadRequest { .. } => "bad_request",
-        EdgeError::ClientIdentity { .. } => "client_identity",
         EdgeError::ConfigOutOfDate { .. } => "config_out_of_date",
         EdgeError::GatewayTimeout { .. } => "gateway_timeout",
         EdgeError::Internal { .. } => "internal",

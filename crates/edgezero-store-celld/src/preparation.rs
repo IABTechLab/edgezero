@@ -18,12 +18,10 @@ use crate::PreparationError;
 use crate::client::ScopedClient;
 use crate::kv::CelldKvStore;
 #[cfg(feature = "records")]
-use crate::records::{CelldRecordKvStore, read_capabilities};
+use crate::records::CelldRecordKvStore;
 use crate::settings::{
     CelldAccess, CelldAccessToken, CelldKvSettings, CelldPreparationLimits, endpoint,
 };
-#[cfg(feature = "records")]
-use crate::settings::{CelldPinnedIdentity, CelldRecordsSettings};
 
 /// Aggregate counters, not process memory measurements. Metadata counts bounded
 /// identifier storage plus conservative per-binding overhead.
@@ -117,26 +115,8 @@ impl CelldPreparation {
         layout: &RecordLayout,
         token: Option<&CelldAccessToken>,
     ) -> Result<KvHandle, PreparationError> {
-        self.prepare_record_store_pinned(settings, layout, token, None)
-            .await
-    }
-
-    /// Prepares like [`Self::prepare_record_store`], then requires the service instance
-    /// to equal `pinned` when one is supplied.
-    ///
-    /// # Errors
-    /// Returns [`PreparationError::PinnedIdentityMismatch`] for a different instance.
-    #[cfg(feature = "records")]
-    #[inline]
-    pub async fn prepare_record_store_pinned(
-        &mut self,
-        settings: &CelldKvSettings,
-        layout: &RecordLayout,
-        token: Option<&CelldAccessToken>,
-        pinned: Option<&CelldPinnedIdentity>,
-    ) -> Result<KvHandle, PreparationError> {
         self.begin()?;
-        let result = self.records_inner(settings, layout, token, pinned).await;
+        let result = self.records_inner(settings, layout, token).await;
         if result.is_ok() {
             self.poisoned = false;
         }
@@ -149,7 +129,6 @@ impl CelldPreparation {
         settings: &CelldKvSettings,
         layout: &RecordLayout,
         token: Option<&CelldAccessToken>,
-        pinned: Option<&CelldPinnedIdentity>,
     ) -> Result<KvHandle, PreparationError> {
         settings.validate()?;
         self.charge_mapping(&[settings.endpoint.len(), settings.store.len()])?;
@@ -164,48 +143,8 @@ impl CelldPreparation {
             self.deadline,
         )
         .await?;
-        if pinned.is_some_and(|expected| !store.has_instance(&expected.instance)) {
-            return Err(PreparationError::PinnedIdentityMismatch);
-        }
         self.check()?;
         Ok(KvHandle::new(Arc::new(store)))
-    }
-
-    /// Offline preflight for a portable binding. Reads the read-only capabilities with
-    /// `token`, rejects every service native preparation rejects and returns the
-    /// instance to pin. It never writes a probe record.
-    ///
-    /// `token_env` names the variable that supplied `token`; it only identifies the client.
-    ///
-    /// # Errors
-    /// Rejects a binding that is not portable, and any preparation failure.
-    #[cfg(feature = "records")]
-    #[inline]
-    pub async fn preflight_record_store(
-        &mut self,
-        settings: &CelldRecordsSettings,
-        token_env: &str,
-        token: &CelldAccessToken,
-    ) -> Result<CelldPinnedIdentity, PreparationError> {
-        settings.portable_endpoint()?;
-        let native = CelldKvSettings {
-            endpoint: settings.endpoint.clone(),
-            access: CelldAccess::Authenticated {
-                token_env: token_env.to_owned(),
-            },
-            store: settings.store.clone(),
-        };
-        self.begin()?;
-        native.validate()?;
-        self.charge_mapping(&[native.endpoint.len(), native.store.len()])?;
-        let (_, client) = self.client(&native.endpoint, &native.access, Some(token))?;
-        let capabilities =
-            read_capabilities(client.as_ref(), &native.store, self.limits, self.deadline).await?;
-        self.check()?;
-        self.poisoned = false;
-        Ok(CelldPinnedIdentity {
-            instance: capabilities.instance,
-        })
     }
 
     /// Safe aggregate counters; no resource or authorization identifiers.

@@ -4794,10 +4794,7 @@ mod record_preparation_tests {
                 .unwrap();
         record_plan.kv.insert(
             "first",
-            NativeStoreSource::BuiltIn(NativeKvSource::DynamoDbRecords {
-                settings,
-                pinned: None,
-            }),
+            NativeStoreSource::BuiltIn(NativeKvSource::DynamoDbRecords(settings)),
         );
         assert!(
             block_on(build_production_stores_with_records(

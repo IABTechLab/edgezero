@@ -10,13 +10,6 @@ qualification = ["progress"]
 progress = ["fixture-core/qualification", "fixture-core/native-body-witness", "edgezero-adapter-fastly/test-utils"]
 readiness = ["dep:fastly-sys"]
 records = ["edgezero-core/test-utils"]
-client-identity = []
-# The canonical Fastly path with both portable record providers compiled in.
-portable-records = [
-    "records",
-    "edgezero-adapter-fastly/aws-dynamodb-records",
-    "edgezero-adapter-fastly/celld-records",
-]
 
 [dependencies]
 edgezero-core.workspace = true
@@ -97,16 +90,6 @@ path = "src/bin/faults.rs"
 name = "fixture-fastly-record-contract"
 path = "src/bin/record_contract.rs"
 required-features = ["records"]
-
-[[bin]]
-name = "fixture-fastly-record-contract-portable"
-path = "src/bin/record_contract_portable.rs"
-required-features = ["portable-records"]
-
-[[bin]]
-name = "fixture-fastly-client-identity"
-path = "src/bin/client_identity.rs"
-required-features = ["client-identity"]
 
 [lints]
 workspace = true

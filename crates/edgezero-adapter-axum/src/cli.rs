@@ -920,14 +920,6 @@ mod tests {
     }
 
     #[test]
-    fn client_identities_are_unsupported() {
-        assert_eq!(
-            AXUM_ADAPTER.capability(Capability::OutboundClientIdentity),
-            CapabilitySupport::Unsupported
-        );
-    }
-
-    #[test]
     #[expect(
         clippy::too_many_lines,
         reason = "keep the complete capability data table together"

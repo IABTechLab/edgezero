@@ -95,8 +95,6 @@ impl Args {
                 "benchmark",
                 "assembly",
                 "record-contract",
-                "portable-record-contract",
-                "client-identity",
                 "outbound-readiness",
                 "outbound-client-progress",
                 "outbound-progress",
@@ -112,15 +110,8 @@ impl Args {
             "unknown suite",
         )?;
         require(
-            !matches!(
-                a.suite.as_str(),
-                "record-contract" | "portable-record-contract"
-            ) || a.adapter == "fastly",
+            a.suite != "record-contract" || a.adapter == "fastly",
             "record contract requires --adapter fastly",
-        )?;
-        require(
-            a.suite != "client-identity" || a.adapter == "fastly",
-            "client identity contract requires --adapter fastly",
         )?;
         require(
             !matches!(
@@ -1074,23 +1065,12 @@ mod argument_tests {
     }
 
     #[test]
-    fn client_identity_suite_selects_only_fastly() {
+    fn record_contract_suite_selects_only_fastly() {
         for adapter in ["fastly", "axum", "cloudflare", "spin", "all"] {
             let result = Args::parse_from(
-                ["--adapter", adapter, "--suite", "client-identity"].map(str::to_owned),
+                ["--adapter", adapter, "--suite", "record-contract"].map(str::to_owned),
             );
             assert_eq!(result.is_ok(), adapter == "fastly", "{adapter}");
-        }
-    }
-
-    #[test]
-    fn record_contract_suite_selects_only_fastly() {
-        for suite in ["record-contract", "portable-record-contract"] {
-            for adapter in ["fastly", "axum", "cloudflare", "spin", "all"] {
-                let result =
-                    Args::parse_from(["--adapter", adapter, "--suite", suite].map(str::to_owned));
-                assert_eq!(result.is_ok(), adapter == "fastly", "{suite} {adapter}");
-            }
         }
     }
 

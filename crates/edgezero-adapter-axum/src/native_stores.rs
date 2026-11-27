@@ -34,15 +34,12 @@ use edgezero_store_aws::AwsPreparation;
     feature = "aws-dynamodb"
 )))]
 use edgezero_store_aws::settings::AwsPreparationLimits;
-use edgezero_store_aws::settings::{
-    AgentAccessToken, AppConfigAgentSettings, DynamoDbKvLimits, DynamoDbKvSettings,
-    DynamoDbPinnedIdentity,
-};
+use edgezero_store_aws::settings::{AgentAccessToken, AppConfigAgentSettings, DynamoDbKvSettings};
 #[cfg(feature = "celld-kv")]
 use edgezero_store_celld::CelldPreparation;
 #[cfg(not(feature = "celld-kv"))]
 use edgezero_store_celld::settings::CelldPreparationLimits;
-use edgezero_store_celld::settings::{CelldAccessToken, CelldKvSettings, CelldPinnedIdentity};
+use edgezero_store_celld::settings::{CelldAccessToken, CelldKvSettings};
 
 use crate::config_store_limits::ConfigStoreLimits;
 use crate::native_bindings::{
@@ -90,14 +87,10 @@ pub(crate) enum NativeConfigSource {
 
 pub(crate) enum NativeKvSource {
     DynamoDb(DynamoDbKvSettings),
-    DynamoDbRecords {
-        settings: DynamoDbKvSettings,
-        pinned: Option<DynamoDbPinnedIdentity>,
-    },
+    DynamoDbRecords(DynamoDbKvSettings),
     CelldRecords {
         settings: CelldKvSettings,
         token: Option<CelldAccessToken>,
-        pinned: Option<CelldPinnedIdentity>,
     },
     Celld {
         settings: CelldKvSettings,
@@ -396,9 +389,7 @@ impl NativeSourcePlan {
                         "raw binding does not support declared records",
                     ));
                 }
-                NativeStoreSource::BuiltIn(NativeKvSource::DynamoDbRecords {
-                    settings, ..
-                }) => {
+                NativeStoreSource::BuiltIn(NativeKvSource::DynamoDbRecords(settings)) => {
                     if layout.is_none() {
                         return Err(failure(
                             "kv",
@@ -489,7 +480,7 @@ impl NativeSourcePlan {
             matches!(
                 source,
                 NativeStoreSource::BuiltIn(
-                    NativeKvSource::DynamoDb(_) | NativeKvSource::DynamoDbRecords { .. }
+                    NativeKvSource::DynamoDb(_) | NativeKvSource::DynamoDbRecords(_)
                 )
             )
         }) || self
@@ -544,35 +535,27 @@ fn native_kv_source(
 ) -> anyhow::Result<NativeKvSource> {
     match binding {
         NativeKvBinding::DynamoDb(settings) => Ok(NativeKvSource::DynamoDb(settings.clone())),
-        NativeKvBinding::DynamoDbRecords(settings) => Ok(NativeKvSource::DynamoDbRecords {
-            settings: settings.kv_settings(DynamoDbKvLimits::default()),
-            pinned: settings.pinned.clone(),
-        }),
-        NativeKvBinding::Celld(settings) => {
-            let token = settings
-                .access
-                .token_env()
-                .map(|name| options.celld_token(name))
-                .transpose()?;
-            Ok(NativeKvSource::Celld {
-                settings: settings.clone(),
-                token,
-            })
+        NativeKvBinding::DynamoDbRecords(settings) => {
+            Ok(NativeKvSource::DynamoDbRecords(settings.clone()))
         }
-        NativeKvBinding::CelldRecords(records) => {
-            let settings = records
-                .native_settings()
-                .map_err(|category| failure("kv", "bindings", &category.to_string()))?;
+        NativeKvBinding::Celld(settings) | NativeKvBinding::CelldRecords(settings) => {
             let token = settings
                 .access
                 .token_env()
                 .map(|name| options.celld_token(name))
                 .transpose()?;
-            Ok(NativeKvSource::CelldRecords {
-                settings,
-                token,
-                pinned: records.pinned.clone(),
-            })
+            let cloned_settings = settings.clone();
+            if matches!(binding, NativeKvBinding::CelldRecords(_)) {
+                Ok(NativeKvSource::CelldRecords {
+                    settings: cloned_settings,
+                    token,
+                })
+            } else {
+                Ok(NativeKvSource::Celld {
+                    settings: cloned_settings,
+                    token,
+                })
+            }
         }
     }
 }
@@ -697,7 +680,7 @@ impl NativePreparationSessions {
         declared_layout: Option<&RecordLayout>,
     ) -> anyhow::Result<KvHandle> {
         match builtin {
-            NativeKvSource::DynamoDbRecords { settings, pinned } => {
+            NativeKvSource::DynamoDbRecords(settings) => {
                 let layout =
                     declared_layout.ok_or_else(|| failure("kv", id, "record layout required"))?;
                 #[cfg(feature = "aws-dynamodb-records")]
@@ -705,25 +688,17 @@ impl NativePreparationSessions {
                     self.aws
                         .as_mut()
                         .ok_or_else(|| failure("kv", id, "invalid preparation session"))?
-                        .prepare_dynamodb_records_pinned(&settings, layout, pinned.as_ref())
+                        .prepare_dynamodb_records(&settings, layout)
                         .await
                         .map_err(|category| failure("kv", id, &category.to_string()))
                 }
                 #[cfg(not(feature = "aws-dynamodb-records"))]
                 {
-                    let _: (
-                        DynamoDbKvSettings,
-                        Option<DynamoDbPinnedIdentity>,
-                        &RecordLayout,
-                    ) = (settings, pinned, layout);
+                    let _: (DynamoDbKvSettings, &RecordLayout) = (settings, layout);
                     Err(failure("kv", id, "record provider not compiled"))
                 }
             }
-            NativeKvSource::CelldRecords {
-                settings,
-                token,
-                pinned,
-            } => {
+            NativeKvSource::CelldRecords { settings, token } => {
                 let layout =
                     declared_layout.ok_or_else(|| failure("kv", id, "record layout required"))?;
                 #[cfg(feature = "celld-records")]
@@ -731,23 +706,14 @@ impl NativePreparationSessions {
                     self.celld
                         .as_mut()
                         .ok_or_else(|| failure("kv", id, "invalid preparation session"))?
-                        .prepare_record_store_pinned(
-                            &settings,
-                            layout,
-                            token.as_ref(),
-                            pinned.as_ref(),
-                        )
+                        .prepare_record_store(&settings, layout, token.as_ref())
                         .await
                         .map_err(|category| failure("kv", id, &category.to_string()))
                 }
                 #[cfg(not(feature = "celld-records"))]
                 {
-                    let _: (
-                        CelldKvSettings,
-                        &RecordLayout,
-                        Option<CelldAccessToken>,
-                        Option<CelldPinnedIdentity>,
-                    ) = (settings, layout, token, pinned);
+                    let _: (CelldKvSettings, &RecordLayout, Option<CelldAccessToken>) =
+                        (settings, layout, token);
                     Err(failure("kv", id, "record provider not compiled"))
                 }
             }

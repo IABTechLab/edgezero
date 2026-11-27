@@ -19,33 +19,15 @@ cli = [
     "dep:toml_edit",
     "dep:walkdir",
 ]
-fastly = [
-    "dep:fastly",
-    "dep:fastly-shared",
-    "dep:fastly-sys",
-    "dep:log-fastly",
-    "dep:edgezero-adapter",
-    "edgezero-adapter/store-bindings",
-]
-# Portable record providers. The bindings document selects them per KV ID at runtime.
-aws-dynamodb-records = [
-    "fastly",
-    "dep:edgezero-store-aws",
-    "edgezero-store-aws/dynamodb-records-portable",
-]
-celld-records = [
-    "fastly",
-    "dep:edgezero-store-celld",
-    "edgezero-store-celld/portable-records",
-]
+fastly = ["dep:fastly", "dep:fastly-shared", "dep:fastly-sys", "dep:log-fastly"]
 test-utils = ["edgezero-core/test-utils"]
 
 [dependencies]
 anyhow = { workspace = true }
 edgezero-core = { path = "../edgezero-core" }
-edgezero-adapter = { path = "../edgezero-adapter", optional = true }
-edgezero-store-aws = { workspace = true, optional = true }
-edgezero-store-celld = { workspace = true, optional = true }
+edgezero-adapter = { path = "../edgezero-adapter", optional = true, features = [
+    "cli",
+] }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 brotli = { workspace = true }

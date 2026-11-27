@@ -62,18 +62,13 @@ if ! cmp -s "$scratch/native-off.packages" "$scratch/native-on.packages"; then
   fail 'geo-cloudfront changed the isolated normal dependency set'
 fi
 
-# Portable core and real platform graphs must not acquire native hosting or runtimes.
+# Portable core and real platform graphs must not acquire native hosting/stores.
 assert_portable() {
   local name="$1" root="$2"
   shift 2
   graph "$name" "$root" "$@"
-  if grep -Eq '^(edgezero-adapter-axum|axum(-[^ ]+)?|reqwest|hyper(-[^ ]+)?|mio|socket2|ipnet|aws-config|aws-sdk-[^ ]+) v' "$scratch/$name"; then
-    fail "native runtime/SDK leaked into $name"
-  fi
-  # Platform adapters read the shared store bindings through the store crates' default-off
-  # builds; check_native_store_dependency_contract.sh proves those carry no native runtime.
-  if [[ "$name" == core ]] && grep -Eq '^edgezero-store-(aws|celld) v' "$scratch/$name"; then
-    fail 'store crate leaked into portable core'
+  if grep -Eq '^(edgezero-adapter-axum|edgezero-store-(aws|celld)|axum(-[^ ]+)?|reqwest|hyper(-[^ ]+)?|mio|socket2|ipnet|aws-config|aws-sdk-[^ ]+) v' "$scratch/$name"; then
+    fail "native runtime/store/SDK leaked into $name"
   fi
   if [[ "$name" == core ]] && grep -Eq '^tokio(-[^ ]+)? v' "$scratch/$name"; then
     fail 'Tokio dependency leaked into portable core'

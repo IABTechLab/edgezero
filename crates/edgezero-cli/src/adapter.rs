@@ -17,9 +17,6 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
 
-/// Comma-separated `[adapters.<name>.build] features` for provider-CLI builds.
-const BUILD_FEATURES_VAR: &str = "EDGEZERO_BUILD_FEATURES";
-
 include!(concat!(env!("OUT_DIR"), "/linked_adapters.rs"));
 
 #[derive(Debug, Clone, Copy)]
@@ -505,7 +502,7 @@ pub(crate) fn ensure_capabilities(
             ),
         }
     }
-    adapter.validate_client_identities(verified_manifest)
+    Ok(())
 }
 
 fn produces_current_runtime(action: Action) -> bool {
@@ -604,13 +601,6 @@ fn build_shell_command(
         Some(native_command) => native_command,
         None => shell_command(command, adapter_args, cwd),
     };
-
-    // Axum receives manifest build features as Cargo arguments above. Adapters whose
-    // provider CLI runs the Cargo build, such as Fastly's `[scripts] build`, read them
-    // from this variable; the generated build scripts append `--features`.
-    if !adapter_name.eq_ignore_ascii_case("axum") && !manifest_features.is_empty() {
-        cmd.env(BUILD_FEATURES_VAR, manifest_features.join(","));
-    }
 
     // Precedence (high to low) for `EDGEZERO__ADAPTER__HOST/PORT` on the
     // subprocess:
@@ -864,8 +854,8 @@ mod tests {
     #[cfg(feature = "edgezero-adapter-axum")]
     use super::native_axum_cargo_command;
     use super::{
-        AdapterDeployContext, BUILD_FEATURES_VAR, ResolvedEnvironment, apply_environment,
-        build_shell_command, deploy, ensure_capabilities, execute_runtime,
+        AdapterDeployContext, ResolvedEnvironment, apply_environment, deploy, ensure_capabilities,
+        execute_runtime,
     };
     use crate::adapter::Action;
     use crate::manifest_source::resolve_runtime_from;
@@ -874,14 +864,13 @@ mod tests {
         Adapter, AdapterAction, AdapterExecutionTarget, register_adapter,
     };
     use edgezero_core::manifest::{
-        Capability, CapabilitySupport, Manifest, ManifestContract, ManifestLoader,
-        ResolvedEnvironmentBinding,
+        Capability, CapabilitySupport, ManifestContract, ManifestLoader, ResolvedEnvironmentBinding,
     };
     use edgezero_core::test_env::EnvOverride;
     use std::env;
     use std::ffi::{OsStr, OsString};
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::process::Command;
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -900,7 +889,6 @@ mod tests {
         name: "gate-native",
         support: CapabilitySupport::Native,
     };
-    static IDENTITY_GATE_ADAPTER: IdentityGateAdapter = IdentityGateAdapter;
     static UNSUPPORTED_ADAPTER: GateAdapter = GateAdapter {
         name: "gate-unsupported",
         support: CapabilitySupport::Unsupported,
@@ -909,35 +897,6 @@ mod tests {
     struct GateAdapter {
         name: &'static str,
         support: CapabilitySupport,
-    }
-
-    /// Rejects any manifest that declares a client identity.
-    struct IdentityGateAdapter;
-
-    #[expect(
-        clippy::missing_trait_methods,
-        reason = "identity-gate fixture overrides only the relevant trait methods"
-    )]
-    impl Adapter for IdentityGateAdapter {
-        fn capability(&self, _capability: Capability) -> CapabilitySupport {
-            CapabilitySupport::Native
-        }
-
-        fn execute(&self, _action: AdapterAction, _args: &[String]) -> Result<(), String> {
-            Ok(())
-        }
-
-        fn name(&self) -> &'static str {
-            "gate-identity"
-        }
-
-        fn validate_client_identities(&self, manifest: &Manifest) -> Result<(), String> {
-            if manifest.capabilities.outbound.client_identities.is_empty() {
-                Ok(())
-            } else {
-                Err("fixture rejects client identities".to_owned())
-            }
-        }
     }
 
     struct EnvironmentAdapter;
@@ -1152,38 +1111,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_cli_builds_receive_manifest_features_and_axum_does_not() {
-        let features = [
-            "aws-dynamodb-records".to_owned(),
-            "celld-records".to_owned(),
-        ];
-        let env_of = |adapter: &str, selected: &[String]| {
-            build_shell_command(
-                "true",
-                Path::new("."),
-                adapter,
-                Action::Build,
-                None,
-                (None, None),
-                &[],
-                selected,
-            )
-            .expect("command")
-            .get_envs()
-            .find(|(key, _)| key.to_str() == Some(BUILD_FEATURES_VAR))
-            .and_then(|(_, value)| value)
-            .and_then(OsStr::to_str)
-            .map(str::to_owned)
-        };
-        assert_eq!(
-            env_of("fastly", &features).as_deref(),
-            Some("aws-dynamodb-records,celld-records")
-        );
-        assert_eq!(env_of("fastly", &[]), None);
-        assert_eq!(env_of("axum", &features), None);
-    }
-
-    #[test]
     fn apply_environment_defers_to_parent_env_when_already_set() {
         // Manifest `[environment.variables].value` is a DEFAULT.
         // When the operator exports the same env var in the parent
@@ -1294,31 +1221,6 @@ mod tests {
                 Ok(())
             );
         }
-    }
-
-    #[test]
-    fn capability_gate_runs_adapter_client_identity_validation() {
-        register_adapter(&IDENTITY_GATE_ADAPTER);
-        let without = capability_manifest("required = [\"outbound-http\"]");
-        assert_eq!(
-            ensure_capabilities(
-                "gate-identity",
-                ManifestContract::from_opt(Some(without.manifest()))
-            ),
-            Ok(())
-        );
-
-        let with = ManifestLoader::load_from_str(
-            "[capabilities]\noptional = [\"outbound-client-identity\"]\n\
-             [capabilities.outbound.client-identities.mtls]\n[adapters.gate]\n",
-        );
-        assert_eq!(
-            ensure_capabilities(
-                "gate-identity",
-                ManifestContract::from_opt(Some(with.manifest()))
-            ),
-            Err("fixture rejects client identities".to_owned())
-        );
     }
 
     #[test]

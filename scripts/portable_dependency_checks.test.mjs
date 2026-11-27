@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,35 +9,6 @@ import test from "node:test";
 const helper = fileURLToPath(
   new URL("./portable_dependency_checks.sh", import.meta.url),
 );
-
-const signingAssertion = readFileSync(
-  new URL("./check_native_store_dependency_contract.sh", import.meta.url),
-  "utf8",
-).match(/^assert_sigv4\(\) \{\n[\s\S]*?^\}/m)[0];
-
-for (const [expected, graph, status, diagnostic] of [
-  ["present", "aws-sigv4 v1.6.0\n", 0, ""],
-  ["absent", "serde v1.0.228\n", 0, ""],
-  ["present", "serde v1.0.228\n", 1, "signing dependency is missing"],
-  ["absent", "aws-sigv4 v1.6.0\n", 1, "signing dependency leaked"],
-]) {
-  test(`signing policy ${expected} checks ${JSON.stringify(graph)}`, () => {
-    const result = spawnSync(
-      "bash",
-      [
-        "-c",
-        `set -euo pipefail\ncargo() { printf '%s' "$FAKE_GRAPH"; }\n${signingAssertion}\nassert_sigv4 "$1" -p test-provider`,
-        "bash",
-        expected,
-      ],
-      { encoding: "utf8", env: { ...process.env, FAKE_GRAPH: graph } },
-    );
-    assert.equal(result.status, status, result.stderr);
-    assert.equal(result.stdout, "");
-    assert.ok(result.stderr.includes(diagnostic), result.stderr);
-    if (status !== 0) assert.match(result.stderr, /-p test-provider/);
-  });
-}
 
 function check(graph) {
   return spawnSync(
@@ -103,11 +74,6 @@ for (const [script, dependency, diagnostic] of [
     "check_geo_dependency_contract.sh",
     "tokio v1.52.3|",
     /Tokio dependency leaked into portable core/,
-  ],
-  [
-    "check_geo_dependency_contract.sh",
-    "edgezero-store-aws v0.1.0|",
-    /store crate leaked into portable core/,
   ],
 ]) {
   test(`${script} still rejects ${dependency} in core`, (t) => {

@@ -24,8 +24,6 @@ mod adapter;
 #[cfg(feature = "cli")]
 mod auth;
 #[cfg(feature = "cli")]
-mod bindings_pin;
-#[cfg(feature = "cli")]
 mod config;
 #[cfg(all(feature = "cli", feature = "demo-example"))]
 mod demo_server;
@@ -50,8 +48,6 @@ pub mod args;
 
 #[cfg(feature = "cli")]
 pub use auth::run_auth;
-#[cfg(feature = "cli")]
-pub use bindings_pin::run_config_bindings_pin;
 #[cfg(feature = "cli")]
 pub use config::{
     DiffExit, run_config_diff_typed, run_config_gc, run_config_push, run_config_push_typed,

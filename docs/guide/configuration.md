@@ -85,23 +85,6 @@ Outbound hosts configure adapter plumbing rather than application authorization.
 See [Capabilities](/guide/capabilities) for the exact grammar, support matrix, and platform
 limitations.
 
-### Client identities
-
-`[capabilities.outbound.client-identities.<name>]` declares a TLS client identity that outbound
-requests can select:
-
-```toml
-[capabilities.outbound.client-identities.prebid-server]
-config-store = "app_config"   # optional; defaults to the [stores.config] default
-secret-store = "default"      # optional; defaults to the [stores.secrets] default
-```
-
-Names are 1 to 64 characters of `[a-z0-9-]` and cannot start or end with `-`. A named store must
-be declared in `[stores.config]` or `[stores.secrets]`. The manifest requires neither kind of
-store, but adapters that read the binding from stores, such as Fastly, reject an identity whose
-stores cannot resolve. Hosts, certificates and keys are runtime bindings, not manifest fields.
-See [Client Certificates (mTLS)](/guide/proxying#client-certificates-mtls).
-
 ## HTTP Triggers
 
 The `[[triggers.http]]` array defines routes:

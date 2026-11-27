@@ -1,10 +1,8 @@
-# DynamoDB KV
+# Native DynamoDB KV
 
-The native sections below describe the ordinary `aws-dynamodb` format. For
-conditional records, partitioned storage and global Scan, see
-[conditional KV records](./kv-records) and the
-[portable DynamoDB records](#portable-dynamodb-records) section below.
-The ordinary and record formats are explicit and do not migrate each other's rows.
+This page describes the ordinary `aws-dynamodb` format. For native conditional
+records, partitioned storage and global Scan, see [conditional KV records](./kv-records).
+The two modes are explicit and do not migrate each other's rows.
 
 DynamoDB is an optional live KV provider for native Axum apps. It uses the existing
 `Kv` extractor, `KvHandle` and per-ID registry. Config and Secrets Manager stores
@@ -22,12 +20,9 @@ features = ["aws-dynamodb"]
 ```
 
 `aws-stores` retains its existing AppConfig Agent and Secrets Manager membership.
-Use `aws-stores,aws-dynamodb` to enable all three. Native DynamoDB is off by
-default on adapters. Its SDK is absent from settings-only, minimal CLI/Axum,
-Agent-only and WASM portable-provider graphs. The bundled CLI's default
-`bindings-pin` feature intentionally includes the native SDK for operator-run
-preflight. An SDK-free CLI build uses
-`--no-default-features --features cli,edgezero-adapter-axum`.
+Use `aws-stores,aws-dynamodb` to enable all three. DynamoDB is off by default and
+its SDK is absent from settings-only, ordinary CLI/Axum, Agent-only and WASM
+normal dependency graphs.
 
 Declare a portable KV ID in the application as usual, then select its native
 provider in an absolute bindings file:
@@ -127,97 +122,6 @@ flowchart TD
     Listener --> KV[Handler uses portable KvHandle]
     KV --> SDK[One bounded live DynamoDB operation]
 ```
-
-## Portable DynamoDB records
-
-Fastly can use `provider = "aws-dynamodb-records"` with the default-off generated
-adapter feature `aws-dynamodb-records`. The standalone provider crate feature is
-`dynamodb-records-portable`. It implements DynamoDB JSON 1.0 with SigV4 over
-EdgeZero outbound HTTP, without the AWS SDK or a native executor on WASM. Native
-Axum keeps the SDK-backed `dynamodb-records` transport. Both transports use the
-same record rows, allocator state and cursor scope.
-
-Follow [portable providers on Fastly](./kv-records#portable-providers-on-fastly)
-for the complete manifest, Config Store document, secrets and upload steps.
-A DynamoDB binding declares `region`, `table`, `namespace`,
-`credentials = { secrets = "<logical-secrets-id>" }` and a preflight-generated
-`pinned` table ARN and optional TableId. Runtime credentials come from
-`KV__<ID>__AWS_ACCESS_KEY_ID`, `KV__<ID>__AWS_SECRET_ACCESS_KEY` and optional
-`KV__<ID>__AWS_SESSION_TOKEN` in that logical secrets store. They are read on first
-use per request, never retained across requests. An STS rotator can update those
-keys with short-lived credentials.
-
-### Endpoints and pinned identity
-
-Portable bindings accept an optional `endpoint`. Without it, EdgeZero derives the
-regional DynamoDB endpoint from `region`, including the China partition suffix.
-Use HTTPS. Plain HTTP is accepted only on a literal loopback IP for DynamoDB Local,
-for example `endpoint = "http://127.0.0.1:18000"`. Userinfo, paths, queries and
-fragments are rejected. Axum rejects the binding's `endpoint` and `credentials`
-fields; its native SDK endpoint/credential sources remain unchanged.
-
-`edgezero config bindings pin --adapter fastly --store-bindings <file>` uses the
-AWS SDK credential chain and DescribeTable at that same explicit or regional
-endpoint. It verifies table shape, captures ARN/TableId, checks the observed
-endpoint identity and writes only `pinned`. It does not insert an endpoint or
-credentials into the file, create a table or test write permissions.
-
-The portable runtime makes no DescribeTable call and addresses the table by name.
-Pins bind cursors to the configured identity, but do not detect same-name table
-recreation at runtime. Native startup does reject a pin that differs from its
-preflight observation. Do not recreate a bound table in place: recreation discards
-allocator rows and can make old generation tokens collide. If it is unavoidable,
-re-pin and redeploy bindings before serving, and invalidate outstanding generations.
-Converting the table to a global table after pinning is unsupported because Add/CAS
-requires the validated single-region table behavior.
-
-### Runtime IAM
-
-For a portable record binding on `ts-identity`, grant these six runtime actions
-on one table ARN. Replace the account, region and table with the reviewed target:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "dynamodb:GetItem",
-        "dynamodb:UpdateItem",
-        "dynamodb:PutItem",
-        "dynamodb:DeleteItem",
-        "dynamodb:Query",
-        "dynamodb:Scan"
-      ],
-      "Resource": "arn:aws:dynamodb:us-east-1:111122223333:table/ts-identity"
-    }
-  ]
-}
-```
-
-DescribeTable belongs to the operator's preflight role and native preparation,
-not the portable runtime role. Table creation, TTL configuration and permission
-administration remain operator responsibilities. Global listing uses Scan, which
-reads broadly across the table before namespace/format/prefix filtering. A
-partition-only Query policy cannot support that listing path. This policy example
-does not qualify hosted IAM or capacity.
-
-### Deadlines and failures
-
-Portable DynamoDB defaults to a 1,000 ms operation deadline and 250 ms connect
-timeout. A strict per-binding `[kv.<id>.limits]` table may override timeout values
-and lower the payload cap. Positive timeout values must satisfy
-`connect_timeout_ms <= attempt_timeout_ms <= operation_timeout_ms`.
-Native defaults remain 5,000 ms operation and 1,000 ms connect.
-
-Every record insert makes UpdateItem then PutItem under one shared deadline,
-including Add/CAS. Neither call is automatically retried. A definitive condition
-failure is `PreconditionFailed`; failure before value dispatch or a definitive
-service rejection is `Unavailable`. A dispatched value write with an uncertain
-outcome returns `MutationUncertain`, never a successful miss or an automatic
-replay. See [deadlines and uncertain writes](./kv-records#deadlines-and-uncertain-writes)
-for reconciliation guidance and the pending real Fastly latency evidence.
 
 ## Diagnostics and verification scope
 

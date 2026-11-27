@@ -105,12 +105,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
 
 [[package]]
-name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -349,18 +343,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
-name = "edgezero-adapter"
-version = "0.1.0"
-dependencies = [
- "edgezero-core",
- "edgezero-store-aws",
- "edgezero-store-celld",
- "serde",
- "thiserror 2.0.21",
- "toml",
-]
-
-[[package]]
 name = "edgezero-adapter-cloudflare"
 version = "0.1.0"
 dependencies = [
@@ -392,7 +374,6 @@ dependencies = [
  "brotli",
  "bytes",
  "chrono",
- "edgezero-adapter",
  "edgezero-core",
  "fastly",
  "fastly-shared",
@@ -441,7 +422,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base16ct",
- "base64",
  "brotli",
  "brotli-decompressor",
  "bytes",
@@ -485,26 +465,6 @@ dependencies = [
  "syn 3.0.6",
  "toml",
  "validator",
-]
-
-[[package]]
-name = "edgezero-store-aws"
-version = "0.1.0"
-dependencies = [
- "percent-encoding",
- "serde",
- "thiserror 2.0.21",
- "url",
- "web-time",
-]
-
-[[package]]
-name = "edgezero-store-celld"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror 2.0.21",
- "url",
 ]
 
 [[package]]
